@@ -1,0 +1,2 @@
+{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":true,"writeTextFile":true},"terminal":true},"clientInfo":{"name":"acpx","version":"0.1.0"}}}
+{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"ACP agent exited before initialize completed (exit=42, signal=null): fake ACP agent exited before initialize","data":{"acpxCode":"RUNTIME","detailCode":"AGENT_STARTUP_FAILED","origin":"acp","sessionId":"unknown"}}}

@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":null,"error":{"code":-32002,"message":"⚠ No acpx session found (searched up to /data/agents/workspace/hermes/repo/agent-run-supervisor/.tmp/acpx-contract-scratch/management-no-session).\nCreate one: acpx codex sessions new --name definitely-missing-session","data":{"acpxCode":"NO_SESSION","origin":"cli","sessionId":"unknown"}}}

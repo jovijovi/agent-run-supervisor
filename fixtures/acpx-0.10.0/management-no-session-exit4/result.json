@@ -1,0 +1,10 @@
+{
+  "exit_code": 4,
+  "expected_exit": 4,
+  "matches_expected_exit": true,
+  "name": "management-no-session-exit4",
+  "stderr_bytes": 0,
+  "stderr_lines": 0,
+  "stdout_bytes": 354,
+  "stdout_lines": 1
+}

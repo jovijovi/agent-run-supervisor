@@ -1,0 +1,10 @@
+{
+  "exit_code": 1,
+  "expected_exit": 1,
+  "matches_expected_exit": true,
+  "name": "runtime-error-agent",
+  "stderr_bytes": 0,
+  "stderr_lines": 0,
+  "stdout_bytes": 488,
+  "stdout_lines": 2
+}

@@ -1,0 +1,86 @@
+{
+  "acpx_version": "0.10.0",
+  "acpx_version_exit": 0,
+  "captured_at": "2026-05-28T10:37:27.422552+00:00",
+  "codex_status_exit": 0,
+  "codex_status_stderr_bytes": 0,
+  "codex_status_stdout": "{\"action\":\"status_snapshot\",\"status\":\"no-session\",\"summary\":\"no active session\"}",
+  "fixtures": [
+    {
+      "description": "No-tool Codex connectivity sentinel using exact V0.1a runner flag family.",
+      "expected_exit": 0,
+      "name": "success-codex-sentinel"
+    },
+    {
+      "description": "Invalid CLI flag should classify as usage error.",
+      "expected_exit": 2,
+      "name": "usage-error-invalid-flag"
+    },
+    {
+      "description": "Custom hanging ACP process should trigger acpx --timeout and exit 3.",
+      "expected_exit": 3,
+      "name": "timeout-hanging-agent"
+    },
+    {
+      "description": "Custom ACP process exits before initialize; acpx should classify as runtime error.",
+      "expected_exit": 1,
+      "name": "runtime-error-agent"
+    },
+    {
+      "description": "Codex attempts file access under deny-all; acpx exits 5 after permission denial.",
+      "expected_exit": 5,
+      "name": "permission-denied-codex-read"
+    },
+    {
+      "description": "Missing named session with --no-wait exits 4; management/session path only.",
+      "expected_exit": 4,
+      "name": "management-no-session-exit4"
+    },
+    {
+      "description": "Status command with no session exits 0 but reports status=no-session; management schema, not exec success.",
+      "expected_exit": 0,
+      "name": "management-status-no-session-exit0"
+    }
+  ],
+  "node_version": "v24.14.0",
+  "node_version_exit": 0,
+  "npm_version": "11.15.0",
+  "npm_version_exit": 0,
+  "npx_runtime_fetch_risk": "commands intentionally used npx -y acpx@0.10.0 for Phase -1 capture; V0.1a run path should prefer a pinned local binary/digest.",
+  "runner_flags_family": [
+    "--format",
+    "json",
+    "--json-strict",
+    "--suppress-reads",
+    "--timeout",
+    "180",
+    "--max-turns",
+    "1"
+  ],
+  "schema_summary": {
+    "jsonrpc_present": true,
+    "line_count": 15,
+    "methods": [
+      "initialize",
+      "session/new",
+      "session/prompt",
+      "session/set_model",
+      "session/update"
+    ],
+    "session_update_types": [
+      "agent_message_chunk",
+      "available_commands_update",
+      "usage_update"
+    ],
+    "stdout_shape": "newline-delimited JSON objects observed from acpx --format json"
+  },
+  "schema_version": 1,
+  "skipped_fixtures": [
+    {
+      "expected_exit": 130,
+      "name": "interrupted-exit130",
+      "reason": "Reliable SIGINT orchestration is deferred; V0.1a classifier will still table-test 130 without a live acpx fixture.",
+      "status": "skipped"
+    }
+  ]
+}

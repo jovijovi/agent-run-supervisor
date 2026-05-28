@@ -1,0 +1,10 @@
+{
+  "exit_code": 2,
+  "expected_exit": 2,
+  "matches_expected_exit": true,
+  "name": "usage-error-invalid-flag",
+  "stderr_bytes": 0,
+  "stderr_lines": 0,
+  "stdout_bytes": 164,
+  "stdout_lines": 1
+}

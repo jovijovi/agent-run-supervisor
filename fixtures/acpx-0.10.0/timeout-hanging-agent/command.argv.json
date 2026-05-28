@@ -1,0 +1,19 @@
+[
+  "npx",
+  "-y",
+  "acpx@0.10.0",
+  "--format",
+  "json",
+  "--json-strict",
+  "--suppress-reads",
+  "--timeout",
+  "1",
+  "--max-turns",
+  "1",
+  "--cwd",
+  "/data/agents/workspace/hermes/repo/agent-run-supervisor/.tmp/acpx-contract-scratch/timeout-hanging-agent",
+  "--agent",
+  "node /data/agents/workspace/hermes/repo/agent-run-supervisor/tools/fake-agents/hang-agent.mjs",
+  "exec",
+  "hello"
+]
