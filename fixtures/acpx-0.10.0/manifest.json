@@ -1,7 +1,7 @@
 {
   "acpx_version": "0.10.0",
   "acpx_version_exit": 0,
-  "captured_at": "2026-05-28T10:37:27.422552+00:00",
+  "captured_at": "2026-05-28T10:49:50.489599+00:00",
   "codex_status_exit": 0,
   "codex_status_stderr_bytes": 0,
   "codex_status_stdout": "{\"action\":\"status_snapshot\",\"status\":\"no-session\",\"summary\":\"no active session\"}",
@@ -10,6 +10,11 @@
       "description": "No-tool Codex connectivity sentinel using exact V0.1a runner flag family.",
       "expected_exit": 0,
       "name": "success-codex-sentinel"
+    },
+    {
+      "description": "Real --permission-policy JSON is accepted while the task uses no tools.",
+      "expected_exit": 0,
+      "name": "permission-policy-deny-all-sentinel"
     },
     {
       "description": "Invalid CLI flag should classify as usage error.",
@@ -47,6 +52,29 @@
   "npm_version": "11.15.0",
   "npm_version_exit": 0,
   "npx_runtime_fetch_risk": "commands intentionally used npx -y acpx@0.10.0 for Phase -1 capture; V0.1a run path should prefer a pinned local binary/digest.",
+  "path_enforcement_conclusion": {
+    "source_inspection": "FileSystemHandlers.resolvePathWithinRoot checks absolute path and isWithinRoot(rootDir, resolved) in acpx@0.10.0 dist/live-checkpoint-CuFft_Nd.js.",
+    "summary": "acpx@0.10.0 client fs handlers source-resolve absolute paths inside cwd, but Phase -1 did not prove AgentRoleSpec allowed_roots as an OS/filesystem sandbox.",
+    "v0_1a_rule": "Treat allowed_roots as cwd/config validation only unless a later OS sandbox/path-policy layer is added."
+  },
+  "permission_policy_fixture": {
+    "conclusion": "acpx@0.10.0 accepts --permission-policy JSON with autoDeny/defaultAction in the observed runner flag family.",
+    "fixture": "permission-policy-deny-all-sentinel",
+    "policy": {
+      "autoDeny": [
+        "read",
+        "search",
+        "edit",
+        "execute",
+        "delete",
+        "move",
+        "fetch",
+        "switch_mode",
+        "other"
+      ],
+      "defaultAction": "deny"
+    }
+  },
   "runner_flags_family": [
     "--format",
     "json",

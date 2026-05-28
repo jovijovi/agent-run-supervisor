@@ -58,6 +58,7 @@ Captured fixtures:
 | Fixture | Expected exit | Actual exit | Notes |
 |---|---:|---:|---|
 | `success-codex-sentinel` | 0 | 0 | No-tool Codex sentinel with exact V0.1a runner flag family |
+| `permission-policy-deny-all-sentinel` | 0 | 0 | Real `--permission-policy` JSON accepted under V0.1a runner flags |
 | `usage-error-invalid-flag` | 2 | 2 | Invalid CLI flag usage error |
 | `timeout-hanging-agent` | 3 | 3 | Custom hanging ACP process triggers acpx `--timeout` |
 | `runtime-error-agent` | 1 | 1 | Custom ACP process exits before initialize |
@@ -70,6 +71,26 @@ Skipped live fixture:
 ```text
 interrupted-exit130 — reliable SIGINT orchestration deferred; classifier should still table-test 130 in V0.1a.
 ```
+
+Additional Phase -1 findings:
+
+- `--permission-policy` accepts JSON containing `autoDeny` and `defaultAction` under the same JSON/timeout/max-turns runner flag family.
+- acpx source inspection shows client fs handlers resolve absolute paths inside the active cwd; this is useful evidence, but **not** proof that `AgentRoleSpec.allowed_roots` is an OS/filesystem sandbox.
+- V0.1a must treat `allowed_roots` as cwd/config validation only unless a later sandbox/path-policy layer is added.
+
+### First independent review
+
+Codex full-diff review returned `BLOCK` (`72/100`) with two blockers:
+
+1. `scripts/validate_contract_fixtures.py` only checked exit-code equality and secret-shaped scans; it did not validate stdout JSON, schema summary, runner flags, permission-policy fixture, path-boundary finding, or management JSON separation.
+2. The fixture set did not include a real `--permission-policy` fixture or a documented path-level enforcement conclusion.
+
+Fix applied:
+
+- Added `permission-policy-deny-all-sentinel` fixture.
+- Added manifest fields for `permission_policy_fixture` and `path_enforcement_conclusion`.
+- Strengthened `scripts/validate_contract_fixtures.py` to validate required fixture names, observed schema markers, runner flag family, permission-policy fixture presence, path-boundary statement, JSON/NDJSON parseability, and `management-status-no-session-exit0` reporting `status=no-session`.
+- Added validator regression tests for fail-closed manifest validation and management status separation.
 
 ### Validation
 
@@ -86,7 +107,7 @@ Results:
 
 ```text
 OK: fixtures/acpx-0.10.0
-pytest: 2 passed
+pytest: 4 passed
 compileall: ok
 git diff --check: ok
 ```

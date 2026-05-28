@@ -21,6 +21,10 @@ COMMON_FLAGS = [
     "--timeout", "180",
     "--max-turns", "1",
 ]
+DENY_PERMISSION_POLICY = {
+    "autoDeny": ["read", "search", "edit", "execute", "delete", "move", "fetch", "switch_mode", "other"],
+    "defaultAction": "deny",
+}
 CODEX_ENV = {
     "HOME": "/home/ecs-user",
     "CODEX_PATH": "/home/ecs-user/.local/bin/codex",
@@ -154,6 +158,7 @@ def main() -> int:
     SCRATCH_ROOT.mkdir(parents=True, exist_ok=True)
 
     success_scratch = init_scratch("success-codex-sentinel")
+    policy_scratch = init_scratch("permission-policy-deny-all-sentinel")
     permission_scratch = init_scratch("permission-denied-codex-read")
     no_session_scratch = init_scratch("management-no-session")
     timeout_scratch = init_scratch("timeout-hanging-agent")
@@ -180,6 +185,20 @@ def main() -> int:
                 "--model", "gpt-5.5[low]",
                 "codex", "exec",
                 "Connectivity smoke only. Do not inspect files, do not run tools, do not edit files. Reply exactly: CODEX_ACPX_OK",
+            ],
+        ),
+        FixtureSpec(
+            name="permission-policy-deny-all-sentinel",
+            expected_exit=0,
+            description="Real --permission-policy JSON is accepted while the task uses no tools.",
+            argv=ACPX + COMMON_FLAGS + [
+                "--cwd", str(policy_scratch),
+                "--permission-policy", json.dumps(DENY_PERMISSION_POLICY, separators=(",", ":")),
+                "--non-interactive-permissions", "fail",
+                "--no-terminal",
+                "--model", "gpt-5.5[low]",
+                "codex", "exec",
+                "Do not use tools. Reply exactly: POLICY_OK",
             ],
         ),
         FixtureSpec(
@@ -250,6 +269,16 @@ def main() -> int:
         "codex_status_stdout": codex_status_stdout.strip(),
         "codex_status_stderr_bytes": len(codex_status_stderr.encode("utf-8")),
         "runner_flags_family": COMMON_FLAGS,
+        "permission_policy_fixture": {
+            "fixture": "permission-policy-deny-all-sentinel",
+            "policy": DENY_PERMISSION_POLICY,
+            "conclusion": "acpx@0.10.0 accepts --permission-policy JSON with autoDeny/defaultAction in the observed runner flag family.",
+        },
+        "path_enforcement_conclusion": {
+            "summary": "acpx@0.10.0 client fs handlers source-resolve absolute paths inside cwd, but Phase -1 did not prove AgentRoleSpec allowed_roots as an OS/filesystem sandbox.",
+            "source_inspection": "FileSystemHandlers.resolvePathWithinRoot checks absolute path and isWithinRoot(rootDir, resolved) in acpx@0.10.0 dist/live-checkpoint-CuFft_Nd.js.",
+            "v0_1a_rule": "Treat allowed_roots as cwd/config validation only unless a later OS sandbox/path-policy layer is added.",
+        },
         "fixtures": [
             {
                 "name": spec.name,
@@ -289,6 +318,18 @@ Observed stdout for `--format json --json-strict --suppress-reads` is newline-de
 ```
 
 The V0.1a parser must target this observed stdout schema. Management-command JSON such as `status=no-session` is stored separately and must not be parsed as exec success.
+
+## Permission policy finding
+
+`permission-policy-deny-all-sentinel` proves `acpx@0.10.0` accepts this policy shape under the V0.1a runner flags:
+
+```json
+{json.dumps(DENY_PERMISSION_POLICY, ensure_ascii=False, indent=2)}
+```
+
+## Path enforcement finding
+
+Source inspection shows acpx client fs handlers resolve absolute paths under the active cwd, but this does not prove `AgentRoleSpec.allowed_roots` as an OS/filesystem sandbox. V0.1a must still treat `allowed_roots` as cwd/config validation only unless a later sandbox/path-policy layer is added.
 
 ## Fixtures
 

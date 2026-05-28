@@ -58,10 +58,49 @@ def validate_manifest(root: Path) -> list[str]:
     if not manifest_path.exists():
         return [f"missing {manifest_path}"]
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    flags = manifest.get("runner_flags_family")
+    required_flags = ["--format", "json", "--json-strict", "--suppress-reads", "--timeout", "--max-turns"]
+    if not isinstance(flags, list) or any(flag not in flags for flag in required_flags):
+        errors.append("manifest.runner_flags_family must include exact V0.1a JSON/timeout/max-turns flags")
+
+    schema_summary = manifest.get("schema_summary")
+    if not isinstance(schema_summary, dict):
+        errors.append("manifest.schema_summary must be present")
+    else:
+        if schema_summary.get("jsonrpc_present") is not True:
+            errors.append("schema_summary.jsonrpc_present must be true for observed acpx JSON stdout")
+        methods = set(schema_summary.get("methods") or [])
+        for required_method in {"initialize", "session/new", "session/prompt"}:
+            if required_method not in methods:
+                errors.append(f"schema_summary.methods missing {required_method}")
+
+    permission_policy = manifest.get("permission_policy_fixture")
+    if not isinstance(permission_policy, dict) or permission_policy.get("fixture") != "permission-policy-deny-all-sentinel":
+        errors.append("manifest.permission_policy_fixture must reference permission-policy-deny-all-sentinel")
+
+    path_finding = manifest.get("path_enforcement_conclusion")
+    if not isinstance(path_finding, dict) or "allowed_roots" not in str(path_finding.get("v0_1a_rule", "")):
+        errors.append("manifest.path_enforcement_conclusion must state the V0.1a allowed_roots boundary")
+
     fixtures = manifest.get("fixtures")
     if not isinstance(fixtures, list) or not fixtures:
         errors.append("manifest.fixtures must be a non-empty list")
         return errors
+    names = {fixture.get("name") for fixture in fixtures if isinstance(fixture, dict)}
+    required_names = {
+        "success-codex-sentinel",
+        "permission-policy-deny-all-sentinel",
+        "usage-error-invalid-flag",
+        "timeout-hanging-agent",
+        "runtime-error-agent",
+        "permission-denied-codex-read",
+        "management-no-session-exit4",
+        "management-status-no-session-exit0",
+    }
+    for name in sorted(required_names - names):
+        errors.append(f"manifest.fixtures missing {name}")
+
     for fixture in fixtures:
         if not isinstance(fixture, dict):
             errors.append("manifest fixture entry must be object")
@@ -79,6 +118,26 @@ def validate_manifest(root: Path) -> list[str]:
         actual_exit = result.get("exit_code")
         if actual_exit != expected_exit:
             errors.append(f"{name}: exit_code {actual_exit!r} != expected {expected_exit!r}")
+
+        stdout_name = json.loads((root / name / "metadata.json").read_text(encoding="utf-8")).get("stdout_file", "stdout.ndjson")
+        stdout_path = root / name / stdout_name
+        if stdout_path.exists() and stdout_path.suffix in {".ndjson", ".json"}:
+            if stdout_path.suffix == ".ndjson":
+                try:
+                    parse_json_lines(stdout_path)
+                except ValueError as exc:
+                    errors.append(str(exc))
+            else:
+                try:
+                    json.loads(stdout_path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError as exc:
+                    errors.append(f"{stdout_path}: invalid JSON: {exc.msg}")
+
+    status_path = root / "management-status-no-session-exit0" / "stdout.json"
+    if status_path.exists():
+        status_payload = json.loads(status_path.read_text(encoding="utf-8"))
+        if status_payload.get("status") != "no-session":
+            errors.append("management-status-no-session-exit0 must report status=no-session")
     return errors
 
 
