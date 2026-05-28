@@ -1,0 +1,52 @@
+name: Verify
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - 'ai/**'
+      - 'feat/**'
+      - 'fix/**'
+      - 'docs/**'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install package
+        run: python -m pip install -e '.[dev]'
+
+      - name: Validate acpx contract fixtures
+        run: python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0
+
+      - name: Run tests
+        run: python3 -m pytest -q
+
+      - name: Compile Python sources
+        run: python3 -m compileall -q src scripts tests
+
+      - name: CLI doctor smoke
+        run: PYTHONPATH=src python3 -m agent_run_supervisor doctor
+
+      - name: CLI replay smoke
+        run: PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson
+
+      - name: Check docs index
+        run: python tools/build_docs_index.py --check
+
+      - name: Check docs drift report
+        run: python tools/docs_drift_signal.py --check
+
+      - name: Whitespace diff check
+        run: git diff --check
