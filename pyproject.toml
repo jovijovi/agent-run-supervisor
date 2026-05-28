@@ -15,6 +15,14 @@ dependencies = []
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]
 
+[project.scripts]
+agent-run-supervisor = "agent_run_supervisor.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["agent_run_supervisor*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+pythonpath = ["src", "."]
