@@ -37,15 +37,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
     run = subparsers.add_parser(
         "run",
-        help="Compile a role+prompt and (optionally) launch acpx.",
+        help="Compile a role+prompt; refuses real agent launch in V0.1b.",
+        description="Compile a role+prompt; refuses real agent launch in V0.1b.",
     )
     run.add_argument("--role", required=True, help="Path to AgentRoleSpec JSON file.")
     run.add_argument("--prompt-file", required=True, help="Path to prompt text file.")
-    run.add_argument("--cwd", default=None, help="Override cwd for the acpx run.")
+    run.add_argument("--cwd", default=None, help="Override effective cwd for dry-run compilation.")
     run.add_argument(
         "--no-real-run",
         action="store_true",
-        help="Compile and persist run artifacts without launching acpx.",
+        help="Persist safe dry-run artifacts; current V0.1b requires this flag.",
     )
     run.add_argument(
         "--runs-dir",

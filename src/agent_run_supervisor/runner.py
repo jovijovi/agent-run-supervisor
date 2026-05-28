@@ -28,6 +28,11 @@ from agent_run_supervisor.redaction import (
 )
 from agent_run_supervisor.result import build_result_payload, RunOutcome
 from agent_run_supervisor.role import AgentRoleSpec, role_hash
+from agent_run_supervisor.workspace import (
+    ALLOWED_ROOTS_DISCLAIMER,
+    WorkspaceValidationResult,
+    validate_effective_cwd,
+)
 
 DEFAULT_RUNS_DIR_NAME = Path(".agent-run-supervisor") / "runs"
 
@@ -80,11 +85,13 @@ class SupervisorRunner:
         cwd: str | None,
         env: Mapping[str, str] | None,
         dry_run: bool,
+        workspace: WorkspaceValidationResult,
     ) -> _ArtifactBundle:
         run_id = _generate_run_id()
         handle = self.store.create_run(run_id)
 
-        argv = compile_command(role, cwd=cwd, prompt=prompt)
+        resolved_cwd_str = str(workspace.effective_cwd)
+        argv = compile_command(role, cwd=resolved_cwd_str, prompt=prompt)
         policy = compile_permission_policy(role)
         report = RedactionReport()
 
@@ -113,11 +120,10 @@ class SupervisorRunner:
             "adapter_agent": role.runner.adapter_agent,
             "started_at": _utc_now_iso(),
             "cwd": cwd or role.workspace.default_cwd,
+            "effective_cwd": resolved_cwd_str,
             "allowed_roots": list(role.workspace.allowed_roots),
             "allowed_roots_security_boundary": False,
-            "allowed_roots_disclaimer": (
-                "allowed_roots is cwd/config validation only — not an OS/filesystem sandbox."
-            ),
+            "allowed_roots_disclaimer": ALLOWED_ROOTS_DISCLAIMER,
             "dry_run": dry_run,
         }
         redacted_metadata, meta_report = redact_mapping(metadata)
@@ -148,12 +154,14 @@ class SupervisorRunner:
         cwd: str | None,
         env: Mapping[str, str] | None = None,
     ) -> DryRunResult:
+        workspace = validate_effective_cwd(role, cwd)
         bundle = self._prepare_artifacts(
             role=role,
             prompt=prompt,
             cwd=cwd,
             env=env,
             dry_run=True,
+            workspace=workspace,
         )
         result = build_result_payload(
             run_id=bundle.handle.run_id,
@@ -189,12 +197,14 @@ class SupervisorRunner:
         subprocess_outcome: SubprocessOutcome,
         env: Mapping[str, str] | None = None,
     ) -> RunOutcome:
+        workspace = validate_effective_cwd(role, cwd)
         bundle = self._prepare_artifacts(
             role=role,
             prompt=prompt,
             cwd=cwd,
             env=env,
             dry_run=False,
+            workspace=workspace,
         )
 
         bundle.handle.write_text("stderr.log", _decode_redacted(subprocess_outcome.stderr, bundle.redaction_report, "stderr"))
