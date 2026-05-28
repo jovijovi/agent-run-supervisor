@@ -94,6 +94,18 @@ allowed_static_hits=1
 
 The single allowed static hit is the copied `tools/docs_drift_signal.py` use of `subprocess.run(...)` to execute read-only `git log`; this is expected for the drift tool and not a runtime AGENT/Gateway action.
 
+Codex CLI primary review:
+
+```text
+VERDICT: PASS
+SCORE: 94/100
+BLOCKERS: None
+```
+
+Notes from review: governance docs are project-specific to `agent-run-supervisor`, explicit non-approvals are preserved, CI gates are portable and do not require live acpx/agent behavior, and docs index/drift tooling/frontmatter are coherent.
+
+Review environment note: Codex read-only sandbox failed with a local `bwrap` permission issue, so the review was rerun in a temporary clone with `danger-full-access` constrained to that throwaway directory. The review clone remained clean after review.
+
 ## Follow-up Notes
 
 Future phases should now begin by reading `GOAL.md`, `docs/roadmap/current-status.md`, and `docs/AI_FLOW.md`, then writing a plan before implementation.
