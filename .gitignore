@@ -7,3 +7,4 @@ __pycache__/
 # Runtime scratch outputs that are not part of curated fixtures
 outputs/
 .tmp/
+.agent-run-supervisor/

@@ -1,3 +1,9 @@
+---
+title: "Phase -1 acpx Contract Spike Dev Log"
+status: active
+created_at: 2026-05-28
+last_validated_at: 2026-05-28T20:00:00+0800
+---
 # Phase -1 acpx@0.10.0 Contract Spike Dev Log
 
 ## Scope
