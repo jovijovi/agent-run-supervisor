@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+.DS_Store
+
+# Runtime scratch outputs that are not part of curated fixtures
+outputs/
+.tmp/
