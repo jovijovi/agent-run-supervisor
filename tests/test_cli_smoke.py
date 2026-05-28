@@ -54,3 +54,14 @@ def test_cli_subcommand_help_exits_zero() -> None:
     for subcommand in ("validate-role", "replay", "doctor", "run"):
         completed = _run_cli(subcommand, "--help")
         assert completed.returncode == 0, (subcommand, completed.stderr)
+
+
+def test_run_help_states_real_run_refusal_boundary() -> None:
+    completed = _run_cli("run", "--help")
+
+    assert completed.returncode == 0, completed.stderr
+    help_text = completed.stdout.lower()
+    assert "refuses real agent launch" in help_text
+    assert "optionally" not in help_text
+    assert "launch acpx" not in help_text
+    assert "acpx run" not in help_text

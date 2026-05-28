@@ -9,8 +9,17 @@ from typing import Any
 
 from agent_run_supervisor.event_store import EventStore
 from agent_run_supervisor.parser import ParseResult, parse_acpx_stdout
+from agent_run_supervisor.preflight import probe_acpx, probe_node
 from agent_run_supervisor.role import RoleValidationError, load_role, role_hash
 from agent_run_supervisor.runner import SupervisorRunner
+from agent_run_supervisor.workspace import (
+    ALLOWED_ROOTS_DISCLAIMER,
+    WorkspaceValidationError,
+)
+
+REAL_RUN_REFUSAL_MESSAGE = (
+    "real AGENT launch is disabled in V0.1b; pass --no-real-run to compile artifacts."
+)
 
 
 def _load_json(path: str | Path) -> Any:
@@ -80,6 +89,7 @@ def _default_fixture_dir() -> Path:
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     role_payload: dict[str, Any] | None = None
+    role = None
     if args.role:
         try:
             role = _parse_role_file(args.role)
@@ -101,6 +111,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         }
 
     probe = EventStore(base_dir=Path.cwd() / ".tmp" / "doctor-event-store-probe").permission_probe()
+    node_probe = probe_node()
+    acpx_probe = probe_acpx(binary=role.runner.acpx_binary if role is not None else None)
     payload = {
         "ok": not fixture_replay.get("protocol_error", True),
         "python_version": platform.python_version(),
@@ -109,6 +121,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "event_store_probe": probe,
         "fixture_replay": fixture_replay,
         "role_validation": role_payload,
+        "node_probe": node_probe,
+        "acpx_probe": acpx_probe,
     }
     _print_json(payload)
     return 0 if payload["ok"] else 1
@@ -116,7 +130,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     if not args.no_real_run:
-        print("real run disabled in V0.1a CLI unless --no-real-run is provided", file=sys.stderr)
+        _print_json(
+            {
+                "status": "refused",
+                "error_code": "REAL_RUN_DISABLED",
+                "message": REAL_RUN_REFUSAL_MESSAGE,
+                "launched_real_agent": False,
+                "allowed_roots_security_boundary": False,
+                "disclaimer": ALLOWED_ROOTS_DISCLAIMER,
+            }
+        )
         return 2
     try:
         role = _parse_role_file(args.role)
@@ -125,6 +148,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"run input error: {exc}", file=sys.stderr)
         return 1
     runner = SupervisorRunner(runs_dir=Path(args.runs_dir) if args.runs_dir else None)
-    outcome = runner.dry_run(role=role, prompt=prompt, cwd=args.cwd)
+    try:
+        outcome = runner.dry_run(role=role, prompt=prompt, cwd=args.cwd)
+    except WorkspaceValidationError as exc:
+        print(f"workspace validation error: {exc}", file=sys.stderr)
+        return 1
     _print_json(outcome.result)
     return 0
