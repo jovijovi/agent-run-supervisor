@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from scripts.validate_contract_fixtures import find_secret_like_values, parse_json_lines, validate_manifest
+from scripts.validate_contract_fixtures import (
+    find_secret_like_values,
+    parse_json_lines,
+    validate_command_argv,
+    validate_manifest,
+)
 
 
 def test_parse_json_lines_rejects_malformed_line(tmp_path: Path) -> None:
@@ -49,6 +54,38 @@ def test_validate_manifest_fails_closed_without_core_contract_fields(tmp_path: P
     assert any("manifest.fixtures" in error for error in errors)
 
 
+def test_validate_command_argv_rejects_misordered_exec_flags() -> None:
+    errors = validate_command_argv(
+        "success-codex-sentinel",
+        [
+            "npx",
+            "-y",
+            "acpx@0.10.0",
+            "--json-strict",
+            "--format",
+            "json",
+            "--suppress-reads",
+            "--timeout",
+            "180",
+            "--max-turns",
+            "1",
+            "--cwd",
+            "/tmp/.tmp/acpx-contract-scratch/success-codex-sentinel",
+            "--deny-all",
+            "--non-interactive-permissions",
+            "fail",
+            "--no-terminal",
+            "--model",
+            "gpt-5.5[low]",
+            "codex",
+            "exec",
+            "hello",
+        ],
+    )
+
+    assert any("ordered JSON/timeout/max-turns/cwd grammar" in error for error in errors)
+
+
 def test_validate_manifest_checks_management_status_no_session(tmp_path: Path) -> None:
     root = tmp_path
     fixture_names = [
@@ -82,15 +119,23 @@ def test_validate_manifest_checks_management_status_no_session(tmp_path: Path) -
             "runtime-error-agent",
             "permission-denied-codex-read",
         }:
-            argv = ["npx", "acpx", "--format", "json", "--json-strict", "--suppress-reads", "--timeout", "1", "--max-turns", "1", "exec", "hello"]
-            if name == "permission-policy-deny-all-sentinel":
-                argv.extend(["--permission-policy", "{}"])
+            argv = ["npx", "-y", "acpx@0.10.0", "--format", "json", "--json-strict", "--suppress-reads", "--timeout", "1", "--max-turns", "1", "--cwd", f"/tmp/.tmp/acpx-contract-scratch/{name}", "exec", "hello"]
+            if name == "success-codex-sentinel":
+                argv = ["npx", "-y", "acpx@0.10.0", "--format", "json", "--json-strict", "--suppress-reads", "--timeout", "180", "--max-turns", "1", "--cwd", f"/tmp/.tmp/acpx-contract-scratch/{name}", "--deny-all", "--non-interactive-permissions", "fail", "--no-terminal", "--model", "gpt-5.5[low]", "codex", "exec", "hello"]
+            elif name == "permission-denied-codex-read":
+                argv = ["npx", "-y", "acpx@0.10.0", "--format", "json", "--json-strict", "--suppress-reads", "--timeout", "180", "--max-turns", "3", "--cwd", f"/tmp/.tmp/acpx-contract-scratch/{name}", "--deny-all", "--non-interactive-permissions", "fail", "--no-terminal", "--model", "gpt-5.5[low]", "codex", "exec", "hello"]
+            elif name == "runtime-error-agent":
+                argv = ["npx", "-y", "acpx@0.10.0", "--format", "json", "--json-strict", "--suppress-reads", "--timeout", "10", "--max-turns", "1", "--cwd", f"/tmp/.tmp/acpx-contract-scratch/{name}", "--agent", "node /tmp/tools/fake-agents/exit-before-initialize.mjs", "exec", "hello"]
+            elif name == "timeout-hanging-agent":
+                argv = ["npx", "-y", "acpx@0.10.0", "--format", "json", "--json-strict", "--suppress-reads", "--timeout", "1", "--max-turns", "1", "--cwd", f"/tmp/.tmp/acpx-contract-scratch/{name}", "--agent", "node /tmp/tools/fake-agents/hang-agent.mjs", "exec", "hello"]
+            elif name == "permission-policy-deny-all-sentinel":
+                argv = ["npx", "-y", "acpx@0.10.0", "--format", "json", "--json-strict", "--suppress-reads", "--timeout", "180", "--max-turns", "1", "--cwd", f"/tmp/.tmp/acpx-contract-scratch/{name}", "--permission-policy", json.dumps({"defaultAction": "deny", "autoDeny": ["read"]}), "--non-interactive-permissions", "fail", "--no-terminal", "--model", "gpt-5.5[low]", "codex", "exec", "hello"]
         elif name == "usage-error-invalid-flag":
-            argv = ["npx", "acpx", "--format", "json", "--json-strict", "--bad-flag"]
+            argv = ["npx", "-y", "acpx@0.10.0", "--format", "json", "--json-strict", "--bad-flag"]
         elif name == "management-no-session-exit4":
-            argv = ["npx", "acpx", "--format", "json", "--json-strict", "--no-wait", "hello"]
+            argv = ["npx", "-y", "acpx@0.10.0", "--format", "json", "--json-strict", "--cwd", "/tmp/.tmp/acpx-contract-scratch/management-no-session", "codex", "-s", "definitely-missing-session", "--no-wait", "hello"]
         else:
-            argv = ["npx", "acpx", "--format", "json", "--json-strict", "status"]
+            argv = ["npx", "-y", "acpx@0.10.0", "--format", "json", "--json-strict", "--cwd", "/tmp/.tmp/acpx-contract-scratch/management-no-session", "codex", "-s", "definitely-missing-session", "status"]
         (fixture / "command.argv.json").write_text(json.dumps(argv), encoding="utf-8")
     status_dir = root / "management-status-no-session-exit0"
     (status_dir / "metadata.json").write_text(json.dumps({"stdout_file": "stdout.json"}), encoding="utf-8")

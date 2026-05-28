@@ -92,6 +92,12 @@ Fix applied:
 - Strengthened `scripts/validate_contract_fixtures.py` to validate required fixture names, observed schema markers, runner flag family, per-fixture `command.argv.json` grammar/common exec flags, permission-policy fixture presence, path-boundary statement, JSON/NDJSON parseability, and `management-status-no-session-exit0` reporting `status=no-session`.
 - Added validator regression tests for fail-closed manifest validation and management status separation.
 
+Codex blocker-only re-review then returned `BLOCK` (`82/100`) because command argv validation still used unordered token presence. Follow-up fix:
+
+- Replaced token-presence checks with ordered per-fixture argv grammar validation.
+- Enforced `npx -y acpx@0.10.0` prefix, JSON flag order, timeout/max-turn values, cwd scratch target, `codex exec` placement, custom-agent fixture tails, management command tails, and exact invalid-flag fixture shape.
+- Added regression coverage for misordered exec flags.
+
 ### Validation
 
 Commands:
@@ -107,7 +113,7 @@ Results:
 
 ```text
 OK: fixtures/acpx-0.10.0
-pytest: 4 passed
+pytest: 5 passed
 compileall: ok
 git diff --check: ok
 ```

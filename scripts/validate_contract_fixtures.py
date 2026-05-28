@@ -24,6 +24,101 @@ class SecretFinding:
     line_number: int
 
 
+def validate_command_argv(name: str, argv: list[str]) -> list[str]:
+    errors: list[str] = []
+    acpx_prefix = ["npx", "-y", "acpx@0.10.0"]
+    if argv[:3] != acpx_prefix:
+        errors.append(f"{name}: command argv must start with npx -y acpx@0.10.0")
+        return errors
+
+    if name == "usage-error-invalid-flag":
+        expected = acpx_prefix + ["--format", "json", "--json-strict", "--bad-flag"]
+        if argv != expected:
+            errors.append(f"{name}: command argv must exactly match invalid-flag usage fixture grammar")
+        return errors
+
+    if name in {"management-no-session-exit4", "management-status-no-session-exit0"}:
+        expected_tail = ["codex", "-s", "definitely-missing-session"]
+        expected_end = ["--no-wait", "hello"] if name == "management-no-session-exit4" else ["status"]
+        expected_head = acpx_prefix + ["--format", "json", "--json-strict", "--cwd"]
+        if argv[:7] != expected_head:
+            errors.append(f"{name}: management command argv has wrong prefix/format/cwd grammar")
+            return errors
+        if not argv[7].endswith("/.tmp/acpx-contract-scratch/management-no-session"):
+            errors.append(f"{name}: management --cwd must point at management-no-session scratch dir")
+        if argv[8:] != expected_tail + expected_end:
+            errors.append(f"{name}: management command tail must exactly match expected session command")
+        return errors
+
+    expected_exec = {
+        "success-codex-sentinel": ("180", "1", "success-codex-sentinel"),
+        "permission-policy-deny-all-sentinel": ("180", "1", "permission-policy-deny-all-sentinel"),
+        "timeout-hanging-agent": ("1", "1", "timeout-hanging-agent"),
+        "runtime-error-agent": ("10", "1", "runtime-error-agent"),
+        "permission-denied-codex-read": ("180", "3", "permission-denied-codex-read"),
+    }
+    if name not in expected_exec:
+        errors.append(f"{name}: unknown fixture command grammar")
+        return errors
+
+    timeout_value, max_turns_value, scratch_name = expected_exec[name]
+    expected_head = acpx_prefix + [
+        "--format",
+        "json",
+        "--json-strict",
+        "--suppress-reads",
+        "--timeout",
+        timeout_value,
+        "--max-turns",
+        max_turns_value,
+        "--cwd",
+    ]
+    if argv[:12] != expected_head:
+        errors.append(f"{name}: exec command argv has wrong ordered JSON/timeout/max-turns/cwd grammar")
+        return errors
+    if not argv[12].endswith(f"/.tmp/acpx-contract-scratch/{scratch_name}"):
+        errors.append(f"{name}: exec --cwd must point at {scratch_name} scratch dir")
+    tail = argv[13:]
+
+    if name == "permission-policy-deny-all-sentinel":
+        expected_tail_prefix = ["--permission-policy"]
+        if tail[:1] != expected_tail_prefix:
+            errors.append(f"{name}: permission-policy fixture must pass --permission-policy immediately after --cwd")
+        else:
+            try:
+                policy = json.loads(tail[1])
+            except (IndexError, json.JSONDecodeError) as exc:
+                errors.append(f"{name}: --permission-policy value must be JSON: {exc}")
+                return errors
+            if policy.get("defaultAction") != "deny" or "read" not in policy.get("autoDeny", []):
+                errors.append(f"{name}: --permission-policy JSON must deny by default and include read in autoDeny")
+            tail = tail[2:]
+        expected_codex_tail = ["--non-interactive-permissions", "fail", "--no-terminal", "--model", "gpt-5.5[low]", "codex", "exec"]
+        if tail[:7] != expected_codex_tail or len(tail) != 8:
+            errors.append(f"{name}: permission-policy codex exec tail must exactly match expected grammar")
+        return errors
+
+    if name in {"success-codex-sentinel", "permission-denied-codex-read"}:
+        expected_codex_tail = ["--deny-all", "--non-interactive-permissions", "fail", "--no-terminal", "--model", "gpt-5.5[low]", "codex", "exec"]
+        if tail[:8] != expected_codex_tail or len(tail) != 9:
+            errors.append(f"{name}: codex exec tail must exactly match expected deny-all grammar")
+        return errors
+
+    if name == "timeout-hanging-agent":
+        expected_agent = "node "
+        if tail[:1] != ["--agent"] or len(tail) != 4 or not tail[1].startswith(expected_agent) or not tail[1].endswith("/tools/fake-agents/hang-agent.mjs") or tail[2:] != ["exec", "hello"]:
+            errors.append(f"{name}: hanging custom-agent command tail must exactly match expected grammar")
+        return errors
+
+    if name == "runtime-error-agent":
+        expected_agent = "node "
+        if tail[:1] != ["--agent"] or len(tail) != 4 or not tail[1].startswith(expected_agent) or not tail[1].endswith("/tools/fake-agents/exit-before-initialize.mjs") or tail[2:] != ["exec", "hello"]:
+            errors.append(f"{name}: runtime-error custom-agent command tail must exactly match expected grammar")
+        return errors
+
+    return errors
+
+
 def parse_json_lines(path: Path) -> list[Any]:
     records: list[Any] = []
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
@@ -128,26 +223,7 @@ def validate_manifest(root: Path) -> list[str]:
             errors.append(f"{name}: command.argv.json must be a string array")
             continue
 
-        exec_runner_fixtures = {
-            "success-codex-sentinel",
-            "permission-policy-deny-all-sentinel",
-            "timeout-hanging-agent",
-            "runtime-error-agent",
-            "permission-denied-codex-read",
-        }
-        if name in exec_runner_fixtures:
-            required_exec_tokens = ["--format", "json", "--json-strict", "--suppress-reads", "--timeout", "--max-turns", "exec"]
-            for token in required_exec_tokens:
-                if token not in argv:
-                    errors.append(f"{name}: command argv missing {token}")
-        if name == "permission-policy-deny-all-sentinel" and "--permission-policy" not in argv:
-            errors.append("permission-policy-deny-all-sentinel: command argv missing --permission-policy")
-        if name == "usage-error-invalid-flag" and "--bad-flag" not in argv:
-            errors.append("usage-error-invalid-flag: command argv missing --bad-flag")
-        if name == "management-no-session-exit4" and "--no-wait" not in argv:
-            errors.append("management-no-session-exit4: command argv missing --no-wait")
-        if name == "management-status-no-session-exit0" and "status" not in argv:
-            errors.append("management-status-no-session-exit0: command argv missing status")
+        errors.extend(validate_command_argv(name, argv))
 
         stdout_name = json.loads((root / name / "metadata.json").read_text(encoding="utf-8")).get("stdout_file", "stdout.ndjson")
         stdout_path = root / name / stdout_name
