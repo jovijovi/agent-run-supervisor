@@ -120,6 +120,27 @@ git diff --check: ok
 
 Secret scan: covered by `scripts/validate_contract_fixtures.py`; no credential-shaped findings.
 
+### Final reviews
+
+Codex blocker-only re-review after exact argv grammar validation:
+
+```text
+VERDICT: PASS
+SCORE: 94/100
+BLOCKERS: None
+NOTE: Validator still relies on manifest.schema_summary for schema markers rather than recomputing them from stdout; non-blocking for Phase -1.
+```
+
+Claude Code auxiliary review:
+
+```text
+VERDICT: PASS
+SCORE: 94/100
+BLOCKERS: None
+```
+
+Claude noted non-blocking tails for V0.1a: prefer pinned local acpx binary/digest over runtime `npx`, table-test or later live-capture exit 130, and consider table-driving the fixture grammar if fixture count grows.
+
 ### Boundary notes
 
 - Phase -1 used `npx -y acpx@0.10.0` intentionally for contract capture and records runtime fetch risk in `fixtures/acpx-0.10.0/manifest.json`.
