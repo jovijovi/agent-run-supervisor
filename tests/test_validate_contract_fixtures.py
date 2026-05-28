@@ -75,6 +75,23 @@ def test_validate_manifest_checks_management_status_no_session(tmp_path: Path) -
         (fixture / "metadata.json").write_text(json.dumps({"stdout_file": "stdout.ndjson"}), encoding="utf-8")
         (fixture / "result.json").write_text(json.dumps({"exit_code": 0}), encoding="utf-8")
         (fixture / "stdout.ndjson").write_text('{"jsonrpc":"2.0"}\n', encoding="utf-8")
+        if name in {
+            "success-codex-sentinel",
+            "permission-policy-deny-all-sentinel",
+            "timeout-hanging-agent",
+            "runtime-error-agent",
+            "permission-denied-codex-read",
+        }:
+            argv = ["npx", "acpx", "--format", "json", "--json-strict", "--suppress-reads", "--timeout", "1", "--max-turns", "1", "exec", "hello"]
+            if name == "permission-policy-deny-all-sentinel":
+                argv.extend(["--permission-policy", "{}"])
+        elif name == "usage-error-invalid-flag":
+            argv = ["npx", "acpx", "--format", "json", "--json-strict", "--bad-flag"]
+        elif name == "management-no-session-exit4":
+            argv = ["npx", "acpx", "--format", "json", "--json-strict", "--no-wait", "hello"]
+        else:
+            argv = ["npx", "acpx", "--format", "json", "--json-strict", "status"]
+        (fixture / "command.argv.json").write_text(json.dumps(argv), encoding="utf-8")
     status_dir = root / "management-status-no-session-exit0"
     (status_dir / "metadata.json").write_text(json.dumps({"stdout_file": "stdout.json"}), encoding="utf-8")
     (status_dir / "stdout.json").write_text(json.dumps({"status": "active"}), encoding="utf-8")

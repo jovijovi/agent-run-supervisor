@@ -119,6 +119,36 @@ def validate_manifest(root: Path) -> list[str]:
         if actual_exit != expected_exit:
             errors.append(f"{name}: exit_code {actual_exit!r} != expected {expected_exit!r}")
 
+        command_path = root / name / "command.argv.json"
+        if not command_path.exists():
+            errors.append(f"{name}: missing command.argv.json")
+            continue
+        argv = json.loads(command_path.read_text(encoding="utf-8"))
+        if not isinstance(argv, list) or not all(isinstance(arg, str) for arg in argv):
+            errors.append(f"{name}: command.argv.json must be a string array")
+            continue
+
+        exec_runner_fixtures = {
+            "success-codex-sentinel",
+            "permission-policy-deny-all-sentinel",
+            "timeout-hanging-agent",
+            "runtime-error-agent",
+            "permission-denied-codex-read",
+        }
+        if name in exec_runner_fixtures:
+            required_exec_tokens = ["--format", "json", "--json-strict", "--suppress-reads", "--timeout", "--max-turns", "exec"]
+            for token in required_exec_tokens:
+                if token not in argv:
+                    errors.append(f"{name}: command argv missing {token}")
+        if name == "permission-policy-deny-all-sentinel" and "--permission-policy" not in argv:
+            errors.append("permission-policy-deny-all-sentinel: command argv missing --permission-policy")
+        if name == "usage-error-invalid-flag" and "--bad-flag" not in argv:
+            errors.append("usage-error-invalid-flag: command argv missing --bad-flag")
+        if name == "management-no-session-exit4" and "--no-wait" not in argv:
+            errors.append("management-no-session-exit4: command argv missing --no-wait")
+        if name == "management-status-no-session-exit0" and "status" not in argv:
+            errors.append("management-status-no-session-exit0: command argv missing status")
+
         stdout_name = json.loads((root / name / "metadata.json").read_text(encoding="utf-8")).get("stdout_file", "stdout.ndjson")
         stdout_path = root / name / stdout_name
         if stdout_path.exists() and stdout_path.suffix in {".ndjson", ".json"}:

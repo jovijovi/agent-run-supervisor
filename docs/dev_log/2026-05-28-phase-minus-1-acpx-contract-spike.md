@@ -89,7 +89,7 @@ Fix applied:
 
 - Added `permission-policy-deny-all-sentinel` fixture.
 - Added manifest fields for `permission_policy_fixture` and `path_enforcement_conclusion`.
-- Strengthened `scripts/validate_contract_fixtures.py` to validate required fixture names, observed schema markers, runner flag family, permission-policy fixture presence, path-boundary statement, JSON/NDJSON parseability, and `management-status-no-session-exit0` reporting `status=no-session`.
+- Strengthened `scripts/validate_contract_fixtures.py` to validate required fixture names, observed schema markers, runner flag family, per-fixture `command.argv.json` grammar/common exec flags, permission-policy fixture presence, path-boundary statement, JSON/NDJSON parseability, and `management-status-no-session-exit0` reporting `status=no-session`.
 - Added validator regression tests for fail-closed manifest validation and management status separation.
 
 ### Validation
