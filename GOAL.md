@@ -35,7 +35,7 @@ The project is an independent repo. It is not Sachima, not a Gateway plugin, not
 Phase -1 acpx@0.10.0 contract spike: complete with checked-in fixtures and validator.
 V0.1a exec-only vertical slice: implemented on main with role validation, policy/argv compile, exit classification, observed stdout replay, EventStore, redaction, CLI smoke, pytest coverage, and Codex review evidence.
 V0.1b real-run preflight hardening: implemented with structured Node/acpx doctor probes, cwd-vs-allowed-roots fail-closed validation, and stable real-run refusal; still no real AGENT launch.
-V0.1c HITL/manual real-run design gate: in progress as documentation/design only, defining a future human approval contract, fail-closed launch rules, and test plan; it does not approve or implement real AGENT launch.
+V0.1c HITL/manual real-run design gate: merged via PR #3 (`adfea8b9cc1de7e80850418453b032722071b8c2`) as documentation/design only, defining a future human approval contract, fail-closed launch rules, and test plan; it does not approve or implement real AGENT launch.
 AI_FLOW bootstrap: this repository now uses GOAL.md, docs/roadmap/current-status.md, docs/AI_FLOW.md, docs/plans/, docs/dev_log/, generated docs index, and docs drift gates for future work.
 ```
 
