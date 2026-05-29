@@ -3,9 +3,11 @@ from __future__ import annotations
 import datetime as _dt
 import os
 import secrets
+import signal as _signal
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol
 
 from agent_run_supervisor.event_store import EventStore, RunHandle
 from agent_run_supervisor.exit_classifier import (
@@ -35,6 +37,7 @@ from agent_run_supervisor.workspace import (
 )
 
 DEFAULT_RUNS_DIR_NAME = Path(".agent-run-supervisor") / "runs"
+DEFAULT_WATCHDOG_GRACE_MS = 1_000
 
 
 @dataclass
@@ -45,6 +48,24 @@ class SubprocessOutcome:
     stderr: bytes
     supervisor_killed: bool = False
     supervisor_timed_out: bool = False
+    kill_reason: str | None = None
+    kill_signal: str | None = None
+    grace_ms: int | None = None
+    process_group_used: bool | None = None
+    stdout_closed: bool | None = None
+    stderr_closed: bool | None = None
+
+
+class SubprocessExecutor(Protocol):
+    def __call__(
+        self,
+        *,
+        argv: list[str],
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout_seconds: int,
+        grace_ms: int,
+    ) -> SubprocessOutcome: ...
 
 
 @dataclass
@@ -72,10 +93,18 @@ def _generate_run_id() -> str:
 
 
 class SupervisorRunner:
-    def __init__(self, runs_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        runs_dir: Path | None = None,
+        *,
+        executor: SubprocessExecutor | None = None,
+        watchdog_grace_ms: int = DEFAULT_WATCHDOG_GRACE_MS,
+    ) -> None:
         if runs_dir is None:
             runs_dir = Path.cwd() / DEFAULT_RUNS_DIR_NAME
         self.store = EventStore(base_dir=Path(runs_dir))
+        self.executor = executor or execute_subprocess
+        self.watchdog_grace_ms = watchdog_grace_ms
 
     def _prepare_artifacts(
         self,
@@ -188,6 +217,40 @@ class SupervisorRunner:
             result=result,
         )
 
+    def run(
+        self,
+        *,
+        role: AgentRoleSpec,
+        prompt: str,
+        cwd: str | None,
+        env: Mapping[str, str] | None = None,
+    ) -> RunOutcome:
+        workspace = validate_effective_cwd(role, cwd)
+        env_map = dict(env) if env is not None else dict(os.environ)
+        bundle = self._prepare_artifacts(
+            role=role,
+            prompt=prompt,
+            cwd=cwd,
+            env=env_map,
+            dry_run=False,
+            workspace=workspace,
+        )
+        subprocess_outcome = self.executor(
+            argv=bundle.argv,
+            cwd=workspace.effective_cwd,
+            env=env_map,
+            timeout_seconds=_outer_watchdog_timeout_seconds(
+                role.limits.timeout_seconds,
+                self.watchdog_grace_ms,
+            ),
+            grace_ms=self.watchdog_grace_ms,
+        )
+        return self._finalize_prepared_outcome(
+            bundle=bundle,
+            role=role,
+            subprocess_outcome=subprocess_outcome,
+        )
+
     def finalize_outcome(
         self,
         *,
@@ -206,9 +269,21 @@ class SupervisorRunner:
             dry_run=False,
             workspace=workspace,
         )
+        return self._finalize_prepared_outcome(
+            bundle=bundle,
+            role=role,
+            subprocess_outcome=subprocess_outcome,
+        )
 
+    def _finalize_prepared_outcome(
+        self,
+        *,
+        bundle: _ArtifactBundle,
+        role: AgentRoleSpec,
+        subprocess_outcome: SubprocessOutcome,
+    ) -> RunOutcome:
         bundle.handle.write_text("stderr.log", _decode_redacted(subprocess_outcome.stderr, bundle.redaction_report, "stderr"))
-        _persist_stdout(bundle.handle, subprocess_outcome.stdout)
+        _persist_stdout(bundle.handle, subprocess_outcome.stdout, bundle.redaction_report)
 
         parse_result = parse_acpx_stdout_bytes(
             subprocess_outcome.stdout,
@@ -249,6 +324,7 @@ class SupervisorRunner:
             truncate_reason=parse_result.truncate_reason,
             run_dir=bundle.handle.run_dir,
         )
+        result.update(_kill_metadata_payload(subprocess_outcome))
         bundle.handle.write_json("result.json", result)
         self._persist_redaction_report(bundle)
         return RunOutcome(
@@ -268,9 +344,149 @@ def _decode_redacted(data: bytes, report: RedactionReport, location: str) -> str
     return redacted
 
 
-def _persist_stdout(handle: RunHandle, stdout: bytes) -> None:
+def _kill_metadata_payload(outcome: SubprocessOutcome) -> dict[str, Any]:
+    return {
+        "kill_reason": outcome.kill_reason,
+        "kill_signal": outcome.kill_signal,
+        "grace_ms": outcome.grace_ms,
+        "process_group_used": outcome.process_group_used,
+        "stdout_closed": outcome.stdout_closed,
+        "stderr_closed": outcome.stderr_closed,
+    }
+
+
+def _outer_watchdog_timeout_seconds(acpx_timeout_seconds: int, grace_ms: int) -> int:
+    grace_seconds = max(1, (max(grace_ms, 0) + 999) // 1000)
+    return acpx_timeout_seconds + grace_seconds
+
+
+def execute_subprocess(
+    *,
+    argv: list[str],
+    cwd: Path,
+    env: Mapping[str, str],
+    timeout_seconds: int,
+    grace_ms: int,
+) -> SubprocessOutcome:
+    start_new_session = os.name == "posix"
+    try:
+        process = subprocess.Popen(
+            argv,
+            cwd=str(cwd),
+            env=dict(env),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            start_new_session=start_new_session,
+        )
+    except FileNotFoundError as exc:
+        return SubprocessOutcome(
+            exit_code=127,
+            signal=None,
+            stdout=b"",
+            stderr=str(exc).encode("utf-8", errors="replace"),
+            stdout_closed=True,
+            stderr_closed=True,
+        )
+    except OSError as exc:
+        return SubprocessOutcome(
+            exit_code=1,
+            signal=None,
+            stdout=b"",
+            stderr=str(exc).encode("utf-8", errors="replace"),
+            stdout_closed=True,
+            stderr_closed=True,
+        )
+
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+        return SubprocessOutcome(
+            exit_code=_normalize_returncode(process.returncode),
+            signal=_signal_from_returncode(process.returncode),
+            stdout=stdout or b"",
+            stderr=stderr or b"",
+            stdout_closed=True,
+            stderr_closed=True,
+        )
+    except subprocess.TimeoutExpired:
+        stdout = b""
+        stderr = b""
+        kill_signal = "SIGTERM"
+        kill_reason = "watchdog_timeout"
+        process_group_used = False
+        _terminate_process(process, use_group=start_new_session)
+        process_group_used = start_new_session and os.name == "posix"
+        try:
+            more_stdout, more_stderr = process.communicate(timeout=max(grace_ms, 0) / 1000)
+            stdout += more_stdout or b""
+            stderr += more_stderr or b""
+        except subprocess.TimeoutExpired:
+            kill_signal = "SIGKILL"
+            kill_reason = "watchdog_timeout_force_kill"
+            _kill_process(process, use_group=process_group_used)
+            more_stdout, more_stderr = process.communicate()
+            stdout += more_stdout or b""
+            stderr += more_stderr or b""
+        return SubprocessOutcome(
+            exit_code=3,
+            signal=_signal_from_returncode(process.returncode),
+            stdout=stdout,
+            stderr=stderr,
+            supervisor_killed=True,
+            supervisor_timed_out=True,
+            kill_reason=kill_reason,
+            kill_signal=kill_signal,
+            grace_ms=grace_ms,
+            process_group_used=process_group_used,
+            stdout_closed=True,
+            stderr_closed=True,
+        )
+
+
+def _terminate_process(process: subprocess.Popen[bytes], *, use_group: bool) -> None:
+    if use_group and os.name == "posix":
+        try:
+            os.killpg(process.pid, _signal.SIGTERM)
+            return
+        except ProcessLookupError:
+            return
+        except OSError:
+            pass
+    process.terminate()
+
+
+def _kill_process(process: subprocess.Popen[bytes], *, use_group: bool) -> None:
+    if use_group and os.name == "posix":
+        try:
+            os.killpg(process.pid, _signal.SIGKILL)
+            return
+        except ProcessLookupError:
+            return
+        except OSError:
+            pass
+    process.kill()
+
+
+
+def _normalize_returncode(returncode: int | None) -> int:
+    if returncode is None:
+        return 1
+    if returncode < 0:
+        return 128 + abs(returncode)
+    return returncode
+
+
+def _signal_from_returncode(returncode: int | None) -> int | None:
+    if returncode is not None and returncode < 0:
+        return abs(returncode)
+    return None
+
+
+def _persist_stdout(handle: RunHandle, stdout: bytes, report: RedactionReport) -> None:
     text = stdout.decode("utf-8", errors="replace")
-    redacted, _ = redact_text(text, location="acpx_stdout")
+    redacted, stdout_report = redact_text(text, location="acpx_stdout")
+    report.merge(stdout_report)
     handle.write_text("acpx-stdout.ndjson", redacted)
 
 

@@ -149,16 +149,30 @@ def test_run_no_real_run_writes_artifacts(run_cli, tmp_path: Path, role_file: Pa
     assert "--json-strict" in argv
 
 
-def test_run_without_no_real_run_emits_stable_refusal_and_creates_no_artifacts(
-    run_cli, tmp_path: Path, role_file: Path, prompt_file: Path
+def test_run_without_no_real_run_launches_local_exec_and_writes_artifacts(
+    run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], prompt_file: Path, fixtures_root: Path
 ) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    fake_acpx = tmp_path / "fake-acpx"
+    fixture_stdout = fixtures_root / "success-codex-sentinel" / "stdout.ndjson"
+    fake_acpx.write_text(f"#!/bin/sh\ncat {fixture_stdout!s}\n", encoding="utf-8")
+    fake_acpx.chmod(0o700)
+    role_payload = dict(valid_role_dict)
+    role_payload["workspace"] = dict(valid_role_dict["workspace"])
+    role_payload["workspace"]["default_cwd"] = str(work)
+    role_payload["workspace"]["allowed_roots"] = [str(work)]
+    role_payload["runner"] = dict(valid_role_dict["runner"])
+    role_payload["runner"]["acpx_binary"] = str(fake_acpx)
+    role_path = tmp_path / "role.json"
+    role_path.write_text(json.dumps(role_payload), encoding="utf-8")
     runs_dir = tmp_path / "runs"
 
     completed = run_cli(
         [
             "run",
             "--role",
-            str(role_file),
+            str(role_path),
             "--prompt-file",
             str(prompt_file),
             "--runs-dir",
@@ -166,17 +180,19 @@ def test_run_without_no_real_run_emits_stable_refusal_and_creates_no_artifacts(
         ]
     )
 
-    assert completed.returncode == 2, completed.stderr
+    assert completed.returncode == 0, completed.stderr
     payload = json.loads(completed.stdout)
-    assert payload["status"] == "refused"
-    assert payload["error_code"] == "REAL_RUN_DISABLED"
-    assert payload["launched_real_agent"] is False
-    assert payload["allowed_roots_security_boundary"] is False
-    assert "disclaimer" in payload
-    assert not runs_dir.exists() or list(runs_dir.iterdir()) == []
+    assert payload["status"] == "completed"
+    assert payload["final_message"] == "CODEX_ACPX_OK"
+    assert payload["business_verdict"] is None
+    run_dir = Path(payload["run_dir"])
+    metadata = json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["dry_run"] is False
+    argv = json.loads((run_dir / "command.argv.json").read_text(encoding="utf-8"))
+    assert argv[0] == str(fake_acpx)
 
 
-def test_run_refusal_happens_before_reading_prompt(
+def test_run_real_exec_missing_prompt_creates_no_artifacts(
     run_cli, tmp_path: Path, role_file: Path
 ) -> None:
     runs_dir = tmp_path / "runs"
@@ -194,10 +210,8 @@ def test_run_refusal_happens_before_reading_prompt(
         ]
     )
 
-    assert completed.returncode == 2, completed.stderr
-    payload = json.loads(completed.stdout)
-    assert payload["status"] == "refused"
-    assert payload["error_code"] == "REAL_RUN_DISABLED"
+    assert completed.returncode == 1
+    assert "run input error" in completed.stderr
     assert not runs_dir.exists() or list(runs_dir.iterdir()) == []
 
 

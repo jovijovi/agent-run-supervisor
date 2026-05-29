@@ -12,15 +12,7 @@ from agent_run_supervisor.parser import ParseResult, parse_acpx_stdout
 from agent_run_supervisor.preflight import probe_acpx, probe_node
 from agent_run_supervisor.role import RoleValidationError, load_role, role_hash
 from agent_run_supervisor.runner import SupervisorRunner
-from agent_run_supervisor.workspace import (
-    ALLOWED_ROOTS_DISCLAIMER,
-    WorkspaceValidationError,
-)
-
-REAL_RUN_REFUSAL_MESSAGE = (
-    "real AGENT launch is disabled until E1 exec runner support lands; pass --no-real-run to compile artifacts."
-)
-
+from agent_run_supervisor.workspace import WorkspaceValidationError
 
 def _load_json(path: str | Path) -> Any:
     return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -129,18 +121,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    if not args.no_real_run:
-        _print_json(
-            {
-                "status": "refused",
-                "error_code": "REAL_RUN_DISABLED",
-                "message": REAL_RUN_REFUSAL_MESSAGE,
-                "launched_real_agent": False,
-                "allowed_roots_security_boundary": False,
-                "disclaimer": ALLOWED_ROOTS_DISCLAIMER,
-            }
-        )
-        return 2
     try:
         role = _parse_role_file(args.role)
         prompt = Path(args.prompt_file).read_text(encoding="utf-8")
@@ -149,9 +129,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1
     runner = SupervisorRunner(runs_dir=Path(args.runs_dir) if args.runs_dir else None)
     try:
-        outcome = runner.dry_run(role=role, prompt=prompt, cwd=args.cwd)
+        if args.no_real_run:
+            outcome = runner.dry_run(role=role, prompt=prompt, cwd=args.cwd)
+            _print_json(outcome.result)
+            return 0
+        outcome = runner.run(role=role, prompt=prompt, cwd=args.cwd)
     except WorkspaceValidationError as exc:
         print(f"workspace validation error: {exc}", file=sys.stderr)
         return 1
     _print_json(outcome.result)
-    return 0
+    return 0 if outcome.result["status"] == "completed" else 1

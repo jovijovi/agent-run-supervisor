@@ -2,7 +2,7 @@
 title: "agent-run-supervisor Technical Solution"
 status: active
 created_at: 2026-05-29
-last_validated_at: 2026-05-29T13:05:26+0800
+last_validated_at: 2026-05-29T13:44:07+0800
 ---
 # agent-run-supervisor Technical Solution
 
@@ -65,7 +65,7 @@ Responsibilities:
 - Apply automation flags such as JSON output, strict parsing, read suppression, timeout, max turns, cwd, generated policy, non-interactive permission failure, optional model, and terminal disabling.
 - Compile mode-specific command tails for exec and future persistent-session operations.
 
-Current status: implemented for current dry-run and future exec path. Session-mode compilation is future work after command fixtures are captured.
+Current status: implemented for current dry-run and real exec paths. Session-mode compilation is future work after command fixtures are captured.
 
 ### 3.3 `workspace.py` — cwd and workspace gate
 
@@ -106,7 +106,7 @@ Responsibilities:
 10. Parse observed stdout and normalized events.
 11. Classify result and persist final artifacts.
 
-Current status: dry-run and supplied/fake outcome finalization are implemented; true subprocess launch and watchdog are not complete.
+Current status: one-shot subprocess launch, stdout/stderr capture, parser/classifier finalization, and watchdog kill metadata are implemented for local exec. Persistent-session supervision remains future work.
 
 ### 3.6 `session.py` / future session store — persistent-session supervision
 
@@ -188,7 +188,7 @@ agent-run-supervisor doctor [--role <role-file>]
 agent-run-supervisor session create|send|status|close|abort ...
 ```
 
-Current status: validate-role, replay, doctor baseline, and dry-run are implemented; real exec and persistent session commands remain incomplete.
+Current status: validate-role, replay, doctor baseline, dry-run, and local one-shot real exec are implemented; persistent session commands remain incomplete.
 
 ## 4. Data models
 

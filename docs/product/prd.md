@@ -2,7 +2,7 @@
 title: "agent-run-supervisor PRD"
 status: active
 created_at: 2026-05-29
-last_validated_at: 2026-05-29T12:20:00+0800
+last_validated_at: 2026-05-29T13:44:07+0800
 ---
 # agent-run-supervisor PRD
 
@@ -82,7 +82,7 @@ Checklist:
 - [x] Compile format/JSON/timeout/max-turn/suppress-read flags.
 - [x] Include role model when set.
 - [x] Persist redacted argv/policy artifacts for dry-run evidence.
-- [ ] Ensure real exec path uses the same compiler as dry-run.
+- [x] Ensure real exec path uses the same compiler as dry-run.
 - [ ] Add session-mode command compilation once persistent-session command shapes are fixture-proven.
 
 Acceptance:
@@ -113,13 +113,13 @@ The product must supervise a local one-shot `acpx exec` subprocess.
 
 Checklist:
 
-- [ ] CLI/library run path launches acpx exec with compiled argv/policy.
-- [ ] Captures stdout/stderr into EventStore.
-- [ ] Runs under validated effective cwd.
-- [ ] Records start/end timestamps, acpx version, role hash, policy hash, exit code, signal, timeout, and kill metadata.
-- [ ] Uses an outer watchdog with graceful termination and forced kill fallback.
+- [x] CLI/library run path launches acpx exec with compiled argv/policy.
+- [x] Captures stdout/stderr into EventStore.
+- [x] Runs under validated effective cwd.
+- [x] Records start/end timestamps, acpx version, role hash, policy hash, exit code, signal, timeout, and kill metadata.
+- [x] Uses an outer watchdog with graceful termination and forced kill fallback.
 - [x] Current fake outcome/finalization path supports tests for supplied subprocess outcomes.
-- [x] Current unimplemented real-run path refuses safely.
+- [x] Pre-E1 unimplemented real-run path refused safely until the E1 runner replaced it.
 
 Acceptance:
 
@@ -214,7 +214,7 @@ Checklist:
 - [x] `replay <events.ndjson>`.
 - [x] `doctor` baseline.
 - [x] `run --role <role-file> --prompt-file <file> [--cwd <dir>] --no-real-run`.
-- [ ] `run --role <role-file> --prompt-file <file> [--cwd <dir>]` real exec supervision.
+- [x] `run --role <role-file> --prompt-file <file> [--cwd <dir>]` real exec supervision.
 - [ ] Session lifecycle commands/API after session design and fixtures are proven.
 - [ ] Stable JSON outputs for caller automation.
 

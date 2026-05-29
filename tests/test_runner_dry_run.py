@@ -116,3 +116,40 @@ def test_runner_redacts_prompt_in_persisted_artifacts(tmp_path: Path, valid_role
     persisted_prompt = (outcome.run_dir / "prompt.txt").read_text(encoding="utf-8")
     assert ("sk-" + "test_should_not_be_here") not in persisted_prompt
     assert "[REDACTED]" in persisted_prompt
+
+
+def test_finalize_outcome_records_watchdog_kill_metadata(tmp_path: Path, valid_role_dict: dict[str, Any]) -> None:
+    role = load_role(valid_role_dict)
+    runner = SupervisorRunner(runs_dir=tmp_path)
+
+    outcome = runner.finalize_outcome(
+        role=role,
+        prompt="hello",
+        cwd=None,
+        subprocess_outcome=SubprocessOutcome(
+            exit_code=3,
+            signal=15,
+            stdout=b"",
+            stderr=b"",
+            supervisor_killed=True,
+            supervisor_timed_out=True,
+            kill_reason="watchdog_timeout",
+            kill_signal="SIGTERM",
+            grace_ms=250,
+            process_group_used=True,
+            stdout_closed=True,
+            stderr_closed=True,
+        ),
+    )
+
+    result_path = outcome.run_dir / "result.json"
+    persisted = json.loads(result_path.read_text(encoding="utf-8"))
+    assert outcome.result["status"] == "timed_out"
+    assert outcome.result["origin"] == "supervisor"
+    assert outcome.result["business_verdict"] is None
+    assert persisted["kill_reason"] == "watchdog_timeout"
+    assert persisted["kill_signal"] == "SIGTERM"
+    assert persisted["grace_ms"] == 250
+    assert persisted["process_group_used"] is True
+    assert persisted["stdout_closed"] is True
+    assert persisted["stderr_closed"] is True
