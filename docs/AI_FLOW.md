@@ -2,32 +2,38 @@
 title: "AI-assisted development flow"
 status: active
 created_at: 2026-05-28
-last_validated_at: 2026-05-28T20:00:00+0800
+last_validated_at: 2026-05-29T12:20:00+0800
 ---
 # AI-assisted development flow
 
 ## Purpose
 
-`agent-run-supervisor` is developed with humans and AI agents working together. This document defines the branch model, task lifecycle, plan persistence, commit and PR conventions, verification gates, rollback strategy, and worktree rules that keep that collaboration auditable, reversible, and safe.
+This repository is developed with humans and AI agents working together. This document defines how to move from product documents to implementation while keeping work auditable, reversible, and aligned with the product goal.
 
-A new human or AI agent should be able to read this document once and operate correctly without chat-history context.
+Documentation development and management come before code development: the documents are the project soul. Code implements the documents, not the other way around.
 
-## Goal and roadmap preflight
+## Document hierarchy
 
-Before any roadmap, phase-gate, implementation, PR, CI, review, merge, or next-phase-readiness work, read:
+The authority chain is:
 
-1. `GOAL.md`;
-2. `docs/roadmap/current-status.md`;
-3. this file;
-4. the latest relevant plan and dev log linked from current status.
+```text
+PRD -> design documents -> roadmap/current-status + feature tracker -> approved phase implementation plan -> code
+```
 
-Before changing files, state the current project position, next allowed request, explicit non-approvals, open tails, and whether the requested task is allowed by the current status.
+Required preflight for roadmap, phase-gate, implementation, PR, CI, review, merge, or next-phase-readiness work:
 
-Docs/governance work can update `GOAL.md` or `docs/roadmap/current-status.md`, but it does not approve persistent sessions, Sachima integration, real AGENT auto-replies, public ingress, real delivery, Gateway lifecycle operations, production config writes, or live/default-on behavior.
+1. `GOAL.md`
+2. `docs/product/prd.md`
+3. `docs/design/technical-solution.md`
+4. `docs/roadmap/features.md`
+5. `docs/roadmap/current-status.md`
+6. this file
+
+Old `docs/plans/` and `docs/dev_log/` files were retired and cleared. Do not use historical plan/dev-log artifacts as source-of-truth.
 
 ## Branch model
 
-This project uses trunk-based development with short-lived per-task branches.
+Use trunk-based development with short-lived per-task branches.
 
 ```text
 main                              # integration trunk
@@ -39,44 +45,35 @@ main                              # integration trunk
 
 Rules:
 
-- `main` is the integration trunk and should be kept releasable.
+- `main` is the integration trunk and should stay releasable.
 - One task branch = one task = one PR.
-- Do not commit directly to `main` except for explicitly approved trivial metadata changes.
-- If a task spans sessions, push WIP and leave a clear plan/dev-log trail.
+- Do not commit directly to `main` except explicitly approved trivial metadata changes.
+- Start from a clean `origin/main` worktree.
 
 ## Per-task lifecycle
 
-Every AI-assisted task follows this loop:
+1. **Preflight** — read the document hierarchy above and state whether the requested work matches current roadmap/status.
+2. **Scope** — confirm whether the task is documentation, design, implementation, review, or cleanup.
+3. **Plan** — for non-trivial implementation, derive a phase implementation plan from PRD/design/roadmap. The plan must not redefine product goals.
+4. **Implement** — use narrow commits and TDD for behavior changes.
+5. **Update authority docs** — update PRD/design/feature tracker/roadmap when the product, design, completion state, or acceptance evidence changes.
+6. **Verify** — run local gates and scans.
+7. **Review** — Claude Code may be main worker; Codex CLI is primary reviewer; Hermes verifies and arbitrates with evidence.
+8. **PR and merge** — push branch, open PR, wait for CI, merge only when green, then verify `main` from a clean checkout/worktree.
 
-1. **Start from a clean trunk**
-   ```bash
-   git fetch origin main
-   git worktree add /home/ecs-user/workspace/hermes/worktrees/agent-run-supervisor/<branch-slug> -b ai/<topic>-$(date +%F) origin/main
-   cd /home/ecs-user/workspace/hermes/worktrees/agent-run-supervisor/<branch-slug>
-   ```
-2. **Preflight** — read `GOAL.md`, `docs/roadmap/current-status.md`, `docs/AI_FLOW.md`, and the latest relevant plan/dev log.
-3. **Plan** — inspect relevant context, write a concrete plan, and get human approval before product/code changes when the task is non-trivial.
-4. **Persist the plan** — save it under `docs/plans/YYYY-MM-DD-<topic>.md`.
-5. **Implement with narrow commits** — use TDD for behavior changes; stage files by name after inspecting the diff.
-6. **Write task knowledge** — every task gets a dev log under `docs/dev_log/`. Add lessons/practices when the task surfaces reusable knowledge.
-7. **Verify locally** — run the gates below.
-8. **Push and open PR** — PR targets `main`, links plan/dev log, and lists verification and review evidence.
-9. **Review, fix, merge, verify main** — address blockers, merge only when green, then verify `main` from a clean checkout/worktree.
+## Implementation plan rule
 
-## Plan-as-artifact
+A phase implementation plan is an execution artifact created only after PRD/design/roadmap target is clear. It must include:
 
-Plans are repository artifacts, not disposable scratchpads.
+- context and exact target from PRD/design/roadmap;
+- checklist of implementation goals;
+- acceptance criteria;
+- files likely to change;
+- verification gates;
+- risks/open questions;
+- rollback strategy.
 
-- Canonical location: `docs/plans/YYYY-MM-DD-<topic>.md`.
-- Required shape:
-  - `## Context`
-  - `## Proposed approach`
-  - `## Step-by-step plan`
-  - `## Files likely to change`
-  - `## Verification`
-  - `## Risks and open questions`
-- Lifecycle: write once at task start after approval. Do not rewrite merged plans to hide what changed later; write a dev log for actual execution.
-- PR bodies should link the plan. Non-trivial commit bodies should include `Plan: docs/plans/...`.
+Old plans were cleared because they no longer represent the current authority chain. Future plans must be fresh and trace back to `docs/roadmap/current-status.md`.
 
 ## Commit conventions
 
@@ -89,8 +86,6 @@ Explain why the change exists.
 
 Verification:
 - <command> -> <result>
-
-Plan: docs/plans/YYYY-MM-DD-<topic>.md
 ```
 
 Never include secrets, tokens, cookies, raw environment values, real webhook values, or private platform identifiers.
@@ -113,78 +108,30 @@ git diff --check
 Secret/static safety gates:
 
 - Run a secret-shaped scan over added/changed text before commit.
-- Run a static dangerous-pattern scan for new subprocess/network/config-write surfaces when the phase forbids them.
-- Use `[REDACTED]`, placeholders, or split synthetic strings in docs/tests.
-
-## CI gates
-
-GitHub Actions should mirror the portable local gates:
-
-- install project with dev dependencies;
-- fixture validation;
-- pytest;
-- compileall;
-- CLI doctor/replay smoke;
-- docs index check;
-- docs drift check;
-- `git diff --check`.
+- Run static dangerous-pattern scans for new subprocess/network/config-write surfaces when relevant.
+- Use `[REDACTED]` placeholders for sensitive examples.
 
 ## PR requirements
 
-Every PR should include:
+Every non-trivial PR should include:
 
-- Summary of changes.
-- Plan link or explicit note that no plan was needed.
-- Dev log link.
-- Lessons/practices touched.
-- Test plan with commands and results.
-- Review evidence: Claude Code main-worker notes when applicable, Codex review result when required.
-- Secret-safety statement.
-- Boundary statement for explicit non-approvals.
+- summary of changes;
+- source-of-truth docs touched;
+- feature tracker / roadmap status impact;
+- test plan with commands and results;
+- review evidence;
+- secret-safety statement;
+- boundary statement for explicit non-approvals.
 
 Target `main` unless a future roadmap explicitly introduces another integration trunk.
 
-## Rollback strategy
+## Anti-patterns
 
-Granular history keeps AI changes reversible.
-
-| Scope | Action |
-|---|---|
-| Single merged PR | Revert the PR merge or squash commit on `main` |
-| Single commit before merge | Revert or amend on the task branch |
-| Multiple related PRs | Revert in reverse merge order, then open a fresh corrective PR |
-| Broken trunk | Stop new merges, identify last good commit, revert forward with reviewed PRs |
-
-Never force-push `main`. If a force-push seems necessary, stop and discuss first.
-
-## Anti-patterns to avoid
-
-- Starting product/code changes without reading the goal, current status, and AI flow.
-- Letting a plan live only in chat history.
-- Skipping `docs/dev_log/` because a PR body already explains the work.
+- Starting code work before PRD/design/roadmap alignment.
+- Treating historical plan/dev-log files as authority.
+- Letting exec-first engineering sequence shrink PRD or design scope.
 - Treating `allowed_roots` as an OS sandbox.
 - Treating runner completion as business PASS.
-- Letting dry-run/preview work imply real AGENT execution.
+- Letting dry-run/preview docs imply real AGENT auto-replies, public ingress, delivery, or Gateway operations.
 - Broad `git add -A` without inspecting the diff.
 - Committing runtime outputs, prompt material, raw stderr with secrets, `.env`, or token files.
-- Ignoring CI because local tests passed.
-
-## Quick reference
-
-```bash
-TOPIC=<topic>
-BRANCH=ai/$TOPIC-$(date +%F)
-git fetch origin main
-git worktree add /home/ecs-user/workspace/hermes/worktrees/agent-run-supervisor/$TOPIC -b "$BRANCH" origin/main
-cd /home/ecs-user/workspace/hermes/worktrees/agent-run-supervisor/$TOPIC
-# read GOAL.md, docs/roadmap/current-status.md, docs/AI_FLOW.md
-# write docs/plans/$(date +%F)-$TOPIC.md before non-trivial implementation
-# implement + write docs/dev_log/$(date +%F)-$TOPIC.md
-python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0
-python3 -m pytest -q
-python3 -m compileall -q src scripts tests
-python tools/build_docs_index.py --check
-python tools/docs_drift_signal.py --check
-git push -u origin HEAD
-gh pr create --base main --title "<conventional subject>" --body-file <body-file>
-```

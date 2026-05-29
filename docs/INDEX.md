@@ -2,36 +2,15 @@
 
 # Documentation Index
 
-Total: 26 documents tracked across 2 statuses.
+Total: 8 documents tracked across 1 statuses.
 
-## Active (25)
+## Active (8)
 
 - [agent-run-supervisor Technical Solution](design/technical-solution.md) — created 2026-05-29
-- [Goal-first final docs dev log](dev_log/2026-05-29-goal-first-final-docs.md) — created 2026-05-29
-- [V0.1b Real-Run Preflight Hardening Dev Log](dev_log/2026-05-29-v0.1b-real-run-preflight-hardening.md) — created 2026-05-29
-- [V0.1c HITL / Manual Real-Run Design Gate Dev Log](dev_log/2026-05-29-v0.1c-hitl-manual-real-run-design-gate.md) — created 2026-05-29
-- [V0.1c Status Closure Dev Log](dev_log/2026-05-29-v0.1c-status-closure.md) — created 2026-05-29
-- [Goal-first final docs plan](plans/2026-05-29-goal-first-final-docs.md) — created 2026-05-29
-- [V0.1b Claude Code Main Worker Context](plans/2026-05-29-v0.1b-claude-main-context.md) — created 2026-05-29
-- [V0.1b Real-Run Preflight Hardening Plan](plans/2026-05-29-v0.1b-real-run-preflight-hardening.md) — created 2026-05-29
-- [V0.1c HITL / Manual Real-Run Design Gate Plan](plans/2026-05-29-v0.1c-hitl-manual-real-run-design-gate.md) — created 2026-05-29
-- [V0.1c Status Closure Plan](plans/2026-05-29-v0.1c-status-closure.md) — created 2026-05-29
 - [agent-run-supervisor PRD](product/prd.md) — created 2026-05-29
-- [agent-run-supervisor Implementation Plan](roadmap/implementation-plan.md) — created 2026-05-29
-- [V0.1a Design Conformance Matrix](roadmap/v0.1a-design-conformance.md) — created 2026-05-29
+- [Feature and Capability Tracker](roadmap/features.md) — created 2026-05-29
+- [Legacy V0.1a Migration and Conformance Matrix](roadmap/v0.1a-design-conformance.md) — created 2026-05-29
 - [AI-assisted development flow](AI_FLOW.md) — created 2026-05-28
-- [agent-run-supervisor V0.1a Revised Design Gate](design/v0.1a-design.md) — created 2026-05-28
-- [AI_FLOW Bootstrap Dev Log](dev_log/2026-05-28-ai-flow-bootstrap.md) — created 2026-05-28
-- [Phase -1 acpx Contract Spike Dev Log](dev_log/2026-05-28-phase-minus-1-acpx-contract-spike.md) — created 2026-05-28
-- [V0.1a Exec-Only Vertical Slice Dev Log](dev_log/2026-05-28-v0.1a-exec-only-vertical-slice.md) — created 2026-05-28
-- [AI_FLOW Bootstrap Plan](plans/2026-05-28-ai-flow-bootstrap.md) — created 2026-05-28
-- [Phase -1 acpx Contract Spike Plan](plans/2026-05-28-phase-minus-1-acpx-contract-spike.md) — created 2026-05-28
-- [V0.1a Claude Main Worker Context Pack](plans/2026-05-28-v0.1a-claude-main-context.md) — created 2026-05-28
-- [V0.1a Exec-Only Vertical Slice Plan](plans/2026-05-28-v0.1a-exec-only-vertical-slice.md) — created 2026-05-28
 - [Engineering practices](practices/README.md) — created 2026-05-28
 - [Roadmap governance](roadmap/README.md) — created 2026-05-28
 - [agent-run-supervisor Roadmap Current Status](roadmap/current-status.md) — created 2026-05-28
-
-## Deprecated (1)
-
-- [agent-run-supervisor V0.1c HITL / Manual Real-Run Design Gate](design/v0.1c-hitl-manual-real-run-design.md) — created 2026-05-29

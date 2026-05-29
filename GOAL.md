@@ -1,55 +1,49 @@
 # agent-run-supervisor Project Goal
 
-## One-sentence goal
+## One-sentence product positioning
 
-`agent-run-supervisor` should be a small, local-first Python library and dev CLI that supervises external AGENT runs through pinned `acpx` / ACP, turns raw runner behavior into normalized, redacted, auditable evidence, and lets caller projects decide business meaning without inheriting runner chaos.
+`agent-run-supervisor` is a small, local-first Python library and dev CLI that supervises ACP/acpx-powered external AGENT runs, normalizes runner/protocol behavior into redacted auditable evidence, and keeps caller projects free from runner lifecycle chaos.
 
-## Role in the larger system
+## Product identity
+
+The project is an independent supervisor layer. It is not Sachima, not a Gateway plugin, not an IM adapter, and not a daemon.
 
 ```text
 Caller project / human operator
-  -> chooses an AgentRoleSpec, task prompt, cwd, and business contract
+  -> chooses AgentRoleSpec, task prompt/context, cwd, and business contract
 agent-run-supervisor
-  -> validates role/cwd, compiles acpx argv/policy, runs or replays exec-only runs, classifies status, writes redacted artifacts
-acpx@0.10.0 / ACP runner boundary
-  -> launches and streams the external AGENT
+  -> validates role/workspace, compiles acpx policy/argv, supervises exec or session runs,
+     parses observed events, classifies status, writes redacted artifacts
+acpx / ACP runner boundary
+  -> launches or resumes the external AGENT
 External AGENT
   -> Codex, Claude Code, or another ACP-capable worker/reviewer
 ```
 
-The project is an independent repo. It is not Sachima, not a Gateway plugin, not an IM adapter, and not a daemon.
+## What this project owns
 
-## Non-negotiable principles
+- `AgentRoleSpec` as the durable role, policy, and authorization boundary.
+- acpx/ACP invocation compilation for supported execution modes.
+- Local runner/session lifecycle supervision.
+- Observed stdout/event parsing and status classification.
+- Redacted local artifacts and audit evidence.
+- Dev CLI and Python library surfaces for caller projects.
 
-- `AgentRoleSpec` is the durable role/policy boundary.
-- V0.1a is exec-only: no persistent sessions, no session registry, no stale-lock recovery.
-- `allowed_roots` validates cwd/config intent only; it is not an OS sandbox.
-- A completed runner status is not a business PASS. In V0.1a, `business_verdict` remains `null`.
-- Artifacts must be redacted by default and written with restrictive permissions.
-- The project never implies Sachima integration, real AGENT auto-replies, public ingress, real delivery, Gateway lifecycle operations, production config writes, live/default-on behavior, `@all`, or agent-to-agent auto-routing without a separately approved phase.
-- Future work follows `docs/AI_FLOW.md`: clean task branch, plan artifact, dev log, fresh gates, review, PR, and post-merge verification.
+## What caller projects own
 
-## Current phase line
+- Product/business intent and final verdict interpretation.
+- User-facing rendering, progress display, delivery, and integration policy.
+- Any platform-specific behavior such as Sachima, IM, Gateway, or production deployment.
 
-```text
-Phase -1 acpx@0.10.0 contract spike: complete with checked-in fixtures and validator.
-V0.1a foundation slice: implemented on main with role validation, policy/argv compile, exit classification, observed stdout replay, EventStore, redaction, CLI smoke, pytest coverage, and Codex review evidence.
-V0.1b preflight hardening: implemented with structured Node/acpx doctor probes, cwd-vs-allowed-roots fail-closed validation, and stable real-run refusal; final exec-only subprocess launch is still incomplete.
-V0.1c HITL/manual approval design: historical/deprecated direction; it does not supersede role-bound authorization in `docs/design/v0.1a-design.md`.
-Current next implementation target: V0.1a completion / exec-only runner alignment — connect CLI `run` to the one-shot acpx exec runner under role-bound `AgentRoleSpec` authorization, with no persistent sessions or Sachima/Gateway integration.
-AI_FLOW bootstrap: this repository now uses GOAL.md, docs/roadmap/current-status.md, docs/AI_FLOW.md, docs/plans/, docs/dev_log/, generated docs index, and docs drift gates for future work.
-```
+## Source-of-truth index
 
-## Planning basis
+Read these in order for product, design, roadmap, and implementation work:
 
-Read these documents before roadmap, implementation, PR, CI, review, merge, or next-phase-readiness work:
+1. Product requirements: `docs/product/prd.md`
+2. Technical design: `docs/design/technical-solution.md`
+3. Feature completion tracking: `docs/roadmap/features.md`
+4. Roadmap, phase status, and implementation-stage acceptance: `docs/roadmap/current-status.md`
+5. Development workflow: `docs/AI_FLOW.md`
+6. Generated documentation index: `docs/INDEX.md`
 
-1. `GOAL.md`;
-2. `docs/product/prd.md`;
-3. `docs/design/v0.1a-design.md`;
-4. `docs/design/technical-solution.md`;
-5. `docs/roadmap/v0.1a-design-conformance.md`;
-6. `docs/roadmap/implementation-plan.md`;
-7. `docs/roadmap/current-status.md`;
-8. `docs/AI_FLOW.md`;
-9. the latest relevant plan and dev log linked from current status.
+`GOAL.md` is intentionally stable. It defines product positioning and points to the living documents above; it is not a phase tracker.

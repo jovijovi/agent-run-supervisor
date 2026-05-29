@@ -2,109 +2,236 @@
 title: "agent-run-supervisor Roadmap Current Status"
 status: active
 created_at: 2026-05-28
-last_validated_at: 2026-05-29T11:09:05+0800
+last_validated_at: 2026-05-29T12:20:00+0800
 ---
 # agent-run-supervisor Roadmap Current Status
 
-> Living dashboard. This file is the first stop for roadmap, next-phase, and drift-control work.
+> Living roadmap, phase tracker, and implementation-stage acceptance register. This file replaces the deleted standalone implementation plan.
 
 ```text
 last_updated: 2026-05-29
 base_branch: main
-repo_role: independent local Python library + dev CLI for supervising acpx/ACP exec-only AGENT runs and recording redacted audit evidence
-source_of_truth: docs/design/v0.1a-design.md, docs/product/prd.md, docs/design/technical-solution.md, docs/roadmap/v0.1a-design-conformance.md, docs/roadmap/implementation-plan.md
-current_mainline: Phase -1 fixtures, V0.1a foundation, V0.1b preflight hardening, and goal-first final docs are aligned around role-bound AgentRoleSpec authorization
-selected_epic: V0.1a completion / exec-only runner alignment; persistent sessions, Sachima integration, real delivery, and per-run manual approval remain out of mainline scope
+product_role: independent local Python library + dev CLI for supervising ACP/acpx AGENT runs and sessions with redacted audit evidence
+source_of_truth: GOAL.md, docs/product/prd.md, docs/design/technical-solution.md, docs/roadmap/features.md, docs/roadmap/current-status.md, docs/AI_FLOW.md
+current_mainline: documentation authority realignment, then local exec runner completion, then persistent-session support
 ```
 
-## One-screen roadmap checklist
+## 1. How to read this roadmap
 
-### G0 — Project governance / AI_FLOW
-
-- [x] Root `GOAL.md` defines project role, principles, and non-approvals.
-- [x] `docs/AI_FLOW.md` defines AI-assisted branch, plan, verification, review, and PR workflow.
-- [x] `AGENTS.md` gives local agent instructions and role split.
-- [x] `docs/roadmap/current-status.md` is the living status dashboard.
-- [x] `tools/build_docs_index.py` and `tools/docs_drift_signal.py` provide docs index/drift gates.
-- [x] GitHub Actions `Verify` mirrors portable local gates.
-- [x] Goal-first final docs exist: PRD, technical solution, implementation plan, and V0.1a conformance matrix.
-
-**Evidence:** `GOAL.md`, `AGENTS.md`, `docs/AI_FLOW.md`, `docs/product/prd.md`, `docs/design/technical-solution.md`, `docs/roadmap/implementation-plan.md`, `docs/roadmap/v0.1a-design-conformance.md`, `.github/workflows/verify.yml`.
-
-### Phase -1 — acpx@0.10.0 contract spike
-
-- [x] Capture real `acpx@0.10.0` command grammar and stdout schema.
-- [x] Check in fixtures under `fixtures/acpx-0.10.0/`.
-- [x] Validate fixture naming, command argv JSON, schema markers, exit semantics, and secret-shaped content.
-- [x] Record that `allowed_roots` is cwd/config evidence only, not a security sandbox.
-
-**Evidence:** `fixtures/acpx-0.10.0/`, `scripts/capture_acpx_contract.py`, `scripts/validate_contract_fixtures.py`, `docs/plans/2026-05-28-phase-minus-1-acpx-contract-spike.md`, `docs/dev_log/2026-05-28-phase-minus-1-acpx-contract-spike.md`.
-
-### V0.1a foundation — role/policy/parser/store vertical slice
-
-- [x] `AgentRoleSpec` validation.
-- [x] acpx argv/policy compiler.
-- [x] exit classifier for `0/1/2/3/4/5/130/unknown`.
-- [x] observed stdout parser/replay for Phase -1 fixtures.
-- [x] EventStore with restrictive permissions.
-- [x] redaction helpers.
-- [x] CLI commands: `validate-role`, `replay`, `doctor`, and `run --no-real-run`.
-- [x] pytest, compileall, fixture validation, CLI smoke, secret/static scan, and Codex review evidence.
-- [ ] final CLI `run` exec-only subprocess launch path.
-- [ ] outer watchdog/process-group lifecycle and detailed kill metadata.
-- [ ] retention/cleanup knobs before long-lived use.
-
-**Evidence:** `src/agent_run_supervisor/`, `tests/`, `docs/plans/2026-05-28-v0.1a-exec-only-vertical-slice.md`, `docs/dev_log/2026-05-28-v0.1a-exec-only-vertical-slice.md`, `docs/roadmap/v0.1a-design-conformance.md`.
-
-### V0.1b — preflight and safe refusal hardening
-
-- [x] `doctor` emits structured Node and acpx version probes without launching agents.
-- [x] role-specific `runner.acpx_binary` is honored by the acpx version probe.
-- [x] cwd-vs-allowed-roots validation fails closed before artifact creation.
-- [x] `run --no-real-run` records effective cwd metadata and the allowed-roots disclaimer.
-- [x] `run` without `--no-real-run` returns a stable refusal payload and creates no run artifacts.
-- [x] tests cover probe success/failure, cwd in/out-of-root, and real-run refusal.
-
-**Evidence:** `src/agent_run_supervisor/preflight.py`, `src/agent_run_supervisor/workspace.py`, `tests/test_preflight.py`, `tests/test_workspace_gate.py`, `docs/plans/2026-05-29-v0.1b-real-run-preflight-hardening.md`, `docs/dev_log/2026-05-29-v0.1b-real-run-preflight-hardening.md`.
-
-### V0.1c — deprecated HITL/manual approval design branch
-
-- [x] Historical design branch merged as docs-only PR #3.
-- [x] Current review found it conflicts with the role-bound authorization decision.
-- [x] `docs/design/v0.1c-hitl-manual-real-run-design.md` is marked deprecated/historical.
-- [x] Current mainline no longer points next work to per-run manual approval artifacts.
-
-**Evidence:** `docs/design/v0.1c-hitl-manual-real-run-design.md`, this current-status dashboard, `docs/product/prd.md`, `docs/design/technical-solution.md`.
-
-### V0.1a completion — exec-only runner alignment
-
-- [ ] Add a real one-shot subprocess execution path for `run` using compiled role argv/policy.
-- [ ] Capture stdout/stderr from the real subprocess into EventStore.
-- [ ] Add fake subprocess tests for success, failure, timeout, malformed stdout, permission denied, and stderr redaction.
-- [ ] Implement outer watchdog with grace and process-group termination where supported.
-- [ ] Record kill metadata: `kill_reason`, `kill_signal`, `grace_ms`, `process_group_used`, stdout/stderr truncation/closure state.
-- [ ] Preserve `business_verdict: null` and caller-owned business interpretation.
-- [ ] Keep persistent sessions, Sachima integration, Gateway operations, and IM delivery out of scope.
-
-**Evidence target:** future V0.1a completion plan/dev log/PR plus updates to `docs/roadmap/v0.1a-design-conformance.md`.
-
-## Current decision
+The document hierarchy is:
 
 ```text
-G0 governance / AI_FLOW: supported.
-Phase -1: complete.
-V0.1a foundation: complete as role/policy/parser/store foundation, but incomplete against final exec-only runner design.
-V0.1b: complete as preflight and safe refusal hardening.
-V0.1c: deprecated as product direction; retained only as historical drift context.
-Next allowed request: V0.1a completion / exec-only runner alignment. This may implement the one-shot local acpx exec runner under role-bound AgentRoleSpec authorization, with fake subprocess tests first and no persistent sessions or Sachima/Gateway integration.
+PRD -> technical/design docs -> roadmap/current-status + feature tracker -> approved phase implementation plan
 ```
 
-## Explicit non-approvals
+- `GOAL.md` defines stable product positioning and points to source-of-truth docs.
+- `docs/product/prd.md` defines product requirements.
+- `docs/design/technical-solution.md` defines the technical solution.
+- `docs/roadmap/features.md` tracks feature/capability completion.
+- This file tracks engineering phases, status, tails, and acceptance criteria.
+- Per-phase implementation plans are created only for newly approved implementation work; all old `docs/plans/` and `docs/dev_log/` artifacts were retired.
 
-The current repo state does not approve:
+## 2. Current decision
 
-- persistent sessions;
-- session registry, locking, stale-lock recovery, or multi-turn context retention;
+```text
+Documentation authority realignment is required before more code work.
+The product requirement includes both one-shot exec and persistent sessions.
+Engineering sequence may implement exec first, then persistent sessions.
+Exec-first sequencing belongs in roadmap/phase planning only, not in PRD, GOAL, or product-level design as a reduced product scope.
+```
+
+## 3. Phase roadmap
+
+### R0 — Documentation authority realignment
+
+Goal: make documentation the product authority, delete obsolete mixed/stale docs, and prevent old plan/dev-log artifacts from driving future work.
+
+Checklist:
+
+- [x] Simplify `GOAL.md` into stable product positioning and source-of-truth index.
+- [x] Move product requirements into `docs/product/prd.md`.
+- [x] Move technical/architecture/session/runner design into `docs/design/technical-solution.md`.
+- [x] Add feature completion management at `docs/roadmap/features.md`.
+- [x] Merge standalone implementation-plan content into this roadmap/status document.
+- [x] Remove retired mixed design file `docs/design/v0.1a-design.md`.
+- [x] Remove stale V0.1c manual-approval design file.
+- [x] Clear obsolete `docs/dev_log/` files.
+- [x] Clear obsolete `docs/plans/` files.
+- [x] Rebuild `docs/INDEX.md` and `docs/lessons/_drift_report.md`.
+- [ ] Merge the documentation authority realignment PR.
+
+Acceptance:
+
+- Docs index/drift gates pass.
+- No active doc names deleted design/dev-log/plan files as source-of-truth.
+- PRD/DESIGN/GOAL do not reduce the product to exec-only.
+- Roadmap clearly sequences exec before persistent sessions as engineering order only.
+
+Status: **In progress in this PR**.
+
+### C0 — acpx contract fixtures and validator
+
+Goal: preserve the observed acpx contract that implementation and tests rely on.
+
+Checklist:
+
+- [x] Capture real `acpx@0.10.0` fixtures.
+- [x] Capture command grammar and observed stdout schema for current fixture family.
+- [x] Validate fixture naming, schema markers, exit semantics, and secret-shaped content.
+- [x] Record that `allowed_roots` is cwd/config evidence only, not a sandbox.
+
+Acceptance:
+
+- `python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0` passes.
+
+Status: **Complete**.
+
+### F0 — Role/policy/parser/store foundation
+
+Goal: provide the reusable core supervisor foundation without relying on a true subprocess/session launch.
+
+Checklist:
+
+- [x] `AgentRoleSpec` model and validation.
+- [x] role hash.
+- [x] permission policy compiler.
+- [x] acpx argv compiler for current run shape.
+- [x] cwd/allowed-roots gate.
+- [x] exit classifier.
+- [x] observed stdout parser.
+- [x] EventStore permissions/atomic writes.
+- [x] redaction helpers.
+- [x] CLI `validate-role`, `replay`, `doctor` baseline.
+- [x] CLI `run --no-real-run` artifact compilation.
+- [x] Stable real-run refusal while launch path is incomplete.
+
+Acceptance:
+
+- pytest passes.
+- compileall passes.
+- CLI doctor/replay smoke passes.
+- Current real-run path refuses without launching a process.
+
+Status: **Complete as foundation; not product-complete**.
+
+### E1 — One-shot exec runner completion
+
+Goal: implement real local acpx exec supervision under role-bound authorization.
+
+Checklist:
+
+- [ ] Add subprocess execution abstraction accepting compiled argv, effective cwd, timeout, and environment snapshot.
+- [ ] Prove no shell interpolation.
+- [ ] Capture stdout/stderr from subprocess into EventStore.
+- [ ] Parse stdout with fixture-proven parser.
+- [ ] Add fake subprocess tests for success, nonzero exits, malformed stdout, permission denied, stderr redaction, interruption, timeout, and kill paths.
+- [ ] Implement outer watchdog with grace and process-group handling where supported.
+- [ ] Record kill metadata: `kill_reason`, `kill_signal`, `grace_ms`, `process_group_used`, stdout/stderr truncation/closure state.
+- [ ] Connect CLI/library `run` without `--no-real-run` to the exec runner after tests are green.
+- [ ] Preserve `business_verdict: null` and caller-owned business interpretation.
+- [ ] Run a minimal local acpx smoke in a scratch repo after fake-runner gates pass.
+- [ ] Update `docs/roadmap/features.md` and this file with evidence.
+
+Acceptance:
+
+- Existing tests continue to pass.
+- New fake runner/watchdog tests pass.
+- `python3 -m compileall -q src scripts tests` passes.
+- Fixture validator passes.
+- Doctor/replay smoke passes.
+- Secret/static scans show no unsafe runner patterns.
+- Local smoke evidence is redacted and does not use production/Gateway/Sachima integration.
+
+Status: **Next implementation phase**.
+
+### S1 — Persistent session support
+
+Goal: implement controlled persistent ACP/acpx session lifecycle as a first-class product requirement.
+
+Checklist:
+
+- [ ] Capture fresh acpx session command fixtures and observed event shapes.
+- [ ] Extend `AgentRoleSpec` session config for persistent sessions.
+- [ ] Add session store layout with role/workspace/acpx/policy hashes.
+- [ ] Implement session create/open.
+- [ ] Implement session send/continue.
+- [ ] Implement session status/list where needed.
+- [ ] Implement session close/abort semantics.
+- [ ] Add locks/leases to prevent unsafe concurrent use.
+- [ ] Add stale-lock recovery and crash/interruption handling.
+- [ ] Refuse cross-role, cross-workspace, stale-policy, or mismatched-session reuse.
+- [ ] Add session parser/event coverage and redaction tests.
+- [ ] Add CLI/library session surface.
+- [ ] Update feature tracker and roadmap evidence.
+
+Acceptance:
+
+- Fixture validator or session-specific fixture validator passes.
+- Session lifecycle tests cover create, send, resume, close, stale lock, mismatch refusal, and crash recovery.
+- Session artifacts are redacted and local-only.
+- No public ingress, real delivery, Gateway lifecycle, or agent-to-agent auto-routing is introduced.
+
+Status: **Planned after E1**.
+
+### H1 — Operational hardening
+
+Goal: close long-lived-use tails.
+
+Checklist:
+
+- [ ] Doctor probes adapter availability without launching AGENT work.
+- [ ] Doctor detects runtime `npx` fetch risk.
+- [ ] Doctor checks policy parseability safely.
+- [ ] Doctor reports role cwd/allowed-roots validation.
+- [ ] Doctor reports redaction probe.
+- [ ] Doctor reports session readiness after S1.
+- [ ] Retention/cleanup knobs exist for run/session artifacts.
+- [ ] Result/event schema is documented for caller stability.
+
+Acceptance:
+
+- Doctor tests cover success/failure for each probe.
+- Retention tests prove safe deletion/listing boundaries.
+- Feature tracker marks hardening tails complete.
+
+Status: **Planned**.
+
+### I1 — Thin caller integration
+
+Goal: only after explicit approval, integrate with a caller such as Hermes/Sachima while keeping the supervisor independent.
+
+Checklist before start:
+
+- [ ] E1 exec support merged and verified.
+- [ ] S1 session support merged and verified if the caller needs persistent sessions.
+- [ ] Caller integration target and responsibility split are documented.
+- [ ] No public ingress / real delivery / Gateway lifecycle operation is implied.
+- [ ] Caller owns business verdict and rendering.
+
+Acceptance:
+
+- Separate integration PRD/plan names exact caller behavior and non-goals.
+- Supervisor remains local library/CLI.
+
+Status: **Parked pending separate approval**.
+
+## 4. Tail register
+
+| ID | Class | Description | Blocks code work? | Required before | Acceptance method | Status |
+|---|---|---|---:|---|---|---|
+| ARS-DOC-AUTHORITY | BLOCKER | Documentation authority must be PRD/design/roadmap/features, not mixed legacy design or stale dev logs. | Yes | Any new feature code | This PR + docs gates | In progress |
+| ARS-LEGACY-DOCS | BLOCKER | Old `v0.1a-design`, V0.1c HITL design, `docs/dev_log`, and `docs/plans` artifacts must not remain active authority. | Yes | Any new feature code | Deleted/cleared + stale-reference search | In progress |
+| ARS-EXEC-RUNNER | NEXT_PHASE | Real one-shot acpx exec runner is missing. | Yes | Product execution mode E1 | Fake subprocess tests + local smoke | Open |
+| ARS-SESSIONS | NEXT_PHASE | Persistent session support is product-required but unimplemented. | Yes for product-complete | S1 | Session fixtures + lifecycle tests | Open |
+| ARS-DOCTOR-COMPLETE | NEXT_PHASE | Doctor is missing adapter/npx/policy/cwd/redaction/session probes. | No | H1 | Structured doctor tests | Open |
+| ARS-RETENTION-CLEANUP | NEXT_PHASE | Run/session artifact retention cleanup knobs are missing. | No | H1 / long-lived use | Cleanup tests and docs | Open |
+| ARS-SANDBOX-BOUNDARY | PARKED | Any claim that `allowed_roots` is an OS/filesystem sandbox remains parked. | No | Separate sandbox phase | OS sandbox proof + negative probes | Parked |
+| ARS-CALLER-INTEGRATION | PARKED | Sachima/Hermes behavior integration remains separate. | No | I1 approval | Explicit integration PRD/plan | Parked |
+
+## 5. Current explicit non-approvals
+
+Current docs/code work does not approve:
+
 - Sachima behavior integration;
 - real AGENT automatic replies;
 - public ingress;
@@ -120,36 +247,26 @@ The current repo state does not approve:
 - treating `allowed_roots` as an OS/filesystem sandbox;
 - per-run human approval as the default authorization model.
 
-## Tail register
+Persistent sessions are **not** a non-goal; they are a product requirement scheduled after the exec runner implementation phase.
 
-| ID | Class | Description | Blocks current docs phase? | Blocks next implementation? | Required before | Acceptance method | Status |
-|---|---|---|---:|---:|---|---|---|
-| ARS-DOCS-GOAL-FIRST | BLOCKER | Final PRD/technical solution/implementation plan/conformance matrix must exist before more feature work. | Yes | Yes | Any further implementation | docs gates and review | In this PR |
-| ARS-MANUAL-APPROVAL-DRIFT | BLOCKER | V0.1c manual approval branch conflicts with role-bound authorization. | Yes | Yes | V0.1a completion | deprecate design and remove next-mainline wording | In this PR |
-| ARS-V01A-REAL-RUNNER | NEXT_PHASE | CLI `run` must connect to one-shot exec-only subprocess runner. | No | Yes | V0.1a completion | fake subprocess tests + local smoke if approved | Open |
-| ARS-WATCHDOG-METADATA | NEXT_PHASE | Outer watchdog and kill metadata must match v0.1a design. | No | Yes | V0.1a completion | tests for timeout/kill paths | Open |
-| ARS-DOCTOR-COMPLETE | NEXT_PHASE | Doctor is missing adapter/npx/policy/cwd/redaction probes. | No | No | V0.1a hardening | structured doctor tests | Open |
-| ARS-RETENTION-CLEANUP | NEXT_PHASE | Retention/cleanup knobs are missing before long-lived use. | No | No | V0.1a hardening | tests and docs | Open |
-| ARS-SANDBOX-BOUNDARY | PARKED | Any claim that `allowed_roots` provides OS/filesystem sandbox isolation remains parked. | No | No | Separate sandbox phase approval | OS-level sandbox proof and negative filesystem-access probes | Parked |
-| ARS-PERSISTENT-SESSIONS | PARKED | Persistent sessions, session registry, locking, stale-lock recovery, and multi-turn context retention remain outside this roadmap line. | No | No | Separate persistent-session phase approval | session isolation/locking/recovery design and tests | Parked |
-| ARS-SACHIMA-INTEGRATION | PARKED | Sachima behavior integration, auto-replies, delivery, ingress, participant UI, and `@all` remain out of scope. | No | No | Separate integration approval | explicit integration plan and product boundary review | Parked |
+## 6. Verification gates for implementation PRs
 
-## Canonical references
+```bash
+python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0
+python3 -m pytest -q
+python3 -m compileall -q src scripts tests
+PYTHONPATH=src python3 -m agent_run_supervisor doctor
+PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson
+python tools/build_docs_index.py --check
+python tools/docs_drift_signal.py --check
+git diff --check
+```
 
-- North star: `GOAL.md`
-- PRD: `docs/product/prd.md`
-- Design authority: `docs/design/v0.1a-design.md`
-- Technical solution: `docs/design/technical-solution.md`
-- V0.1a conformance matrix: `docs/roadmap/v0.1a-design-conformance.md`
-- Implementation plan: `docs/roadmap/implementation-plan.md`
-- AI flow: `docs/AI_FLOW.md`
-- Roadmap rules: `docs/roadmap/README.md`
-- Phase -1 plan: `docs/plans/2026-05-28-phase-minus-1-acpx-contract-spike.md`
-- Phase -1 dev log: `docs/dev_log/2026-05-28-phase-minus-1-acpx-contract-spike.md`
-- V0.1a plan: `docs/plans/2026-05-28-v0.1a-exec-only-vertical-slice.md`
-- V0.1a dev log: `docs/dev_log/2026-05-28-v0.1a-exec-only-vertical-slice.md`
-- V0.1b plan: `docs/plans/2026-05-29-v0.1b-real-run-preflight-hardening.md`
-- V0.1b dev log: `docs/dev_log/2026-05-29-v0.1b-real-run-preflight-hardening.md`
-- Deprecated V0.1c design: `docs/design/v0.1c-hitl-manual-real-run-design.md`
-- Goal-first final docs plan: `docs/plans/2026-05-29-goal-first-final-docs.md`
-- Goal-first final docs dev log: `docs/dev_log/2026-05-29-goal-first-final-docs.md`
+For source changes, also run secret-shaped and static dangerous-pattern scans over added lines.
+
+## 7. Review requirements
+
+- Claude Code: main worker for implementation/debugging/design work unless explicitly deviating.
+- Codex CLI: primary reviewer.
+- Hermes: scope control, verification, gates, and evidence arbitration.
+- Reviewers must check PRD/design/feature/roadmap alignment, not only whether tests pass.
