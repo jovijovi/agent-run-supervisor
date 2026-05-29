@@ -23,7 +23,9 @@ Documentation is the project soul and precedes code. For roadmap, design, implem
 
 Before changing files, state the current product position, feature/phase target, open tails, explicit non-approvals, and whether the requested task is allowed by the roadmap.
 
-Old `docs/plans/` and `docs/dev_log/` files were retired and cleared. Do not treat historical plan/dev-log artifacts as source-of-truth.
+The pre-realignment `docs/plans/` and `docs/dev_log/` artifacts were retired and cleared and remain non-authoritative. Do not treat historical plan/dev-log artifacts as source-of-truth.
+
+Concrete task/phase implementation plans live under `docs/plans/`, named `docs/plans/YYYY-MM-DD-<task-slug>.md`; `docs/roadmap/` owns roadmap/status/feature tracking, not task-level execution plans. See `docs/plans/README.md`.
 
 ## Development workflow
 
