@@ -239,7 +239,10 @@ class SupervisorRunner:
             argv=bundle.argv,
             cwd=workspace.effective_cwd,
             env=env_map,
-            timeout_seconds=role.limits.timeout_seconds,
+            timeout_seconds=_outer_watchdog_timeout_seconds(
+                role.limits.timeout_seconds,
+                self.watchdog_grace_ms,
+            ),
             grace_ms=self.watchdog_grace_ms,
         )
         return self._finalize_prepared_outcome(
@@ -280,7 +283,7 @@ class SupervisorRunner:
         subprocess_outcome: SubprocessOutcome,
     ) -> RunOutcome:
         bundle.handle.write_text("stderr.log", _decode_redacted(subprocess_outcome.stderr, bundle.redaction_report, "stderr"))
-        _persist_stdout(bundle.handle, subprocess_outcome.stdout)
+        _persist_stdout(bundle.handle, subprocess_outcome.stdout, bundle.redaction_report)
 
         parse_result = parse_acpx_stdout_bytes(
             subprocess_outcome.stdout,
@@ -352,6 +355,11 @@ def _kill_metadata_payload(outcome: SubprocessOutcome) -> dict[str, Any]:
     }
 
 
+def _outer_watchdog_timeout_seconds(acpx_timeout_seconds: int, grace_ms: int) -> int:
+    grace_seconds = max(1, (max(grace_ms, 0) + 999) // 1000)
+    return acpx_timeout_seconds + grace_seconds
+
+
 def execute_subprocess(
     *,
     argv: list[str],
@@ -401,9 +409,9 @@ def execute_subprocess(
             stdout_closed=True,
             stderr_closed=True,
         )
-    except subprocess.TimeoutExpired as exc:
-        stdout = _as_bytes(exc.output)
-        stderr = _as_bytes(exc.stderr)
+    except subprocess.TimeoutExpired:
+        stdout = b""
+        stderr = b""
         kill_signal = "SIGTERM"
         kill_reason = "watchdog_timeout"
         process_group_used = False
@@ -413,9 +421,7 @@ def execute_subprocess(
             more_stdout, more_stderr = process.communicate(timeout=max(grace_ms, 0) / 1000)
             stdout += more_stdout or b""
             stderr += more_stderr or b""
-        except subprocess.TimeoutExpired as force_exc:
-            stdout += _as_bytes(force_exc.output)
-            stderr += _as_bytes(force_exc.stderr)
+        except subprocess.TimeoutExpired:
             kill_signal = "SIGKILL"
             kill_reason = "watchdog_timeout_force_kill"
             _kill_process(process, use_group=process_group_used)
@@ -462,13 +468,6 @@ def _kill_process(process: subprocess.Popen[bytes], *, use_group: bool) -> None:
     process.kill()
 
 
-def _as_bytes(value: bytes | str | None) -> bytes:
-    if value is None:
-        return b""
-    if isinstance(value, bytes):
-        return value
-    return value.encode("utf-8", errors="replace")
-
 
 def _normalize_returncode(returncode: int | None) -> int:
     if returncode is None:
@@ -484,9 +483,10 @@ def _signal_from_returncode(returncode: int | None) -> int | None:
     return None
 
 
-def _persist_stdout(handle: RunHandle, stdout: bytes) -> None:
+def _persist_stdout(handle: RunHandle, stdout: bytes, report: RedactionReport) -> None:
     text = stdout.decode("utf-8", errors="replace")
-    redacted, _ = redact_text(text, location="acpx_stdout")
+    redacted, stdout_report = redact_text(text, location="acpx_stdout")
+    report.merge(stdout_report)
     handle.write_text("acpx-stdout.ndjson", redacted)
 
 
