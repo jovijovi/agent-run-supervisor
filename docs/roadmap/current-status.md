@@ -2,7 +2,7 @@
 title: "agent-run-supervisor Roadmap Current Status"
 status: active
 created_at: 2026-05-28
-last_validated_at: 2026-05-29T01:36:11+0800
+last_validated_at: 2026-05-29T08:27:41+0800
 ---
 # agent-run-supervisor Roadmap Current Status
 
@@ -12,8 +12,8 @@ last_validated_at: 2026-05-29T01:36:11+0800
 last_updated: 2026-05-29
 base_branch: main
 repo_role: independent local Python library + dev CLI for supervising acpx/ACP exec-only AGENT runs and recording redacted audit evidence
-current_mainline: Phase -1 fixtures, V0.1a exec-only vertical slice, and V0.1b real-run preflight hardening are repository-supported
-selected_epic: V0.1b preflight hardening; persistent sessions and real integrations remain deferred
+current_mainline: Phase -1 fixtures, V0.1a exec-only vertical slice, V0.1b real-run preflight hardening, and V0.1c HITL/manual real-run design-gate documentation are repository-supported
+selected_epic: V0.1c HITL/manual real-run design gate; real launch implementation, persistent sessions, and integrations remain deferred
 ```
 
 ## One-screen roadmap checklist
@@ -62,6 +62,17 @@ selected_epic: V0.1b preflight hardening; persistent sessions and real integrati
 
 **Evidence:** `src/agent_run_supervisor/preflight.py`, `src/agent_run_supervisor/workspace.py`, `tests/test_preflight.py`, `tests/test_workspace_gate.py`, `docs/plans/2026-05-29-v0.1b-real-run-preflight-hardening.md`, `docs/dev_log/2026-05-29-v0.1b-real-run-preflight-hardening.md`.
 
+### V0.1c — HITL / manual real-run design gate
+
+- [x] Human approval scope is explicitly design/docs-only; no real AGENT launch is approved.
+- [x] Design specifies a future manual approval state machine: `prepared`, `pending_approval`, `approved`, `rejected`, `expired`, plus parked launch states.
+- [x] Design specifies a redacted approval artifact shape binding approval to role/policy/argv/prompt/cwd/cap hashes.
+- [x] Design lists fail-closed rules for missing approval, expiry, hash drift, cwd drift, invalid caps, nonce replay, non-human origin, missing future launch flag, and tamper.
+- [x] Design proposes CLI/API surfaces as future-only and states current launch behavior remains refusal.
+- [x] Design includes future implementation test plan and boundary review checklist.
+
+**Evidence:** `docs/design/v0.1c-hitl-manual-real-run-design.md`, `docs/plans/2026-05-29-v0.1c-hitl-manual-real-run-design-gate.md`, `docs/dev_log/2026-05-29-v0.1c-hitl-manual-real-run-design-gate.md`.
+
 ## Current decision
 
 ```text
@@ -69,7 +80,8 @@ G0 governance / AI_FLOW: supported from this branch onward.
 Phase -1: complete.
 V0.1a: complete as exec-only vertical slice.
 V0.1b: complete as real-run preflight hardening; actual real AGENT launch remains unapproved.
-Next allowed request: plan a HITL/manual real-run design gate only if the user explicitly approves the next boundary; it must stay single-agent, manual, budget/timeout/max-turn bounded, and no auto-routing by default.
+V0.1c: active as HITL/manual real-run design gate only; it defines a future approval contract and test plan but does not implement or approve real launch.
+Next allowed request after V0.1c review: ask to implement the manual approval artifact/state-machine without launch, or separately ask for a tightly bounded manual real-run implementation phase; neither is implied by this design PR.
 ```
 
 ## Explicit non-approvals
@@ -99,7 +111,10 @@ The current repo state does not approve:
 | ARS-V01B-NODE-ACPX-DOCTOR | NEXT_PHASE | `doctor` emits structured Node/acpx probes, honors role `runner.acpx_binary`, and does not launch agents. | No | No | V0.1b/live-run preflight | tests plus doctor output proving detected versions without launching real agents | Closed in V0.1b |
 | ARS-ALLOWED-ROOTS-BOUNDARY | NEXT_PHASE | `allowed_roots` is implemented as cwd/config validation only; cwd outside configured roots fails before artifacts. | No | No | V0.1b preflight | negative tests and docs that distinguish config validation from sandbox enforcement | Closed for cwd/config gate in V0.1b |
 | ARS-SANDBOX-BOUNDARY | PARKED | Any claim that `allowed_roots` provides OS/filesystem sandbox isolation remains parked. | No | No | Separate sandbox phase approval | OS-level sandbox proof and negative filesystem-access probes | Parked |
-| ARS-REAL-RUN-GATE | PARKED | Real agent launch beyond `run --no-real-run` remains parked; V0.1b only adds stable refusal. | No | No | Separate user approval | phase plan with HITL/manual gate, timeout/max-turns/budget caps, no auto-routing | Parked |
+| ARS-REAL-RUN-GATE | PARKED | Real agent launch beyond `run --no-real-run` remains parked; V0.1b only adds stable refusal and V0.1c only designs the future approval contract. | No | No | Separate user approval | phase plan with HITL/manual gate, timeout/max-turns/budget caps, no auto-routing | Parked |
+| ARS-V01C-HITL-DESIGN | NEXT_PHASE | HITL/manual real-run design gate defines approval states, artifact binding, fail-closed rules, proposed CLI/API, and future test plan without implementing launch. | No | No | V0.1c design review | Codex primary review, Claude auxiliary review, docs gates, and boundary checklist with no blocker | Active in V0.1c |
+| ARS-PERSISTENT-SESSIONS | PARKED | Persistent sessions, session registry, locking, stale-lock recovery, and multi-turn context retention remain outside this roadmap line. | No | No | Separate persistent-session phase approval | session isolation/locking/recovery design and tests | Parked |
+| ARS-SACHIMA-INTEGRATION | PARKED | Sachima behavior integration, auto-replies, delivery, ingress, participant UI, and `@all` remain out of scope. | No | No | Separate integration approval | explicit integration plan and product boundary review | Parked |
 
 ## Canonical references
 
@@ -113,3 +128,6 @@ The current repo state does not approve:
 - V0.1a dev log: `docs/dev_log/2026-05-28-v0.1a-exec-only-vertical-slice.md`
 - V0.1b plan: `docs/plans/2026-05-29-v0.1b-real-run-preflight-hardening.md`
 - V0.1b dev log: `docs/dev_log/2026-05-29-v0.1b-real-run-preflight-hardening.md`
+- V0.1c design: `docs/design/v0.1c-hitl-manual-real-run-design.md`
+- V0.1c plan: `docs/plans/2026-05-29-v0.1c-hitl-manual-real-run-design-gate.md`
+- V0.1c dev log: `docs/dev_log/2026-05-29-v0.1c-hitl-manual-real-run-design-gate.md`
