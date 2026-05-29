@@ -105,6 +105,8 @@ python tools/docs_drift_signal.py --check -> OK: drift report up to date
 git diff --check -> pass
 secret-shaped scan over changed/untracked files -> 0 findings
 static source scan over changed source files -> 0 findings
+Codex read-only sandbox review -> BLOCK due sandbox environment only (`bwrap: loopback: Failed RTM_NEWADDR` before file reads)
+Codex danger-full-access review-only rerun -> PASS; no blockers; non-blocking stale wording note in conformance matrix patched
 ```
 
 ## Boundary statement
