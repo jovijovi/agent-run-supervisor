@@ -2,7 +2,7 @@
 title: "Feature and Capability Tracker"
 status: active
 created_at: 2026-05-29
-last_validated_at: 2026-05-29T12:20:00+0800
+last_validated_at: 2026-05-29T13:05:26+0800
 ---
 # Feature and Capability Tracker
 
@@ -18,7 +18,7 @@ Status legend:
 
 | ID | Feature / capability | Product status | Implementation status | Evidence | Remaining acceptance |
 |---|---|---|---|---|---|
-| F-GOV-001 | Documentation-first authority chain: GOAL -> PRD -> design -> feature tracker -> roadmap/status -> phase plans | Required | Partial | `GOAL.md`, `docs/product/prd.md`, `docs/design/technical-solution.md`, this file, `docs/roadmap/current-status.md` | This realignment PR merged; old mixed/stale docs removed |
+| F-GOV-001 | Documentation-first authority chain: GOAL -> PRD -> design -> feature tracker -> roadmap/status -> phase plans | Required | Done | `GOAL.md`, `docs/product/prd.md`, `docs/design/technical-solution.md`, this file, `docs/roadmap/current-status.md`, PR #6 (`7dcbe4f`) | Maintain this chain as features/phases change |
 | F-ROLE-001 | `AgentRoleSpec` validation and role hash | Required | Done | `src/agent_run_supervisor/role.py`, tests | Extend schema for persistent-session config without breaking role-bound authorization |
 | F-POLICY-001 | acpx policy/argv compiler | Required | Partial | `src/agent_run_supervisor/policy.py`, tests, dry-run artifacts | Prove real exec and session command paths use same compiler |
 | F-WORKSPACE-001 | cwd / allowed-roots intent gate | Required | Partial | `src/agent_run_supervisor/workspace.py`, tests | Re-check role/workspace hash for persistent sessions |
@@ -39,7 +39,7 @@ Status legend:
 
 | Area | Done | Partial | Planned/Parked | Note |
 |---|---:|---:|---:|---|
-| Governance/docs | 0 | 1 | 0 | This PR finishes authority realignment. |
+| Governance/docs | 1 | 0 | 0 | Authority realignment complete via PR #6 (`7dcbe4f`). |
 | Core role/policy/workspace | 1 | 2 | 0 | Role implemented; policy/workspace need real exec/session proof. |
 | Parser/status/store | 0 | 3 | 1 | Current run surfaces exist; session/retention remain. |
 | CLI | 3 | 1 | 2 | validate/replay/dry-run done; doctor partial; real exec/session pending. |

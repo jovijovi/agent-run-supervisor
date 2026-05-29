@@ -2,7 +2,7 @@
 title: "agent-run-supervisor Technical Solution"
 status: active
 created_at: 2026-05-29
-last_validated_at: 2026-05-29T12:20:00+0800
+last_validated_at: 2026-05-29T13:05:26+0800
 ---
 # agent-run-supervisor Technical Solution
 
@@ -26,7 +26,7 @@ The supervisor owns runner/session lifecycle and evidence. It does not own produ
 
 ## 2. Document authority
 
-The previous mixed `docs/design/v0.1a-design.md` file has been decomposed and retired. Its requirements now live in:
+The previous mixed V0.1a design file has been decomposed and retired. Its durable requirements now live in:
 
 - PRD and product requirements: `docs/product/prd.md`
 - Technical solution: this file

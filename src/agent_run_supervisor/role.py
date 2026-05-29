@@ -22,7 +22,7 @@ PERMISSION_KINDS: tuple[str, ...] = (
 
 
 class RoleValidationError(ValueError):
-    """Raised when an AgentRoleSpec mapping fails V0.1a validation."""
+    """Raised when an AgentRoleSpec mapping fails current validation."""
 
 
 @dataclass(frozen=True)
@@ -134,7 +134,7 @@ def _runner(raw: Mapping[str, Any]) -> AgentRunnerSpec:
     acpx_version = _require_str(raw, "acpx_version", where)
     if acpx_version != "0.10.0":
         raise RoleValidationError(
-            f"{where}: acpx_version must be '0.10.0' for V0.1a (got {acpx_version!r})",
+            f"{where}: acpx_version must be '0.10.0' for the current acpx contract (got {acpx_version!r})",
         )
     adapter_agent = _require_str(raw, "adapter_agent", where)
     acpx_binary = raw.get("acpx_binary")
@@ -170,7 +170,7 @@ def _workspace(raw: Mapping[str, Any]) -> AgentWorkspaceSpec:
     if boundary:
         raise RoleValidationError(
             f"{where}: allowed_roots_security_boundary=true is rejected — "
-            "allowed_roots is not a security boundary in V0.1a.",
+            "allowed_roots is not a security boundary.",
         )
     return AgentWorkspaceSpec(
         default_cwd=default_cwd,
@@ -201,7 +201,7 @@ def _session(raw: Mapping[str, Any] | None) -> AgentSessionSpec:
     strategy = _require_str(raw, "strategy", where)
     if strategy != "exec":
         raise RoleValidationError(
-            f"{where}: V0.1a only accepts strategy='exec' (got {strategy!r})",
+            f"{where}: current role schema only accepts strategy='exec' until persistent sessions are implemented (got {strategy!r})",
         )
     return AgentSessionSpec(strategy=strategy)
 
