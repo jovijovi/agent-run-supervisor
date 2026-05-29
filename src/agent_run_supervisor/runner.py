@@ -45,6 +45,12 @@ class SubprocessOutcome:
     stderr: bytes
     supervisor_killed: bool = False
     supervisor_timed_out: bool = False
+    kill_reason: str | None = None
+    kill_signal: str | None = None
+    grace_ms: int | None = None
+    process_group_used: bool | None = None
+    stdout_closed: bool | None = None
+    stderr_closed: bool | None = None
 
 
 @dataclass
@@ -249,6 +255,7 @@ class SupervisorRunner:
             truncate_reason=parse_result.truncate_reason,
             run_dir=bundle.handle.run_dir,
         )
+        result.update(_kill_metadata_payload(subprocess_outcome))
         bundle.handle.write_json("result.json", result)
         self._persist_redaction_report(bundle)
         return RunOutcome(
@@ -266,6 +273,17 @@ def _decode_redacted(data: bytes, report: RedactionReport, location: str) -> str
     redacted, sub_report = redact_text(text, location=location)
     report.merge(sub_report)
     return redacted
+
+
+def _kill_metadata_payload(outcome: SubprocessOutcome) -> dict[str, Any]:
+    return {
+        "kill_reason": outcome.kill_reason,
+        "kill_signal": outcome.kill_signal,
+        "grace_ms": outcome.grace_ms,
+        "process_group_used": outcome.process_group_used,
+        "stdout_closed": outcome.stdout_closed,
+        "stderr_closed": outcome.stderr_closed,
+    }
 
 
 def _persist_stdout(handle: RunHandle, stdout: bytes) -> None:
