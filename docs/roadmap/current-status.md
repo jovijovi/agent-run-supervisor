@@ -2,7 +2,7 @@
 title: "agent-run-supervisor Roadmap Current Status"
 status: active
 created_at: 2026-05-28
-last_validated_at: 2026-05-29T13:05:26+0800
+last_validated_at: 2026-05-29T13:44:07+0800
 ---
 # agent-run-supervisor Roadmap Current Status
 
@@ -13,7 +13,7 @@ last_updated: 2026-05-29
 base_branch: main
 product_role: independent local Python library + dev CLI for supervising ACP/acpx AGENT runs and sessions with redacted audit evidence
 source_of_truth: GOAL.md, docs/product/prd.md, docs/design/technical-solution.md, docs/roadmap/features.md, docs/roadmap/current-status.md, docs/AI_FLOW.md
-current_mainline: R0 documentation authority realignment complete via PR #6 / merge commit 7dcbe4f; next implementation mainline is E1 local one-shot exec runner completion, then S1 persistent-session support
+current_mainline: E1 local one-shot exec runner implementation candidate is complete on branch ai/e1-one-shot-exec-runner-2026-05-29; close ARS-EXEC-RUNNER on main only after PR merge, CI, and post-merge verification; next product mode remains S1 persistent-session support
 ```
 
 ## 1. How to read this roadmap
@@ -38,7 +38,7 @@ Documentation authority realignment is complete on main via PR #6 (`7dcbe4f`).
 The product requirement includes both one-shot exec and persistent sessions.
 Engineering sequence may implement exec first, then persistent sessions.
 Exec-first sequencing belongs in roadmap/phase planning only, not in PRD, GOAL, or product-level design as a reduced product scope.
-Next allowed implementation request: E1 local one-shot exec runner completion.
+Current approved implementation: E1 local one-shot exec runner. Candidate evidence exists on branch `ai/e1-one-shot-exec-runner-2026-05-29`; E1 closes on main only after PR merge and post-merge gates.
 ```
 
 ## 3. Phase roadmap
@@ -121,17 +121,17 @@ Goal: implement real local acpx exec supervision under role-bound authorization.
 
 Checklist:
 
-- [ ] Add subprocess execution abstraction accepting compiled argv, effective cwd, timeout, and environment snapshot.
-- [ ] Prove no shell interpolation.
-- [ ] Capture stdout/stderr from subprocess into EventStore.
-- [ ] Parse stdout with fixture-proven parser.
-- [ ] Add fake subprocess tests for success, nonzero exits, malformed stdout, permission denied, stderr redaction, interruption, timeout, and kill paths.
-- [ ] Implement outer watchdog with grace and process-group handling where supported.
-- [ ] Record kill metadata: `kill_reason`, `kill_signal`, `grace_ms`, `process_group_used`, stdout/stderr truncation/closure state.
-- [ ] Connect CLI/library `run` without `--no-real-run` to the exec runner after tests are green.
-- [ ] Preserve `business_verdict: null` and caller-owned business interpretation.
-- [ ] Run a minimal local acpx smoke in a scratch repo after fake-runner gates pass.
-- [ ] Update `docs/roadmap/features.md` and this file with evidence.
+- [x] Add subprocess execution abstraction accepting compiled argv, effective cwd, timeout, and environment snapshot.
+- [x] Prove no shell interpolation.
+- [x] Capture stdout/stderr from subprocess into EventStore.
+- [x] Parse stdout with fixture-proven parser.
+- [x] Add fake subprocess tests for success, nonzero exits, malformed stdout, permission denied, stderr redaction, interruption, timeout, and kill paths.
+- [x] Implement outer watchdog with grace and process-group handling where supported.
+- [x] Record kill metadata: `kill_reason`, `kill_signal`, `grace_ms`, `process_group_used`, stdout/stderr truncation/closure state.
+- [x] Connect CLI/library `run` without `--no-real-run` to the exec runner after tests are green.
+- [x] Preserve `business_verdict: null` and caller-owned business interpretation.
+- [x] Run a minimal local acpx smoke in a scratch repo after fake-runner gates pass.
+- [x] Update `docs/roadmap/features.md` and this file with evidence.
 
 Acceptance:
 
@@ -143,7 +143,7 @@ Acceptance:
 - Secret/static scans show no unsafe runner patterns.
 - Local smoke evidence is redacted and does not use production/Gateway/Sachima integration.
 
-Status: **Next implementation phase**.
+Status: **Implementation candidate complete on branch `ai/e1-one-shot-exec-runner-2026-05-29`; close on main only after PR merge, main CI, and clean post-merge verification. Evidence includes `tests/test_runner_exec.py`, full local gates, and local smoke `/tmp/agent-run-supervisor-e1-smoke/result.json` with `final_message=AGENT_RUN_SUPERVISOR_E1_OK`.**
 
 ### S1 — Persistent session support
 
@@ -220,7 +220,7 @@ Status: **Parked pending separate approval**.
 
 | ID | Class | Description | Blocks code work? | Required before | Acceptance method | Status |
 |---|---|---|---:|---|---|---|
-| ARS-EXEC-RUNNER | NEXT_PHASE | Real one-shot acpx exec runner is missing. | Yes | Product execution mode E1 | Fake subprocess tests + local smoke | Open |
+| ARS-EXEC-RUNNER | NEXT_PHASE | Real one-shot acpx exec runner is implemented on the E1 branch but not closed on main until PR merge/post-merge gates. | Yes | Product execution mode E1 | Fake subprocess tests + local smoke + PR/CI/post-merge verification | In review |
 | ARS-SESSIONS | NEXT_PHASE | Persistent session support is product-required but unimplemented. | Yes for product-complete | S1 | Session fixtures + lifecycle tests | Open |
 | ARS-DOCTOR-COMPLETE | NEXT_PHASE | Doctor is missing adapter/npx/policy/cwd/redaction/session probes. | No | H1 | Structured doctor tests | Open |
 | ARS-RETENTION-CLEANUP | NEXT_PHASE | Run/session artifact retention cleanup knobs are missing. | No | H1 / long-lived use | Cleanup tests and docs | Open |

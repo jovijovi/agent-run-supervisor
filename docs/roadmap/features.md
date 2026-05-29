@@ -2,7 +2,7 @@
 title: "Feature and Capability Tracker"
 status: active
 created_at: 2026-05-29
-last_validated_at: 2026-05-29T13:05:26+0800
+last_validated_at: 2026-05-29T13:44:07+0800
 ---
 # Feature and Capability Tracker
 
@@ -20,8 +20,8 @@ Status legend:
 |---|---|---|---|---|---|
 | F-GOV-001 | Documentation-first authority chain: GOAL -> PRD -> design -> feature tracker -> roadmap/status -> phase plans | Required | Done | `GOAL.md`, `docs/product/prd.md`, `docs/design/technical-solution.md`, this file, `docs/roadmap/current-status.md`, PR #6 (`7dcbe4f`) | Maintain this chain as features/phases change |
 | F-ROLE-001 | `AgentRoleSpec` validation and role hash | Required | Done | `src/agent_run_supervisor/role.py`, tests | Extend schema for persistent-session config without breaking role-bound authorization |
-| F-POLICY-001 | acpx policy/argv compiler | Required | Partial | `src/agent_run_supervisor/policy.py`, tests, dry-run artifacts | Prove real exec and session command paths use same compiler |
-| F-WORKSPACE-001 | cwd / allowed-roots intent gate | Required | Partial | `src/agent_run_supervisor/workspace.py`, tests | Re-check role/workspace hash for persistent sessions |
+| F-POLICY-001 | acpx policy/argv compiler | Required | Partial | `src/agent_run_supervisor/policy.py`, tests, dry-run and real-exec artifacts | Add session command compilation after session fixtures are captured |
+| F-WORKSPACE-001 | cwd / allowed-roots intent gate | Required | Partial | `src/agent_run_supervisor/workspace.py`, tests, real-exec prelaunch gate | Re-check role/workspace hash for persistent sessions |
 | F-PARSER-001 | Observed acpx event/stdout parser | Required | Partial | `src/agent_run_supervisor/parser.py`, fixtures, replay tests | Add persistent-session event fixtures and parser coverage |
 | F-STATUS-001 | Supervisor status and exit classification | Required | Partial | `src/agent_run_supervisor/exit_classifier.py`, tests | Add session lifecycle detail if needed |
 | F-STORE-001 | EventStore, artifact permissions, redaction | Required | Partial | `src/agent_run_supervisor/event_store.py`, redaction tests | Add session layout plus retention/cleanup knobs |
@@ -29,7 +29,7 @@ Status legend:
 | F-CLI-002 | `replay` CLI | Required | Done | Fixture replay smoke/tests | Keep stable |
 | F-CLI-003 | `doctor` CLI | Required | Partial | `src/agent_run_supervisor/preflight.py`, doctor smoke/tests | Adapter/npx/policy/cwd/redaction/session readiness probes |
 | F-RUN-001 | `run --no-real-run` compile/artifact preview | Useful support feature | Done | dry-run tests/artifacts | Keep or deprecate only with replacement evidence |
-| F-EXEC-001 | Real one-shot acpx exec supervision | Required | Planned | Current safe refusal; fake finalization tests | Subprocess runner, stdout/stderr capture, watchdog, kill metadata, local smoke |
+| F-EXEC-001 | Real one-shot acpx exec supervision | Required | Done | `src/agent_run_supervisor/runner.py`, `src/agent_run_supervisor/commands.py`, `tests/test_runner_exec.py`, local smoke `/tmp/agent-run-supervisor-e1-smoke/result.json` | Keep local-only boundary; persistent sessions remain S1 |
 | F-SESSION-001 | Persistent session lifecycle | Required | Planned | Product requirement in PRD/design | Session fixtures, session store, locks, stale recovery, close/abort semantics, leakage tests |
 | F-RETENTION-001 | Artifact retention/cleanup knobs | Required for long-lived use | Planned | Current EventStore only | Cleanup API/CLI, retention tests, no unsafe deletion |
 | F-INTEGRATION-001 | Thin caller integration boundary | Future optional | Parked | PRD/design boundary | Separate approval and plan; caller owns business verdict/rendering |
@@ -40,10 +40,10 @@ Status legend:
 | Area | Done | Partial | Planned/Parked | Note |
 |---|---:|---:|---:|---|
 | Governance/docs | 1 | 0 | 0 | Authority realignment complete via PR #6 (`7dcbe4f`). |
-| Core role/policy/workspace | 1 | 2 | 0 | Role implemented; policy/workspace need real exec/session proof. |
+| Core role/policy/workspace | 1 | 2 | 0 | Role implemented; policy/workspace have exec proof and still need session proof. |
 | Parser/status/store | 0 | 3 | 1 | Current run surfaces exist; session/retention remain. |
-| CLI | 3 | 1 | 2 | validate/replay/dry-run done; doctor partial; real exec/session pending. |
-| Execution modes | 0 | 0 | 2 | Both exec and persistent sessions are product requirements. |
+| CLI | 4 | 1 | 1 | validate/replay/dry-run/real exec done; doctor partial; session CLI pending. |
+| Execution modes | 1 | 0 | 1 | One-shot exec done; persistent sessions remain product-required S1 work. |
 
 ## Maintenance rule
 
