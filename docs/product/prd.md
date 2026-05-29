@@ -119,7 +119,7 @@ Checklist:
 - [x] Records start/end timestamps, acpx version, role hash, policy hash, exit code, signal, timeout, and kill metadata.
 - [x] Uses an outer watchdog with graceful termination and forced kill fallback.
 - [x] Current fake outcome/finalization path supports tests for supplied subprocess outcomes.
-- [x] Current unimplemented real-run path refuses safely.
+- [x] Pre-E1 unimplemented real-run path refused safely until the E1 runner replaced it.
 
 Acceptance:
 

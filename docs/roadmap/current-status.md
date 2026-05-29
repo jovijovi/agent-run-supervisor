@@ -104,14 +104,14 @@ Checklist:
 - [x] redaction helpers.
 - [x] CLI `validate-role`, `replay`, `doctor` baseline.
 - [x] CLI `run --no-real-run` artifact compilation.
-- [x] Stable real-run refusal while launch path is incomplete.
+- [x] Pre-E1 real-run refusal stayed stable until the E1 runner replaced it.
 
 Acceptance:
 
 - pytest passes.
 - compileall passes.
 - CLI doctor/replay smoke passes.
-- Current real-run path refuses without launching a process.
+- Pre-E1 real-run path refused without launching a process until E1 replaced that refusal with supervised local exec.
 
 Status: **Complete as foundation; not product-complete**.
 
