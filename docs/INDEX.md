@@ -2,13 +2,16 @@
 
 # Documentation Index
 
-Total: 15 documents tracked across 1 statuses.
+Total: 18 documents tracked across 1 statuses.
 
-## Active (15)
+## Active (18)
 
+- [agent-run-supervisor V0.1c HITL / Manual Real-Run Design Gate](design/v0.1c-hitl-manual-real-run-design.md) — created 2026-05-29
 - [V0.1b Real-Run Preflight Hardening Dev Log](dev_log/2026-05-29-v0.1b-real-run-preflight-hardening.md) — created 2026-05-29
+- [V0.1c HITL / Manual Real-Run Design Gate Dev Log](dev_log/2026-05-29-v0.1c-hitl-manual-real-run-design-gate.md) — created 2026-05-29
 - [V0.1b Claude Code Main Worker Context](plans/2026-05-29-v0.1b-claude-main-context.md) — created 2026-05-29
 - [V0.1b Real-Run Preflight Hardening Plan](plans/2026-05-29-v0.1b-real-run-preflight-hardening.md) — created 2026-05-29
+- [V0.1c HITL / Manual Real-Run Design Gate Plan](plans/2026-05-29-v0.1c-hitl-manual-real-run-design-gate.md) — created 2026-05-29
 - [AI-assisted development flow](AI_FLOW.md) — created 2026-05-28
 - [agent-run-supervisor V0.1a Revised Design Gate](design/v0.1a-design.md) — created 2026-05-28
 - [AI_FLOW Bootstrap Dev Log](dev_log/2026-05-28-ai-flow-bootstrap.md) — created 2026-05-28
