@@ -10,32 +10,36 @@ Project-local instructions for AI agents working in this repository.
 - GitHub repo: `jovijovi/agent-run-supervisor`
 - Visibility: private
 
-## Project goal and roadmap preflight
+## Product and documentation preflight
 
-For any roadmap, phase-gate, implementation, PR, CI, review, merge, or next-phase-readiness work, read these first:
+Documentation is the project soul and precedes code. For roadmap, design, implementation, PR, CI, review, merge, or next-phase-readiness work, read in order:
 
-1. `GOAL.md`;
-2. `docs/roadmap/current-status.md`;
-3. `docs/AI_FLOW.md`;
-4. the latest relevant plan and dev log linked from current status.
+1. `GOAL.md`
+2. `docs/product/prd.md`
+3. `docs/design/technical-solution.md`
+4. `docs/roadmap/features.md`
+5. `docs/roadmap/current-status.md`
+6. `docs/AI_FLOW.md`
 
-Before changing files, state the current project position, next allowed request, explicit non-approvals, open `BLOCKER` / `NEXT_PHASE` / `WATCH` / `PARKED` tails, and whether the requested task is allowed by current status.
+Before changing files, state the current product position, feature/phase target, open tails, explicit non-approvals, and whether the requested task is allowed by the roadmap.
 
-If `docs/roadmap/current-status.md` is missing, stale, or contradicts the requested work, stop and report the drift risk before editing. If the requested task is to create or repair this roadmap system, use a clean `origin/main` worktree and record the repair in `docs/dev_log/`.
-
-For multi-phase, production-adjacent, high-risk, or next-phase-readiness work, load the `phase-gate-drift-control` skill. Do not infer persistent sessions, Sachima integration, real AGENT auto-replies, public ingress, real delivery, Gateway lifecycle operations, production config writes, or live/default-on approval from docs/governance changes.
+Old `docs/plans/` and `docs/dev_log/` files were retired and cleared. Do not treat historical plan/dev-log artifacts as source-of-truth.
 
 ## Development workflow
 
-Read `docs/AI_FLOW.md` before starting any non-trivial development task.
-
-Use short-lived task branches and isolated worktrees for AI-assisted work. Persist approved plans under `docs/plans/`, write a dev log under `docs/dev_log/`, and open PRs that link the plan, dev log, verification evidence, review result, and secret-safety review.
+Use short-lived task branches and isolated worktrees for AI-assisted work. Derive implementation plans from PRD/design/roadmap; a plan must not redefine product goals.
 
 Default role split unless explicitly changed:
 
-- Claude Code: main worker for implementation/debugging.
+- Claude Code: main worker for implementation/debugging/design work.
 - Codex CLI: primary reviewer.
 - Hermes: scope control, verification, evidence, and arbitration.
+
+## Product boundaries
+
+The product requirement includes both acpx one-shot exec and persistent sessions. Engineering may implement exec first and sessions later, but PRD/DESIGN/GOAL must not describe the product as exec-only.
+
+Do not infer Sachima integration, real AGENT auto-replies, public ingress, real delivery, Gateway lifecycle operations, production config writes, live/default-on behavior, `@all`, or agent-to-agent auto-routing from docs/governance changes.
 
 ## Secrets and credentials
 
@@ -50,17 +54,10 @@ Use `[REDACTED]` in docs and examples when referring to sensitive values. Keep r
 - Use `python3 -m compileall -q src scripts tests` for syntax/import smoke.
 - Use `PYTHONPATH=src python3 -m agent_run_supervisor ...` for local CLI smoke unless the package has been installed in the active environment.
 - Use `python tools/build_docs_index.py --write` after docs changes and never hand-edit `docs/INDEX.md`.
-
-## Documentation workflow
-
-Every development task ends with a `docs/dev_log/YYYY-MM-DD-<topic>.md` entry. Required deliverable, no exceptions.
-
-Plans live under `docs/plans/YYYY-MM-DD-<topic>.md`. They are repository artifacts, not chat scratchpads.
-
-If a task surfaces a repeatable pitfall, add a lesson under `docs/lessons/YYYY-MM-DD-<topic>.md` and link it from root `LESSONS.md`. If a task produces a reusable process or convention, add a practice under `docs/practices/YYYY-MM-DD-<topic>.md` and link it from `docs/practices/README.md`.
+- Use `python tools/docs_drift_signal.py --write` after governed docs changes.
 
 ## Knowledge document validation
 
-Lessons and practices carry `last_validated_at`. Validation is use-driven: when a dev log, commit, or PR body cites a specific lesson or practice path, the citing change must either bump `last_validated_at`, refine the document and bump it, or deprecate/supersede it.
+Lessons and practices carry `last_validated_at`. Validation is use-driven: when a commit, PR body, or active project doc cites a specific lesson or practice path, the citing change must either bump `last_validated_at`, refine the document and bump it, or deprecate/supersede it.
 
 `tools/docs_drift_signal.py` writes `docs/lessons/_drift_report.md`. Treat it as a signal that the next citing change must process the named knowledge docs.

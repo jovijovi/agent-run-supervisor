@@ -2,250 +2,244 @@
 title: "agent-run-supervisor Technical Solution"
 status: active
 created_at: 2026-05-29
-last_validated_at: 2026-05-29T11:09:05+0800
+last_validated_at: 2026-05-29T12:20:00+0800
 ---
 # agent-run-supervisor Technical Solution
 
 ## 1. Architecture summary
 
-`agent-run-supervisor` is an independent local Python library plus dev CLI. It sits between a caller project and `acpx@0.10.0`.
+`agent-run-supervisor` is an independent local Python library plus dev CLI between caller projects and the ACP/acpx runner boundary.
 
 ```text
 Caller project / human operator
-  -> chooses AgentRoleSpec, task prompt/context, cwd, and business contract
+  -> selects AgentRoleSpec, prompt/context, cwd, execution mode, and business contract
 agent-run-supervisor
-  -> validates role/cwd, compiles policy/argv, supervises one exec-only acpx run,
-     parses observed stdout, classifies status, writes redacted artifacts
-acpx@0.10.0
-  -> ACP runner/client boundary
+  -> validates role/workspace, compiles policy/argv, supervises exec or session lifecycle,
+     parses observed events, classifies status, writes redacted artifacts
+acpx / ACP runner boundary
+  -> starts one-shot exec runs or persistent sessions
 External AGENT
   -> Codex, Claude Code, or another ACP-capable worker/reviewer
 ```
 
-The supervisor owns runner supervision and evidence. It does not own product meaning, IM delivery, Gateway lifecycle, or persistent AGENT sessions.
+The supervisor owns runner/session lifecycle and evidence. It does not own product meaning, IM delivery, Gateway lifecycle, or public routing.
 
-## 2. Authoritative design alignment
+## 2. Document authority
 
-This solution implements `docs/design/v0.1a-design.md` as the current source of truth.
+The previous mixed `docs/design/v0.1a-design.md` file has been decomposed and retired. Its requirements now live in:
 
-Important corrections after the V0.1c drift:
+- PRD and product requirements: `docs/product/prd.md`
+- Technical solution: this file
+- Feature completion matrix: `docs/roadmap/features.md`
+- Roadmap, phases, acceptance criteria: `docs/roadmap/current-status.md`
 
-- Authorization is role-bound through `AgentRoleSpec`, not per-run human approval.
-- `AgentRoleSpec.role_id` is stable identity and policy boundary.
-- A run may have a run-intent/audit record, but that record is not a human approval ticket.
-- Persistent sessions remain a separately approved future phase.
+The previous V0.1c manual-approval design is deleted as stale history. Role-bound authorization remains the design direction.
 
-## 3. Module design
+## 3. Core modules
 
-### 3.1 `role.py` — AgentRoleSpec model and validation
+### 3.1 `role.py` — AgentRoleSpec model
 
 Responsibilities:
 
-- Parse a mapping into immutable dataclass specs.
-- Validate schema version, runner, workspace, permissions, session, limits, prompt, and redaction flags.
-- Reject `allowed_roots_security_boundary=true` for V0.1a.
-- Compute canonical `role_hash`.
+- Parse and validate role identity, runner config, workspace intent, permissions, session config, limits, prompt contract, and redaction policy.
+- Compute canonical role hash.
+- Reject unknown/unsafe claims such as `allowed_roots_security_boundary=true` unless a future sandbox design proves it.
 
-Current status: implemented.
+Design notes:
+
+- `role_id` is the stable authorization boundary.
+- Role permissions describe maximum acpx-controllable behavior.
+- Session configuration must eventually represent both one-shot exec and persistent-session use while preserving role-bound authorization.
+
+Current status: implemented for current exec-shaped role config; persistent-session fields are not complete.
 
 ### 3.2 `policy.py` — acpx policy and argv compiler
 
 Responsibilities:
 
 - Convert role permissions into acpx policy JSON:
-  - allowed role permissions -> `autoApprove`;
-  - denied role permissions -> `autoDeny`;
-  - `defaultAction=deny`.
-- Build the pinned acpx argv:
-  - binary or `npx -y acpx@0.10.0`;
-  - `--format json`;
-  - `--json-strict`;
-  - `--suppress-reads`;
-  - `--timeout <limits.timeout_seconds>`;
-  - `--max-turns <limits.max_turns>`;
-  - `--cwd <effective_cwd>`;
-  - `--permission-policy <generated-policy-json>`;
-  - `--non-interactive-permissions fail`;
-  - `--no-terminal` when terminal is false;
-  - optional `--model`;
-  - `<adapter_agent> exec <prompt>`.
+  - allowed permissions -> `autoApprove`;
+  - denied permissions -> `autoDeny`;
+  - default action -> deny.
+- Build acpx argv as a list, never a shell string.
+- Apply automation flags such as JSON output, strict parsing, read suppression, timeout, max turns, cwd, generated policy, non-interactive permission failure, optional model, and terminal disabling.
+- Compile mode-specific command tails for exec and future persistent-session operations.
 
-Current status: implemented for dry-run and future runner path.
+Current status: implemented for current dry-run and future exec path. Session-mode compilation is future work after command fixtures are captured.
 
-### 3.3 `workspace.py` — cwd/allowed_roots gate
+### 3.3 `workspace.py` — cwd and workspace gate
 
 Responsibilities:
 
-- Resolve the effective cwd.
-- Validate the cwd is under configured roots.
-- Fail before artifact creation if outside.
-- Preserve the explicit disclaimer that this is not a sandbox.
+- Resolve effective cwd from CLI input or role default.
+- Validate cwd under configured allowed roots.
+- Fail before artifact creation if invalid.
+- Re-check role/workspace identity when attaching to persistent sessions.
 
-Current status: implemented.
+Security claim: this is configuration/cwd intent validation, not OS/filesystem sandboxing.
+
+Current status: cwd gate implemented for current run path; session reattach checks are future work.
 
 ### 3.4 `preflight.py` — doctor probes
 
 Responsibilities:
 
-- Probe Node version without launching an agent.
-- Probe acpx version without launching an agent.
-- Honor role-specific `runner.acpx_binary`.
+- Probe Python, Node, acpx binary/version, adapter availability, policy parseability, fixture replay, EventStore permissions, cwd validation, redaction behavior, and session readiness.
+- Stay read-only unless a future probe explicitly documents otherwise.
 - Return structured diagnostics.
 
-Current status: partially implemented. Still missing adapter availability, `npx` fetch detection, policy parseability/dry-run, role cwd probe, and explicit redaction probe.
+Current status: Python/Node/acpx basics, role-specific acpx binary probe, fixture replay, and EventStore permission probe are partially implemented.
 
-### 3.5 `parser.py` — observed acpx stdout parser
+### 3.5 `runner.py` — one-shot exec supervision
 
 Responsibilities:
 
-- Parse only the observed newline-delimited JSON-RPC schema captured in Phase -1 fixtures.
+1. Load and validate role.
+2. Read prompt file.
+3. Resolve and validate cwd.
+4. Create run artifact directory.
+5. Compile argv/policy.
+6. Spawn acpx exec with `cwd=effective_cwd`, no shell, controlled environment, and captured stdout/stderr.
+7. Enforce an outer watchdog longer than acpx timeout.
+8. On watchdog expiry: terminate process group where supported, wait grace, force kill if still running, record kill metadata.
+9. Persist redacted stdout/stderr.
+10. Parse observed stdout and normalized events.
+11. Classify result and persist final artifacts.
+
+Current status: dry-run and supplied/fake outcome finalization are implemented; true subprocess launch and watchdog are not complete.
+
+### 3.6 `session.py` / future session store — persistent-session supervision
+
+Responsibilities:
+
+1. Fixture-prove acpx persistent-session command grammar and stream shapes.
+2. Create/open sessions with validated role/workspace metadata.
+3. Persist session id, role hash, workspace hash, acpx version, policy hash, cwd, state, lease/lock metadata, and redacted transcript/event artifacts.
+4. Send prompts to existing sessions only if role/workspace/session metadata still match.
+5. Prevent concurrent unsafe session use through locks or leases.
+6. Detect stale locks and recover deterministically.
+7. Close/abort sessions with explicit status and artifact evidence.
+8. Prevent cross-role, cross-workspace, or stale-session leakage.
+
+Current status: not implemented. This is product-required future work, not a PRD/DESIGN non-goal.
+
+### 3.7 `parser.py` — observed event parser
+
+Responsibilities:
+
+- Parse only fixture-proven observed acpx stdout/event schemas.
 - Convert updates into normalized event dicts.
-- Assemble `final_message` from ordered text deltas.
+- Assemble final messages from ordered text deltas.
 - Preserve unknown update type plus key/type summaries only.
-- Fail closed on malformed framing.
-- Enforce `max_output_bytes`.
-- Keep `business_verdict=None`.
+- Fail closed on malformed framing or max-output overflow.
 
-Current status: implemented for the observed JSON-RPC fixture family.
+Current status: implemented for the current exec fixture family. Persistent-session parser coverage is future work.
 
-### 3.6 `exit_classifier.py` — supervisor status classifier
+### 3.8 `exit_classifier.py` — status classifier
 
 Responsibilities:
 
-- Map acpx/runner exit code and metadata to `AgentRunStatus`.
-- Handle protocol errors on exit 0.
-- Refine generic exit 1 with `acpxCode` and origin.
-- Separate supervisor-origin kill/timeout from acpx exit 3.
+- Map acpx/runner/session exit behavior to supervisor-owned statuses.
+- Ensure nonzero exits never become completed.
+- Distinguish supervisor-origin failures from acpx-origin failures.
+- Keep caller business verdict separate from supervisor status.
 
-Current status: implemented.
+Current statuses:
 
-### 3.7 `event_store.py` — run artifact store
+```text
+completed
+runner_error
+invalid_invocation
+timed_out
+no_session
+permission_denied
+interrupted
+protocol_error
+infrastructure_error
+policy_error
+```
 
-Responsibilities:
+Current status: implemented for current exit-code model; session lifecycle detail may need extensions.
 
-- Create run directory under `.agent-run-supervisor/runs/<run_id>/`.
-- Enforce mode `0700` for run directories.
-- Enforce mode `0600` for final artifacts.
-- Use atomic writes for final JSON/text artifacts.
-- Append NDJSON/JSONL stream artifacts.
+### 3.9 `event_store.py` and `redaction.py` — artifact store
 
-Current status: implemented.
+Run/session artifact responsibilities:
 
-### 3.8 `redaction.py` — redaction helpers
+- Create local artifact roots with restrictive permissions.
+- Use atomic writes for final artifacts.
+- Append streams as JSONL/NDJSON.
+- Redact prompt, env, argv, metadata, stdout, stderr, normalized event text, and final messages.
+- Produce redaction reports.
+- Add retention/cleanup knobs before long-lived operation.
 
-Responsibilities:
+Current status: run artifacts and redaction are implemented for current surfaces; session artifact layout and retention controls are future work.
 
-- Redact prompt, stderr, env, argv, metadata, observed stdout, normalized events, and final result surfaces.
-- Produce a redaction report without exposing secret values.
+### 3.10 `commands.py` / `cli.py` — dev CLI
 
-Current status: implemented for current artifact surfaces; should remain required for new runner paths.
+CLI responsibilities:
 
-### 3.9 `runner.py` — runner orchestration
+```text
+agent-run-supervisor validate-role <role-file>
+agent-run-supervisor run --role <role-file-or-id> --prompt-file <file> [--cwd <dir>]
+agent-run-supervisor run --role <role-file-or-id> --prompt-file <file> [--cwd <dir>] --no-real-run
+agent-run-supervisor replay <events.ndjson>
+agent-run-supervisor doctor [--role <role-file>]
+# Future session surface after session design/fixtures:
+agent-run-supervisor session create|send|status|close|abort ...
+```
 
-Responsibilities in the final V0.1a solution:
-
-1. Validate effective cwd.
-2. Prepare run artifacts and metadata.
-3. Compile acpx argv/policy from the role.
-4. Spawn one exec-only subprocess under the effective cwd.
-5. Capture stdout/stderr.
-6. Enforce outer watchdog and process-group termination.
-7. Parse stdout and persist normalized events.
-8. Classify exit/result.
-9. Persist `result.json` and redaction report.
-10. Return a stable `RunOutcome`.
-
-Current status:
-
-- `dry_run()` is implemented.
-- `finalize_outcome()` is implemented for supplied/fake subprocess outcomes.
-- A true subprocess launch path is not yet connected to CLI `run`.
-- Watchdog/process-group lifecycle is not yet implemented.
-
-### 3.10 `commands.py` and `cli.py` — dev CLI
-
-Responsibilities:
-
-- `validate-role` validates and hashes roles.
-- `replay` parses observed stdout fixtures.
-- `doctor` probes environment/fixtures without launch.
-- `run` compiles/executes according to the approved V0.1a behavior.
-
-Current status:
-
-- validate-role/replay/doctor implemented.
-- `run --no-real-run` implemented.
-- `run` without `--no-real-run` currently refuses real launch; this is safe but incomplete relative to `v0.1a-design.md`.
+Current status: validate-role, replay, doctor baseline, and dry-run are implemented; real exec and persistent session commands remain incomplete.
 
 ## 4. Data models
 
 ### 4.1 AgentRoleSpec
 
-`AgentRoleSpec` is the stable authorization boundary.
+Required conceptual fields:
 
-Key fields:
-
-- `role_id`
-- `runner.type`
-- `runner.acpx_version`
-- `runner.acpx_binary`
-- `runner.adapter_agent`
-- `workspace.default_cwd`
-- `workspace.allowed_roots`
-- `workspace.allowed_roots_security_boundary`
-- `permissions.*`
-- `session.strategy`
-- `limits.timeout_seconds`
-- `limits.max_turns`
-- `limits.max_output_bytes`
-- `prompt.role_instruction`
-- `prompt.output_contract`
-- `redaction.*`
+- identity: `role_id`, `display_name`, `description`
+- runner: type, acpx version/binary, adapter agent, model
+- workspace: default cwd, allowed roots, sandbox-boundary disclaimer
+- permissions: acpx-controllable permission booleans
+- session: execution mode/config for exec or persistent sessions
+- limits: timeout, max turns, max output, session TTL/lease where applicable
+- prompt contract: role instruction and output contract
+- redaction: prompt/stderr/metadata/env/event redaction flags
 
 ### 4.2 Normalized events
 
-Supported V0.1a event families:
+Base event families:
 
-- `run_started`
-- `agent_message_delta`
-- `tool_started`
-- `tool_updated`
-- `tool_completed`
-- `usage_updated`
-- `permission_requested`
-- `permission_denied`
-- `unknown_update`
-- `run_completed`
-- `run_failed`
-
-The parser may emit additional implementation-internal observed events such as `session_new_requested` and `session_prompt_sent`; caller-facing compatibility must be documented before external consumers depend on them.
+- run/session lifecycle start/update/complete/failure
+- agent message delta
+- tool start/update/complete
+- usage update
+- permission requested/denied
+- unknown update summary
+- watchdog/kill/lifecycle metadata events
 
 ### 4.3 Result payload
 
-Minimum result fields:
+Minimum result concepts:
 
-- `run_id`
-- `status`
-- `business_verdict`
-- `error_code`
-- `detail_code`
-- `origin`
-- `retryable`
-- `acpx_exit_code`
-- `signal`
-- `stop_reason`
-- `usage`
-- `final_message`
-- `truncated`
-- `truncate_reason`
-- `run_dir`
-- `stderr_path`
-- `raw_event_path`
-- `redaction_report_path`
+- run/session id
+- status
+- business verdict placeholder/null
+- error/detail code
+- origin
+- retryable flag
+- acpx exit code/signal where applicable
+- stop reason
+- usage
+- final message or session update summary
+- truncation info
+- artifact paths
+- redaction report path
 
-`business_verdict` stays `null` in supervisor output.
+`business_verdict` remains caller-owned.
 
-## 5. Run artifact layout
+## 5. Artifact layout
+
+Current run layout:
 
 ```text
 .agent-run-supervisor/runs/<run_id>/
@@ -261,85 +255,76 @@ Minimum result fields:
   redaction-report.json
 ```
 
-All paths are local artifacts. They must not be treated as public or user-facing output without caller-side rendering/redaction review.
+Future session layout should be explicit before implementation. A likely shape:
 
-## 6. Real exec-only runner design
+```text
+.agent-run-supervisor/sessions/<session_id>/
+  session.json
+  role.snapshot.json
+  workspace.snapshot.json
+  generated-policy.json
+  lock.json
+  turns/<turn_id>/
+    prompt.txt
+    acpx-stdout.ndjson
+    normalized-events.jsonl
+    stderr.log
+    result.json
+    redaction-report.json
+```
 
-The missing V0.1a runner completion should follow this algorithm:
+Exact file names remain design details until session fixtures and API are approved in the roadmap.
 
-1. Load and validate role.
-2. Read prompt file.
-3. Resolve and validate cwd.
-4. Create run directory.
-5. Compile command/policy.
-6. Start subprocess with `cwd=effective_cwd`, no shell, controlled env snapshot, and captured stdout/stderr.
-7. Use an outer watchdog of `timeout_seconds + grace_seconds`.
-8. On watchdog timeout:
-   - terminate process group where supported;
-   - wait a fixed grace;
-   - kill if still running;
-   - record `kill_reason`, `kill_signal`, `grace_ms`, `process_group_used`, and truncation/closure flags.
-9. Persist stdout/stderr redacted.
-10. Parse stdout with the observed-schema parser.
-11. Classify status.
-12. Persist result and redaction report.
-13. Return JSON to CLI.
+## 6. Security and lifecycle boundaries
 
-No shell interpolation is allowed. All argv components must be passed as a list.
+Enforced or required:
 
-## 7. Security boundaries
+- role validation;
+- cwd/workspace intent gate;
+- acpx policy generation with default deny;
+- non-interactive permission failure;
+- no shell interpolation;
+- artifact permission controls;
+- redaction by default;
+- watchdog and kill metadata for exec;
+- lock/lease/stale-lock handling for persistent sessions.
 
-### Enforced in current project
+Not claimed:
 
-- Role validation.
-- cwd/allowed_roots intent gate.
-- acpx policy generation with default deny.
-- non-interactive permissions fail mode.
-- artifact permissions.
-- redaction.
-- explicit refusal for not-yet-approved real launch.
+- OS/filesystem sandboxing;
+- production authorization;
+- caller business PASS/BLOCK;
+- platform delivery or Gateway lifecycle safety;
+- agent-to-agent containment.
 
-### Not claimed
-
-- OS/filesystem sandboxing.
-- Production authorization.
-- Business PASS/BLOCK.
-- Platform delivery or Gateway lifecycle safety.
-- Agent-to-agent containment.
-
-## 8. Testing strategy
+## 7. Testing strategy
 
 Required layers:
 
 1. Role schema tests.
 2. Policy compiler golden tests.
 3. Workspace gate tests.
-4. Exit classifier table tests.
+4. Exit/status classifier tests.
 5. Parser fixture replay tests.
 6. EventStore permission and atomic-write tests.
 7. Redaction tests.
-8. Runner fake-subprocess tests, including watchdog behavior.
-9. CLI smoke tests.
-10. Fixture validator.
-11. One minimal real acpx smoke after the real-run phase is explicitly approved.
-12. Docs index/drift and secret/static scans.
+8. Exec runner fake-subprocess and watchdog tests.
+9. Persistent-session fixture and lifecycle tests.
+10. CLI smoke tests.
+11. Fixture validator.
+12. Minimal real acpx smoke for approved local execution phases.
+13. Docs index/drift, secret scans, and static scans.
 
-Current automated tests: 123 collected tests pass on `main` at `cc86f8cdc42221a2a2750f8404fb6193b3dba279`.
-
-## 9. Integration boundary
+## 8. Integration boundary
 
 Future Sachima/Hermes integration should remain thin:
 
 ```text
-mention/operator action -> role_id
+caller action -> role_id + execution mode
 caller builds context pack/prompt
-caller invokes agent-run-supervisor run
+caller invokes agent-run-supervisor
 caller renders normalized progress/events
-caller interprets final_message under its own business contract
+caller interprets final output under its own business contract
 ```
 
-The caller must not parse raw ACP/acpx stdout directly, own runner lifecycle, or infer external delivery approval from a supervisor result.
-
-## 10. Deprecated branch: manual approval design
-
-The V0.1c HITL/manual approval design introduced per-run approval semantics that conflict with the project-level decision that authorization is role-bound. It is historical context only and should not drive implementation unless the user explicitly reverses the role-bound authorization decision.
+The caller must not parse raw ACP/acpx streams directly or infer external delivery approval from supervisor results.

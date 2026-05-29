@@ -1,21 +1,37 @@
 # agent-run-supervisor
 
-Independent Python library + dev CLI for supervising external AGENT runs through pinned `acpx` / ACP, normalizing runner evidence, and recording auditable artifacts.
+Independent local Python library + dev CLI for supervising ACP/acpx external AGENT runs and sessions, normalizing runner evidence, and recording redacted auditable artifacts.
+
+## Product scope
+
+`agent-run-supervisor` owns:
+
+- role-bound `AgentRoleSpec` validation;
+- acpx policy/argv compilation;
+- local one-shot exec supervision;
+- persistent session lifecycle supervision;
+- observed event parsing and status classification;
+- redacted local artifacts.
+
+Caller projects own business verdicts, user-facing rendering, delivery, and platform integration.
 
 ## Current stable state
 
-- **Phase -1 acpx@0.10.0 contract spike:** complete with checked-in fixtures and validator.
-- **V0.1a exec-only vertical slice:** implemented with role validation, policy/argv compilation, exit classification, observed stdout replay, secure EventStore artifacts, redaction helpers, and CLI commands.
-- **AI-assisted development workflow:** governed by `GOAL.md`, `docs/roadmap/current-status.md`, and `docs/AI_FLOW.md`.
+- **Contract fixtures:** acpx `0.10.0` fixtures and validator exist.
+- **Foundation:** role validation, policy/argv compilation, cwd gate, exit classification, observed stdout replay, EventStore artifacts, redaction helpers, and CLI baseline exist.
+- **Documentation authority:** governed by `GOAL.md`, `docs/product/prd.md`, `docs/design/technical-solution.md`, `docs/roadmap/features.md`, `docs/roadmap/current-status.md`, and `docs/AI_FLOW.md`.
+- **Next implementation sequence:** finish local one-shot exec runner, then persistent sessions.
 
 ## Not approved by current phases
 
-- persistent sessions;
 - Sachima behavior integration;
 - real AGENT automatic replies;
 - public ingress, real delivery, Gateway lifecycle operations, or production config writes;
 - live/default-on behavior;
+- `@all` fanout or agent-to-agent automatic routing;
 - treating `allowed_roots` as an OS/filesystem sandbox.
+
+Persistent sessions are product scope, but implementation is sequenced after the exec runner phase.
 
 ## Useful commands
 
@@ -29,9 +45,11 @@ python tools/build_docs_index.py --check
 python tools/docs_drift_signal.py --check
 ```
 
-See:
+## Read next
 
 - `GOAL.md`
-- `docs/AI_FLOW.md`
+- `docs/product/prd.md`
+- `docs/design/technical-solution.md`
+- `docs/roadmap/features.md`
 - `docs/roadmap/current-status.md`
-- `docs/design/v0.1a-design.md`
+- `docs/AI_FLOW.md`
