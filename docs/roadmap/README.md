@@ -21,4 +21,6 @@ Use roadmap documents to answer:
 
 Roadmap documents may sequence implementation, for example exec before persistent sessions. They must not shrink PRD/DESIGN product requirements.
 
+Roadmap documents own roadmap, status, and feature tracking. They do **not** own task-level execution plans: concrete task/phase implementation plans live under `docs/plans/`, named `YYYY-MM-DD-<task-slug>.md` (see `docs/plans/README.md`).
+
 Do not use roadmap documents to imply live/runtime approval. A phase may start only after its scope is named and approved.

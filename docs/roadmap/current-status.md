@@ -21,15 +21,15 @@ current_mainline: E1 local one-shot exec runner implementation candidate is comp
 The document hierarchy is:
 
 ```text
-PRD -> technical/design docs -> roadmap/current-status + feature tracker -> approved phase implementation plan
+PRD -> technical/design docs -> roadmap/current-status + feature tracker -> approved phase implementation plan (docs/plans/)
 ```
 
 - `GOAL.md` defines stable product positioning and points to source-of-truth docs.
 - `docs/product/prd.md` defines product requirements.
 - `docs/design/technical-solution.md` defines the technical solution.
 - `docs/roadmap/features.md` tracks feature/capability completion.
-- This file tracks engineering phases, status, tails, and acceptance criteria.
-- Per-phase implementation plans are created only for newly approved implementation work; all old `docs/plans/` and `docs/dev_log/` artifacts were retired.
+- This file tracks engineering phases, status, tails, and acceptance criteria. It does not hold task-level execution plans.
+- Per-phase implementation plans are created only for newly approved implementation work and live under `docs/plans/` named `YYYY-MM-DD-<task-slug>.md` (see `docs/plans/README.md`); the pre-realignment `docs/plans/` and `docs/dev_log/` artifacts were retired and remain non-authoritative.
 
 ## 2. Current decision
 

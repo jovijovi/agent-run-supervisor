@@ -17,8 +17,12 @@ Documentation development and management come before code development: the docum
 The authority chain is:
 
 ```text
-PRD -> design documents -> roadmap/current-status + feature tracker -> approved phase implementation plan -> code
+PRD -> design documents -> roadmap/current-status + feature tracker -> approved phase implementation plan (docs/plans/) -> code
 ```
+
+Concrete task/phase implementation plans live under `docs/plans/`; `docs/roadmap/`
+owns roadmap, status, and feature tracking, not task-level execution plans. See
+`docs/plans/README.md`.
 
 Required preflight for roadmap, phase-gate, implementation, PR, CI, review, merge, or next-phase-readiness work:
 
@@ -29,7 +33,7 @@ Required preflight for roadmap, phase-gate, implementation, PR, CI, review, merg
 5. `docs/roadmap/current-status.md`
 6. this file
 
-Old `docs/plans/` and `docs/dev_log/` files were retired and cleared. Do not use historical plan/dev-log artifacts as source-of-truth.
+The pre-realignment `docs/plans/` and `docs/dev_log/` artifacts were retired and cleared and remain non-authoritative; do not use historical plan/dev-log artifacts as source-of-truth. The `docs/plans/` directory is now the home for fresh, approved implementation plans named `YYYY-MM-DD-<task-slug>.md` (see `docs/plans/README.md`).
 
 ## Branch model
 
@@ -63,7 +67,7 @@ Rules:
 
 ## Implementation plan rule
 
-A phase implementation plan is an execution artifact created only after PRD/design/roadmap target is clear. It must include:
+A phase implementation plan is an execution artifact created only after PRD/design/roadmap target is clear. It lives under `docs/plans/` and is named `docs/plans/YYYY-MM-DD-<task-slug>.md`. It must include:
 
 - context and exact target from PRD/design/roadmap;
 - checklist of implementation goals;
@@ -73,7 +77,7 @@ A phase implementation plan is an execution artifact created only after PRD/desi
 - risks/open questions;
 - rollback strategy.
 
-Old plans were cleared because they no longer represent the current authority chain. Future plans must be fresh and trace back to `docs/roadmap/current-status.md`.
+A plan must not redefine product goals, expand product scope, or imply new live/runtime approvals. Keep task-level execution plans in `docs/plans/`, not in `docs/roadmap/`, which owns roadmap/status/feature tracking. The pre-realignment plans were cleared because they no longer represent the current authority chain; future plans must be fresh and trace back to `docs/roadmap/current-status.md`. See `docs/plans/README.md`.
 
 ## Commit conventions
 
@@ -129,6 +133,7 @@ Target `main` unless a future roadmap explicitly introduces another integration 
 
 - Starting code work before PRD/design/roadmap alignment.
 - Treating historical plan/dev-log files as authority.
+- Putting task-level implementation plans in `docs/roadmap/` instead of `docs/plans/`.
 - Letting exec-first engineering sequence shrink PRD or design scope.
 - Treating `allowed_roots` as an OS sandbox.
 - Treating runner completion as business PASS.

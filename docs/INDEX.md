@@ -2,13 +2,14 @@
 
 # Documentation Index
 
-Total: 9 documents tracked across 1 statuses.
+Total: 10 documents tracked across 1 statuses.
 
-## Active (9)
+## Active (10)
 
 - [agent-run-supervisor Technical Solution](design/technical-solution.md) — created 2026-05-29
+- [E1 One-shot Exec Runner Implementation Plan](plans/2026-05-29-e1-one-shot-exec-runner.md) — created 2026-05-29
+- [Implementation plans directory](plans/README.md) — created 2026-05-29
 - [agent-run-supervisor PRD](product/prd.md) — created 2026-05-29
-- [E1 One-shot Exec Runner Implementation Plan](roadmap/e1-one-shot-exec-runner-plan.md) — created 2026-05-29
 - [Feature and Capability Tracker](roadmap/features.md) — created 2026-05-29
 - [Legacy V0.1a Migration and Conformance Matrix](roadmap/v0.1a-design-conformance.md) — created 2026-05-29
 - [AI-assisted development flow](AI_FLOW.md) — created 2026-05-28
