@@ -8,7 +8,7 @@ from typing import Sequence
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-run-supervisor",
-        description="Supervise external AGENT runs through pinned acpx@0.10.0.",
+        description="Supervise ACP/acpx external AGENT runs and sessions with redacted local evidence.",
     )
     subparsers = parser.add_subparsers(dest="command", metavar="command")
 
@@ -20,7 +20,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     replay = subparsers.add_parser(
         "replay",
-        help="Replay an acpx stdout NDJSON stream through the V0.1a parser.",
+        help="Replay an observed acpx stdout NDJSON stream through the parser.",
     )
     replay.add_argument("events_file", help="Path to acpx stdout NDJSON file.")
 
@@ -37,8 +37,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     run = subparsers.add_parser(
         "run",
-        help="Compile a role+prompt; refuses real agent launch in V0.1b.",
-        description="Compile a role+prompt; refuses real agent launch in V0.1b.",
+        help="Compile a role+prompt; refuses real agent launch until E1 exec runner support lands.",
+        description="Compile a role+prompt; refuses real agent launch until E1 exec runner support lands.",
     )
     run.add_argument("--role", required=True, help="Path to AgentRoleSpec JSON file.")
     run.add_argument("--prompt-file", required=True, help="Path to prompt text file.")
@@ -46,7 +46,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--no-real-run",
         action="store_true",
-        help="Persist safe dry-run artifacts; current V0.1b requires this flag.",
+        help="Persist safe dry-run artifacts while real exec runner support is incomplete.",
     )
     run.add_argument(
         "--runs-dir",

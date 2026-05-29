@@ -18,7 +18,7 @@ from agent_run_supervisor.workspace import (
 )
 
 REAL_RUN_REFUSAL_MESSAGE = (
-    "real AGENT launch is disabled in V0.1b; pass --no-real-run to compile artifacts."
+    "real AGENT launch is disabled until E1 exec runner support lands; pass --no-real-run to compile artifacts."
 )
 
 

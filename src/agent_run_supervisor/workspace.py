@@ -1,9 +1,8 @@
 """Cwd-vs-allowed-roots gate.
 
 This is **cwd/config validation only** — not an OS or filesystem sandbox.
-The role's `allowed_roots_security_boundary` flag must remain `False` in
-V0.1b; a future phase would need explicit approval before any sandbox
-claim could be made.
+The role's `allowed_roots_security_boundary` flag must remain `False` unless
+a future sandbox phase explicitly proves and approves a real security boundary.
 """
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 """Environment preflight probes for `doctor`.
 
-V0.1b: probes only run `--version`; they never launch real AGENT processes
+Current probes only run `--version`; they never launch real AGENT processes
 and never invoke `acpx exec`. Probes return structured dicts so the CLI can
 serialize them deterministically without raising on a missing binary.
 """

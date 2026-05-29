@@ -1,4 +1,4 @@
-"""agent-run-supervisor V0.1a exec-only vertical slice."""
+"""agent-run-supervisor local ACP/acpx run and session supervision toolkit."""
 
 __version__ = "0.0.0"
 

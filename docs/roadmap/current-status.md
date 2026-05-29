@@ -2,7 +2,7 @@
 title: "agent-run-supervisor Roadmap Current Status"
 status: active
 created_at: 2026-05-28
-last_validated_at: 2026-05-29T12:20:00+0800
+last_validated_at: 2026-05-29T13:05:26+0800
 ---
 # agent-run-supervisor Roadmap Current Status
 
@@ -13,7 +13,7 @@ last_updated: 2026-05-29
 base_branch: main
 product_role: independent local Python library + dev CLI for supervising ACP/acpx AGENT runs and sessions with redacted audit evidence
 source_of_truth: GOAL.md, docs/product/prd.md, docs/design/technical-solution.md, docs/roadmap/features.md, docs/roadmap/current-status.md, docs/AI_FLOW.md
-current_mainline: documentation authority realignment, then local exec runner completion, then persistent-session support
+current_mainline: R0 documentation authority realignment complete via PR #6 / merge commit 7dcbe4f; next implementation mainline is E1 local one-shot exec runner completion, then S1 persistent-session support
 ```
 
 ## 1. How to read this roadmap
@@ -34,10 +34,11 @@ PRD -> technical/design docs -> roadmap/current-status + feature tracker -> appr
 ## 2. Current decision
 
 ```text
-Documentation authority realignment is required before more code work.
+Documentation authority realignment is complete on main via PR #6 (`7dcbe4f`).
 The product requirement includes both one-shot exec and persistent sessions.
 Engineering sequence may implement exec first, then persistent sessions.
 Exec-first sequencing belongs in roadmap/phase planning only, not in PRD, GOAL, or product-level design as a reduced product scope.
+Next allowed implementation request: E1 local one-shot exec runner completion.
 ```
 
 ## 3. Phase roadmap
@@ -53,12 +54,12 @@ Checklist:
 - [x] Move technical/architecture/session/runner design into `docs/design/technical-solution.md`.
 - [x] Add feature completion management at `docs/roadmap/features.md`.
 - [x] Merge standalone implementation-plan content into this roadmap/status document.
-- [x] Remove retired mixed design file `docs/design/v0.1a-design.md`.
-- [x] Remove stale V0.1c manual-approval design file.
+- [x] Remove the retired mixed V0.1a design file.
+- [x] Remove the stale V0.1c manual-approval design file.
 - [x] Clear obsolete `docs/dev_log/` files.
 - [x] Clear obsolete `docs/plans/` files.
 - [x] Rebuild `docs/INDEX.md` and `docs/lessons/_drift_report.md`.
-- [ ] Merge the documentation authority realignment PR.
+- [x] Merge documentation authority realignment via PR #6 (`7dcbe4f`) and verify main CI.
 
 Acceptance:
 
@@ -67,7 +68,7 @@ Acceptance:
 - PRD/DESIGN/GOAL do not reduce the product to exec-only.
 - Roadmap clearly sequences exec before persistent sessions as engineering order only.
 
-Status: **In progress in this PR**.
+Status: **Complete on main via PR #6 (`7dcbe4f`); main `Verify` CI passed and post-merge local gates passed.**
 
 ### C0 — acpx contract fixtures and validator
 
@@ -219,14 +220,19 @@ Status: **Parked pending separate approval**.
 
 | ID | Class | Description | Blocks code work? | Required before | Acceptance method | Status |
 |---|---|---|---:|---|---|---|
-| ARS-DOC-AUTHORITY | BLOCKER | Documentation authority must be PRD/design/roadmap/features, not mixed legacy design or stale dev logs. | Yes | Any new feature code | This PR + docs gates | In progress |
-| ARS-LEGACY-DOCS | BLOCKER | Old `v0.1a-design`, V0.1c HITL design, `docs/dev_log`, and `docs/plans` artifacts must not remain active authority. | Yes | Any new feature code | Deleted/cleared + stale-reference search | In progress |
 | ARS-EXEC-RUNNER | NEXT_PHASE | Real one-shot acpx exec runner is missing. | Yes | Product execution mode E1 | Fake subprocess tests + local smoke | Open |
 | ARS-SESSIONS | NEXT_PHASE | Persistent session support is product-required but unimplemented. | Yes for product-complete | S1 | Session fixtures + lifecycle tests | Open |
 | ARS-DOCTOR-COMPLETE | NEXT_PHASE | Doctor is missing adapter/npx/policy/cwd/redaction/session probes. | No | H1 | Structured doctor tests | Open |
 | ARS-RETENTION-CLEANUP | NEXT_PHASE | Run/session artifact retention cleanup knobs are missing. | No | H1 / long-lived use | Cleanup tests and docs | Open |
 | ARS-SANDBOX-BOUNDARY | PARKED | Any claim that `allowed_roots` is an OS/filesystem sandbox remains parked. | No | Separate sandbox phase | OS sandbox proof + negative probes | Parked |
 | ARS-CALLER-INTEGRATION | PARKED | Sachima/Hermes behavior integration remains separate. | No | I1 approval | Explicit integration PRD/plan | Parked |
+
+### Recently closed tails
+
+| ID | Closed by | Evidence | Result |
+|---|---|---|---|
+| ARS-DOC-AUTHORITY | PR #6 (`7dcbe4f`) | docs index/drift, CI `Verify`, post-merge gates | Closed |
+| ARS-LEGACY-DOCS | PR #6 (`7dcbe4f`) | retired mixed/stale docs deleted, old plan/dev-log artifacts cleared, stale-reference scan | Closed |
 
 ## 5. Current explicit non-approvals
 
