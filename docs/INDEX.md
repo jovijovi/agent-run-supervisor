@@ -2,18 +2,23 @@
 
 # Documentation Index
 
-Total: 20 documents tracked across 1 statuses.
+Total: 26 documents tracked across 2 statuses.
 
-## Active (20)
+## Active (25)
 
-- [agent-run-supervisor V0.1c HITL / Manual Real-Run Design Gate](design/v0.1c-hitl-manual-real-run-design.md) — created 2026-05-29
+- [agent-run-supervisor Technical Solution](design/technical-solution.md) — created 2026-05-29
+- [Goal-first final docs dev log](dev_log/2026-05-29-goal-first-final-docs.md) — created 2026-05-29
 - [V0.1b Real-Run Preflight Hardening Dev Log](dev_log/2026-05-29-v0.1b-real-run-preflight-hardening.md) — created 2026-05-29
 - [V0.1c HITL / Manual Real-Run Design Gate Dev Log](dev_log/2026-05-29-v0.1c-hitl-manual-real-run-design-gate.md) — created 2026-05-29
 - [V0.1c Status Closure Dev Log](dev_log/2026-05-29-v0.1c-status-closure.md) — created 2026-05-29
+- [Goal-first final docs plan](plans/2026-05-29-goal-first-final-docs.md) — created 2026-05-29
 - [V0.1b Claude Code Main Worker Context](plans/2026-05-29-v0.1b-claude-main-context.md) — created 2026-05-29
 - [V0.1b Real-Run Preflight Hardening Plan](plans/2026-05-29-v0.1b-real-run-preflight-hardening.md) — created 2026-05-29
 - [V0.1c HITL / Manual Real-Run Design Gate Plan](plans/2026-05-29-v0.1c-hitl-manual-real-run-design-gate.md) — created 2026-05-29
 - [V0.1c Status Closure Plan](plans/2026-05-29-v0.1c-status-closure.md) — created 2026-05-29
+- [agent-run-supervisor PRD](product/prd.md) — created 2026-05-29
+- [agent-run-supervisor Implementation Plan](roadmap/implementation-plan.md) — created 2026-05-29
+- [V0.1a Design Conformance Matrix](roadmap/v0.1a-design-conformance.md) — created 2026-05-29
 - [AI-assisted development flow](AI_FLOW.md) — created 2026-05-28
 - [agent-run-supervisor V0.1a Revised Design Gate](design/v0.1a-design.md) — created 2026-05-28
 - [AI_FLOW Bootstrap Dev Log](dev_log/2026-05-28-ai-flow-bootstrap.md) — created 2026-05-28
@@ -26,3 +31,7 @@ Total: 20 documents tracked across 1 statuses.
 - [Engineering practices](practices/README.md) — created 2026-05-28
 - [Roadmap governance](roadmap/README.md) — created 2026-05-28
 - [agent-run-supervisor Roadmap Current Status](roadmap/current-status.md) — created 2026-05-28
+
+## Deprecated (1)
+
+- [agent-run-supervisor V0.1c HITL / Manual Real-Run Design Gate](design/v0.1c-hitl-manual-real-run-design.md) — created 2026-05-29
