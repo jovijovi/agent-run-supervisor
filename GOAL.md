@@ -33,9 +33,10 @@ The project is an independent repo. It is not Sachima, not a Gateway plugin, not
 
 ```text
 Phase -1 acpx@0.10.0 contract spike: complete with checked-in fixtures and validator.
-V0.1a exec-only vertical slice: implemented on main with role validation, policy/argv compile, exit classification, observed stdout replay, EventStore, redaction, CLI smoke, pytest coverage, and Codex review evidence.
-V0.1b real-run preflight hardening: implemented with structured Node/acpx doctor probes, cwd-vs-allowed-roots fail-closed validation, and stable real-run refusal; still no real AGENT launch.
-V0.1c HITL/manual real-run design gate: merged via PR #3 (`adfea8b9cc1de7e80850418453b032722071b8c2`) as documentation/design only, defining a future human approval contract, fail-closed launch rules, and test plan; it does not approve or implement real AGENT launch.
+V0.1a foundation slice: implemented on main with role validation, policy/argv compile, exit classification, observed stdout replay, EventStore, redaction, CLI smoke, pytest coverage, and Codex review evidence.
+V0.1b preflight hardening: implemented with structured Node/acpx doctor probes, cwd-vs-allowed-roots fail-closed validation, and stable real-run refusal; final exec-only subprocess launch is still incomplete.
+V0.1c HITL/manual approval design: historical/deprecated direction; it does not supersede role-bound authorization in `docs/design/v0.1a-design.md`.
+Current next implementation target: V0.1a completion / exec-only runner alignment — connect CLI `run` to the one-shot acpx exec runner under role-bound `AgentRoleSpec` authorization, with no persistent sessions or Sachima/Gateway integration.
 AI_FLOW bootstrap: this repository now uses GOAL.md, docs/roadmap/current-status.md, docs/AI_FLOW.md, docs/plans/, docs/dev_log/, generated docs index, and docs drift gates for future work.
 ```
 
@@ -44,6 +45,11 @@ AI_FLOW bootstrap: this repository now uses GOAL.md, docs/roadmap/current-status
 Read these documents before roadmap, implementation, PR, CI, review, merge, or next-phase-readiness work:
 
 1. `GOAL.md`;
-2. `docs/roadmap/current-status.md`;
-3. `docs/AI_FLOW.md`;
-4. the latest relevant plan and dev log linked from current status.
+2. `docs/product/prd.md`;
+3. `docs/design/v0.1a-design.md`;
+4. `docs/design/technical-solution.md`;
+5. `docs/roadmap/v0.1a-design-conformance.md`;
+6. `docs/roadmap/implementation-plan.md`;
+7. `docs/roadmap/current-status.md`;
+8. `docs/AI_FLOW.md`;
+9. the latest relevant plan and dev log linked from current status.

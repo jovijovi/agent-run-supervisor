@@ -2,7 +2,7 @@
 title: "agent-run-supervisor Roadmap Current Status"
 status: active
 created_at: 2026-05-28
-last_validated_at: 2026-05-29T09:41:07+0800
+last_validated_at: 2026-05-29T11:09:05+0800
 ---
 # agent-run-supervisor Roadmap Current Status
 
@@ -12,8 +12,9 @@ last_validated_at: 2026-05-29T09:41:07+0800
 last_updated: 2026-05-29
 base_branch: main
 repo_role: independent local Python library + dev CLI for supervising acpx/ACP exec-only AGENT runs and recording redacted audit evidence
-current_mainline: Phase -1 fixtures, V0.1a exec-only vertical slice, V0.1b real-run preflight hardening, and V0.1c HITL/manual real-run design gate are merged and verified on main
-selected_epic: V0.1d manual approval artifacts/state machine without launch; real launch implementation, persistent sessions, and integrations remain deferred
+source_of_truth: docs/design/v0.1a-design.md, docs/product/prd.md, docs/design/technical-solution.md, docs/roadmap/v0.1a-design-conformance.md, docs/roadmap/implementation-plan.md
+current_mainline: Phase -1 fixtures, V0.1a foundation, V0.1b preflight hardening, and goal-first final docs are aligned around role-bound AgentRoleSpec authorization
+selected_epic: V0.1a completion / exec-only runner alignment; persistent sessions, Sachima integration, real delivery, and per-run manual approval remain out of mainline scope
 ```
 
 ## One-screen roadmap checklist
@@ -26,8 +27,9 @@ selected_epic: V0.1d manual approval artifacts/state machine without launch; rea
 - [x] `docs/roadmap/current-status.md` is the living status dashboard.
 - [x] `tools/build_docs_index.py` and `tools/docs_drift_signal.py` provide docs index/drift gates.
 - [x] GitHub Actions `Verify` mirrors portable local gates.
+- [x] Goal-first final docs exist: PRD, technical solution, implementation plan, and V0.1a conformance matrix.
 
-**Evidence:** `GOAL.md`, `AGENTS.md`, `docs/AI_FLOW.md`, `docs/roadmap/current-status.md`, `.github/workflows/verify.yml`.
+**Evidence:** `GOAL.md`, `AGENTS.md`, `docs/AI_FLOW.md`, `docs/product/prd.md`, `docs/design/technical-solution.md`, `docs/roadmap/implementation-plan.md`, `docs/roadmap/v0.1a-design-conformance.md`, `.github/workflows/verify.yml`.
 
 ### Phase -1 — acpx@0.10.0 contract spike
 
@@ -38,7 +40,7 @@ selected_epic: V0.1d manual approval artifacts/state machine without launch; rea
 
 **Evidence:** `fixtures/acpx-0.10.0/`, `scripts/capture_acpx_contract.py`, `scripts/validate_contract_fixtures.py`, `docs/plans/2026-05-28-phase-minus-1-acpx-contract-spike.md`, `docs/dev_log/2026-05-28-phase-minus-1-acpx-contract-spike.md`.
 
-### V0.1a — exec-only vertical slice
+### V0.1a foundation — role/policy/parser/store vertical slice
 
 - [x] `AgentRoleSpec` validation.
 - [x] acpx argv/policy compiler.
@@ -48,10 +50,13 @@ selected_epic: V0.1d manual approval artifacts/state machine without launch; rea
 - [x] redaction helpers.
 - [x] CLI commands: `validate-role`, `replay`, `doctor`, and `run --no-real-run`.
 - [x] pytest, compileall, fixture validation, CLI smoke, secret/static scan, and Codex review evidence.
+- [ ] final CLI `run` exec-only subprocess launch path.
+- [ ] outer watchdog/process-group lifecycle and detailed kill metadata.
+- [ ] retention/cleanup knobs before long-lived use.
 
-**Evidence:** `src/agent_run_supervisor/`, `tests/`, `docs/plans/2026-05-28-v0.1a-exec-only-vertical-slice.md`, `docs/dev_log/2026-05-28-v0.1a-exec-only-vertical-slice.md`.
+**Evidence:** `src/agent_run_supervisor/`, `tests/`, `docs/plans/2026-05-28-v0.1a-exec-only-vertical-slice.md`, `docs/dev_log/2026-05-28-v0.1a-exec-only-vertical-slice.md`, `docs/roadmap/v0.1a-design-conformance.md`.
 
-### V0.1b — real-run preflight hardening
+### V0.1b — preflight and safe refusal hardening
 
 - [x] `doctor` emits structured Node and acpx version probes without launching agents.
 - [x] role-specific `runner.acpx_binary` is honored by the acpx version probe.
@@ -62,26 +67,36 @@ selected_epic: V0.1d manual approval artifacts/state machine without launch; rea
 
 **Evidence:** `src/agent_run_supervisor/preflight.py`, `src/agent_run_supervisor/workspace.py`, `tests/test_preflight.py`, `tests/test_workspace_gate.py`, `docs/plans/2026-05-29-v0.1b-real-run-preflight-hardening.md`, `docs/dev_log/2026-05-29-v0.1b-real-run-preflight-hardening.md`.
 
-### V0.1c — HITL / manual real-run design gate
+### V0.1c — deprecated HITL/manual approval design branch
 
-- [x] Human approval scope is explicitly design/docs-only; no real AGENT launch is approved.
-- [x] Design specifies a future manual approval state machine: `prepared`, `pending_approval`, `approved`, `rejected`, `expired`, plus parked launch states.
-- [x] Design specifies a redacted approval artifact shape binding approval to role/policy/argv/prompt/cwd/cap hashes.
-- [x] Design lists fail-closed rules for missing approval, expiry, hash drift, cwd drift, invalid caps, nonce replay, non-human origin, missing future launch flag, and tamper.
-- [x] Design proposes CLI/API surfaces as future-only and states current launch behavior remains refusal.
-- [x] Design includes future implementation test plan and boundary review checklist.
+- [x] Historical design branch merged as docs-only PR #3.
+- [x] Current review found it conflicts with the role-bound authorization decision.
+- [x] `docs/design/v0.1c-hitl-manual-real-run-design.md` is marked deprecated/historical.
+- [x] Current mainline no longer points next work to per-run manual approval artifacts.
 
-**Evidence:** `docs/design/v0.1c-hitl-manual-real-run-design.md`, `docs/plans/2026-05-29-v0.1c-hitl-manual-real-run-design-gate.md`, `docs/dev_log/2026-05-29-v0.1c-hitl-manual-real-run-design-gate.md`, PR #3 (`adfea8b9cc1de7e80850418453b032722071b8c2`), post-merge docs gates.
+**Evidence:** `docs/design/v0.1c-hitl-manual-real-run-design.md`, this current-status dashboard, `docs/product/prd.md`, `docs/design/technical-solution.md`.
+
+### V0.1a completion — exec-only runner alignment
+
+- [ ] Add a real one-shot subprocess execution path for `run` using compiled role argv/policy.
+- [ ] Capture stdout/stderr from the real subprocess into EventStore.
+- [ ] Add fake subprocess tests for success, failure, timeout, malformed stdout, permission denied, and stderr redaction.
+- [ ] Implement outer watchdog with grace and process-group termination where supported.
+- [ ] Record kill metadata: `kill_reason`, `kill_signal`, `grace_ms`, `process_group_used`, stdout/stderr truncation/closure state.
+- [ ] Preserve `business_verdict: null` and caller-owned business interpretation.
+- [ ] Keep persistent sessions, Sachima integration, Gateway operations, and IM delivery out of scope.
+
+**Evidence target:** future V0.1a completion plan/dev log/PR plus updates to `docs/roadmap/v0.1a-design-conformance.md`.
 
 ## Current decision
 
 ```text
-G0 governance / AI_FLOW: supported from this branch onward.
+G0 governance / AI_FLOW: supported.
 Phase -1: complete.
-V0.1a: complete as exec-only vertical slice.
-V0.1b: complete as real-run preflight hardening; actual real AGENT launch remains unapproved.
-V0.1c: closed as HITL/manual real-run design gate via PR #3 (`adfea8b9cc1de7e80850418453b032722071b8c2`); it defined a future approval contract and test plan but did not implement or approve real launch.
-Next allowed request: V0.1d manual approval artifacts/state machine without launch. This may implement prepare/approve/reject/show/expire artifact behavior, but still must not launch a real AGENT.
+V0.1a foundation: complete as role/policy/parser/store foundation, but incomplete against final exec-only runner design.
+V0.1b: complete as preflight and safe refusal hardening.
+V0.1c: deprecated as product direction; retained only as historical drift context.
+Next allowed request: V0.1a completion / exec-only runner alignment. This may implement the one-shot local acpx exec runner under role-bound AgentRoleSpec authorization, with fake subprocess tests first and no persistent sessions or Sachima/Gateway integration.
 ```
 
 ## Explicit non-approvals
@@ -102,35 +117,39 @@ The current repo state does not approve:
 - `@all` fanout;
 - agent-to-agent automatic routing;
 - trusted Markdown/HTML rendering;
-- treating `allowed_roots` as an OS/filesystem sandbox.
+- treating `allowed_roots` as an OS/filesystem sandbox;
+- per-run human approval as the default authorization model.
 
 ## Tail register
 
-| ID | Class | Description | Blocks current phase? | Blocks next phase? | Required before | Acceptance method | Status |
+| ID | Class | Description | Blocks current docs phase? | Blocks next implementation? | Required before | Acceptance method | Status |
 |---|---|---|---:|---:|---|---|---|
-| ARS-V01B-NODE-ACPX-DOCTOR | NEXT_PHASE | `doctor` emits structured Node/acpx probes, honors role `runner.acpx_binary`, and does not launch agents. | No | No | V0.1b/live-run preflight | tests plus doctor output proving detected versions without launching real agents | Closed in V0.1b |
-| ARS-ALLOWED-ROOTS-BOUNDARY | NEXT_PHASE | `allowed_roots` is implemented as cwd/config validation only; cwd outside configured roots fails before artifacts. | No | No | V0.1b preflight | negative tests and docs that distinguish config validation from sandbox enforcement | Closed for cwd/config gate in V0.1b |
+| ARS-DOCS-GOAL-FIRST | BLOCKER | Final PRD/technical solution/implementation plan/conformance matrix must exist before more feature work. | Yes | Yes | Any further implementation | docs gates and review | In this PR |
+| ARS-MANUAL-APPROVAL-DRIFT | BLOCKER | V0.1c manual approval branch conflicts with role-bound authorization. | Yes | Yes | V0.1a completion | deprecate design and remove next-mainline wording | In this PR |
+| ARS-V01A-REAL-RUNNER | NEXT_PHASE | CLI `run` must connect to one-shot exec-only subprocess runner. | No | Yes | V0.1a completion | fake subprocess tests + local smoke if approved | Open |
+| ARS-WATCHDOG-METADATA | NEXT_PHASE | Outer watchdog and kill metadata must match v0.1a design. | No | Yes | V0.1a completion | tests for timeout/kill paths | Open |
+| ARS-DOCTOR-COMPLETE | NEXT_PHASE | Doctor is missing adapter/npx/policy/cwd/redaction probes. | No | No | V0.1a hardening | structured doctor tests | Open |
+| ARS-RETENTION-CLEANUP | NEXT_PHASE | Retention/cleanup knobs are missing before long-lived use. | No | No | V0.1a hardening | tests and docs | Open |
 | ARS-SANDBOX-BOUNDARY | PARKED | Any claim that `allowed_roots` provides OS/filesystem sandbox isolation remains parked. | No | No | Separate sandbox phase approval | OS-level sandbox proof and negative filesystem-access probes | Parked |
-| ARS-REAL-RUN-GATE | PARKED | Real agent launch beyond `run --no-real-run` remains parked; V0.1b only adds stable refusal and V0.1c only designed the future approval contract. | No | No | Separate user approval | phase plan with HITL/manual gate, timeout/max-turns/budget caps, no auto-routing | Parked |
-| ARS-V01C-HITL-DESIGN | NEXT_PHASE | HITL/manual real-run design gate defined approval states, artifact binding, fail-closed rules, proposed CLI/API, and future test plan without implementing launch. | No | No | V0.1c status closure | PR #3 merged, CI success, post-merge docs gates | Closed in V0.1c |
-| ARS-V01D-MANUAL-APPROVAL-ARTIFACTS | NEXT_PHASE | Implement manual approval artifacts/state machine without launch: prepare, approve, reject, show, expire, hash binding, nonce/cap validation, redacted storage, stable refusal. | No | Yes | V0.1d implementation | tests for state transitions, artifact permissions/redaction, fail-closed rules, and no launch path | Next |
 | ARS-PERSISTENT-SESSIONS | PARKED | Persistent sessions, session registry, locking, stale-lock recovery, and multi-turn context retention remain outside this roadmap line. | No | No | Separate persistent-session phase approval | session isolation/locking/recovery design and tests | Parked |
 | ARS-SACHIMA-INTEGRATION | PARKED | Sachima behavior integration, auto-replies, delivery, ingress, participant UI, and `@all` remain out of scope. | No | No | Separate integration approval | explicit integration plan and product boundary review | Parked |
 
 ## Canonical references
 
 - North star: `GOAL.md`
+- PRD: `docs/product/prd.md`
+- Design authority: `docs/design/v0.1a-design.md`
+- Technical solution: `docs/design/technical-solution.md`
+- V0.1a conformance matrix: `docs/roadmap/v0.1a-design-conformance.md`
+- Implementation plan: `docs/roadmap/implementation-plan.md`
 - AI flow: `docs/AI_FLOW.md`
 - Roadmap rules: `docs/roadmap/README.md`
-- Design: `docs/design/v0.1a-design.md`
 - Phase -1 plan: `docs/plans/2026-05-28-phase-minus-1-acpx-contract-spike.md`
 - Phase -1 dev log: `docs/dev_log/2026-05-28-phase-minus-1-acpx-contract-spike.md`
 - V0.1a plan: `docs/plans/2026-05-28-v0.1a-exec-only-vertical-slice.md`
 - V0.1a dev log: `docs/dev_log/2026-05-28-v0.1a-exec-only-vertical-slice.md`
 - V0.1b plan: `docs/plans/2026-05-29-v0.1b-real-run-preflight-hardening.md`
 - V0.1b dev log: `docs/dev_log/2026-05-29-v0.1b-real-run-preflight-hardening.md`
-- V0.1c design: `docs/design/v0.1c-hitl-manual-real-run-design.md`
-- V0.1c plan: `docs/plans/2026-05-29-v0.1c-hitl-manual-real-run-design-gate.md`
-- V0.1c dev log: `docs/dev_log/2026-05-29-v0.1c-hitl-manual-real-run-design-gate.md`
-- V0.1c status closure plan: `docs/plans/2026-05-29-v0.1c-status-closure.md`
-- V0.1c status closure dev log: `docs/dev_log/2026-05-29-v0.1c-status-closure.md`
+- Deprecated V0.1c design: `docs/design/v0.1c-hitl-manual-real-run-design.md`
+- Goal-first final docs plan: `docs/plans/2026-05-29-goal-first-final-docs.md`
+- Goal-first final docs dev log: `docs/dev_log/2026-05-29-goal-first-final-docs.md`
