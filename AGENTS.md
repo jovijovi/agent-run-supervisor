@@ -16,10 +16,11 @@ Documentation is the project soul and precedes code. For roadmap, design, implem
 
 1. `GOAL.md`
 2. `docs/product/prd.md`
-3. `docs/design/technical-solution.md`
-4. `docs/roadmap/features.md`
-5. `docs/roadmap/current-status.md`
-6. `docs/AI_FLOW.md`
+3. `docs/design/architecture.md`
+4. `docs/design/technical-solution.md`
+5. `docs/roadmap/features.md`
+6. `docs/roadmap/current-status.md`
+7. `docs/AI_FLOW.md`
 
 Before changing files, state the current product position, feature/phase target, open tails, explicit non-approvals, and whether the requested task is allowed by the roadmap.
 

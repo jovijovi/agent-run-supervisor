@@ -40,10 +40,11 @@ External AGENT
 Read these in order for product, design, roadmap, and implementation work:
 
 1. Product requirements: `docs/product/prd.md`
-2. Technical design: `docs/design/technical-solution.md`
-3. Feature completion tracking: `docs/roadmap/features.md`
-4. Roadmap, phase status, and implementation-stage acceptance: `docs/roadmap/current-status.md`
-5. Development workflow: `docs/AI_FLOW.md`
-6. Generated documentation index: `docs/INDEX.md`
+2. System architecture (diagrams and boundaries): `docs/design/architecture.md`
+3. Technical design (module detail): `docs/design/technical-solution.md`
+4. Feature completion tracking: `docs/roadmap/features.md`
+5. Roadmap, phase status, and implementation-stage acceptance: `docs/roadmap/current-status.md`
+6. Development workflow: `docs/AI_FLOW.md`
+7. Generated documentation index: `docs/INDEX.md`
 
 `GOAL.md` is intentionally stable. It defines product positioning and points to the living documents above; it is not a phase tracker.

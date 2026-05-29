@@ -19,7 +19,7 @@ Caller projects own business verdicts, user-facing rendering, delivery, and plat
 
 - **Contract fixtures:** acpx `0.10.0` fixtures and validator exist.
 - **Foundation:** role validation, policy/argv compilation, cwd gate, exit classification, observed stdout replay, EventStore artifacts, redaction helpers, and CLI baseline exist.
-- **Documentation authority:** governed by `GOAL.md`, `docs/product/prd.md`, `docs/design/technical-solution.md`, `docs/roadmap/features.md`, `docs/roadmap/current-status.md`, and `docs/AI_FLOW.md`.
+- **Documentation authority:** governed by `GOAL.md`, `docs/product/prd.md`, `docs/design/architecture.md`, `docs/design/technical-solution.md`, `docs/roadmap/features.md`, `docs/roadmap/current-status.md`, and `docs/AI_FLOW.md`.
 - **Next implementation sequence:** finish local one-shot exec runner, then persistent sessions.
 
 ## Not approved by current phases
@@ -49,6 +49,7 @@ python tools/docs_drift_signal.py --check
 
 - `GOAL.md`
 - `docs/product/prd.md`
+- `docs/design/architecture.md`
 - `docs/design/technical-solution.md`
 - `docs/roadmap/features.md`
 - `docs/roadmap/current-status.md`

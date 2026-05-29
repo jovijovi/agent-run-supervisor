@@ -2,7 +2,7 @@
 title: "agent-run-supervisor Roadmap Current Status"
 status: active
 created_at: 2026-05-28
-last_validated_at: 2026-05-29T13:44:07+0800
+last_validated_at: 2026-05-29T18:25:40+0800
 ---
 # agent-run-supervisor Roadmap Current Status
 
@@ -12,7 +12,7 @@ last_validated_at: 2026-05-29T13:44:07+0800
 last_updated: 2026-05-29
 base_branch: main
 product_role: independent local Python library + dev CLI for supervising ACP/acpx AGENT runs and sessions with redacted audit evidence
-source_of_truth: GOAL.md, docs/product/prd.md, docs/design/technical-solution.md, docs/roadmap/features.md, docs/roadmap/current-status.md, docs/AI_FLOW.md
+source_of_truth: GOAL.md, docs/product/prd.md, docs/design/architecture.md, docs/design/technical-solution.md, docs/roadmap/features.md, docs/roadmap/current-status.md, docs/AI_FLOW.md
 current_mainline: E1 local one-shot exec runner implementation candidate is complete on branch ai/e1-one-shot-exec-runner-2026-05-29; close ARS-EXEC-RUNNER on main only after PR merge, CI, and post-merge verification; next product mode remains S1 persistent-session support
 ```
 
@@ -26,7 +26,8 @@ PRD -> technical/design docs -> roadmap/current-status + feature tracker -> appr
 
 - `GOAL.md` defines stable product positioning and points to source-of-truth docs.
 - `docs/product/prd.md` defines product requirements.
-- `docs/design/technical-solution.md` defines the technical solution.
+- `docs/design/architecture.md` gives the system-level architecture (diagrams and boundaries).
+- `docs/design/technical-solution.md` defines the module-level technical solution.
 - `docs/roadmap/features.md` tracks feature/capability completion.
 - This file tracks engineering phases, status, tails, and acceptance criteria. It does not hold task-level execution plans.
 - Per-phase implementation plans are created only for newly approved implementation work and live under `docs/plans/` named `YYYY-MM-DD-<task-slug>.md` (see `docs/plans/README.md`); the pre-realignment `docs/plans/` and `docs/dev_log/` artifacts were retired and remain non-authoritative.

@@ -2,11 +2,16 @@
 title: "agent-run-supervisor Technical Solution"
 status: active
 created_at: 2026-05-29
-last_validated_at: 2026-05-29T13:44:07+0800
+last_validated_at: 2026-05-29T18:25:40+0800
 ---
 # agent-run-supervisor Technical Solution
 
 ## 1. Architecture summary
+
+> **System-level view:** the multi-level architecture (context, container/component,
+> exec/session lifecycles, data-flow, and trust boundaries — with diagrams) lives in
+> `docs/design/architecture.md`. **This file is the module-level companion**: per-file
+> responsibilities, data models, artifact layout, and the testing strategy.
 
 `agent-run-supervisor` is an independent local Python library plus dev CLI between caller projects and the ACP/acpx runner boundary.
 
@@ -29,7 +34,8 @@ The supervisor owns runner/session lifecycle and evidence. It does not own produ
 The previous mixed V0.1a design file has been decomposed and retired. Its durable requirements now live in:
 
 - PRD and product requirements: `docs/product/prd.md`
-- Technical solution: this file
+- System architecture (diagrams + boundaries): `docs/design/architecture.md`
+- Technical solution (module detail): this file
 - Feature completion matrix: `docs/roadmap/features.md`
 - Roadmap, phases, acceptance criteria: `docs/roadmap/current-status.md`
 

@@ -2,7 +2,7 @@
 title: "AI-assisted development flow"
 status: active
 created_at: 2026-05-28
-last_validated_at: 2026-05-29T12:20:00+0800
+last_validated_at: 2026-05-29T18:25:40+0800
 ---
 # AI-assisted development flow
 
@@ -28,10 +28,11 @@ Required preflight for roadmap, phase-gate, implementation, PR, CI, review, merg
 
 1. `GOAL.md`
 2. `docs/product/prd.md`
-3. `docs/design/technical-solution.md`
-4. `docs/roadmap/features.md`
-5. `docs/roadmap/current-status.md`
-6. this file
+3. `docs/design/architecture.md`
+4. `docs/design/technical-solution.md`
+5. `docs/roadmap/features.md`
+6. `docs/roadmap/current-status.md`
+7. this file
 
 The pre-realignment `docs/plans/` and `docs/dev_log/` artifacts were retired and cleared and remain non-authoritative; do not use historical plan/dev-log artifacts as source-of-truth. The `docs/plans/` directory is now the home for fresh, approved implementation plans named `YYYY-MM-DD-<task-slug>.md` (see `docs/plans/README.md`).
 
