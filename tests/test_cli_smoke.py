@@ -56,12 +56,12 @@ def test_cli_subcommand_help_exits_zero() -> None:
         assert completed.returncode == 0, (subcommand, completed.stderr)
 
 
-def test_run_help_states_real_run_refusal_boundary() -> None:
+def test_run_help_describes_local_exec_boundary() -> None:
     completed = _run_cli("run", "--help")
 
     assert completed.returncode == 0, completed.stderr
     help_text = completed.stdout.lower()
-    assert "refuses real agent launch" in help_text
-    assert "optionally" not in help_text
-    assert "launch acpx" not in help_text
-    assert "acpx run" not in help_text
+    assert "supervise local acpx exec" in help_text
+    assert "refuses real agent launch" not in help_text
+    assert "real_run_disabled" not in help_text
+    assert "gateway" not in help_text
