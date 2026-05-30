@@ -1,0 +1,171 @@
+<!-- Hero -->
+<p align="center">
+  <img src="docs/assets/branding/readme-hero.png" alt="agent-run-supervisor —— 将外部 AGENT 运行监督为脱敏、可审计的证据" width="820">
+</p>
+
+<!-- Language links -->
+<p align="center">
+  <a href="README.md">English</a>
+  &nbsp;·&nbsp;
+  <b>简体中文</b>
+</p>
+
+<p align="center">
+  <b>agent-run-supervisor</b> —— 一个小而<b>本地优先</b>的 Python 库与开发 CLI，用于监督<br>
+  ACP/acpx 外部 AGENT 运行，并将运行器行为转化为<b>脱敏、可审计的证据</b>。
+</p>
+
+<p align="center">
+  <code>Python&nbsp;≥&nbsp;3.11</code>
+  &nbsp;·&nbsp;
+  <code>仅标准库</code>
+  &nbsp;·&nbsp;
+  <code>本地优先</code>
+  &nbsp;·&nbsp;
+  <code>MIT</code>
+  &nbsp;·&nbsp;
+  <code>状态：预发布&nbsp;(0.0.0)</code>
+</p>
+
+---
+
+## 它做什么
+
+每一个通过 **ACP/acpx** 驱动外部 AGENT 的项目，最终都会重复实现同一套底层管道：拉起并照看
+运行器子进程、编译权限策略、解析观测到的事件流、对退出行为进行分类，并在任何内容落盘之前完成
+脱敏。一旦各自为政，每个调用方都会长出自己那份略不安全的副本。
+
+`agent-run-supervisor` 将这套管道收敛为一个独立的**本地**监督层。调用方只需选择角色、提示词与
+工作目录；监督层负责校验角色、编译默认拒绝（default-deny）的策略与免 shell 的 argv、监督运行、
+将观测输出解析为归一化事件、判定一个**由监督层拥有的状态**，并写出**脱敏、权限受限的本地工件**。
+调用方拿到的是可审计的证据 —— 而不是一团运行器生命周期代码。
+
+本产品包含**两种执行模式**：一次性 exec（已实现）与持久会话（产品要求、已规划 —— 见
+[路线图](#路线图)）。它刻意**不是** Sachima、不是 Gateway 插件、不是 IM 适配器，也不是常驻守护
+进程（daemon），并且永不给出业务结论（`business_verdict` 始终为 `null`）。
+
+## 工作原理
+
+```mermaid
+flowchart LR
+    C["调用方 / 操作者<br/>role_id · 提示词 · cwd"]
+    S["agent-run-supervisor<br/>校验角色 · 编译策略 + argv<br/>监督 · 解析 · 分类 · 脱敏"]
+    X["acpx / ACP 边界<br/>exec ✅ · session 🟦 已规划"]
+    A["外部 AGENT<br/>Codex · Claude Code · ACP worker"]
+    R[("脱敏的本地工件<br/>result.json —— business_verdict = null")]
+
+    C -->|"角色 + 提示词 + cwd"| S
+    S -->|"编译后的 argv + 策略（列表，绝非 shell 字符串）"| X
+    X -.->|"启动 / 恢复唯一一个 AGENT"| A
+    A -.->|"协议输出"| X
+    X -->|"观测 stdout / 事件"| S
+    S --> R
+    R -->|"可审计的证据"| C
+```
+
+四条原则保持其诚实：
+
+- **是监督者，不是业务裁判。** 运行器/协议层面的完成永远不等于业务结论；`business_verdict`
+  始终为 `null`，归调用方所有。
+- **默认可审计。** 运行会产出确定性的、脱敏的工件，并采用受限权限（目录 `0700`、文件 `0600`、
+  最终工件原子写入）。
+- **不确定即失败关闭（fail closed）。** 无效角色、cwd 越出允许根、stdout 畸形、协议漂移、权限
+  被拒、看门狗超时，都会判定为确定性的非成功状态 —— cwd 无效时**根本不会**创建任何工件。
+- **诚实的安全声明。** `allowed_roots` 只校验 cwd/配置的**意图**，它**不是**操作系统/文件系统沙箱。
+
+不在范围内 —— 属于调用方/平台领域：公网入口、真实 IM 投递、Gateway 生命周期、生产配置写入、
+默认开启/常驻行为、`@all` 扇出，以及 agent 间自动路由。
+
+## 安装与使用
+
+> **尚未发布软件包**（版本 `0.0.0`）。请从源码检出运行。运行时为 **Python ≥ 3.11，仅标准库**；
+> `pytest` 是唯一的（可选）开发依赖。
+
+```bash
+# 克隆并进入仓库
+git clone https://github.com/jovijovi/agent-run-supervisor.git
+cd agent-run-supervisor
+
+# 校验一个 AgentRoleSpec（JSON）并打印其稳定的 role hash
+PYTHONPATH=src python3 -m agent_run_supervisor validate-role <role-file>.json
+
+# 将观测到的 acpx stdout 流经解析器回放（确定性，不启动任何 AGENT）
+PYTHONPATH=src python3 -m agent_run_supervisor replay \
+  fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson
+
+# 探测本地就绪状态（只读，绝不启动 AGENT）
+PYTHONPATH=src python3 -m agent_run_supervisor doctor
+
+# 干跑（dry-run）：编译策略 + argv 并持久化预览工件，不启动任何进程
+PYTHONPATH=src python3 -m agent_run_supervisor run \
+  --role <role-file>.json --prompt-file <prompt>.txt --no-real-run
+
+# 真实的一次性 exec：在角色策略下监督一次本地 `acpx exec`
+#（需要本地具备 acpx/Node；仅启动一个显式、本地的 AGENT）
+PYTHONPATH=src python3 -m agent_run_supervisor run \
+  --role <role-file>.json --prompt-file <prompt>.txt
+```
+
+安装本包后（`pip install -e .`），同样的接口也可通过 `agent-run-supervisor <command> …`
+控制台脚本使用。
+
+运行工件写入 `.agent-run-supervisor/runs/<run_id>/` —— 包括脱敏后的 prompt/env/argv、生成的
+策略、观测 stdout（NDJSON）、归一化事件、stderr、`result.json`（`business_verdict = null`）以及
+`redaction-report.json`。
+
+## 环境要求
+
+| 需求 | 要求 |
+|---|---|
+| 运行时 | **Python ≥ 3.11**，仅标准库 —— 零第三方运行时依赖。 |
+| 测试（可选） | `pytest >= 8, < 10`（`dev` 额外依赖）。 |
+| 真实 AGENT 运行 | 本地具备 **Node + acpx** —— **仅**在不带 `--no-real-run` 的 `run` 时需要。 |
+| 其余一切 | `validate-role`、`replay`、`doctor` 与 `--no-real-run` **无需** Node/acpx，且**不启动**任何 AGENT。 |
+
+## 质量与测试指标
+
+保持监督层诚实的本地关卡（在仓库根目录执行）：
+
+| 指标 | 证据 |
+|---|---|
+| 单元 / 集成测试 | **132 个 pytest 测试** —— `python3 -m pytest -q`。 |
+| acpx 契约 | acpx `0.10.0` 夹具 + 校验器 —— `python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0`。 |
+| 导入 / 语法冒烟 | `python3 -m compileall -q src scripts tests`。 |
+| Doctor（只读） | `… doctor` 绝不启动 AGENT（`launched_real_agent = false`）。 |
+| 回放确定性 | `… replay fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson`。 |
+| 安全工件 | 脱敏工件 · `business_verdict = null` · EventStore `0700`/`0600` 原子 NDJSON。 |
+
+```bash
+python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0
+python3 -m pytest -q
+python3 -m compileall -q src scripts tests
+PYTHONPATH=src python3 -m agent_run_supervisor doctor
+PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson
+```
+
+## 路线图
+
+仅高层方向 —— 完整的阶段状态、验收与非批准项见
+[`docs/roadmap/current-status.md`](docs/roadmap/current-status.md) 与
+[`docs/roadmap/features.md`](docs/roadmap/features.md)。
+
+- **现在 —— 基础 + 一次性 exec。** 角色/策略/解析器/存储基础，以及真实的本地 `acpx exec` 监督
+  （角色绑定、外层看门狗、终止元数据）均已就位。
+- **下一步 —— 持久会话。** 受控的多轮 ACP/acpx 会话生命周期（创建/发送/恢复/关闭、锁、过期锁
+  恢复）。属于产品要求，**并非**非目标。
+- **再之后 —— 加固 + 轻量集成。** 更完整的 doctor 探针、工件保留/清理，以及有文档的结果 schema；
+  轻量调用方集成仅在单独批准后进行。
+
+## 许可证
+
+© `agent-run-supervisor` 作者。以 **[MIT](https://opensource.org/license/mit)** 许可证发布
+（`pyproject.toml` 中 `license = { text = "MIT" }`）。预发布软件（`0.0.0`）；接口与结果 schema
+仍可能变动。
+
+<p align="center">
+  <img src="docs/assets/branding/logo-mark.png" alt="agent-run-supervisor 标志" width="72" height="72">
+  <br>
+  <sub><b>agent-run-supervisor</b> —— 是监督者，不是业务裁判。</sub>
+  <br>
+  <sub><a href="README.md">English README</a></sub>
+</p>
