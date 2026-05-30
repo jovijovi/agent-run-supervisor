@@ -5,6 +5,27 @@ import json
 
 from agent_run_supervisor.role import AgentRoleSpec
 
+
+class ExecStrategyError(ValueError):
+    """Raised when exec compilation/launch is attempted for a non-exec role.
+
+    Once a role declares ``session.strategy='persistent'`` the one-shot exec
+    path must fail closed instead of silently launching ``acpx exec``. The
+    persistent-session runner is not implemented in S1b.
+    """
+
+
+def ensure_exec_strategy(role: AgentRoleSpec) -> None:
+    """Fail closed unless the role is an exec-strategy role."""
+    strategy = role.session.strategy
+    if strategy != "exec":
+        raise ExecStrategyError(
+            f"role {role.role_id!r} uses session.strategy={strategy!r}; exec "
+            "compilation/launch is refused for non-exec strategies "
+            "(persistent-session runtime is not implemented in S1b)."
+        )
+
+
 ACPX_PERMISSION_KIND_FOR_ROLE: dict[str, str] = {
     "read": "read",
     "search": "search",
@@ -39,6 +60,7 @@ def compile_command(
     cwd: str | None,
     prompt: str,
 ) -> list[str]:
+    ensure_exec_strategy(role)
     if role.runner.acpx_binary:
         argv: list[str] = [role.runner.acpx_binary]
     else:

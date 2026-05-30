@@ -57,7 +57,9 @@ Design notes:
 - Role permissions describe maximum acpx-controllable behavior.
 - Session configuration must eventually represent both one-shot exec and persistent-session use while preserving role-bound authorization.
 
-Current status: implemented for current exec-shaped role config; persistent-session fields are not complete.
+Current status: implemented for exec-shaped role config and S1b persistent-session
+configuration (`strategy: persistent` with bounded lease settings). Persistent-session
+runtime behavior remains future work.
 
 ### 3.2 `policy.py` — acpx policy and argv compiler
 
@@ -71,7 +73,10 @@ Responsibilities:
 - Apply automation flags such as JSON output, strict parsing, read suppression, timeout, max turns, cwd, generated policy, non-interactive permission failure, optional model, and terminal disabling.
 - Compile mode-specific command tails for exec and future persistent-session operations.
 
-Current status: implemented for current dry-run and real exec paths. Session-mode compilation is future work after command fixtures are captured.
+Current status: implemented for current dry-run and real exec paths. S1b adds a
+fail-closed guard so persistent-session roles cannot accidentally launch through the
+one-shot exec compiler. Session-mode command compilation remains future work after the
+S1 lifecycle surface is implemented.
 
 ### 3.3 `workspace.py` — cwd and workspace gate
 
@@ -84,7 +89,9 @@ Responsibilities:
 
 Security claim: this is configuration/cwd intent validation, not OS/filesystem sandboxing.
 
-Current status: cwd gate implemented for current run path; session reattach checks are future work.
+Current status: cwd gate implemented for current run path. S1b adds deterministic
+`workspace_hash(...)` for session binding; real attach/resume runtime checks remain future
+work.
 
 ### 3.4 `preflight.py` — doctor probes
 
@@ -114,20 +121,23 @@ Responsibilities:
 
 Current status: one-shot subprocess launch, stdout/stderr capture, parser/classifier finalization, and watchdog kill metadata are implemented for local exec. Persistent-session supervision remains future work.
 
-### 3.6 `session.py` / future session store — persistent-session supervision
+### 3.6 `session.py` — persistent-session store foundation
 
 Responsibilities:
 
 1. Fixture-prove acpx persistent-session command grammar and stream shapes.
-2. Create/open sessions with validated role/workspace metadata.
-3. Persist session id, role hash, workspace hash, acpx version, policy hash, cwd, state, lease/lock metadata, and redacted transcript/event artifacts.
-4. Send prompts to existing sessions only if role/workspace/session metadata still match.
-5. Prevent concurrent unsafe session use through locks or leases.
-6. Detect stale locks and recover deterministically.
-7. Close/abort sessions with explicit status and artifact evidence.
-8. Prevent cross-role, cross-workspace, or stale-session leakage.
+2. Create local session records with validated role/workspace metadata.
+3. Persist session id, optional acpx session id/name, role hash, workspace hash, acpx version, policy hash, cwd, state, and lifecycle metadata.
+4. Validate stored session bindings before any reattach/resume mutation.
+5. Prevent concurrent unsafe session use through lease locks.
+6. Detect expired locks and recover deterministically by replacing the lease.
+7. Define later close/abort runtime semantics with explicit status and artifact evidence.
+8. Prevent cross-role, cross-workspace, stale-policy, acpx-version, or adapter mismatch leakage.
 
-Current status: not implemented. This is product-required future work, not a PRD/DESIGN non-goal.
+Current status: S1b implements the local session store, binding validation, and lease-lock
+foundation in `session.py`. Real acpx persistent-session runtime (`create/open/send/status/
+close/abort`), parser/event coverage, final CLI/library surface, crash/interruption runtime
+recovery, and cleanup policy remain future work.
 
 ### 3.7 `parser.py` — observed event parser
 
@@ -178,7 +188,9 @@ Run/session artifact responsibilities:
 - Produce redaction reports.
 - Add retention/cleanup knobs before long-lived operation.
 
-Current status: run artifacts and redaction are implemented for current surfaces; session artifact layout and retention controls are future work.
+Current status: run artifacts and redaction are implemented for current surfaces. S1b adds
+the local `sessions/<session_id>/session.json` and `lock.json` foundation; turn artifacts,
+retention controls, and session cleanup policy remain future work.
 
 ### 3.10 `commands.py` / `cli.py` — dev CLI
 
@@ -194,7 +206,10 @@ agent-run-supervisor doctor [--role <role-file>]
 agent-run-supervisor session create|send|status|close|abort ...
 ```
 
-Current status: validate-role, replay, doctor baseline, dry-run, and local one-shot real exec are implemented; persistent session commands remain incomplete.
+Current status: validate-role accepts exec and persistent role strategies; replay, doctor
+baseline, dry-run, and local one-shot real exec are implemented. The `run` path refuses
+persistent roles before artifacts/process launch. Persistent session lifecycle commands
+remain incomplete.
 
 ## 4. Data models
 
@@ -261,12 +276,21 @@ Current run layout:
   redaction-report.json
 ```
 
-Future session layout should be explicit before implementation. A likely shape:
+Current S1b session foundation layout:
 
 ```text
 .agent-run-supervisor/sessions/<session_id>/
   session.json
-  role.snapshot.json
+  lock.json            # present only while a lease is held
+```
+
+Future turn/runtime layout remains to be implemented and should extend the foundation,
+not replace it:
+
+```text
+.agent-run-supervisor/sessions/<session_id>/
+  session.json
+  role.snapshot.json   # future runtime snapshot, if needed
   workspace.snapshot.json
   generated-policy.json
   lock.json
@@ -279,7 +303,8 @@ Future session layout should be explicit before implementation. A likely shape:
     redaction-report.json
 ```
 
-Exact file names remain design details until session fixtures and API are approved in the roadmap.
+The foundation filenames are implemented in S1b; turn artifacts, snapshots, cleanup, and
+runtime result files remain future S1/H1 work.
 
 ## 6. Security and lifecycle boundaries
 

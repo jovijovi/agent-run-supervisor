@@ -11,6 +11,7 @@ from agent_run_supervisor.workspace import (
     WorkspaceValidationError,
     resolve_effective_cwd,
     validate_effective_cwd,
+    workspace_hash,
 )
 
 
@@ -143,6 +144,66 @@ def test_dry_run_refuses_cwd_outside_allowed_roots_without_creating_artifacts(
 
     if runs_dir.exists():
         assert list(runs_dir.iterdir()) == []
+
+
+def test_workspace_hash_is_deterministic_and_prefixed(
+    tmp_path: Path, valid_role_dict: dict[str, Any]
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    role = _role_with_roots(valid_role_dict, work, [work])
+    result = validate_effective_cwd(role, override=None)
+
+    first = workspace_hash(role, result)
+    second = workspace_hash(role, result)
+
+    assert first == second
+    assert first.startswith("sha256:")
+
+
+def test_workspace_hash_changes_with_effective_cwd(
+    tmp_path: Path, valid_role_dict: dict[str, Any]
+) -> None:
+    work = tmp_path / "work"
+    sub = work / "sub"
+    sub.mkdir(parents=True)
+    role = _role_with_roots(valid_role_dict, work, [work])
+
+    at_root = workspace_hash(role, validate_effective_cwd(role, override=str(work)))
+    at_sub = workspace_hash(role, validate_effective_cwd(role, override=str(sub)))
+
+    assert at_root != at_sub
+
+
+def test_workspace_hash_changes_with_allowed_roots(
+    tmp_path: Path, valid_role_dict: dict[str, Any]
+) -> None:
+    work = tmp_path / "work"
+    other = tmp_path / "other"
+    work.mkdir()
+    other.mkdir()
+    role_narrow = _role_with_roots(valid_role_dict, work, [work])
+    role_wide = _role_with_roots(valid_role_dict, work, [work, other])
+
+    narrow = workspace_hash(role_narrow, validate_effective_cwd(role_narrow, override=str(work)))
+    wide = workspace_hash(role_wide, validate_effective_cwd(role_wide, override=str(work)))
+
+    assert narrow != wide
+
+
+def test_workspace_hash_uses_validated_path_not_raw_override(
+    tmp_path: Path, valid_role_dict: dict[str, Any]
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    role = _role_with_roots(valid_role_dict, work, [work])
+
+    canonical = workspace_hash(role, validate_effective_cwd(role, override=str(work)))
+    # A non-canonical raw override that resolves to the same effective cwd must
+    # produce the same hash — the hash binds the validated path, not raw input.
+    noisy = workspace_hash(role, validate_effective_cwd(role, override=str(work) + "/."))
+
+    assert canonical == noisy
 
 
 def test_dry_run_accepts_cwd_inside_allowed_roots_and_records_metadata(

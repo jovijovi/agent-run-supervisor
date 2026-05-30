@@ -61,7 +61,7 @@ Checklist:
 - [x] Validate timeout, max-turn, and max-output limits.
 - [x] Validate prompt/redaction config.
 - [x] Provide CLI `validate-role` with stable role hash.
-- [ ] Extend session strategy/config to represent both one-shot exec and persistent-session use without changing the role-bound authorization model.
+- [x] Extend session strategy/config to represent both one-shot exec and persistent-session use without changing the role-bound authorization model.
 
 Acceptance:
 
@@ -100,7 +100,8 @@ Checklist:
 - [x] Resolve effective cwd from explicit CLI input or role default.
 - [x] Fail closed before artifact creation when cwd is outside configured roots.
 - [x] Persist the disclaimer that allowed roots are not a sandbox.
-- [ ] Re-validate cwd/role/workspace hash when attaching to or resuming a persistent session.
+- [x] Add validated workspace hash/binding foundation for persistent sessions.
+- [ ] Re-validate cwd/role/workspace hash when attaching to or resuming a real persistent session runtime.
 
 Acceptance:
 
@@ -132,14 +133,14 @@ The product must support persistent ACP/acpx sessions as a first-class product r
 
 Checklist:
 
-- [ ] Fixture-prove acpx session command grammar and observed stdout/event shapes.
-- [ ] Create/open sessions under a validated `AgentRoleSpec`.
-- [ ] Persist session identity, role hash, workspace hash, acpx version, policy hash, and lifecycle metadata.
+- [x] Fixture-prove acpx session command grammar and observed stdout/event shapes.
+- [x] Persist session identity, role hash, workspace hash, acpx version, policy hash, and lifecycle metadata in a local session store.
+- [x] Implement session locks/leases to prevent concurrent unsafe local mutation.
+- [x] Detect and recover from expired local session locks deterministically.
+- [x] Refuse cross-role, cross-workspace, stale-policy, acpx-version, or adapter-mismatched session reuse before mutation.
+- [ ] Create/open real acpx sessions under a validated `AgentRoleSpec`.
 - [ ] Reattach/send prompts only when role/workspace/session metadata still match policy.
-- [ ] Implement session locks/leases to prevent concurrent unsafe mutation.
-- [ ] Detect and recover from stale locks.
 - [ ] Define close/abort semantics and failure statuses.
-- [ ] Prevent cross-role or cross-workspace context leakage.
 - [ ] Provide CLI/library session operations after design and fixtures are proven.
 
 Acceptance:
@@ -196,7 +197,8 @@ Checklist:
 - [x] Append stream artifacts as JSONL/NDJSON.
 - [x] Redact prompt, env, argv, metadata, stderr, stdout, normalized event text, and final message surfaces.
 - [ ] Add retention/cleanup knobs before long-lived use.
-- [ ] Add session artifact layout and cleanup policy.
+- [x] Add session artifact foundation layout.
+- [ ] Add session turn artifacts and cleanup policy.
 - [ ] Add explicit unsafe raw-capture opt-in only if a later phase proves it necessary.
 
 Acceptance:

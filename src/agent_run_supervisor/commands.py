@@ -9,6 +9,7 @@ from typing import Any
 
 from agent_run_supervisor.event_store import EventStore
 from agent_run_supervisor.parser import ParseResult, parse_acpx_stdout
+from agent_run_supervisor.policy import ExecStrategyError
 from agent_run_supervisor.preflight import probe_acpx, probe_node
 from agent_run_supervisor.role import RoleValidationError, load_role, role_hash
 from agent_run_supervisor.runner import SupervisorRunner
@@ -134,6 +135,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             _print_json(outcome.result)
             return 0
         outcome = runner.run(role=role, prompt=prompt, cwd=args.cwd)
+    except ExecStrategyError as exc:
+        print(f"session strategy error: {exc}", file=sys.stderr)
+        return 1
     except WorkspaceValidationError as exc:
         print(f"workspace validation error: {exc}", file=sys.stderr)
         return 1

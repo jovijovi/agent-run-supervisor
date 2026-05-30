@@ -138,7 +138,7 @@ flowchart TB
 
     subgraph LIFE["Lifecycle plane"]
         RUN["runner.py<br/>one-shot exec supervision ✅"]
-        SESS["session store<br/>persistent sessions 🟦 planned (S1)"]
+        SESS["session.py<br/>store + binding + lease locks 🟡 S1b"]
     end
 
     subgraph EVID["Evidence plane"]
@@ -189,7 +189,7 @@ flowchart TB
     class CLI,CMD surface;
     class ROLE,POL,WS authz;
     class RUN life;
-    class SESS planned;
+    class SESS life;
     class PARSE,CLASS,RES evid;
     class ES,RED store;
     class PRE diag;
@@ -206,7 +206,9 @@ flowchart TB
   default-deny acpx policy and a shell-free argv list; the workspace gate validates the
   effective cwd against `allowed_roots` (intent only — **not** an OS sandbox).
 - **Lifecycle plane** — `runner.py` supervises a real one-shot `acpx exec` subprocess ✅;
-  the persistent **session store** 🟦 is the product-required S1 successor (see §4).
+  `session.py` now provides the S1b persistent-session store, binding, and lease-lock
+  foundation 🟡. Real persistent acpx create/send/status/close/abort runtime remains a
+  later S1 slice (see §4).
 - **Evidence plane** (`parser.py`, `exit_classifier.py`, `result.py`) — converts observed
   acpx output into normalized events, a supervisor-owned status, and a stable result
   payload whose `business_verdict` is always `null`.
@@ -315,13 +317,15 @@ Full status set: `completed`, `runner_error`, `invalid_invocation`, `timed_out`,
 
 ---
 
-## 4. Persistent session lifecycle and control points (Level 2) — 🟦 planned (S1)
+## 4. Persistent session lifecycle and control points (Level 2) — 🟡 partial (S1b foundation)
 
 > **Status banner.** Persistent ACP/acpx sessions are a **first-class product requirement**
-> (PRD FR-5) scheduled as phase **S1**, **after** the exec runner. They are **not**
-> implemented and are **not** a non-goal. The state machine below is **design intent** to
-> anchor S1 work; exact command grammar, event shapes, and artifact filenames remain
-> open until fresh acpx session fixtures are captured and validated.
+> (PRD FR-5) scheduled as phase **S1**, **after** the exec runner. S1a captured the
+> `acpx@0.10.0` command/schema contract, and S1b implements the local session store,
+> binding, and lease-lock foundation. Real acpx persistent-session runtime
+> (`create/open/send/status/close/abort`), parser coverage, final CLI/library lifecycle,
+> and full crash/interruption recovery remain open. Persistent sessions are **not** a
+> non-goal.
 
 ```mermaid
 stateDiagram-v2
@@ -351,6 +355,10 @@ stateDiagram-v2
    cannot leak between roles or workspaces.
 5. **Explicit close/abort** — defined close/abort semantics with their own statuses and
    artifact evidence.
+
+S1b currently implements the first three local control surfaces for store-level state:
+role/workspace/policy/acpx binding, lease locking, and expired-lease replacement. It does
+not yet drive real acpx prompt turns, close/abort commands, or session parser events.
 
 S1 must extend, **not** replace, the role-bound authorization model — sessions bind to
 the same `role_id` boundary as exec runs, never to per-run human approval tickets. S1
@@ -447,7 +455,12 @@ flowchart LR
   result.json
   redaction-report.json
 
-# Future — persistent session (🟦 planned S1; filenames are design intent only)
+# Current — persistent session foundation (🟡 S1b)
+.agent-run-supervisor/sessions/<session_id>/
+  session.json
+  lock.json            # only while a lease is held
+
+# Future — persistent session turns/runtime (remaining S1/H1)
 .agent-run-supervisor/sessions/<session_id>/
   session.json
   role.snapshot.json
@@ -536,11 +549,11 @@ prose here may be read as introducing any of them:
 |---|---|---|---|---|
 | CLI surface | `src/agent_run_supervisor/cli.py` | F-CLI-001/002/003 | ✅ / 🟡 | `tests/test_cli_smoke.py` |
 | Command handlers | `src/agent_run_supervisor/commands.py` | F-CLI-*, F-RUN-001, F-EXEC-001 | ✅ / 🟡 | `tests/test_cli_commands.py` |
-| Role model + hash | `src/agent_run_supervisor/role.py` | F-ROLE-001 | ✅ | `tests/test_role.py` |
-| Policy + argv compiler | `src/agent_run_supervisor/policy.py` | F-POLICY-001 | 🟡 (exec ✅, session pending) | `tests/test_policy.py` |
+| Role model + hash | `src/agent_run_supervisor/role.py` | F-ROLE-001 | ✅ / 🟡 session config | `tests/test_role.py` |
+| Policy + argv compiler | `src/agent_run_supervisor/policy.py` | F-POLICY-001 | 🟡 (exec ✅, session runtime pending) | `tests/test_policy.py`, `tests/test_session_strategy_guard.py` |
 | cwd / allowed-roots gate | `src/agent_run_supervisor/workspace.py` | F-WORKSPACE-001 | 🟡 | `tests/test_workspace_gate.py` |
 | One-shot exec supervision | `src/agent_run_supervisor/runner.py` | F-EXEC-001 (E1) | ✅ (phase closure roadmap-owned) | `tests/test_runner_exec.py`, `tests/test_runner_dry_run.py` |
-| Persistent session store | `session.py` / future session store | F-SESSION-001 (S1) | 🟦 planned | PRD FR-5 (fixtures pending) |
+| Persistent session store | `src/agent_run_supervisor/session.py` | F-SESSION-001 (S1) | 🟡 S1b foundation | `tests/test_session_store.py`, `tests/test_session_strategy_guard.py` |
 | Observed event parser | `src/agent_run_supervisor/parser.py` | F-PARSER-001 | 🟡 | `tests/test_parser.py` |
 | Status classifier | `src/agent_run_supervisor/exit_classifier.py` | F-STATUS-001 | 🟡 | `tests/test_exit_classifier.py` |
 | Result payload | `src/agent_run_supervisor/result.py` | F-STATUS-001 / F-EXEC-001 | ✅ | covered via runner/classifier tests |
@@ -577,7 +590,7 @@ touches the architecture.
 
 These are tracked in `docs/roadmap/current-status.md` §4 and are **not** re-decided here:
 
-- `ARS-SESSIONS` — persistent session support (S1).
+- `ARS-SESSIONS` — persistent session support (S1): S1a contract evidence and S1b store/lock foundation exist; runtime lifecycle remains open.
 - `ARS-DOCTOR-COMPLETE` — adapter/npx/policy/cwd/redaction/session doctor probes (H1).
 - `ARS-RETENTION-CLEANUP` — run/session artifact retention/cleanup knobs (H1).
 - `ARS-SANDBOX-BOUNDARY` — parked; any real OS sandbox is a separate phase.
