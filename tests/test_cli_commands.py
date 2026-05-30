@@ -215,6 +215,53 @@ def test_run_real_exec_missing_prompt_creates_no_artifacts(
     assert not runs_dir.exists() or list(runs_dir.iterdir()) == []
 
 
+def test_run_refuses_persistent_role_without_launching(
+    run_cli, tmp_path: Path, prompt_file: Path, valid_role_dict: dict[str, Any]
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    role_payload = dict(valid_role_dict)
+    role_payload["workspace"] = dict(valid_role_dict["workspace"])
+    role_payload["workspace"]["default_cwd"] = str(work)
+    role_payload["workspace"]["allowed_roots"] = [str(work)]
+    role_payload["session"] = {"strategy": "persistent"}
+    role_path = tmp_path / "role.json"
+    role_path.write_text(json.dumps(role_payload), encoding="utf-8")
+    runs_dir = tmp_path / "runs"
+
+    completed = run_cli(
+        [
+            "run",
+            "--role",
+            str(role_path),
+            "--prompt-file",
+            str(prompt_file),
+            "--runs-dir",
+            str(runs_dir),
+        ]
+    )
+
+    assert completed.returncode == 1, completed.stdout
+    combined = (completed.stdout + completed.stderr).lower()
+    assert "persistent" in combined
+    assert not runs_dir.exists() or list(runs_dir.iterdir()) == []
+
+
+def test_validate_role_accepts_persistent_role(
+    run_cli, tmp_path: Path, valid_role_dict: dict[str, Any]
+) -> None:
+    role_payload = dict(valid_role_dict)
+    role_payload["session"] = {"strategy": "persistent"}
+    role_path = tmp_path / "role.json"
+    role_path.write_text(json.dumps(role_payload), encoding="utf-8")
+
+    completed = run_cli(["validate-role", str(role_path)])
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload["valid"] is True
+
+
 def test_run_no_real_run_refuses_when_cwd_outside_allowed_roots(
     run_cli, tmp_path: Path, prompt_file: Path, valid_role_dict
 ) -> None:

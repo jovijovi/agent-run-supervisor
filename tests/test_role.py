@@ -112,13 +112,84 @@ def test_load_role_rejects_bad_schema_version() -> None:
         load_role(spec)
 
 
-def test_load_role_rejects_non_exec_session_strategy() -> None:
+def test_load_role_defaults_session_to_exec_without_lease() -> None:
+    spec = copy.deepcopy(VALID_ROLE)
+    spec.pop("session", None)
+
+    role = load_role(spec)
+
+    assert role.session.strategy == "exec"
+    assert role.session.lease_seconds is None
+
+
+def test_load_role_accepts_persistent_session_strategy() -> None:
     spec = copy.deepcopy(VALID_ROLE)
     spec["session"] = {"strategy": "persistent"}
 
+    role = load_role(spec)
+
+    assert role.session.strategy == "persistent"
+    # Persistent sessions get a bounded default lease so concurrency control
+    # always has a finite expiry to work with.
+    assert isinstance(role.session.lease_seconds, int)
+    assert role.session.lease_seconds > 0
+
+
+def test_load_role_accepts_explicit_persistent_lease_seconds() -> None:
+    spec = copy.deepcopy(VALID_ROLE)
+    spec["session"] = {"strategy": "persistent", "lease_seconds": 120}
+
+    role = load_role(spec)
+
+    assert role.session.strategy == "persistent"
+    assert role.session.lease_seconds == 120
+
+
+def test_load_role_rejects_unknown_session_strategy() -> None:
+    spec = copy.deepcopy(VALID_ROLE)
+    spec["session"] = {"strategy": "daemon"}
+
     with pytest.raises(RoleValidationError) as excinfo:
         load_role(spec)
-    assert "exec" in str(excinfo.value)
+    assert "strategy" in str(excinfo.value)
+    assert "daemon" in str(excinfo.value)
+
+
+def test_load_role_rejects_nonpositive_persistent_lease_seconds() -> None:
+    spec = copy.deepcopy(VALID_ROLE)
+    spec["session"] = {"strategy": "persistent", "lease_seconds": 0}
+
+    with pytest.raises(RoleValidationError) as excinfo:
+        load_role(spec)
+    assert "lease_seconds" in str(excinfo.value)
+
+
+def test_load_role_rejects_oversized_persistent_lease_seconds() -> None:
+    spec = copy.deepcopy(VALID_ROLE)
+    spec["session"] = {"strategy": "persistent", "lease_seconds": 10_000_000}
+
+    with pytest.raises(RoleValidationError) as excinfo:
+        load_role(spec)
+    assert "lease_seconds" in str(excinfo.value)
+
+
+def test_load_role_rejects_lease_seconds_for_exec_strategy() -> None:
+    spec = copy.deepcopy(VALID_ROLE)
+    spec["session"] = {"strategy": "exec", "lease_seconds": 120}
+
+    with pytest.raises(RoleValidationError) as excinfo:
+        load_role(spec)
+    assert "lease_seconds" in str(excinfo.value)
+
+
+def test_load_role_rejects_unknown_session_keys() -> None:
+    spec = copy.deepcopy(VALID_ROLE)
+    spec["session"] = {"strategy": "persistent", "shell_access": True}
+
+    with pytest.raises(RoleValidationError) as excinfo:
+        load_role(spec)
+    assert "unknown" in str(excinfo.value).lower()
+    assert "shell_access" in str(excinfo.value)
 
 
 def test_load_role_rejects_nonpositive_limits() -> None:

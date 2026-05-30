@@ -30,7 +30,7 @@ Status legend:
 | F-CLI-003 | `doctor` CLI | Required | Partial | `src/agent_run_supervisor/preflight.py`, doctor smoke/tests | Adapter/npx/policy/cwd/redaction/session readiness probes |
 | F-RUN-001 | `run --no-real-run` compile/artifact preview | Useful support feature | Done | dry-run tests/artifacts | Keep or deprecate only with replacement evidence |
 | F-EXEC-001 | Real one-shot acpx exec supervision | Required | Done | `src/agent_run_supervisor/runner.py`, `src/agent_run_supervisor/commands.py`, `tests/test_runner_exec.py`, local smoke `/tmp/agent-run-supervisor-e1-smoke/result.json` | Keep local-only boundary; persistent sessions remain S1 |
-| F-SESSION-001 | Persistent session lifecycle | Required | Planned | Product requirement in PRD/design; S1a contract spike evidence: `fixtures/acpx-0.10.0/session-*`, `fixtures/acpx-0.10.0/session-contract-summary.json`, manifest `session_contract`, `scripts/validate_contract_fixtures.py`, `docs/plans/2026-05-30-s1a-session-contract-spike.md` (command/schema evidence only) | Session store, locks/leases, stale recovery, close/abort semantics, leakage tests, session parser/CLI/lifecycle tests (S1a captured contract evidence only; runtime unimplemented) |
+| F-SESSION-001 | Persistent session lifecycle | Required | Partial | Product requirement in PRD/design; S1a contract evidence: `fixtures/acpx-0.10.0/session-*`, `fixtures/acpx-0.10.0/session-contract-summary.json`, manifest `session_contract`, `scripts/validate_contract_fixtures.py`, `docs/plans/2026-05-30-s1a-session-contract-spike.md`; S1b foundation: `src/agent_run_supervisor/session.py`, session config/exec guard in `role.py`/`policy.py`/`runner.py`/`commands.py`, workspace binding in `workspace.py`, artifact primitives in `event_store.py`, tests `tests/test_session_store.py`, `tests/test_session_strategy_guard.py` | Real session create/open/send/status/close/abort runtime, session parser/event coverage, final CLI/library lifecycle, close/abort semantics, crash/interruption recovery, retention/cleanup, and end-to-end lifecycle tests |
 | F-RETENTION-001 | Artifact retention/cleanup knobs | Required for long-lived use | Planned | Current EventStore only | Cleanup API/CLI, retention tests, no unsafe deletion |
 | F-INTEGRATION-001 | Thin caller integration boundary | Future optional | Parked | PRD/design boundary | Separate approval and plan; caller owns business verdict/rendering |
 | F-NONGOAL-001 | Public ingress / real IM delivery / Gateway lifecycle / production config / `@all` | Non-goal | Non-goal | PRD non-goals | Requires separate product/project approval outside this product's local supervisor scope |
@@ -40,10 +40,10 @@ Status legend:
 | Area | Done | Partial | Planned/Parked | Note |
 |---|---:|---:|---:|---|
 | Governance/docs | 1 | 0 | 0 | Authority realignment complete via PR #6 (`7dcbe4f`). |
-| Core role/policy/workspace | 1 | 2 | 0 | Role implemented; policy/workspace have exec proof and still need session proof. |
+| Core role/policy/workspace | 1 | 2 | 0 | Role supports persistent session config; policy/workspace have exec proof plus S1b binding foundation, with runtime session command proof still open. |
 | Parser/status/store | 0 | 3 | 1 | Current run surfaces exist; session/retention remain. |
 | CLI | 4 | 1 | 1 | validate/replay/dry-run/real exec done; doctor partial; session CLI pending. |
-| Execution modes | 1 | 0 | 1 | One-shot exec done; persistent sessions remain product-required S1 work. |
+| Execution modes | 1 | 1 | 0 | One-shot exec done; persistent sessions have S1a contract evidence and S1b local store/lock foundation, runtime lifecycle still open. |
 
 ## Maintenance rule
 

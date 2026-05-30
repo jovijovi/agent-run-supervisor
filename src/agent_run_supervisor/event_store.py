@@ -91,6 +91,45 @@ class EventStore:
             }
 
 
+def atomic_write_json(path: Path, payload: Mapping[str, Any]) -> Path:
+    """Atomically write ``payload`` as canonical JSON at ``FILE_MODE`` (0600).
+
+    Parents are created as needed; the final file is replaced atomically so a
+    reader never observes a partial write. Keys are sorted for deterministic
+    bytes (so the artifact is stable for hashing/diffing).
+    """
+    path = Path(path)
+    data = json.dumps(payload, sort_keys=True, indent=2).encode("utf-8")
+    _atomic_write_bytes(path, data)
+    return path
+
+
+def exclusive_create_bytes(path: Path, data: bytes) -> Path:
+    """Create ``path`` exclusively (``O_EXCL``) at ``FILE_MODE`` (0600).
+
+    Raises ``FileExistsError`` if the file already exists — this is the
+    primitive locks rely on so two writers can never both believe they created
+    the lock file.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, FILE_MODE)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+    os.chmod(path, FILE_MODE)
+    return path
+
+
+def secure_mkdir(path: Path) -> Path:
+    """Create ``path`` (and parents) and force ``DIR_MODE`` (0700) on the leaf."""
+    path = Path(path)
+    path.mkdir(mode=DIR_MODE, parents=True, exist_ok=True)
+    os.chmod(path, DIR_MODE)
+    return path
+
+
 def _atomic_write_path(path: Path, data: bytes) -> Path:
     _atomic_write_bytes(path, data)
     return path

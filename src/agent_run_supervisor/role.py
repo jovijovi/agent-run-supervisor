@@ -55,9 +55,17 @@ class AgentPermissionSpec:
     other: bool
 
 
+SESSION_STRATEGIES: tuple[str, ...] = ("exec", "persistent")
+# Bounded default lease for persistent sessions so concurrency control always
+# has a finite expiry to recover stale locks against. Exec runs do not lease.
+DEFAULT_SESSION_LEASE_SECONDS = 900
+MAX_SESSION_LEASE_SECONDS = 86_400
+
+
 @dataclass(frozen=True)
 class AgentSessionSpec:
     strategy: str
+    lease_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -195,15 +203,42 @@ def _permissions(raw: Mapping[str, Any]) -> AgentPermissionSpec:
 def _session(raw: Mapping[str, Any] | None) -> AgentSessionSpec:
     where = "session"
     if raw is None:
-        return AgentSessionSpec(strategy="exec")
+        return AgentSessionSpec(strategy="exec", lease_seconds=None)
     if not isinstance(raw, Mapping):
         raise RoleValidationError(f"{where}: must be a mapping")
-    strategy = _require_str(raw, "strategy", where)
-    if strategy != "exec":
+    unknown = set(raw.keys()) - {"strategy", "lease_seconds"}
+    if unknown:
         raise RoleValidationError(
-            f"{where}: current role schema only accepts strategy='exec' until persistent sessions are implemented (got {strategy!r})",
+            f"{where}: unknown keys: {sorted(unknown)}",
         )
-    return AgentSessionSpec(strategy=strategy)
+    strategy = _require_str(raw, "strategy", where)
+    if strategy not in SESSION_STRATEGIES:
+        raise RoleValidationError(
+            f"{where}: strategy must be one of {list(SESSION_STRATEGIES)} (got {strategy!r})",
+        )
+    lease_raw = raw.get("lease_seconds")
+    if strategy == "exec":
+        if lease_raw is not None:
+            raise RoleValidationError(
+                f"{where}: lease_seconds is only valid for strategy='persistent'",
+            )
+        return AgentSessionSpec(strategy="exec", lease_seconds=None)
+
+    # strategy == "persistent": bound the lease so stale-lock recovery is finite.
+    if lease_raw is None:
+        lease_seconds = DEFAULT_SESSION_LEASE_SECONDS
+    else:
+        if not isinstance(lease_raw, int) or isinstance(lease_raw, bool) or lease_raw <= 0:
+            raise RoleValidationError(
+                f"{where}: lease_seconds must be a positive integer (got {lease_raw!r})",
+            )
+        if lease_raw > MAX_SESSION_LEASE_SECONDS:
+            raise RoleValidationError(
+                f"{where}: lease_seconds must be <= {MAX_SESSION_LEASE_SECONDS} "
+                f"(got {lease_raw!r})",
+            )
+        lease_seconds = lease_raw
+    return AgentSessionSpec(strategy="persistent", lease_seconds=lease_seconds)
 
 
 def _limits(raw: Mapping[str, Any]) -> AgentRunLimits:

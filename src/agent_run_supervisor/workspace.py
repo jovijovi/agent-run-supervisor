@@ -6,6 +6,8 @@ a future sandbox phase explicitly proves and approves a real security boundary.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -64,6 +66,33 @@ def validate_effective_cwd(
         allowed_roots_security_boundary=False,
         disclaimer=ALLOWED_ROOTS_DISCLAIMER,
     )
+
+
+def workspace_hash(role: AgentRoleSpec, result: WorkspaceValidationResult) -> str:
+    """Bind a session/run to its validated workspace decision.
+
+    The hash covers the *validated* effective cwd and matched root (canonical,
+    resolved paths — never the raw caller input), the sorted/normalized set of
+    allowed roots, and the security-boundary disclaimer fields. Two callers that
+    pass non-canonical input resolving to the same effective cwd under the same
+    roots therefore produce the same hash; any drift in cwd, roots, or the
+    disclaimer/boundary posture changes it.
+    """
+    normalized_roots = sorted(
+        str(Path(root).expanduser().resolve())
+        for root in role.workspace.allowed_roots
+    )
+    payload = {
+        "effective_cwd": str(result.effective_cwd),
+        "matched_root": (
+            str(result.matched_root) if result.matched_root is not None else None
+        ),
+        "allowed_roots": normalized_roots,
+        "allowed_roots_security_boundary": result.allowed_roots_security_boundary,
+        "disclaimer": result.disclaimer,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _is_within(candidate: Path, root: Path) -> bool:

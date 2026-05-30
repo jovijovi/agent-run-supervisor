@@ -5,11 +5,50 @@ import os
 import stat
 from pathlib import Path
 
-from agent_run_supervisor.event_store import EventStore
+import pytest
+
+from agent_run_supervisor.event_store import (
+    EventStore,
+    atomic_write_json,
+    exclusive_create_bytes,
+    secure_mkdir,
+)
 
 
 def _mode_octal(path: Path) -> int:
     return stat.S_IMODE(os.stat(path).st_mode)
+
+
+def test_atomic_write_json_writes_0600_and_round_trips(tmp_path: Path) -> None:
+    path = tmp_path / "nested" / "record.json"
+
+    atomic_write_json(path, {"a": 1, "b": "two"})
+
+    assert _mode_octal(path) == 0o600
+    assert json.loads(path.read_text(encoding="utf-8")) == {"a": 1, "b": "two"}
+    assert not any(
+        p.name.startswith(".tmp") or p.name.endswith(".tmp")
+        for p in path.parent.iterdir()
+    )
+
+
+def test_exclusive_create_bytes_refuses_existing_file(tmp_path: Path) -> None:
+    path = tmp_path / "lock.json"
+
+    exclusive_create_bytes(path, b"{}")
+    assert _mode_octal(path) == 0o600
+
+    with pytest.raises(FileExistsError):
+        exclusive_create_bytes(path, b"{}")
+
+
+def test_secure_mkdir_creates_0700_dir(tmp_path: Path) -> None:
+    path = tmp_path / "sessions" / "abc"
+
+    secure_mkdir(path)
+
+    assert path.is_dir()
+    assert _mode_octal(path) == 0o700
 
 
 def test_event_store_run_dir_is_mode_0700(tmp_path: Path) -> None:
