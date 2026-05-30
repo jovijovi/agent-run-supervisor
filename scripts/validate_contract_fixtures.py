@@ -435,14 +435,18 @@ def _validate_management_semantics(name: str, payload: dict[str, Any]) -> list[s
             errors.append(f"{name}: session show must use schema acpx.session.v1")
         if payload.get("closed") is not True:
             errors.append(f"{name}: a closed session must report closed=true")
+        else:
+            closed_at = payload.get("closedAt")
+            if not isinstance(closed_at, str) or not closed_at:
+                errors.append(f"{name}: a closed session must record a non-empty closedAt timestamp")
     elif name == "session-show-after-turns":
         if payload.get("schema") != "acpx.session.v1":
             errors.append(f"{name}: session show must use schema acpx.session.v1")
         messages = payload.get("messages")
-        if isinstance(messages, list) and len(messages) == 0:
+        if not isinstance(messages, list) or len(messages) == 0:
             errors.append(f"{name}: session show after turns must record a nonzero message count")
         last_seq = payload.get("lastSeq")
-        if isinstance(last_seq, int) and last_seq <= 0:
+        if not isinstance(last_seq, int) or isinstance(last_seq, bool) or last_seq <= 0:
             errors.append(f"{name}: session show after turns must record a nonzero lastSeq")
     elif name == "session-status-after-turns":
         if payload.get("action") != "status_snapshot":

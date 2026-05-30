@@ -5,6 +5,7 @@ import shutil
 from pathlib import Path
 
 from scripts.validate_contract_fixtures import (
+    _validate_management_semantics,
     find_secret_like_values,
     parse_json_lines,
     validate_command_argv,
@@ -320,3 +321,52 @@ def test_validate_session_contract_detects_exit_mismatch(tmp_path: Path) -> None
     errors = validate_session_contract(root)
 
     assert any("session-close-named" in error and "exit_code" in error for error in errors)
+
+
+def test_management_semantics_after_turns_accepts_valid_payload() -> None:
+    payload = {"schema": "acpx.session.v1", "messages": [{"User": {}}], "lastSeq": 33}
+
+    assert _validate_management_semantics("session-show-after-turns", payload) == []
+
+
+def test_management_semantics_after_turns_requires_messages_present_and_list() -> None:
+    missing = {"schema": "acpx.session.v1", "lastSeq": 33}
+    non_list = {"schema": "acpx.session.v1", "messages": "two messages", "lastSeq": 33}
+
+    missing_errors = _validate_management_semantics("session-show-after-turns", missing)
+    non_list_errors = _validate_management_semantics("session-show-after-turns", non_list)
+
+    assert any("nonzero message count" in error for error in missing_errors)
+    assert any("nonzero message count" in error for error in non_list_errors)
+
+
+def test_management_semantics_after_turns_requires_positive_int_last_seq() -> None:
+    missing = {"schema": "acpx.session.v1", "messages": [{"User": {}}]}
+    non_int = {"schema": "acpx.session.v1", "messages": [{"User": {}}], "lastSeq": "33"}
+
+    missing_errors = _validate_management_semantics("session-show-after-turns", missing)
+    non_int_errors = _validate_management_semantics("session-show-after-turns", non_int)
+
+    assert any("nonzero lastSeq" in error for error in missing_errors)
+    assert any("nonzero lastSeq" in error for error in non_int_errors)
+
+
+def test_management_semantics_closed_accepts_valid_payload() -> None:
+    payload = {
+        "schema": "acpx.session.v1",
+        "closed": True,
+        "closedAt": "2026-05-30T14:18:53.698Z",
+    }
+
+    assert _validate_management_semantics("session-show-closed", payload) == []
+
+
+def test_management_semantics_closed_requires_nonempty_closed_at() -> None:
+    missing = {"schema": "acpx.session.v1", "closed": True}
+    empty = {"schema": "acpx.session.v1", "closed": True, "closedAt": ""}
+
+    missing_errors = _validate_management_semantics("session-show-closed", missing)
+    empty_errors = _validate_management_semantics("session-show-closed", empty)
+
+    assert any("closedAt" in error for error in missing_errors)
+    assert any("closedAt" in error for error in empty_errors)
