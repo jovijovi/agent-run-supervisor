@@ -1,6 +1,6 @@
 <!-- Hero -->
 <p align="center">
-  <img src="docs/assets/branding/readme-hero.png" alt="agent-run-supervisor —— 将外部 AGENT 运行监督为脱敏、可审计的证据" width="820">
+  <img src="docs/assets/branding/readme-hero.png" alt="Agent Run Supervisor" width="860">
 </p>
 
 <!-- Language links -->
@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <b>agent-run-supervisor</b> —— 一个小而<b>本地优先</b>的 Python 库与开发 CLI，用于监督<br>
+  一个小而<b>本地优先</b>的 Python 库与开发 CLI，用于监督<br>
   ACP/acpx 外部 AGENT 运行，并将运行器行为转化为<b>脱敏、可审计的证据</b>。
 </p>
 
@@ -46,22 +46,9 @@
 
 ## 工作原理
 
-```mermaid
-flowchart LR
-    C["调用方 / 操作者<br/>role_id · 提示词 · cwd"]
-    S["agent-run-supervisor<br/>校验角色 · 编译策略 + argv<br/>监督 · 解析 · 分类 · 脱敏"]
-    X["acpx / ACP 边界<br/>exec ✅ · session 🟦 已规划"]
-    A["外部 AGENT<br/>Codex · Claude Code · ACP worker"]
-    R[("脱敏的本地工件<br/>result.json —— business_verdict = null")]
-
-    C -->|"角色 + 提示词 + cwd"| S
-    S -->|"编译后的 argv + 策略（列表，绝非 shell 字符串）"| X
-    X -.->|"启动 / 恢复唯一一个 AGENT"| A
-    A -.->|"协议输出"| X
-    X -->|"观测 stdout / 事件"| S
-    S --> R
-    R -->|"可审计的证据"| C
-```
+<p align="center">
+  <img src="docs/assets/diagrams/how-it-works.zh-CN.svg" alt="agent-run-supervisor 校验角色、监督 ACP/acpx、观测外部 AGENT 并写出脱敏本地工件的工作原理" width="900">
+</p>
 
 四条原则保持其诚实：
 

@@ -1,6 +1,6 @@
 <!-- Hero -->
 <p align="center">
-  <img src="docs/assets/branding/readme-hero.png" alt="agent-run-supervisor — supervise external AGENT runs into redacted, auditable evidence" width="820">
+  <img src="docs/assets/branding/readme-hero.png" alt="Agent Run Supervisor" width="860">
 </p>
 
 <!-- Language links -->
@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <b>agent-run-supervisor</b> — a small, <b>local-first</b> Python library &amp; dev CLI that supervises<br>
+  A small, <b>local-first</b> Python library &amp; dev CLI that supervises<br>
   ACP/acpx external AGENT runs and turns runner behavior into <b>redacted, auditable evidence</b>.
 </p>
 
@@ -50,22 +50,9 @@ Gateway plugin, an IM adapter, or a daemon, and it never emits a business verdic
 
 ## How it works
 
-```mermaid
-flowchart LR
-    C["Caller / operator<br/>role_id · prompt · cwd"]
-    S["agent-run-supervisor<br/>validate role · compile policy + argv<br/>supervise · parse · classify · redact"]
-    X["acpx / ACP boundary<br/>exec ✅ · session 🟦 planned"]
-    A["External AGENT<br/>Codex · Claude Code · ACP worker"]
-    R[("Redacted local artifacts<br/>result.json — business_verdict = null")]
-
-    C -->|"role + prompt + cwd"| S
-    S -->|"compiled argv + policy (a list, never a shell string)"| X
-    X -.->|"launches / resumes ONE AGENT"| A
-    A -.->|"protocol output"| X
-    X -->|"observed stdout / events"| S
-    S --> R
-    R -->|"auditable evidence"| C
-```
+<p align="center">
+  <img src="docs/assets/diagrams/how-it-works.svg" alt="How agent-run-supervisor validates a role, supervises ACP/acpx, observes an external AGENT, and writes redacted local artifacts" width="900">
+</p>
 
 Four principles keep it honest:
 
