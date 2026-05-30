@@ -1,0 +1,12 @@
+{
+  "contract_phase": "S1a persistent-session contract spike",
+  "description": "Show recent session history entries after two prompt turns.",
+  "duration_seconds": 0.817977,
+  "ended_at": "2026-05-30T14:18:50.059386Z",
+  "expected_exit": 0,
+  "management_command_schema": "acpx summarized JSON object, not prompt/exec raw ACP stream",
+  "name": "session-history-after-turns",
+  "started_at": "2026-05-30T14:18:49.241409Z",
+  "stderr_file": "stderr.log",
+  "stdout_file": "stdout.json"
+}

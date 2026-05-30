@@ -1,14 +1,50 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 from scripts.validate_contract_fixtures import (
+    _validate_management_semantics,
     find_secret_like_values,
     parse_json_lines,
     validate_command_argv,
     validate_manifest,
+    validate_session_command_argv,
+    validate_session_contract,
 )
+
+REPO_FIXTURES_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "acpx-0.10.0"
+
+
+def _session_prompt_argv(prompt: str, *, scratch: str | None = None) -> list[str]:
+    cwd = scratch or "/repo/.tmp/acpx-session-contract-scratch/persistent-session"
+    return [
+        "npx",
+        "-y",
+        "acpx@0.10.0",
+        "--format",
+        "json",
+        "--json-strict",
+        "--suppress-reads",
+        "--timeout",
+        "180",
+        "--max-turns",
+        "1",
+        "--cwd",
+        cwd,
+        "--deny-all",
+        "--non-interactive-permissions",
+        "fail",
+        "--no-terminal",
+        "--model",
+        "gpt-5.5[low]",
+        "codex",
+        "prompt",
+        "-s",
+        "s1a-session-contract",
+        prompt,
+    ]
 
 
 def test_parse_json_lines_rejects_malformed_line(tmp_path: Path) -> None:
@@ -144,3 +180,193 @@ def test_validate_manifest_checks_management_status_no_session(tmp_path: Path) -
     errors = validate_manifest(root)
 
     assert "management-status-no-session-exit0 must report status=no-session" in errors
+
+
+# --- S1a persistent-session contract spike --------------------------------
+
+
+def test_validate_session_command_argv_accepts_management_grammar() -> None:
+    argv = [
+        "npx",
+        "-y",
+        "acpx@0.10.0",
+        "--format",
+        "json",
+        "--json-strict",
+        "--cwd",
+        "/repo/.tmp/acpx-session-contract-scratch/persistent-session",
+        "codex",
+        "sessions",
+        "new",
+        "--name",
+        "s1a-session-contract",
+    ]
+
+    assert validate_session_command_argv("session-new-named", argv) == []
+
+
+def test_validate_session_command_argv_accepts_prompt_grammar() -> None:
+    argv = _session_prompt_argv("Persistent session contract turn 1. Reply exactly: S1A_SESSION_TURN_1_OK")
+
+    assert validate_session_command_argv("session-prompt-turn1", argv) == []
+
+
+def test_validate_session_command_argv_rejects_wrong_session_name() -> None:
+    argv = [
+        "npx",
+        "-y",
+        "acpx@0.10.0",
+        "--format",
+        "json",
+        "--json-strict",
+        "--cwd",
+        "/repo/.tmp/acpx-session-contract-scratch/persistent-session",
+        "codex",
+        "sessions",
+        "close",
+        "some-other-session",
+    ]
+
+    errors = validate_session_command_argv("session-close-named", argv)
+
+    assert any("session management command tail" in error for error in errors)
+
+
+def test_validate_session_command_argv_rejects_misordered_prompt_flags() -> None:
+    argv = _session_prompt_argv("hello")
+    # Swap --format/--json-strict ordering to break the strict grammar.
+    argv[3], argv[5] = argv[5], argv[3]
+
+    errors = validate_session_command_argv("session-prompt-turn1", argv)
+
+    assert any("ordered" in error for error in errors)
+
+
+def test_validate_session_command_argv_rejects_extra_prompt_argument() -> None:
+    argv = _session_prompt_argv("hello")
+    argv.append("unexpected-second-prompt")
+
+    errors = validate_session_command_argv("session-prompt-turn1", argv)
+
+    assert any("exactly one prompt argument" in error for error in errors)
+
+
+def test_validate_session_contract_passes_on_captured_fixtures() -> None:
+    errors = validate_session_contract(REPO_FIXTURES_ROOT)
+
+    assert errors == []
+
+
+def test_validate_session_contract_detects_turn2_setup_pollution(tmp_path: Path) -> None:
+    root = tmp_path / "acpx-0.10.0"
+    shutil.copytree(REPO_FIXTURES_ROOT, root)
+
+    turn2 = root / "session-prompt-turn2" / "stdout.ndjson"
+    polluted = turn2.read_text(encoding="utf-8")
+    polluted += json.dumps({"jsonrpc": "2.0", "id": 99, "method": "initialize", "params": {}}) + "\n"
+    turn2.write_text(polluted, encoding="utf-8")
+
+    # Keep the declared summary in sync so the ONLY failing check is the
+    # follow-up-stream rule, not the summary cross-check.
+    summary_path = root / "session-contract-summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["schema"]["turn2"]["methods"] = sorted(
+        set(summary["schema"]["turn2"]["methods"]) | {"initialize"}
+    )
+    summary["fixtures"]["session-prompt-turn2"]["stdout_lines"] += 1
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    errors = validate_session_contract(root)
+
+    assert any("session-prompt-turn2" in error and "follow-up" in error for error in errors)
+
+
+def test_validate_session_contract_detects_flipped_created_flag(tmp_path: Path) -> None:
+    root = tmp_path / "acpx-0.10.0"
+    shutil.copytree(REPO_FIXTURES_ROOT, root)
+
+    new_stdout = root / "session-new-named" / "stdout.json"
+    payload = json.loads(new_stdout.read_text(encoding="utf-8"))
+    payload["created"] = False
+    new_stdout.write_text(json.dumps(payload), encoding="utf-8")
+
+    errors = validate_session_contract(root)
+
+    assert any("session-new-named" in error and "created" in error for error in errors)
+
+
+def test_validate_session_contract_detects_summary_text_mismatch(tmp_path: Path) -> None:
+    root = tmp_path / "acpx-0.10.0"
+    shutil.copytree(REPO_FIXTURES_ROOT, root)
+
+    summary_path = root / "session-contract-summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["schema"]["turn1"]["joined_agent_text"] = "WRONG_SENTINEL"
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    errors = validate_session_contract(root)
+
+    assert any("summary" in error and "turn1" in error for error in errors)
+
+
+def test_validate_session_contract_detects_exit_mismatch(tmp_path: Path) -> None:
+    root = tmp_path / "acpx-0.10.0"
+    shutil.copytree(REPO_FIXTURES_ROOT, root)
+
+    result_path = root / "session-close-named" / "result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["exit_code"] = 1
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+
+    errors = validate_session_contract(root)
+
+    assert any("session-close-named" in error and "exit_code" in error for error in errors)
+
+
+def test_management_semantics_after_turns_accepts_valid_payload() -> None:
+    payload = {"schema": "acpx.session.v1", "messages": [{"User": {}}], "lastSeq": 33}
+
+    assert _validate_management_semantics("session-show-after-turns", payload) == []
+
+
+def test_management_semantics_after_turns_requires_messages_present_and_list() -> None:
+    missing = {"schema": "acpx.session.v1", "lastSeq": 33}
+    non_list = {"schema": "acpx.session.v1", "messages": "two messages", "lastSeq": 33}
+
+    missing_errors = _validate_management_semantics("session-show-after-turns", missing)
+    non_list_errors = _validate_management_semantics("session-show-after-turns", non_list)
+
+    assert any("nonzero message count" in error for error in missing_errors)
+    assert any("nonzero message count" in error for error in non_list_errors)
+
+
+def test_management_semantics_after_turns_requires_positive_int_last_seq() -> None:
+    missing = {"schema": "acpx.session.v1", "messages": [{"User": {}}]}
+    non_int = {"schema": "acpx.session.v1", "messages": [{"User": {}}], "lastSeq": "33"}
+
+    missing_errors = _validate_management_semantics("session-show-after-turns", missing)
+    non_int_errors = _validate_management_semantics("session-show-after-turns", non_int)
+
+    assert any("nonzero lastSeq" in error for error in missing_errors)
+    assert any("nonzero lastSeq" in error for error in non_int_errors)
+
+
+def test_management_semantics_closed_accepts_valid_payload() -> None:
+    payload = {
+        "schema": "acpx.session.v1",
+        "closed": True,
+        "closedAt": "2026-05-30T14:18:53.698Z",
+    }
+
+    assert _validate_management_semantics("session-show-closed", payload) == []
+
+
+def test_management_semantics_closed_requires_nonempty_closed_at() -> None:
+    missing = {"schema": "acpx.session.v1", "closed": True}
+    empty = {"schema": "acpx.session.v1", "closed": True, "closedAt": ""}
+
+    missing_errors = _validate_management_semantics("session-show-closed", missing)
+    empty_errors = _validate_management_semantics("session-show-closed", empty)
+
+    assert any("closedAt" in error for error in missing_errors)
+    assert any("closedAt" in error for error in empty_errors)

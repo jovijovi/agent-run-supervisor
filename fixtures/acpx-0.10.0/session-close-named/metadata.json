@@ -1,0 +1,12 @@
+{
+  "contract_phase": "S1a persistent-session contract spike",
+  "description": "Close the named session record for the scratch cwd.",
+  "duration_seconds": 0.822569,
+  "ended_at": "2026-05-30T14:18:53.727746Z",
+  "expected_exit": 0,
+  "management_command_schema": "acpx summarized JSON object, not prompt/exec raw ACP stream",
+  "name": "session-close-named",
+  "started_at": "2026-05-30T14:18:52.905177Z",
+  "stderr_file": "stderr.log",
+  "stdout_file": "stdout.json"
+}

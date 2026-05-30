@@ -152,7 +152,7 @@ Goal: implement controlled persistent ACP/acpx session lifecycle as a first-clas
 
 Checklist:
 
-- [ ] Capture fresh acpx session command fixtures and observed event shapes.
+- [x] Capture fresh acpx session command fixtures and observed event shapes. *(S1a contract spike — command/schema evidence only; S1 implementation remains Planned.)*
 - [ ] Extend `AgentRoleSpec` session config for persistent sessions.
 - [ ] Add session store layout with role/workspace/acpx/policy hashes.
 - [ ] Implement session create/open.
@@ -166,6 +166,14 @@ Checklist:
 - [ ] Add CLI/library session surface.
 - [ ] Update feature tracker and roadmap evidence.
 
+S1a contract-spike evidence (command/schema only, not implementation):
+
+- Plan: `docs/plans/2026-05-30-s1a-session-contract-spike.md`.
+- Prompt-turn fixtures (raw `stdout.ndjson`): `fixtures/acpx-0.10.0/session-prompt-turn1/`, `fixtures/acpx-0.10.0/session-prompt-turn2/` (turn2 reuses the same ACP session id and skips `initialize`/`session/new`).
+- Management-command fixtures (single-object `stdout.json`): `fixtures/acpx-0.10.0/session-new-named/`, `session-ensure-existing/`, `session-show-open/`, `session-show-after-turns/`, `session-show-closed/`, `session-history-after-turns/`, `session-read-tail-after-turns/`, `session-status-after-turns/`, `session-cancel-no-active/`, `session-close-named/`.
+- Cross-checked summary `fixtures/acpx-0.10.0/session-contract-summary.json`, manifest section `session_contract` in `fixtures/acpx-0.10.0/manifest.json`, fixtures README `fixtures/acpx-0.10.0/README.md`, validator `scripts/validate_contract_fixtures.py`, and tests `tests/test_validate_contract_fixtures.py`.
+- This evidence only proves session command grammar and stdout schemas; the remaining S1 checklist (session store, locks/leases, stale-lock recovery, lifecycle, mismatch refusal, parser/CLI/tests) is unchanged and unimplemented.
+
 Acceptance:
 
 - Fixture validator or session-specific fixture validator passes.
@@ -173,7 +181,7 @@ Acceptance:
 - Session artifacts are redacted and local-only.
 - No public ingress, real delivery, Gateway lifecycle, or agent-to-agent auto-routing is introduced.
 
-Status: **Planned after E1**.
+Status: **Planned after E1. The S1a contract spike captured persistent-session command grammar and stdout-schema evidence only (fixtures + validator + plan `docs/plans/2026-05-30-s1a-session-contract-spike.md`); S1 implementation — session store, locks/leases, stale-lock recovery, lifecycle, mismatch refusal, and session parser/CLI/tests — remains Planned and unimplemented.**
 
 ### H1 — Operational hardening
 
@@ -221,7 +229,7 @@ Status: **Parked pending separate approval**.
 
 | ID | Class | Description | Blocks code work? | Required before | Acceptance method | Status |
 |---|---|---|---:|---|---|---|
-| ARS-SESSIONS | NEXT_PHASE | Persistent session support is product-required but unimplemented. | Yes for product-complete | S1 | Session fixtures + lifecycle tests | Open |
+| ARS-SESSIONS | NEXT_PHASE | Persistent session support is product-required but unimplemented. S1a captured command/schema contract evidence only (fixtures + validator + plan); session store/locks/lifecycle/tests remain. | Yes for product-complete | S1 | Session fixtures + lifecycle tests | Open |
 | ARS-DOCTOR-COMPLETE | NEXT_PHASE | Doctor is missing adapter/npx/policy/cwd/redaction/session probes. | No | H1 | Structured doctor tests | Open |
 | ARS-RETENTION-CLEANUP | NEXT_PHASE | Run/session artifact retention cleanup knobs are missing. | No | H1 / long-lived use | Cleanup tests and docs | Open |
 | ARS-SANDBOX-BOUNDARY | PARKED | Any claim that `allowed_roots` is an OS/filesystem sandbox remains parked. | No | Separate sandbox phase | OS sandbox proof + negative probes | Parked |

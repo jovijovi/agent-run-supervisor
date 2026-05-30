@@ -1,0 +1,21 @@
+{
+  "contract_phase": "S1a persistent-session contract spike",
+  "description": "First persistent-session prompt; starts/initializes the ACP session and emits raw JSON-RPC prompt/update stream.",
+  "duration_seconds": 10.936612,
+  "ended_at": "2026-05-30T14:18:45.007155Z",
+  "expected_exit": 0,
+  "name": "session-prompt-turn1",
+  "runner_flags_family": [
+    "--format",
+    "json",
+    "--json-strict",
+    "--suppress-reads",
+    "--timeout",
+    "180",
+    "--max-turns",
+    "1"
+  ],
+  "started_at": "2026-05-30T14:18:34.070543Z",
+  "stderr_file": "stderr.log",
+  "stdout_file": "stdout.ndjson"
+}

@@ -1,0 +1,12 @@
+{
+  "contract_phase": "S1a persistent-session contract spike",
+  "description": "Show open named session metadata before prompting.",
+  "duration_seconds": 0.846841,
+  "ended_at": "2026-05-30T14:18:33.992556Z",
+  "expected_exit": 0,
+  "management_command_schema": "acpx summarized JSON object, not prompt/exec raw ACP stream",
+  "name": "session-show-open",
+  "started_at": "2026-05-30T14:18:33.145715Z",
+  "stderr_file": "stderr.log",
+  "stdout_file": "stdout.json"
+}

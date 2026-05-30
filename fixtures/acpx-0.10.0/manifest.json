@@ -103,6 +103,40 @@
     "stdout_shape": "newline-delimited JSON objects observed from acpx --format json"
   },
   "schema_version": 1,
+  "session_contract": {
+    "phase": "S1a persistent-session contract spike",
+    "contract_evidence_only": true,
+    "implemented": false,
+    "status": "S1a contract spike evidence captured; S1 session support remains Planned and unimplemented.",
+    "session_name": "s1a-session-contract",
+    "scratch_dir_suffix": ".tmp/acpx-session-contract-scratch/persistent-session",
+    "summary_file": "session-contract-summary.json",
+    "management_command_schema": "Each management command emits a single summarized JSON object (acpx.session.v1 record or an action snapshot), NOT a raw ACP NDJSON stream.",
+    "prompt_command_schema": "Prompt turns emit raw newline-delimited ACP/JSON-RPC stdout; turn2 reuses the same ACP session id and omits initialize/session-new setup.",
+    "schema_summary": {
+      "turn1_methods": ["initialize", "session/new", "session/set_model", "session/prompt", "session/update"],
+      "turn1_update_types": ["agent_message_chunk", "available_commands_update", "usage_update"],
+      "turn1_joined_agent_text": "S1A_SESSION_TURN_1_OK",
+      "turn2_methods": ["session/prompt", "session/update"],
+      "turn2_update_types": ["agent_message_chunk", "usage_update"],
+      "turn2_joined_agent_text": "S1A_SESSION_TURN_2_OK",
+      "session_continuity": "turn1 and turn2 share exactly one ACP session id"
+    },
+    "fixtures": [
+      {"name": "session-new-named", "expected_exit": 0, "kind": "management", "semantics": "action=session_ensured, created=true"},
+      {"name": "session-ensure-existing", "expected_exit": 0, "kind": "management", "semantics": "action=session_ensured, created=false"},
+      {"name": "session-show-open", "expected_exit": 0, "kind": "management", "semantics": "schema=acpx.session.v1, closed=false, messages empty"},
+      {"name": "session-prompt-turn1", "expected_exit": 0, "kind": "prompt", "semantics": "initial prompt; initialize+session/new+session/set_model+session/prompt+session/update"},
+      {"name": "session-prompt-turn2", "expected_exit": 0, "kind": "prompt", "semantics": "follow-up prompt; session/prompt+session/update only, no initialize/session-new"},
+      {"name": "session-show-after-turns", "expected_exit": 0, "kind": "management", "semantics": "schema=acpx.session.v1, nonzero messages and lastSeq"},
+      {"name": "session-history-after-turns", "expected_exit": 0, "kind": "management", "semantics": "count>0 entries carrying the persistent sessionId"},
+      {"name": "session-read-tail-after-turns", "expected_exit": 0, "kind": "management", "semantics": "count>0 entries carrying the persistent sessionId"},
+      {"name": "session-status-after-turns", "expected_exit": 0, "kind": "management", "semantics": "action=status_snapshot, status=alive"},
+      {"name": "session-cancel-no-active", "expected_exit": 0, "kind": "management", "semantics": "action=cancel_result, cancelled=false (idle cancel is not close)"},
+      {"name": "session-close-named", "expected_exit": 0, "kind": "management", "semantics": "action=session_closed"},
+      {"name": "session-show-closed", "expected_exit": 0, "kind": "management", "semantics": "schema=acpx.session.v1, closed=true, closedAt present"}
+    ]
+  },
   "skipped_fixtures": [
     {
       "expected_exit": 130,

@@ -1,0 +1,15 @@
+[
+  "npx",
+  "-y",
+  "acpx@0.10.0",
+  "--format",
+  "json",
+  "--json-strict",
+  "--cwd",
+  "/home/ecs-user/workspace/hermes/worktrees/agent-run-supervisor/s1a-session-contract-2026-05-30/.tmp/acpx-session-contract-scratch/persistent-session",
+  "codex",
+  "sessions",
+  "new",
+  "--name",
+  "s1a-session-contract"
+]
