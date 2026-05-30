@@ -247,12 +247,422 @@ def validate_manifest(root: Path) -> list[str]:
     return errors
 
 
+# --- S1a persistent-session contract spike --------------------------------
+#
+# These fixtures prove the observed acpx@0.10.0 *persistent-session* command
+# grammar and stdout schemas. They are contract evidence only; S1 session
+# support is not implemented. Management commands emit a single summarized JSON
+# object, while prompt turns emit a raw newline-delimited ACP/JSON-RPC stream,
+# so the two schema families are validated separately and never conflated.
+
+SESSION_NAME = "s1a-session-contract"
+SESSION_SCRATCH_SUFFIX = "/.tmp/acpx-session-contract-scratch/persistent-session"
+
+# Exact ordered command tail (everything after `--cwd <scratch>`) per management
+# fixture. Note `status`/`cancel` are top-level codex verbs (`-s <name>`), not
+# `sessions <verb>`.
+SESSION_MANAGEMENT_TAILS: dict[str, list[str]] = {
+    "session-new-named": ["codex", "sessions", "new", "--name", SESSION_NAME],
+    "session-ensure-existing": ["codex", "sessions", "ensure", "--name", SESSION_NAME],
+    "session-show-open": ["codex", "sessions", "show", SESSION_NAME],
+    "session-show-after-turns": ["codex", "sessions", "show", SESSION_NAME],
+    "session-show-closed": ["codex", "sessions", "show", SESSION_NAME],
+    "session-history-after-turns": ["codex", "sessions", "history", "--limit", "8", SESSION_NAME],
+    "session-read-tail-after-turns": ["codex", "sessions", "read", "--tail", "8", SESSION_NAME],
+    "session-status-after-turns": ["codex", "status", "-s", SESSION_NAME],
+    "session-cancel-no-active": ["codex", "cancel", "-s", SESSION_NAME],
+    "session-close-named": ["codex", "sessions", "close", SESSION_NAME],
+}
+
+SESSION_PROMPT_FIXTURES: tuple[str, ...] = ("session-prompt-turn1", "session-prompt-turn2")
+
+# Observed prompt-stream facts. turn2 is a *follow-up*: it reuses the existing
+# ACP session and must NOT re-run initialize/session-new setup.
+SESSION_PROMPT_FACTS: dict[str, dict[str, Any]] = {
+    "session-prompt-turn1": {
+        "required_methods": {"initialize", "session/new", "session/set_model", "session/prompt", "session/update"},
+        "forbidden_methods": set(),
+        "update_types": {"agent_message_chunk", "available_commands_update", "usage_update"},
+        "joined_text": "S1A_SESSION_TURN_1_OK",
+    },
+    "session-prompt-turn2": {
+        "required_methods": {"session/prompt", "session/update"},
+        "forbidden_methods": {"initialize", "session/new"},
+        "update_types": {"agent_message_chunk", "usage_update"},
+        "joined_text": "S1A_SESSION_TURN_2_OK",
+    },
+}
+
+SESSION_PROMPT_HEAD = ["npx", "-y", "acpx@0.10.0"] + [
+    "--format",
+    "json",
+    "--json-strict",
+    "--suppress-reads",
+    "--timeout",
+    "180",
+    "--max-turns",
+    "1",
+    "--cwd",
+]
+SESSION_PROMPT_TAIL = [
+    "--deny-all",
+    "--non-interactive-permissions",
+    "fail",
+    "--no-terminal",
+    "--model",
+    "gpt-5.5[low]",
+    "codex",
+    "prompt",
+    "-s",
+    SESSION_NAME,
+]
+SESSION_MANAGEMENT_HEAD = ["npx", "-y", "acpx@0.10.0", "--format", "json", "--json-strict", "--cwd"]
+
+
+def validate_session_command_argv(name: str, argv: list[str]) -> list[str]:
+    """Validate the exact ordered argv grammar for an S1a session fixture."""
+    errors: list[str] = []
+    if argv[:3] != ["npx", "-y", "acpx@0.10.0"]:
+        errors.append(f"{name}: session command argv must start with npx -y acpx@0.10.0")
+        return errors
+
+    if name in SESSION_PROMPT_FIXTURES:
+        if argv[: len(SESSION_PROMPT_HEAD)] != SESSION_PROMPT_HEAD:
+            errors.append(f"{name}: session prompt argv has wrong ordered JSON/timeout/max-turns/cwd grammar")
+            return errors
+        scratch = argv[len(SESSION_PROMPT_HEAD)]
+        if not scratch.endswith(SESSION_SCRATCH_SUFFIX):
+            errors.append(f"{name}: session prompt --cwd must point at the persistent-session scratch dir")
+        tail = argv[len(SESSION_PROMPT_HEAD) + 1 :]
+        if tail[: len(SESSION_PROMPT_TAIL)] != SESSION_PROMPT_TAIL:
+            errors.append(f"{name}: session prompt tail must exactly match deny-all/model/codex prompt -s grammar")
+            return errors
+        if len(tail) != len(SESSION_PROMPT_TAIL) + 1:
+            errors.append(f"{name}: session prompt must end with exactly one prompt argument")
+        return errors
+
+    if name in SESSION_MANAGEMENT_TAILS:
+        if argv[: len(SESSION_MANAGEMENT_HEAD)] != SESSION_MANAGEMENT_HEAD:
+            errors.append(f"{name}: session management argv has wrong prefix/format/cwd grammar")
+            return errors
+        scratch = argv[len(SESSION_MANAGEMENT_HEAD)]
+        if not scratch.endswith(SESSION_SCRATCH_SUFFIX):
+            errors.append(f"{name}: session management --cwd must point at the persistent-session scratch dir")
+        expected_tail = SESSION_MANAGEMENT_TAILS[name]
+        if argv[len(SESSION_MANAGEMENT_HEAD) + 1 :] != expected_tail:
+            errors.append(
+                f"{name}: session management command tail must exactly match {' '.join(expected_tail)}"
+            )
+        return errors
+
+    errors.append(f"{name}: unknown session fixture command grammar")
+    return errors
+
+
+def summarize_prompt_stream(records: list[Any]) -> tuple[set[str], set[str], set[str], str]:
+    """Derive (methods, update types, session ids, joined agent text) from a stream."""
+    methods: set[str] = set()
+    update_types: set[str] = set()
+    session_ids: set[str] = set()
+    texts: list[str] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        method = record.get("method")
+        if isinstance(method, str):
+            methods.add(method)
+        params = record.get("params")
+        if not isinstance(params, dict):
+            continue
+        session_id = params.get("sessionId")
+        if isinstance(session_id, str):
+            session_ids.add(session_id)
+        update = params.get("update")
+        if not isinstance(update, dict):
+            continue
+        update_type = update.get("sessionUpdate")
+        if isinstance(update_type, str):
+            update_types.add(update_type)
+        if update_type == "agent_message_chunk":
+            content = update.get("content")
+            if isinstance(content, dict) and content.get("type") == "text" and isinstance(content.get("text"), str):
+                texts.append(content["text"])
+    return methods, update_types, session_ids, "".join(texts)
+
+
+def _validate_prompt_facts(name: str, records: list[Any]) -> list[str]:
+    errors: list[str] = []
+    facts = SESSION_PROMPT_FACTS[name]
+    methods, update_types, session_ids, joined = summarize_prompt_stream(records)
+
+    missing_methods = facts["required_methods"] - methods
+    if missing_methods:
+        errors.append(f"{name}: prompt stream missing required methods {sorted(missing_methods)}")
+    present_forbidden = facts["forbidden_methods"] & methods
+    if present_forbidden:
+        errors.append(
+            f"{name}: follow-up prompt stream must not contain setup methods {sorted(present_forbidden)}"
+        )
+    missing_updates = facts["update_types"] - update_types
+    if missing_updates:
+        errors.append(f"{name}: prompt stream missing update types {sorted(missing_updates)}")
+    if joined != facts["joined_text"]:
+        errors.append(f"{name}: joined agent text {joined!r} != expected {facts['joined_text']!r}")
+    if len(session_ids) != 1:
+        errors.append(f"{name}: prompt stream must use exactly one ACP session id, found {len(session_ids)}")
+    return errors
+
+
+def _validate_management_semantics(name: str, payload: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    if name == "session-new-named":
+        if payload.get("action") != "session_ensured":
+            errors.append(f"{name}: management action must be session_ensured")
+        if payload.get("created") is not True:
+            errors.append(f"{name}: a fresh named session must report created=true")
+    elif name == "session-ensure-existing":
+        if payload.get("action") != "session_ensured":
+            errors.append(f"{name}: management action must be session_ensured")
+        if payload.get("created") is not False:
+            errors.append(f"{name}: ensuring an existing session must report created=false")
+    elif name == "session-show-open":
+        if payload.get("schema") != "acpx.session.v1":
+            errors.append(f"{name}: session show must use schema acpx.session.v1")
+        if payload.get("closed") is not False:
+            errors.append(f"{name}: an open session must report closed=false")
+    elif name == "session-show-closed":
+        if payload.get("schema") != "acpx.session.v1":
+            errors.append(f"{name}: session show must use schema acpx.session.v1")
+        if payload.get("closed") is not True:
+            errors.append(f"{name}: a closed session must report closed=true")
+    elif name == "session-show-after-turns":
+        if payload.get("schema") != "acpx.session.v1":
+            errors.append(f"{name}: session show must use schema acpx.session.v1")
+        messages = payload.get("messages")
+        if isinstance(messages, list) and len(messages) == 0:
+            errors.append(f"{name}: session show after turns must record a nonzero message count")
+        last_seq = payload.get("lastSeq")
+        if isinstance(last_seq, int) and last_seq <= 0:
+            errors.append(f"{name}: session show after turns must record a nonzero lastSeq")
+    elif name == "session-status-after-turns":
+        if payload.get("action") != "status_snapshot":
+            errors.append(f"{name}: status command must report action=status_snapshot")
+        if payload.get("status") != "alive":
+            errors.append(f"{name}: status after turns must report an alive queue owner")
+    elif name == "session-cancel-no-active":
+        if payload.get("action") != "cancel_result":
+            errors.append(f"{name}: cancel command must report action=cancel_result")
+        if payload.get("cancelled") is not False:
+            errors.append(f"{name}: idle cancel must report cancelled=false (cancel is not close)")
+    elif name == "session-close-named":
+        if payload.get("action") != "session_closed":
+            errors.append(f"{name}: close command must report action=session_closed")
+    elif name in {"session-history-after-turns", "session-read-tail-after-turns"}:
+        entries = payload.get("entries")
+        if not isinstance(entries, list) or not entries:
+            errors.append(f"{name}: history/read must return a nonempty entries list")
+        count = payload.get("count")
+        if not isinstance(count, int) or count <= 0:
+            errors.append(f"{name}: history/read must report a positive count")
+        if not isinstance(payload.get("sessionId"), str) or not payload.get("sessionId"):
+            errors.append(f"{name}: history/read must reference the persistent sessionId")
+    return errors
+
+
+def _nonempty_line_count(path: Path) -> int:
+    return len([line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()])
+
+
+def _validate_session_summary(root: Path) -> list[str]:
+    """Cross-check session-contract-summary.json against the captured streams."""
+    errors: list[str] = []
+    summary_path = root / "session-contract-summary.json"
+    if not summary_path.exists():
+        return [f"missing {summary_path}"]
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+    schema = summary.get("schema")
+    if not isinstance(schema, dict):
+        errors.append("session-contract-summary.json must contain a schema object")
+        return errors
+
+    observed_ids: list[set[str]] = []
+    for name in SESSION_PROMPT_FIXTURES:
+        turn_key = "turn1" if name.endswith("turn1") else "turn2"
+        declared = schema.get(turn_key)
+        if not isinstance(declared, dict):
+            errors.append(f"session-contract-summary.json schema.{turn_key} must be an object")
+            continue
+        stdout_path = root / name / "stdout.ndjson"
+        if not stdout_path.exists():
+            errors.append(f"summary cross-check ({turn_key}): {name} stdout.ndjson missing")
+            continue
+        try:
+            records = parse_json_lines(stdout_path)
+        except ValueError as exc:
+            errors.append(str(exc))
+            continue
+        methods, update_types, session_ids, joined = summarize_prompt_stream(records)
+        observed_ids.append(session_ids)
+        if declared.get("joined_agent_text") != joined:
+            errors.append(
+                f"summary cross-check ({turn_key}): joined_agent_text {declared.get('joined_agent_text')!r} "
+                f"!= observed {joined!r}"
+            )
+        if set(declared.get("methods") or []) != methods:
+            errors.append(f"summary cross-check ({turn_key}): methods do not match observed prompt stream")
+        if set(declared.get("session_update_types") or []) != update_types:
+            errors.append(
+                f"summary cross-check ({turn_key}): session_update_types do not match observed prompt stream"
+            )
+        if declared.get("unique_session_id_count") != len(session_ids):
+            errors.append(
+                f"summary cross-check ({turn_key}): unique_session_id_count "
+                f"{declared.get('unique_session_id_count')!r} != observed {len(session_ids)}"
+            )
+
+    # Continuity: the two prompt turns must reuse the SAME single ACP session id.
+    if len(observed_ids) == 2 and not (observed_ids[0] and observed_ids[0] == observed_ids[1]):
+        errors.append("summary cross-check: turn1 and turn2 must reuse the same ACP session id (continuity)")
+
+    fixtures = summary.get("fixtures")
+    if not isinstance(fixtures, dict):
+        errors.append("session-contract-summary.json must contain a fixtures object")
+        return errors
+    for name, declared in fixtures.items():
+        if not isinstance(declared, dict):
+            errors.append(f"summary cross-check: fixtures.{name} must be an object")
+            continue
+        result_path = root / name / "result.json"
+        if not result_path.exists():
+            errors.append(f"summary cross-check: {name} result.json missing")
+            continue
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        if declared.get("exit_code") != result.get("exit_code"):
+            errors.append(f"summary cross-check ({name}): exit_code disagrees with result.json")
+        stdout_file = declared.get("stdout_file")
+        if stdout_file:
+            stdout_path = root / name / stdout_file
+            if not stdout_path.exists():
+                errors.append(f"summary cross-check ({name}): declared stdout_file {stdout_file} missing")
+            elif declared.get("stdout_lines") != _nonempty_line_count(stdout_path):
+                errors.append(f"summary cross-check ({name}): stdout_lines disagrees with captured stream")
+    return errors
+
+
+def validate_session_contract(root: Path) -> list[str]:
+    """Fail-closed validation of the S1a persistent-session contract fixtures."""
+    errors: list[str] = []
+    manifest_path = root / "manifest.json"
+    if not manifest_path.exists():
+        return [f"missing {manifest_path}"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    contract = manifest.get("session_contract")
+    if not isinstance(contract, dict):
+        return ["manifest.session_contract section must be present for the S1a contract spike"]
+
+    # S1a is contract evidence only; it must never claim session implementation.
+    if contract.get("contract_evidence_only") is not True:
+        errors.append(
+            "manifest.session_contract.contract_evidence_only must be true (S1a is evidence only)"
+        )
+    if contract.get("implemented") is not False:
+        errors.append(
+            "manifest.session_contract.implemented must be false (S1 session support is not implemented)"
+        )
+    if contract.get("session_name") != SESSION_NAME:
+        errors.append(f"manifest.session_contract.session_name must be {SESSION_NAME!r}")
+    if contract.get("summary_file") != "session-contract-summary.json":
+        errors.append("manifest.session_contract.summary_file must reference session-contract-summary.json")
+
+    declared = contract.get("fixtures")
+    if not isinstance(declared, list) or not declared:
+        errors.append("manifest.session_contract.fixtures must be a non-empty list")
+        return errors
+
+    declared_by_name: dict[str, dict[str, Any]] = {}
+    for entry in declared:
+        if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+            errors.append("manifest.session_contract.fixtures entry must be an object with a name")
+            continue
+        declared_by_name[entry["name"]] = entry
+
+    expected_names = set(SESSION_MANAGEMENT_TAILS) | set(SESSION_PROMPT_FIXTURES)
+    for missing in sorted(expected_names - set(declared_by_name)):
+        errors.append(f"manifest.session_contract.fixtures missing {missing}")
+    for unexpected in sorted(set(declared_by_name) - expected_names):
+        errors.append(f"manifest.session_contract.fixtures has unknown fixture {unexpected}")
+
+    for name in sorted(expected_names):
+        entry = declared_by_name.get(name)
+        if entry is None:
+            continue
+        fixture_dir = root / name
+        if not fixture_dir.is_dir():
+            errors.append(f"{name}: missing session fixture directory")
+            continue
+        expected_exit = entry.get("expected_exit")
+
+        result_path = fixture_dir / "result.json"
+        command_path = fixture_dir / "command.argv.json"
+        metadata_path = fixture_dir / "metadata.json"
+        if not metadata_path.exists():
+            errors.append(f"{name}: missing metadata.json")
+
+        if not result_path.exists():
+            errors.append(f"{name}: missing result.json")
+        else:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            if result.get("exit_code") != expected_exit:
+                errors.append(f"{name}: exit_code {result.get('exit_code')!r} != expected {expected_exit!r}")
+
+        if not command_path.exists():
+            errors.append(f"{name}: missing command.argv.json")
+        else:
+            argv = json.loads(command_path.read_text(encoding="utf-8"))
+            if not isinstance(argv, list) or not all(isinstance(arg, str) for arg in argv):
+                errors.append(f"{name}: command.argv.json must be a string array")
+            else:
+                errors.extend(validate_session_command_argv(name, argv))
+
+        if name in SESSION_PROMPT_FIXTURES:
+            stdout_path = fixture_dir / "stdout.ndjson"
+            if not stdout_path.exists():
+                errors.append(f"{name}: missing stdout.ndjson prompt stream")
+            else:
+                try:
+                    records = parse_json_lines(stdout_path)
+                except ValueError as exc:
+                    errors.append(str(exc))
+                else:
+                    errors.extend(_validate_prompt_facts(name, records))
+        else:
+            stdout_path = fixture_dir / "stdout.json"
+            if not stdout_path.exists():
+                errors.append(f"{name}: missing stdout.json management summary")
+            else:
+                try:
+                    payload = json.loads(stdout_path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError as exc:
+                    errors.append(f"{stdout_path}: invalid JSON: {exc.msg}")
+                else:
+                    if isinstance(payload, dict):
+                        errors.extend(_validate_management_semantics(name, payload))
+                    else:
+                        errors.append(f"{name}: management stdout.json must be a JSON object")
+
+    errors.extend(_validate_session_summary(root))
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate acpx contract fixtures")
     parser.add_argument("root", type=Path, help="Fixture root, e.g. fixtures/acpx-0.10.0")
     args = parser.parse_args()
 
     errors = validate_manifest(args.root)
+    errors.extend(validate_session_contract(args.root))
     secret_findings = find_secret_like_values(args.root)
     for finding in secret_findings:
         errors.append(f"secret-like value: {finding.path}:{finding.line_number} {finding.pattern_name}")

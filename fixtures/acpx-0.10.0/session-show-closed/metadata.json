@@ -1,0 +1,12 @@
+{
+  "contract_phase": "S1a persistent-session contract spike",
+  "description": "Show named session metadata after close; closed=true and closedAt are expected.",
+  "duration_seconds": 0.814767,
+  "ended_at": "2026-05-30T14:18:54.617992Z",
+  "expected_exit": 0,
+  "management_command_schema": "acpx summarized JSON object, not prompt/exec raw ACP stream",
+  "name": "session-show-closed",
+  "started_at": "2026-05-30T14:18:53.803225Z",
+  "stderr_file": "stderr.log",
+  "stdout_file": "stdout.json"
+}

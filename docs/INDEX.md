@@ -2,10 +2,11 @@
 
 # Documentation Index
 
-Total: 11 documents tracked across 1 statuses.
+Total: 12 documents tracked across 1 statuses.
 
-## Active (11)
+## Active (12)
 
+- [S1a Persistent-Session Contract Spike Plan](plans/2026-05-30-s1a-session-contract-spike.md) — created 2026-05-30
 - [agent-run-supervisor System Architecture](design/architecture.md) — created 2026-05-29
 - [agent-run-supervisor Technical Solution](design/technical-solution.md) — created 2026-05-29
 - [E1 One-shot Exec Runner Implementation Plan](plans/2026-05-29-e1-one-shot-exec-runner.md) — created 2026-05-29

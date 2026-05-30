@@ -1,0 +1,21 @@
+{
+  "contract_phase": "S1a persistent-session contract spike",
+  "description": "Second prompt on the same named persistent session; should reuse the same ACP session id and omit initialize/session-new setup.",
+  "duration_seconds": 3.197232,
+  "ended_at": "2026-05-30T14:18:48.278670Z",
+  "expected_exit": 0,
+  "name": "session-prompt-turn2",
+  "runner_flags_family": [
+    "--format",
+    "json",
+    "--json-strict",
+    "--suppress-reads",
+    "--timeout",
+    "180",
+    "--max-turns",
+    "1"
+  ],
+  "started_at": "2026-05-30T14:18:45.081438Z",
+  "stderr_file": "stderr.log",
+  "stdout_file": "stdout.ndjson"
+}
