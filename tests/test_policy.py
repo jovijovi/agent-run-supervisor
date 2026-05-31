@@ -3,9 +3,18 @@ from __future__ import annotations
 import copy
 import json
 
+import pytest
+
 from agent_run_supervisor.policy import (
+    ExecStrategyError,
     compile_command,
     compile_permission_policy,
+    compile_session_create_command,
+    compile_session_ensure_command,
+    compile_session_prompt_command,
+    compile_session_show_command,
+    compile_session_status_command,
+    ensure_persistent_strategy,
     policy_hash,
 )
 from agent_run_supervisor.role import load_role
@@ -17,6 +26,17 @@ def _role_with(**overrides: dict) -> dict:
     for key, value in overrides.items():
         spec[key] = value
     return spec
+
+
+def _persistent_role(**overrides: dict):
+    spec = copy.deepcopy(VALID_ROLE)
+    spec["session"] = {"strategy": "persistent"}
+    # Default to the pinned ``npx`` fetch path so the compiled prefix matches the
+    # S1a fixtures (npx -y acpx@0.10.0); the binary path has its own test.
+    spec["runner"] = {**spec["runner"], "acpx_binary": None}
+    for key, value in overrides.items():
+        spec[key] = value
+    return load_role(spec)
 
 
 def test_compile_permission_policy_maps_kinds_to_auto_lists() -> None:
@@ -147,3 +167,170 @@ def test_compile_permission_policy_does_not_include_terminal_in_kinds_list() -> 
 
     assert "terminal" not in policy["autoApprove"]
     assert "terminal" not in policy["autoDeny"]
+
+
+# --- S1c persistent-session command compilation ---------------------------
+#
+# These pin the fixture-proven acpx@0.10.0 persistent-session command grammar
+# (fixtures/acpx-0.10.0/session-*). Management commands carry only
+# ``--format json --json-strict --cwd`` plus a management tail; prompt turns
+# use the stricter S1a fixture-proven ``--deny-all`` block and end with
+# ``prompt -s <name> <prompt>``.
+
+_MANAGEMENT_PREFIX = ["npx", "-y", "acpx@0.10.0", "--format", "json", "--json-strict"]
+
+
+def test_ensure_persistent_strategy_refuses_exec_role() -> None:
+    role = load_role(VALID_ROLE)
+    with pytest.raises(ExecStrategyError):
+        ensure_persistent_strategy(role)
+
+
+def test_ensure_persistent_strategy_accepts_persistent_role() -> None:
+    role = _persistent_role()
+    # Should not raise.
+    ensure_persistent_strategy(role)
+
+
+def test_compile_session_create_command_matches_fixture_grammar() -> None:
+    role = _persistent_role()
+    argv = compile_session_create_command(role, cwd="/tmp/work", session_name="nightly")
+
+    assert argv[:6] == _MANAGEMENT_PREFIX
+    cwd_index = argv.index("--cwd")
+    assert argv[cwd_index + 1] == "/tmp/work"
+    assert argv[-5:] == ["codex", "sessions", "new", "--name", "nightly"]
+    # Management commands never carry exec/turn authorization flags.
+    for forbidden in ("--permission-policy", "--timeout", "--max-turns", "--suppress-reads", "--no-terminal"):
+        assert forbidden not in argv, forbidden
+
+
+def test_compile_session_ensure_command_uses_ensure_subcommand() -> None:
+    role = _persistent_role()
+    argv = compile_session_ensure_command(role, cwd="/tmp/work", session_name="nightly")
+
+    assert argv[-5:] == ["codex", "sessions", "ensure", "--name", "nightly"]
+    assert "--permission-policy" not in argv
+
+
+def test_compile_session_show_command_uses_show_subcommand() -> None:
+    role = _persistent_role()
+    argv = compile_session_show_command(role, cwd="/tmp/work", session_name="nightly")
+
+    assert argv[-4:] == ["codex", "sessions", "show", "nightly"]
+    assert "--permission-policy" not in argv
+
+
+def test_compile_session_status_command_uses_status_dash_s() -> None:
+    role = _persistent_role()
+    argv = compile_session_status_command(role, cwd="/tmp/work", session_name="nightly")
+
+    assert argv[-4:] == ["codex", "status", "-s", "nightly"]
+
+
+def test_compile_session_prompt_command_ends_with_prompt_tail() -> None:
+    role = _persistent_role()
+    argv = compile_session_prompt_command(
+        role, cwd="/tmp/work", session_name="nightly", prompt="say hi"
+    )
+
+    assert argv[-5:] == ["codex", "prompt", "-s", "nightly", "say hi"]
+
+
+def test_compile_session_prompt_command_uses_fixture_proven_deny_all_not_policy_json() -> None:
+    role = _persistent_role()
+    argv = compile_session_prompt_command(
+        role, cwd="/tmp/work", session_name="nightly", prompt="say hi"
+    )
+
+    # S1a only proved persistent prompt turns with --deny-all. The local
+    # session record remains role/policy-bound; prompt-turn tool permission
+    # expansion needs a later fixture-proven slice.
+    assert "--deny-all" in argv
+    assert "--permission-policy" not in argv
+
+
+def test_compile_session_prompt_command_shares_exec_automation_flags() -> None:
+    role = _persistent_role()
+    argv = compile_session_prompt_command(
+        role, cwd="/tmp/work", session_name="nightly", prompt="say hi"
+    )
+
+    for flag in (
+        "--format",
+        "--json-strict",
+        "--suppress-reads",
+        "--timeout",
+        "--max-turns",
+        "--cwd",
+        "--deny-all",
+        "--non-interactive-permissions",
+        "--no-terminal",
+    ):
+        assert flag in argv, flag
+    timeout_index = argv.index("--timeout")
+    assert argv[timeout_index + 1] == str(role.limits.timeout_seconds)
+    max_turns_index = argv.index("--max-turns")
+    assert argv[max_turns_index + 1] == str(role.limits.max_turns)
+    model_index = argv.index("--model")
+    assert argv[model_index + 1] == role.runner.model
+
+
+def test_compile_session_prompt_command_keeps_prompt_as_single_argv_element() -> None:
+    role = _persistent_role()
+    injection = "ok; rm -rf / && echo $(whoami)"
+    argv = compile_session_prompt_command(
+        role, cwd="/tmp/work", session_name="nightly", prompt=injection
+    )
+
+    # No shell: the whole prompt is one argv element, never split or expanded.
+    assert argv[-1] == injection
+    assert all(isinstance(part, str) for part in argv)
+
+
+def test_compile_session_commands_use_role_binary_when_present() -> None:
+    role = _persistent_role(
+        runner={**copy.deepcopy(VALID_ROLE)["runner"], "acpx_binary": "/opt/acpx/bin/acpx"}
+    )
+
+    for argv in (
+        compile_session_create_command(role, cwd="/tmp/work", session_name="n"),
+        compile_session_show_command(role, cwd="/tmp/work", session_name="n"),
+        compile_session_prompt_command(role, cwd="/tmp/work", session_name="n", prompt="hi"),
+    ):
+        assert argv[0] == "/opt/acpx/bin/acpx"
+        assert "npx" not in argv
+
+
+def test_compile_session_commands_default_cwd_to_role_default() -> None:
+    role = _persistent_role()
+    argv = compile_session_create_command(role, cwd=None, session_name="n")
+
+    cwd_index = argv.index("--cwd")
+    assert argv[cwd_index + 1] == VALID_ROLE["workspace"]["default_cwd"]
+
+
+def test_compile_session_commands_refuse_exec_strategy_role() -> None:
+    role = load_role(VALID_ROLE)  # strategy == "exec"
+    for compile_fn in (
+        lambda: compile_session_create_command(role, cwd="/tmp/work", session_name="n"),
+        lambda: compile_session_ensure_command(role, cwd="/tmp/work", session_name="n"),
+        lambda: compile_session_show_command(role, cwd="/tmp/work", session_name="n"),
+        lambda: compile_session_status_command(role, cwd="/tmp/work", session_name="n"),
+        lambda: compile_session_prompt_command(role, cwd="/tmp/work", session_name="n", prompt="hi"),
+    ):
+        with pytest.raises(ExecStrategyError):
+            compile_fn()
+
+
+def test_compile_session_commands_reject_empty_session_name() -> None:
+    role = _persistent_role()
+    with pytest.raises(ValueError):
+        compile_session_create_command(role, cwd="/tmp/work", session_name="")
+
+
+def test_exec_compile_command_still_refuses_persistent_role() -> None:
+    # Regression: the exec compiler must keep failing closed for persistent roles.
+    role = _persistent_role()
+    with pytest.raises(ExecStrategyError):
+        compile_command(role, cwd="/tmp/work", prompt="hello")

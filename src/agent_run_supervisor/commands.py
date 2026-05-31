@@ -13,7 +13,11 @@ from agent_run_supervisor.policy import ExecStrategyError
 from agent_run_supervisor.preflight import probe_acpx, probe_node
 from agent_run_supervisor.role import RoleValidationError, load_role, role_hash
 from agent_run_supervisor.runner import SupervisorRunner
+from agent_run_supervisor.session import SessionError
+from agent_run_supervisor.session_runtime import SessionRuntime, SessionRuntimeError
 from agent_run_supervisor.workspace import WorkspaceValidationError
+
+DEFAULT_SESSIONS_DIR_NAME = Path(".agent-run-supervisor") / "sessions"
 
 def _load_json(path: str | Path) -> Any:
     return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -143,3 +147,76 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1
     _print_json(outcome.result)
     return 0 if outcome.result["status"] == "completed" else 1
+
+
+def cmd_session(args: argparse.Namespace) -> int:
+    session_command = getattr(args, "session_command", None)
+    if session_command is None:
+        print(
+            "error: a session subcommand is required (create | send | status)",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        role = _parse_role_file(args.role)
+    except (OSError, json.JSONDecodeError, RoleValidationError) as exc:
+        print(f"session input error: {exc}", file=sys.stderr)
+        return 1
+
+    sessions_dir = (
+        Path(args.sessions_dir)
+        if args.sessions_dir
+        else Path.cwd() / DEFAULT_SESSIONS_DIR_NAME
+    )
+    runtime = SessionRuntime(sessions_dir=sessions_dir)
+
+    if session_command == "send":
+        try:
+            prompt = Path(args.prompt_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"session input error: {exc}", file=sys.stderr)
+            return 1
+
+    try:
+        if session_command == "create":
+            outcome = runtime.create_session(
+                role=role,
+                session_id=args.session_id,
+                session_name=args.session_name,
+                cwd=args.cwd,
+            )
+            _print_json(outcome.result)
+            return 0
+        if session_command == "send":
+            turn = runtime.send(
+                role=role,
+                session_id=args.session_id,
+                prompt=prompt,
+                cwd=args.cwd,
+            )
+            _print_json(turn.result)
+            return 0 if turn.result["status"] == "completed" else 1
+        if session_command == "status":
+            status = runtime.status(
+                role=role,
+                session_id=args.session_id,
+                cwd=args.cwd,
+            )
+            _print_json(status.result)
+            return 0 if status.ok else 1
+    except ExecStrategyError as exc:
+        print(f"session strategy error: {exc}", file=sys.stderr)
+        return 1
+    except WorkspaceValidationError as exc:
+        print(f"workspace validation error: {exc}", file=sys.stderr)
+        return 1
+    except SessionRuntimeError as exc:
+        print(f"session runtime error: {exc}", file=sys.stderr)
+        return 1
+    except SessionError as exc:
+        print(f"session error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"error: unknown session subcommand {session_command!r}", file=sys.stderr)
+    return 2

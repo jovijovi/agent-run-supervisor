@@ -83,7 +83,7 @@ Checklist:
 - [x] Include role model when set.
 - [x] Persist redacted argv/policy artifacts for dry-run evidence.
 - [x] Ensure real exec path uses the same compiler as dry-run.
-- [ ] Add session-mode command compilation once persistent-session command shapes are fixture-proven.
+- [x] Add session-mode command compilation once persistent-session command shapes are fixture-proven. *(S1c: create/ensure/show/status management commands and the fixture-proven `prompt -s` turn; prompt-turn tool permissions remain `--deny-all` until a later fixture-proven expansion.)*
 
 Acceptance:
 
@@ -101,7 +101,7 @@ Checklist:
 - [x] Fail closed before artifact creation when cwd is outside configured roots.
 - [x] Persist the disclaimer that allowed roots are not a sandbox.
 - [x] Add validated workspace hash/binding foundation for persistent sessions.
-- [ ] Re-validate cwd/role/workspace hash when attaching to or resuming a real persistent session runtime.
+- [x] Re-validate cwd/role/workspace hash when attaching to or resuming a real persistent session runtime. *(S1c: every send/status re-opens the record and re-validates the binding before mutation.)*
 
 Acceptance:
 
@@ -138,14 +138,14 @@ Checklist:
 - [x] Implement session locks/leases to prevent concurrent unsafe local mutation.
 - [x] Detect and recover from expired local session locks deterministically.
 - [x] Refuse cross-role, cross-workspace, stale-policy, acpx-version, or adapter-mismatched session reuse before mutation.
-- [ ] Create/open real acpx sessions under a validated `AgentRoleSpec`.
-- [ ] Reattach/send prompts only when role/workspace/session metadata still match policy.
+- [x] Create/open real acpx sessions under a validated `AgentRoleSpec`. *(S1c MVP: fixture-shaped `sessions new` runtime; acceptance via fake-executor/fixtures, real-acpx smoke deferred.)*
+- [x] Reattach/send prompts only when role/workspace/session metadata still match policy. *(S1c: lease-locked `prompt -s` turn with binding revalidation before any mutation.)*
 - [ ] Define close/abort semantics and failure statuses.
-- [ ] Provide CLI/library session operations after design and fixtures are proven.
+- [x] Provide CLI/library session operations after design and fixtures are proven. *(S1c MVP: `session create|send|status`; close/abort/list remain later slices.)*
 
 Acceptance:
 
-- Session fixtures and tests cover create, send, resume, close, stale-lock recovery, mismatch refusal, and crash/interruption behavior.
+- Session fixtures and tests cover create, send, resume, close, stale-lock recovery, mismatch refusal, and crash/interruption behavior. *(S1c covers create/send/status, lease release on success and failure, and mismatch refusal; close/abort and crash/interruption recovery remain open.)*
 - Session artifacts are redacted and local-first.
 - Persistent sessions do not imply public ingress, Gateway operations, real delivery, or agent-to-agent routing.
 
@@ -161,7 +161,7 @@ Checklist:
 - [x] Emit normalized events for run lifecycle, message deltas, tools, usage, permission events, unknown updates, completion, and failure.
 - [x] Fail closed on malformed JSON/framing.
 - [x] Enforce `max_output_bytes`.
-- [ ] Add persistent-session parser/event coverage after session fixtures are captured.
+- [x] Add persistent-session parser/event coverage after session fixtures are captured. *(S1c: prompt-turn NDJSON via the existing parser; management-command JSON via a separate safe summarizer.)*
 
 Acceptance:
 
@@ -198,7 +198,7 @@ Checklist:
 - [x] Redact prompt, env, argv, metadata, stderr, stdout, normalized event text, and final message surfaces.
 - [ ] Add retention/cleanup knobs before long-lived use.
 - [x] Add session artifact foundation layout.
-- [ ] Add session turn artifacts and cleanup policy.
+- [x] Add session turn artifacts. *(S1c: redacted `turns/<turn_id>/` and `management/` artifacts; cleanup policy remains a later slice.)*
 - [ ] Add explicit unsafe raw-capture opt-in only if a later phase proves it necessary.
 
 Acceptance:
@@ -217,8 +217,8 @@ Checklist:
 - [x] `doctor` baseline.
 - [x] `run --role <role-file> --prompt-file <file> [--cwd <dir>] --no-real-run`.
 - [x] `run --role <role-file> --prompt-file <file> [--cwd <dir>]` real exec supervision.
-- [ ] Session lifecycle commands/API after session design and fixtures are proven.
-- [ ] Stable JSON outputs for caller automation.
+- [x] Session lifecycle commands/API after session design and fixtures are proven. *(S1c MVP: `session create|send|status` plus the `SessionRuntime` library surface; close/abort/list remain later slices.)*
+- [x] Stable JSON outputs for caller automation. *(S1c: session commands emit JSON to stdout with `business_verdict: null` and 0/nonzero exit codes.)*
 
 Acceptance:
 

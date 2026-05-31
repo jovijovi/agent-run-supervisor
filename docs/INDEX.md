@@ -2,10 +2,11 @@
 
 # Documentation Index
 
-Total: 13 documents tracked across 1 statuses.
+Total: 14 documents tracked across 1 statuses.
 
-## Active (13)
+## Active (14)
 
+- [S1c Persistent Session Runtime MVP Plan](plans/2026-05-31-s1c-session-runtime-mvp.md) — created 2026-05-31
 - [S1a Persistent-Session Contract Spike Plan](plans/2026-05-30-s1a-session-contract-spike.md) — created 2026-05-30
 - [S1b Session Store and Lock Foundation Plan](plans/2026-05-30-s1b-session-store-locks.md) — created 2026-05-30
 - [agent-run-supervisor System Architecture](design/architecture.md) — created 2026-05-29

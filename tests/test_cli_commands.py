@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from typing import Any
@@ -297,3 +298,225 @@ def test_run_no_real_run_refuses_when_cwd_outside_allowed_roots(
     combined = completed.stdout + completed.stderr
     assert "allowed_roots" in combined.lower()
     assert not runs_dir.exists() or list(runs_dir.iterdir()) == []
+
+
+# --- S1c session lifecycle CLI (create / send / status) -------------------
+#
+# These drive the real argparse + handler path against a fake acpx binary that
+# dispatches per management/turn subcommand from the S1a fixtures. No real acpx,
+# no network, no AGENT launch.
+
+
+def _fake_acpx(
+    tmp_path: Path,
+    fixtures_root: Path,
+    *,
+    status_fixture: str = "session-status-after-turns",
+) -> Path:
+    new_json = fixtures_root / "session-new-named" / "stdout.json"
+    show_json = fixtures_root / "session-show-open" / "stdout.json"
+    status_json = fixtures_root / status_fixture / "stdout.json"
+    turn_ndjson = fixtures_root / "session-prompt-turn1" / "stdout.ndjson"
+    script = tmp_path / "fake-acpx"
+    script.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        f'  *"sessions new"*) cat "{new_json}" ;;\n'
+        f'  *"sessions ensure"*) cat "{new_json}" ;;\n'
+        f'  *"sessions show"*) cat "{show_json}" ;;\n'
+        f'  *"status -s"*) cat "{status_json}" ;;\n'
+        f'  *"prompt -s"*) cat "{turn_ndjson}" ;;\n'
+        "  *) printf '{\"action\":\"unknown\"}\\n' ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o700)
+    return script
+
+
+def _persistent_role_file(
+    tmp_path: Path,
+    valid_role_dict: dict[str, Any],
+    work: Path,
+    acpx_binary: Path | None,
+    *,
+    strategy: str = "persistent",
+) -> Path:
+    payload = copy.deepcopy(valid_role_dict)
+    payload["workspace"]["default_cwd"] = str(work)
+    payload["workspace"]["allowed_roots"] = [str(work)]
+    payload["runner"]["acpx_binary"] = str(acpx_binary) if acpx_binary else None
+    payload["session"] = {"strategy": strategy}
+    path = tmp_path / "session-role.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_session_create_cli_writes_record_and_json(
+    run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], fixtures_root: Path
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    role_path = _persistent_role_file(tmp_path, valid_role_dict, work, _fake_acpx(tmp_path, fixtures_root))
+    sessions_dir = tmp_path / "sessions"
+
+    completed = run_cli(
+        [
+            "session",
+            "create",
+            "--role",
+            str(role_path),
+            "--session-id",
+            "sess-a",
+            "--session-name",
+            "nightly",
+            "--sessions-dir",
+            str(sessions_dir),
+        ]
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload["session_id"] == "sess-a"
+    assert payload["acpx_session_id"] == "019e7940-35e8-79b1-8af2-229e4e41ad4b"
+    assert payload["business_verdict"] is None
+    assert (sessions_dir / "sess-a" / "session.json").exists()
+
+
+def test_session_send_cli_persists_turn_and_returns_final_message(
+    run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], fixtures_root: Path
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    role_path = _persistent_role_file(tmp_path, valid_role_dict, work, _fake_acpx(tmp_path, fixtures_root))
+    sessions_dir = tmp_path / "sessions"
+    prompt_path = tmp_path / "prompt.txt"
+    prompt_path.write_text("contract turn 1", encoding="utf-8")
+
+    created = run_cli(
+        ["session", "create", "--role", str(role_path), "--session-id", "sess-a",
+         "--session-name", "nightly", "--sessions-dir", str(sessions_dir)]
+    )
+    assert created.returncode == 0, created.stderr
+
+    completed = run_cli(
+        ["session", "send", "--role", str(role_path), "--session-id", "sess-a",
+         "--prompt-file", str(prompt_path), "--sessions-dir", str(sessions_dir)]
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload["status"] == "completed"
+    assert payload["final_message"] == "S1A_SESSION_TURN_1_OK"
+    assert payload["business_verdict"] is None
+    assert payload["session_id"] == "sess-a"
+    turns_dir = sessions_dir / "sess-a" / "turns"
+    assert turns_dir.exists()
+    assert list(turns_dir.iterdir()), "expected a persisted turn directory"
+
+
+def test_session_status_cli_returns_safe_summary(
+    run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], fixtures_root: Path
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    role_path = _persistent_role_file(tmp_path, valid_role_dict, work, _fake_acpx(tmp_path, fixtures_root))
+    sessions_dir = tmp_path / "sessions"
+
+    created = run_cli(
+        ["session", "create", "--role", str(role_path), "--session-id", "sess-a",
+         "--session-name", "nightly", "--sessions-dir", str(sessions_dir)]
+    )
+    assert created.returncode == 0, created.stderr
+
+    completed = run_cli(
+        ["session", "status", "--role", str(role_path), "--session-id", "sess-a",
+         "--sessions-dir", str(sessions_dir)]
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload["ok"] is True
+    assert payload["summary"]["kind"] == "status_snapshot"
+    assert payload["summary"]["status"] == "alive"
+    # Safe summary: the bulk model catalog must not leak through the CLI.
+    assert "gpt-5.5" not in completed.stdout
+
+
+def test_session_status_cli_no_session_snapshot_returns_nonzero(
+    run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], fixtures_root: Path
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    role_path = _persistent_role_file(
+        tmp_path,
+        valid_role_dict,
+        work,
+        _fake_acpx(
+            tmp_path,
+            fixtures_root,
+            status_fixture="management-status-no-session-exit0",
+        ),
+    )
+    sessions_dir = tmp_path / "sessions"
+
+    created = run_cli(
+        ["session", "create", "--role", str(role_path), "--session-id", "sess-a",
+         "--session-name", "nightly", "--sessions-dir", str(sessions_dir)]
+    )
+    assert created.returncode == 0, created.stderr
+
+    completed = run_cli(
+        ["session", "status", "--role", str(role_path), "--session-id", "sess-a",
+         "--sessions-dir", str(sessions_dir)]
+    )
+
+    assert completed.returncode == 1
+    payload = json.loads(completed.stdout)
+    assert payload["ok"] is False
+    assert payload["summary"]["status"] == "no-session"
+
+
+def test_session_create_cli_refuses_exec_role(
+    run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], fixtures_root: Path
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    role_path = _persistent_role_file(
+        tmp_path, valid_role_dict, work, _fake_acpx(tmp_path, fixtures_root), strategy="exec"
+    )
+    sessions_dir = tmp_path / "sessions"
+
+    completed = run_cli(
+        ["session", "create", "--role", str(role_path), "--session-id", "sess-a",
+         "--sessions-dir", str(sessions_dir)]
+    )
+
+    assert completed.returncode == 1, completed.stdout
+    assert "persistent" in (completed.stdout + completed.stderr).lower()
+    assert not (sessions_dir / "sess-a").exists()
+
+
+def test_session_without_subcommand_errors(run_cli) -> None:
+    completed = run_cli(["session"])
+
+    assert completed.returncode == 2
+    assert "session" in (completed.stdout + completed.stderr).lower()
+
+
+def test_session_send_cli_missing_prompt_file_errors(
+    run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], fixtures_root: Path
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    role_path = _persistent_role_file(tmp_path, valid_role_dict, work, _fake_acpx(tmp_path, fixtures_root))
+    sessions_dir = tmp_path / "sessions"
+    missing_prompt = tmp_path / "nope.txt"
+
+    completed = run_cli(
+        ["session", "send", "--role", str(role_path), "--session-id", "sess-a",
+         "--prompt-file", str(missing_prompt), "--sessions-dir", str(sessions_dir)]
+    )
+
+    assert completed.returncode == 1
+    assert "error" in (completed.stdout + completed.stderr).lower()

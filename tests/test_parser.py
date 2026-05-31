@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from agent_run_supervisor.parser import (
+    ManagementParseError,
     ParseResult,
     parse_acpx_stdout,
     parse_acpx_stdout_bytes,
+    summarize_management_json,
 )
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "acpx-0.10.0"
@@ -151,3 +154,119 @@ def test_parse_acpx_stdout_accepts_path(tmp_path: Path) -> None:
 
     assert result.final_message == "CODEX_ACPX_OK"
     assert result.protocol_error is False
+
+
+# --- S1c management-command JSON summarizer --------------------------------
+#
+# Management commands emit a single JSON object (NOT a JSON-RPC NDJSON stream),
+# so they get a dedicated summarizer. It extracts only an allow-list of scalar
+# identity/lifecycle fields plus a top-level key/type summary — it never echoes
+# bulk/untrusted payload (model lists, event-log paths, agent command lines).
+
+
+def test_summarize_session_ensured_created_extracts_ids_and_name() -> None:
+    summary = summarize_management_json(_read("session-new-named", "stdout.json"))
+
+    assert summary["kind"] == "session_ensured"
+    assert summary["created"] is True
+    assert summary["acpx_session_id"] == "019e7940-35e8-79b1-8af2-229e4e41ad4b"
+    assert summary["acpx_record_id"] == "019e7940-35e8-79b1-8af2-229e4e41ad4b"
+    assert summary["session_name"] == "s1a-session-contract"
+
+
+def test_summarize_session_ensured_existing_reports_created_false() -> None:
+    summary = summarize_management_json(_read("session-ensure-existing", "stdout.json"))
+
+    assert summary["kind"] == "session_ensured"
+    assert summary["created"] is False
+
+
+def test_summarize_session_show_normalizes_acp_session_id_and_closed() -> None:
+    summary = summarize_management_json(_read("session-show-open", "stdout.json"))
+
+    assert summary["kind"] == "acpx.session.v1"
+    # `show` spells it `acpSessionId` (no x); the summary normalizes the key.
+    assert summary["acpx_session_id"] == "019e7940-35e8-79b1-8af2-229e4e41ad4b"
+    assert summary["closed"] is False
+    assert summary["session_name"] == "s1a-session-contract"
+
+
+def test_summarize_session_show_omits_bulk_untrusted_payload() -> None:
+    summary = summarize_management_json(_read("session-show-open", "stdout.json"))
+    serialized = json.dumps(summary)
+
+    # No model catalog, event-log path, agent command line, or cwd value leaks.
+    assert "gpt-5.5" not in serialized
+    assert "@agentclientprotocol" not in serialized
+    assert ".stream.ndjson" not in serialized
+    assert "/home/ecs-user" not in serialized
+    # And the summary does not carry those bulk fields as keys.
+    assert "availableModels" not in summary
+    assert "eventLog" not in summary
+    assert "messages" not in summary
+
+
+def test_summarize_status_snapshot_reports_alive_status() -> None:
+    summary = summarize_management_json(_read("session-status-after-turns", "stdout.json"))
+
+    assert summary["kind"] == "status_snapshot"
+    assert summary["status"] == "alive"
+
+
+def test_summarize_status_snapshot_reports_no_session() -> None:
+    summary = summarize_management_json(
+        _read("management-status-no-session-exit0", "stdout.json")
+    )
+
+    assert summary["kind"] == "status_snapshot"
+    assert summary["status"] == "no-session"
+
+
+def test_summarize_session_closed() -> None:
+    summary = summarize_management_json(_read("session-close-named", "stdout.json"))
+
+    assert summary["kind"] == "session_closed"
+    assert summary["acpx_session_id"] == "019e7940-4726-73e2-ab90-10b8bd7714f7"
+
+
+def test_summarize_cancel_result_reports_cancelled_flag() -> None:
+    summary = summarize_management_json(_read("session-cancel-no-active", "stdout.json"))
+
+    assert summary["kind"] == "cancel_result"
+    assert summary["cancelled"] is False
+
+
+def test_summarize_surfaces_jsonrpc_error_envelope_as_management_error() -> None:
+    # A single jsonrpc error line (missing session, exit 4) is a management error,
+    # not a turn stream; the summarizer surfaces the acpxCode for classification.
+    summary = summarize_management_json(_read("management-no-session-exit4", "stdout.ndjson"))
+
+    assert summary["kind"] == "error"
+    assert summary["acpx_code"] == "NO_SESSION"
+
+
+def test_summarize_refuses_ndjson_prompt_stream() -> None:
+    # Multi-line JSON-RPC turn stream must NOT be parsed as a management object.
+    with pytest.raises(ManagementParseError):
+        summarize_management_json(_read("session-prompt-turn1", "stdout.ndjson"))
+
+
+def test_summarize_refuses_jsonrpc_method_record() -> None:
+    record = b'{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}'
+    with pytest.raises(ManagementParseError):
+        summarize_management_json(record)
+
+
+def test_summarize_refuses_non_json() -> None:
+    with pytest.raises(ManagementParseError):
+        summarize_management_json(b"not json at all")
+
+
+def test_summarize_refuses_empty_output() -> None:
+    with pytest.raises(ManagementParseError):
+        summarize_management_json(b"   \n  ")
+
+
+def test_summarize_refuses_json_array() -> None:
+    with pytest.raises(ManagementParseError):
+        summarize_management_json(b'["not", "an", "object"]')
