@@ -317,6 +317,8 @@ def _fake_acpx(
     show_json = fixtures_root / "session-show-open" / "stdout.json"
     status_json = fixtures_root / status_fixture / "stdout.json"
     turn_ndjson = fixtures_root / "session-prompt-turn1" / "stdout.ndjson"
+    close_json = fixtures_root / "session-close-named" / "stdout.json"
+    cancel_json = fixtures_root / "session-cancel-no-active" / "stdout.json"
     script = tmp_path / "fake-acpx"
     script.write_text(
         "#!/bin/sh\n"
@@ -324,6 +326,8 @@ def _fake_acpx(
         f'  *"sessions new"*) cat "{new_json}" ;;\n'
         f'  *"sessions ensure"*) cat "{new_json}" ;;\n'
         f'  *"sessions show"*) cat "{show_json}" ;;\n'
+        f'  *"sessions close"*) cat "{close_json}" ;;\n'
+        f'  *"cancel -s"*) cat "{cancel_json}" ;;\n'
         f'  *"status -s"*) cat "{status_json}" ;;\n'
         f'  *"prompt -s"*) cat "{turn_ndjson}" ;;\n'
         "  *) printf '{\"action\":\"unknown\"}\\n' ;;\n"
@@ -520,3 +524,167 @@ def test_session_send_cli_missing_prompt_file_errors(
 
     assert completed.returncode == 1
     assert "error" in (completed.stdout + completed.stderr).lower()
+
+
+# --- S1d session lifecycle CLI (close / abort / list) ---------------------
+
+
+def _create_session_via_cli(run_cli, role_path: Path, sessions_dir: Path, session_id="sess-a"):
+    created = run_cli(
+        ["session", "create", "--role", str(role_path), "--session-id", session_id,
+         "--session-name", "nightly", "--sessions-dir", str(sessions_dir)]
+    )
+    assert created.returncode == 0, created.stderr
+    return created
+
+
+def test_session_close_cli_marks_closed_and_returns_json(
+    run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], fixtures_root: Path
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    role_path = _persistent_role_file(tmp_path, valid_role_dict, work, _fake_acpx(tmp_path, fixtures_root))
+    sessions_dir = tmp_path / "sessions"
+    _create_session_via_cli(run_cli, role_path, sessions_dir)
+
+    completed = run_cli(
+        ["session", "close", "--role", str(role_path), "--session-id", "sess-a",
+         "--sessions-dir", str(sessions_dir)]
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload["state"] == "closed"
+    assert payload["closed"] is True
+    assert payload["business_verdict"] is None
+    data = json.loads((sessions_dir / "sess-a" / "session.json").read_text(encoding="utf-8"))
+    assert data["state"] == "closed"
+    assert (sessions_dir / "sess-a" / "management" / "close.json").exists()
+
+
+def test_session_abort_cli_reports_cancelled_flag(
+    run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], fixtures_root: Path
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    role_path = _persistent_role_file(tmp_path, valid_role_dict, work, _fake_acpx(tmp_path, fixtures_root))
+    sessions_dir = tmp_path / "sessions"
+    _create_session_via_cli(run_cli, role_path, sessions_dir)
+
+    completed = run_cli(
+        ["session", "abort", "--role", str(role_path), "--session-id", "sess-a",
+         "--sessions-dir", str(sessions_dir)]
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload["cancelled"] is False
+    assert payload["kind"] == "cancel_result"
+    assert payload["business_verdict"] is None
+    # Cancel is not close: the record remains open.
+    data = json.loads((sessions_dir / "sess-a" / "session.json").read_text(encoding="utf-8"))
+    assert data["state"] == "open"
+    assert (sessions_dir / "sess-a" / "management" / "abort.json").exists()
+
+
+def test_session_send_cli_refuses_closed_session(
+    run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], fixtures_root: Path
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    role_path = _persistent_role_file(tmp_path, valid_role_dict, work, _fake_acpx(tmp_path, fixtures_root))
+    sessions_dir = tmp_path / "sessions"
+    prompt_path = tmp_path / "prompt.txt"
+    prompt_path.write_text("contract turn 1", encoding="utf-8")
+    _create_session_via_cli(run_cli, role_path, sessions_dir)
+
+    closed = run_cli(
+        ["session", "close", "--role", str(role_path), "--session-id", "sess-a",
+         "--sessions-dir", str(sessions_dir)]
+    )
+    assert closed.returncode == 0, closed.stderr
+
+    completed = run_cli(
+        ["session", "send", "--role", str(role_path), "--session-id", "sess-a",
+         "--prompt-file", str(prompt_path), "--sessions-dir", str(sessions_dir)]
+    )
+
+    assert completed.returncode == 1
+    assert "closed" in (completed.stdout + completed.stderr).lower()
+    # Fail closed: no turn artifacts produced for the closed session.
+    assert not (sessions_dir / "sess-a" / "turns").exists()
+
+
+def test_session_list_cli_returns_records(
+    run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], fixtures_root: Path
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    role_path = _persistent_role_file(tmp_path, valid_role_dict, work, _fake_acpx(tmp_path, fixtures_root))
+    sessions_dir = tmp_path / "sessions"
+    _create_session_via_cli(run_cli, role_path, sessions_dir, session_id="sess-a")
+    _create_session_via_cli(run_cli, role_path, sessions_dir, session_id="sess-b")
+
+    completed = run_cli(
+        ["session", "list", "--sessions-dir", str(sessions_dir), "--role", str(role_path)]
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    ids = [entry["session_id"] for entry in payload["sessions"]]
+    assert ids == ["sess-a", "sess-b"]
+    assert payload["count"] == 2
+    assert payload["business_verdict"] is None
+    # Local read-only summary: bulk acpx payload never appears.
+    assert "gpt-5.5" not in completed.stdout
+
+
+def test_session_list_cli_works_without_role(
+    run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], fixtures_root: Path
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    role_path = _persistent_role_file(tmp_path, valid_role_dict, work, _fake_acpx(tmp_path, fixtures_root))
+    sessions_dir = tmp_path / "sessions"
+    _create_session_via_cli(run_cli, role_path, sessions_dir)
+
+    completed = run_cli(["session", "list", "--sessions-dir", str(sessions_dir)])
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert [e["session_id"] for e in payload["sessions"]] == ["sess-a"]
+
+
+def test_session_list_cli_empty_when_no_sessions(run_cli, tmp_path: Path) -> None:
+    sessions_dir = tmp_path / "sessions"
+
+    completed = run_cli(["session", "list", "--sessions-dir", str(sessions_dir)])
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload["sessions"] == []
+    assert payload["count"] == 0
+
+
+def test_session_close_cli_refuses_already_closed(
+    run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], fixtures_root: Path
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    role_path = _persistent_role_file(tmp_path, valid_role_dict, work, _fake_acpx(tmp_path, fixtures_root))
+    sessions_dir = tmp_path / "sessions"
+    _create_session_via_cli(run_cli, role_path, sessions_dir)
+
+    first = run_cli(
+        ["session", "close", "--role", str(role_path), "--session-id", "sess-a",
+         "--sessions-dir", str(sessions_dir)]
+    )
+    assert first.returncode == 0, first.stderr
+
+    second = run_cli(
+        ["session", "close", "--role", str(role_path), "--session-id", "sess-a",
+         "--sessions-dir", str(sessions_dir)]
+    )
+
+    assert second.returncode == 1
+    assert "closed" in (second.stdout + second.stderr).lower()

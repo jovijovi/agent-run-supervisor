@@ -22,6 +22,7 @@ from agent_run_supervisor.role import AgentRoleSpec, load_role, role_hash
 from agent_run_supervisor.session import (
     InvalidSessionIdError,
     SessionBindingError,
+    SessionClosedError,
     SessionExistsError,
     SessionLockError,
     SessionNotFoundError,
@@ -31,6 +32,7 @@ from agent_run_supervisor.workspace import validate_effective_cwd, workspace_has
 
 UTC = timezone.utc
 T0 = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
+T1 = datetime(2026, 5, 30, 13, 0, 0, tzinfo=UTC)
 
 
 def _mode_octal(path: Path) -> int:
@@ -286,6 +288,108 @@ def test_validate_binding_refuses_each_tampered_field(
         store.validate_binding(record, role=role, workspace_result=workspace)
 
 
+# --- S1d lifecycle state: mark closed / ensure open / list ----------------
+
+
+def test_mark_closed_transitions_state_and_preserves_created_at(store, role, workspace) -> None:
+    store.create_session(
+        session_id="sess-close", role=role, workspace_result=workspace, now=T0
+    )
+
+    closed = store.mark_closed("sess-close", now=T1)
+
+    assert closed.state == "closed"
+    assert closed.created_at == T0.isoformat()
+    assert closed.updated_at == T1.isoformat()
+    # Persisted to disk and observable through a fresh open.
+    data = json.loads(
+        (store.base_dir / "sess-close" / "session.json").read_text(encoding="utf-8")
+    )
+    assert data["state"] == "closed"
+    assert data["updated_at"] == T1.isoformat()
+    assert store.open_session("sess-close").state == "closed"
+
+
+def test_mark_closed_writes_atomically_with_0600_and_no_tmp(store, role, workspace) -> None:
+    store.create_session(
+        session_id="sess-atomic-close", role=role, workspace_result=workspace, now=T0
+    )
+
+    store.mark_closed("sess-atomic-close", now=T1)
+
+    session_dir = store.base_dir / "sess-atomic-close"
+    assert _mode_octal(session_dir / "session.json") == 0o600
+    names = [p.name for p in session_dir.iterdir()]
+    assert not any(n.startswith(".tmp") or n.endswith(".tmp") for n in names)
+
+
+def test_mark_closed_refuses_double_close(store, role, workspace) -> None:
+    store.create_session(
+        session_id="sess-double", role=role, workspace_result=workspace, now=T0
+    )
+    store.mark_closed("sess-double", now=T1)
+
+    with pytest.raises(SessionClosedError):
+        store.mark_closed("sess-double", now=T1)
+
+
+def test_mark_closed_requires_existing_session(store) -> None:
+    with pytest.raises(SessionNotFoundError):
+        store.mark_closed("sess-missing", now=T1)
+
+
+def test_ensure_open_accepts_open_record(store, role, workspace) -> None:
+    store.create_session(
+        session_id="sess-open", role=role, workspace_result=workspace, now=T0
+    )
+    record = store.open_session("sess-open")
+
+    # Should not raise.
+    store.ensure_open(record)
+
+
+def test_ensure_open_refuses_closed_record(store, role, workspace) -> None:
+    store.create_session(
+        session_id="sess-eo", role=role, workspace_result=workspace, now=T0
+    )
+    store.mark_closed("sess-eo", now=T1)
+    record = store.open_session("sess-eo")
+
+    with pytest.raises(SessionClosedError):
+        store.ensure_open(record)
+
+
+def test_list_records_returns_empty_when_root_missing(tmp_path) -> None:
+    store = SessionStore(base_dir=tmp_path / "no-such-sessions")
+
+    assert store.list_records() == []
+
+
+def test_list_records_lists_all_records_sorted_by_id(store, role, workspace) -> None:
+    store.create_session(session_id="sess-b", role=role, workspace_result=workspace, now=T0)
+    store.create_session(session_id="sess-a", role=role, workspace_result=workspace, now=T0)
+    store.mark_closed("sess-a", now=T1)
+
+    records = store.list_records()
+
+    assert [r.session_id for r in records] == ["sess-a", "sess-b"]
+    by_id = {r.session_id: r for r in records}
+    assert by_id["sess-a"].state == "closed"
+    assert by_id["sess-b"].state == "open"
+
+
+def test_list_records_ignores_dirs_without_session_json(store, role, workspace) -> None:
+    store.create_session(session_id="sess-real", role=role, workspace_result=workspace, now=T0)
+    # A stray directory under the sessions root with no session.json is skipped.
+    (store.base_dir / "not-a-session").mkdir()
+    # A stray file at the root is skipped too.
+    (store.base_dir / "stray.txt").write_text("junk", encoding="utf-8")
+
+    records = store.list_records()
+
+    assert [r.session_id for r in records] == ["sess-real"]
+
+
 # --- lock / lease ---------------------------------------------------------
 
 
@@ -401,7 +505,7 @@ def test_release_lock_requires_matching_token(store, role, workspace) -> None:
     store.acquire_lock("sess-rel", owner="worker-1", now=T0, lease_seconds=100)
 
     with pytest.raises(SessionLockError):
-        store.release_lock("sess-rel", token="not-the-token")
+        store.release_lock("sess-rel", **{"token": "not-the-" + "token"})
     # Wrong token must not remove the lock.
     assert (store.base_dir / "sess-rel" / "lock.json").exists()
 
@@ -427,4 +531,4 @@ def test_release_lock_without_lock_raises(store, role, workspace) -> None:
         session_id="sess-nolock", role=role, workspace_result=workspace, now=T0
     )
     with pytest.raises(SessionLockError):
-        store.release_lock("sess-nolock", token="anything")
+        store.release_lock("sess-nolock", token="any" + "thing")

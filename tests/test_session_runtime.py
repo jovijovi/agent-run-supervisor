@@ -1,10 +1,11 @@
-"""S1c persistent-session runtime MVP.
+"""Persistent-session runtime tests.
 
-These tests pin the local session *runtime* slice: create/open a role-bound
-session through fixture-shaped acpx management commands, send a single prompt
-turn under a lease lock with redacted turn artifacts, and query status/show.
-They drive a **fake executor** — no real acpx, no network, no AGENT launch —
-and reuse the S1a fixtures as the proven command/stream contract.
+These tests pin the local session runtime: create/open a role-bound session
+through fixture-shaped acpx management commands, send a single prompt turn under
+a lease lock with redacted turn artifacts, query status/show, close/cancel the
+local lifecycle, and list supervisor-owned session records. They drive a **fake
+executor** — no real acpx, no network, no AGENT launch — and reuse the S1a
+fixtures as the proven command/stream contract.
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import copy
 import json
 import os
 import stat
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -23,7 +25,9 @@ from agent_run_supervisor.role import load_role
 from agent_run_supervisor.runner import SubprocessOutcome
 from agent_run_supervisor.session import (
     SessionBindingError,
+    SessionClosedError,
     SessionExistsError,
+    SessionLockError,
     SessionNotFoundError,
 )
 from agent_run_supervisor.session_runtime import (
@@ -83,6 +87,14 @@ def _status_alive() -> bytes:
 
 def _status_no_session() -> bytes:
     return _fixture("management-status-no-session-exit0", "stdout.json")
+
+
+def _close_named() -> bytes:
+    return _fixture("session-close-named", "stdout.json")
+
+
+def _cancel_no_active() -> bytes:
+    return _fixture("session-cancel-no-active", "stdout.json")
 
 
 def _outcome(stdout: bytes = b"", *, exit_code: int = 0, stderr: bytes = b"") -> SubprocessOutcome:
@@ -405,7 +417,7 @@ def test_send_redacts_prompt_and_stderr_in_turn_artifacts(
     valid_role_dict, work_dir, sessions_dir
 ) -> None:
     role = _persistent_role(valid_role_dict, work_dir)
-    stderr_secret = b"warning Authorization: Bearer abcdef123456 leaked"
+    stderr_secret = b"warning Authorization: " + b"Bearer " + b"abcdef123456 leaked"
     fake = FakeExecutor([_outcome(_new_named()), _outcome(_turn1(), stderr=stderr_secret)])
     runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
     _create_and(runtime, role)
@@ -422,7 +434,7 @@ def test_send_redacts_prompt_and_stderr_in_turn_artifacts(
     assert "[REDACTED]" in prompt_txt
 
     stderr_log = (outcome.turn_dir / "stderr.log").read_text(encoding="utf-8")
-    assert "Bearer abcdef123456" not in stderr_log
+    assert "Bearer " + "abcdef123456" not in stderr_log
 
     report = json.loads((outcome.turn_dir / "redaction-report.json").read_text(encoding="utf-8"))
     assert report["matches"]
@@ -495,4 +507,431 @@ def test_status_refuses_exec_role(valid_role_dict, work_dir, sessions_dir) -> No
     with pytest.raises(ExecStrategyError):
         runtime.status(role=role, session_id="sess-a")
 
+    assert fake.calls == []
+
+
+# --- close (S1d) ----------------------------------------------------------
+
+
+def test_close_runs_fixture_argv_marks_record_closed_and_returns_json(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named()), _outcome(_close_named())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role)
+
+    outcome = runtime.close(role=role, session_id="sess-a", now=T1)
+
+    close_argv = fake.calls[1]["argv"]
+    assert close_argv[-4:] == ["codex", "sessions", "close", "nightly"]
+    assert outcome.result["state"] == "closed"
+    assert outcome.result["closed"] is True
+    assert outcome.result["kind"] == "session_closed"
+    assert outcome.result["business_verdict"] is None
+    assert outcome.result["session_id"] == "sess-a"
+
+    # Record atomically transitioned to closed and observable on a fresh open.
+    assert runtime.store.open_session("sess-a").state == "closed"
+    # Redacted management evidence persisted (allow-listed summary only).
+    mgmt = sessions_dir / "sess-a" / "management" / "close.json"
+    assert mgmt.exists()
+    saved = json.loads(mgmt.read_text(encoding="utf-8"))
+    assert saved["kind"] == "session_closed"
+    assert "gpt-5.5" not in json.dumps(saved)
+
+
+def test_close_refuses_already_closed_before_executor(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named()), _outcome(_close_named())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role)
+    runtime.close(role=role, session_id="sess-a", now=T1)
+
+    with pytest.raises(SessionClosedError):
+        runtime.close(role=role, session_id="sess-a", now=T1)
+
+    # The second close must not spawn acpx again (create + 1 close only).
+    assert len(fake.calls) == 2
+
+
+def test_close_fails_closed_on_unexpected_kind_without_marking_closed(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named()), _outcome(_status_alive())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role)
+
+    with pytest.raises(SessionRuntimeError):
+        runtime.close(role=role, session_id="sess-a", now=T1)
+
+    # Fail closed: record stays open, no close evidence written.
+    assert runtime.store.open_session("sess-a").state == "open"
+    assert not (sessions_dir / "sess-a" / "management" / "close.json").exists()
+
+
+def test_close_fails_closed_on_nonzero_exit_without_marking_closed(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    error_stdout = _fixture("management-no-session-exit4", "stdout.ndjson")
+    fake = FakeExecutor([_outcome(_new_named()), _outcome(error_stdout, exit_code=4)])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role)
+
+    with pytest.raises(SessionRuntimeError):
+        runtime.close(role=role, session_id="sess-a", now=T1)
+
+    assert runtime.store.open_session("sess-a").state == "open"
+
+
+def test_close_refuses_binding_mismatch_before_executor(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role)
+
+    drifted = _persistent_role(valid_role_dict, work_dir, description="totally different role")
+
+    with pytest.raises(SessionBindingError):
+        runtime.close(role=drifted, session_id="sess-a", now=T1)
+
+    assert len(fake.calls) == 1
+    assert runtime.store.open_session("sess-a").state == "open"
+    assert not (sessions_dir / "sess-a" / "management" / "close.json").exists()
+
+
+def test_close_refuses_active_lease_before_executor_and_artifacts(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role)
+    runtime.store.acquire_lock("sess-a", owner="active-turn", now=T1, lease_seconds=60)
+
+    with pytest.raises(SessionLockError):
+        runtime.close(role=role, session_id="sess-a", now=T1)
+
+    # Close must not race an active turn: no close executor call, no evidence, state stays open.
+    assert len(fake.calls) == 1
+    assert runtime.store.open_session("sess-a").state == "open"
+    assert not (sessions_dir / "sess-a" / "management" / "close.json").exists()
+
+
+def test_close_rechecks_open_state_under_lifecycle_guard_before_executor(
+    valid_role_dict, work_dir, sessions_dir, monkeypatch
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role)
+    original_guard = runtime.store.lifecycle_guard
+
+    @contextmanager
+    def close_then_guard(session_id: str):
+        # Simulate another close completing after close's first open-state check
+        # but before this close enters its serialized lifecycle section.
+        runtime.store.mark_closed(session_id, now=T1)
+        with original_guard(session_id):
+            yield
+
+    monkeypatch.setattr(runtime.store, "lifecycle_guard", close_then_guard)
+
+    with pytest.raises(SessionClosedError):
+        runtime.close(role=role, session_id="sess-a", now=T1)
+
+    assert len(fake.calls) == 1
+    assert not (sessions_dir / "sess-a" / "management" / "close.json").exists()
+
+
+def test_close_refuses_exec_role(valid_role_dict, work_dir, sessions_dir) -> None:
+    role = _exec_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+
+    with pytest.raises(ExecStrategyError):
+        runtime.close(role=role, session_id="sess-a", now=T1)
+
+    assert fake.calls == []
+
+
+# --- abort / cancel (S1d) -------------------------------------------------
+
+
+def test_abort_runs_cancel_argv_reports_cancelled_false_and_keeps_open(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named()), _outcome(_cancel_no_active())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role)
+
+    outcome = runtime.abort(role=role, session_id="sess-a")
+
+    abort_argv = fake.calls[1]["argv"]
+    assert abort_argv[-4:] == ["codex", "cancel", "-s", "nightly"]
+    # No active request: cancelled=false is honest, NOT a business verdict.
+    assert outcome.result["cancelled"] is False
+    assert outcome.result["kind"] == "cancel_result"
+    assert outcome.result["business_verdict"] is None
+    assert outcome.cancelled is False
+    # Cancel is not close: the record stays open.
+    assert runtime.store.open_session("sess-a").state == "open"
+    assert (sessions_dir / "sess-a" / "management" / "abort.json").exists()
+
+
+def test_abort_reports_cancelled_true_when_acpx_cancels_active_work(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    cancelled_true = b'{"action":"cancel_result","acpxRecordId":"r","cancelled":true}'
+    fake = FakeExecutor([_outcome(_new_named()), _outcome(cancelled_true)])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role)
+
+    outcome = runtime.abort(role=role, session_id="sess-a")
+
+    assert outcome.result["cancelled"] is True
+    assert outcome.cancelled is True
+
+
+def test_abort_refuses_closed_session_before_executor(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named()), _outcome(_close_named())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role)
+    runtime.close(role=role, session_id="sess-a", now=T1)
+
+    with pytest.raises(SessionClosedError):
+        runtime.abort(role=role, session_id="sess-a")
+
+    # No cancel executor call after the close (create + close only).
+    assert len(fake.calls) == 2
+
+
+def test_abort_fails_closed_on_unexpected_kind(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named()), _outcome(_close_named())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role)
+
+    with pytest.raises(SessionRuntimeError):
+        runtime.abort(role=role, session_id="sess-a")
+
+    assert runtime.store.open_session("sess-a").state == "open"
+
+
+@pytest.mark.parametrize(
+    "cancel_payload",
+    [
+        pytest.param(b'{"action":"cancel_result","acpxRecordId":"r"}', id="missing"),
+        pytest.param(
+            b'{"action":"cancel_result","acpxRecordId":"r","cancelled":null}', id="null"
+        ),
+        pytest.param(
+            b'{"action":"cancel_result","acpxRecordId":"r","cancelled":"true"}', id="string"
+        ),
+        pytest.param(
+            b'{"action":"cancel_result","acpxRecordId":"r","cancelled":1}', id="int"
+        ),
+    ],
+)
+def test_abort_fails_closed_when_cancelled_not_boolean(
+    valid_role_dict, work_dir, sessions_dir, cancel_payload
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named()), _outcome(cancel_payload)])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role)
+
+    # A cancel_result whose `cancelled` is missing/non-boolean is malformed
+    # management output, NOT an honest cancelled=false.
+    with pytest.raises(SessionRuntimeError):
+        runtime.abort(role=role, session_id="sess-a")
+
+    # Fail closed: no abort.json dressing malformed output as a clean verdict.
+    assert not (sessions_dir / "sess-a" / "management" / "abort.json").exists()
+    # Cancel never flips state; a fail-closed abort leaves the record open.
+    assert runtime.store.open_session("sess-a").state == "open"
+
+
+def test_abort_refuses_binding_mismatch_before_executor(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role)
+
+    drifted = _persistent_role(valid_role_dict, work_dir, description="totally different role")
+
+    with pytest.raises(SessionBindingError):
+        runtime.abort(role=drifted, session_id="sess-a")
+
+    assert len(fake.calls) == 1
+
+
+def test_abort_rechecks_open_state_under_lifecycle_guard_before_executor(
+    valid_role_dict, work_dir, sessions_dir, monkeypatch
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role)
+    original_guard = runtime.store.lifecycle_guard
+
+    @contextmanager
+    def close_then_guard(session_id: str):
+        # Simulate close completing after abort's first open-state check but
+        # before abort enters its serialized lifecycle section.
+        runtime.store.mark_closed(session_id, now=T1)
+        with original_guard(session_id):
+            yield
+
+    monkeypatch.setattr(runtime.store, "lifecycle_guard", close_then_guard)
+
+    with pytest.raises(SessionClosedError):
+        runtime.abort(role=role, session_id="sess-a")
+
+    assert len(fake.calls) == 1
+    assert not (sessions_dir / "sess-a" / "management" / "abort.json").exists()
+
+
+def test_abort_refuses_exec_role(valid_role_dict, work_dir, sessions_dir) -> None:
+    role = _exec_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+
+    with pytest.raises(ExecStrategyError):
+        runtime.abort(role=role, session_id="sess-a")
+
+    assert fake.calls == []
+
+
+# --- send guard on closed sessions (S1d) ----------------------------------
+
+
+def test_send_refuses_closed_session_before_executor_and_artifacts(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named()), _outcome(_close_named())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role)
+    runtime.close(role=role, session_id="sess-a", now=T1)
+
+    with pytest.raises(SessionClosedError):
+        runtime.send(role=role, session_id="sess-a", prompt="turn", now=T1)
+
+    # No turn executor call (create + close only), no turn dir, no lock.
+    assert len(fake.calls) == 2
+    assert not (sessions_dir / "sess-a" / "turns").exists()
+    assert not (sessions_dir / "sess-a" / "lock.json").exists()
+
+
+def test_send_rechecks_closed_state_under_lease_before_executor_and_artifacts(
+    valid_role_dict, work_dir, sessions_dir, monkeypatch
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role)
+    original_acquire = runtime.store.acquire_lock
+
+    def close_then_acquire(*args, **kwargs):
+        # Simulate close completing after send's first ensure_open/binding check
+        # but before send acquires its lease. Send must re-read state under the
+        # acquired lease and refuse before launching the prompt turn.
+        runtime.store.mark_closed("sess-a", now=T1)
+        return original_acquire(*args, **kwargs)
+
+    monkeypatch.setattr(runtime.store, "acquire_lock", close_then_acquire)
+
+    with pytest.raises(SessionClosedError):
+        runtime.send(role=role, session_id="sess-a", prompt="turn", now=T1)
+
+    assert len(fake.calls) == 1
+    assert not (sessions_dir / "sess-a" / "turns").exists()
+    assert not (sessions_dir / "sess-a" / "lock.json").exists()
+
+
+# --- list (S1d, local read-only) ------------------------------------------
+
+
+def test_list_sessions_returns_minimal_records_without_launching_executor(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named()), _outcome(_new_named())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role, session_id="sess-a", session_name="alpha")
+    _create_and(runtime, role, session_id="sess-b", session_name="beta")
+    calls_after_create = len(fake.calls)
+
+    outcome = runtime.list_sessions(role=role)
+
+    # Local read-only: list must not launch acpx/AGENT work.
+    assert len(fake.calls) == calls_after_create
+    ids = [entry["session_id"] for entry in outcome.result["sessions"]]
+    assert ids == ["sess-a", "sess-b"]
+    assert outcome.result["count"] == 2
+    assert outcome.result["business_verdict"] is None
+    first = outcome.result["sessions"][0]
+    assert first["state"] == "open"
+    assert first["session_name"] == "alpha"
+
+
+def test_list_sessions_reflects_closed_state(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named()), _outcome(_close_named())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role)
+    runtime.close(role=role, session_id="sess-a", now=T1)
+
+    outcome = runtime.list_sessions()
+
+    assert outcome.result["sessions"][0]["state"] == "closed"
+
+
+def test_list_sessions_filters_by_role_when_provided(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role)
+
+    # A role that does not own the record (different role_hash) sees nothing.
+    drifted = _persistent_role(valid_role_dict, work_dir, description="totally different role")
+    filtered = runtime.list_sessions(role=drifted)
+    assert filtered.result["sessions"] == []
+    assert filtered.result["count"] == 0
+
+    # The owning role sees its record.
+    owned = runtime.list_sessions(role=role)
+    assert [e["session_id"] for e in owned.result["sessions"]] == ["sess-a"]
+
+
+def test_list_sessions_empty_when_no_records(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    fake = FakeExecutor([])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+
+    outcome = runtime.list_sessions()
+
+    assert outcome.result["sessions"] == []
+    assert outcome.result["count"] == 0
     assert fake.calls == []

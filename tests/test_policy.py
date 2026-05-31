@@ -9,6 +9,8 @@ from agent_run_supervisor.policy import (
     ExecStrategyError,
     compile_command,
     compile_permission_policy,
+    compile_session_cancel_command,
+    compile_session_close_command,
     compile_session_create_command,
     compile_session_ensure_command,
     compile_session_prompt_command,
@@ -286,6 +288,83 @@ def test_compile_session_prompt_command_keeps_prompt_as_single_argv_element() ->
     # No shell: the whole prompt is one argv element, never split or expanded.
     assert argv[-1] == injection
     assert all(isinstance(part, str) for part in argv)
+
+
+# --- S1d close / cancel command compilation -------------------------------
+#
+# Fixture-proven (fixtures/acpx-0.10.0/session-close-named,
+# session-cancel-no-active). Both are management commands: they carry only the
+# ``--format json --json-strict --cwd`` block plus a management tail, never the
+# exec/turn authorization flags, and never a shell string.
+
+
+def test_compile_session_close_command_matches_fixture_grammar() -> None:
+    role = _persistent_role()
+    argv = compile_session_close_command(role, cwd="/tmp/work", session_name="nightly")
+
+    assert argv[:6] == _MANAGEMENT_PREFIX
+    cwd_index = argv.index("--cwd")
+    assert argv[cwd_index + 1] == "/tmp/work"
+    assert argv[-4:] == ["codex", "sessions", "close", "nightly"]
+    for forbidden in (
+        "--permission-policy",
+        "--timeout",
+        "--max-turns",
+        "--suppress-reads",
+        "--deny-all",
+        "--no-terminal",
+    ):
+        assert forbidden not in argv, forbidden
+    assert all(isinstance(part, str) for part in argv)
+
+
+def test_compile_session_cancel_command_matches_fixture_grammar() -> None:
+    role = _persistent_role()
+    argv = compile_session_cancel_command(role, cwd="/tmp/work", session_name="nightly")
+
+    assert argv[:6] == _MANAGEMENT_PREFIX
+    cwd_index = argv.index("--cwd")
+    assert argv[cwd_index + 1] == "/tmp/work"
+    # ``cancel -s <name>`` (NOT ``sessions cancel``), per the S1a fixture.
+    assert argv[-4:] == ["codex", "cancel", "-s", "nightly"]
+    for forbidden in (
+        "--permission-policy",
+        "--timeout",
+        "--max-turns",
+        "--suppress-reads",
+        "--deny-all",
+        "--no-terminal",
+    ):
+        assert forbidden not in argv, forbidden
+    assert all(isinstance(part, str) for part in argv)
+
+
+def test_compile_session_close_cancel_refuse_exec_strategy_role() -> None:
+    role = load_role(VALID_ROLE)  # strategy == "exec"
+    with pytest.raises(ExecStrategyError):
+        compile_session_close_command(role, cwd="/tmp/work", session_name="n")
+    with pytest.raises(ExecStrategyError):
+        compile_session_cancel_command(role, cwd="/tmp/work", session_name="n")
+
+
+def test_compile_session_close_cancel_reject_empty_session_name() -> None:
+    role = _persistent_role()
+    with pytest.raises(ValueError):
+        compile_session_close_command(role, cwd="/tmp/work", session_name="")
+    with pytest.raises(ValueError):
+        compile_session_cancel_command(role, cwd="/tmp/work", session_name="")
+
+
+def test_compile_session_close_cancel_use_role_binary_when_present() -> None:
+    role = _persistent_role(
+        runner={**copy.deepcopy(VALID_ROLE)["runner"], "acpx_binary": "/opt/acpx/bin/acpx"}
+    )
+    for argv in (
+        compile_session_close_command(role, cwd="/tmp/work", session_name="n"),
+        compile_session_cancel_command(role, cwd="/tmp/work", session_name="n"),
+    ):
+        assert argv[0] == "/opt/acpx/bin/acpx"
+        assert "npx" not in argv
 
 
 def test_compile_session_commands_use_role_binary_when_present() -> None:

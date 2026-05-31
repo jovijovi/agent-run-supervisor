@@ -226,6 +226,44 @@ def compile_session_status_command(
     return argv
 
 
+def compile_session_close_command(
+    role: AgentRoleSpec,
+    cwd: str | None,
+    session_name: str,
+) -> list[str]:
+    """``<adapter> sessions close <session_name>`` (terminal session close).
+
+    Fixture-proven by ``fixtures/acpx-0.10.0/session-close-named``. A management
+    command: it carries only the output/cwd block, never an exec/turn
+    authorization block, and the session name is always a single argv element.
+    """
+    ensure_persistent_strategy(role)
+    name = _require_session_name(session_name)
+    argv = _acpx_prefix(role)
+    argv.extend(_management_flags(_resolve_cwd(role, cwd)))
+    argv.extend([role.runner.adapter_agent, "sessions", "close", name])
+    return argv
+
+
+def compile_session_cancel_command(
+    role: AgentRoleSpec,
+    cwd: str | None,
+    session_name: str,
+) -> list[str]:
+    """``<adapter> cancel -s <session_name>`` (cooperative cancel of active work).
+
+    Fixture-proven by ``fixtures/acpx-0.10.0/session-cancel-no-active``. Note the
+    grammar is ``cancel -s <name>`` (not ``sessions cancel``). A management
+    command: output/cwd block only, no exec/turn authorization, single argv name.
+    """
+    ensure_persistent_strategy(role)
+    name = _require_session_name(session_name)
+    argv = _acpx_prefix(role)
+    argv.extend(_management_flags(_resolve_cwd(role, cwd)))
+    argv.extend([role.runner.adapter_agent, "cancel", "-s", name])
+    return argv
+
+
 def compile_session_prompt_command(
     role: AgentRoleSpec,
     cwd: str | None,
