@@ -77,6 +77,10 @@ def _turn1() -> bytes:
     return _fixture("session-prompt-turn1", "stdout.ndjson")
 
 
+def _turn2() -> bytes:
+    return _fixture("session-prompt-turn2", "stdout.ndjson")
+
+
 def _show_open() -> bytes:
     return _fixture("session-show-open", "stdout.json")
 
@@ -438,6 +442,67 @@ def test_send_redacts_prompt_and_stderr_in_turn_artifacts(
 
     report = json.loads((outcome.turn_dir / "redaction-report.json").read_text(encoding="utf-8"))
     assert report["matches"]
+
+
+# --- multi-turn continuity (S1 closure) -----------------------------------
+
+
+def test_two_sequential_sends_reuse_record_persist_distinct_turns_and_release_lease(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    """S1 closure: multi-turn continuity through ``SessionRuntime``.
+
+    Two sequential ``send`` calls against the same local session id must reuse
+    the same local record (no second create), drive the SAME acpx session name,
+    persist two distinct redacted turn directories, release the lease after each
+    turn, and parse the S1a fixture markers ``S1A_SESSION_TURN_1_OK`` /
+    ``S1A_SESSION_TURN_2_OK`` (turn2 reuses the same ACP session id, skipping
+    ``initialize``/``session/new``).
+    """
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named()), _outcome(_turn1()), _outcome(_turn2())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+
+    created = _create_and(runtime, role)
+    # Exactly one management call so far: the single create. No extra create
+    # is allowed for the second turn.
+    assert len(fake.calls) == 1
+
+    first = runtime.send(role=role, session_id="sess-a", prompt="contract turn 1", now=T1)
+    # Lease released after the first turn so the second turn can acquire it.
+    assert not (sessions_dir / "sess-a" / "lock.json").exists()
+
+    second = runtime.send(role=role, session_id="sess-a", prompt="contract turn 2", now=T1)
+    # Lease released after the second turn too.
+    assert not (sessions_dir / "sess-a" / "lock.json").exists()
+
+    # Same local record reused: only the two prompt turns were added, so the
+    # second turn did NOT trigger another create.
+    assert len(fake.calls) == 3
+    assert created.session_id == "sess-a"
+    assert fake.calls[1]["argv"][-5:] == ["codex", "prompt", "-s", "nightly", "contract turn 1"]
+    assert fake.calls[2]["argv"][-5:] == ["codex", "prompt", "-s", "nightly", "contract turn 2"]
+
+    # Two distinct redacted turn directories persisted under the one session.
+    assert first.turn_id != second.turn_id
+    assert first.turn_dir != second.turn_dir
+    turns_root = sessions_dir / "sess-a" / "turns"
+    turn_dirs = sorted(p.name for p in turns_root.iterdir() if p.is_dir())
+    assert len(turn_dirs) == 2
+    assert {first.turn_id, second.turn_id} == set(turn_dirs)
+
+    # Multi-turn continuity markers parsed from the fixtures.
+    assert first.result["final_message"] == "S1A_SESSION_TURN_1_OK"
+    assert second.result["final_message"] == "S1A_SESSION_TURN_2_OK"
+    assert first.result["status"] == "completed"
+    assert second.result["status"] == "completed"
+    assert first.result["session_id"] == "sess-a"
+    assert second.result["session_id"] == "sess-a"
+    assert first.result["business_verdict"] is None
+    assert second.result["business_verdict"] is None
+
+    # The single local session record stays open across both turns.
+    assert runtime.store.open_session("sess-a").state == "open"
 
 
 # --- status ---------------------------------------------------------------

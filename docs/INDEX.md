@@ -2,10 +2,11 @@
 
 # Documentation Index
 
-Total: 15 documents tracked across 1 statuses.
+Total: 16 documents tracked across 1 statuses.
 
-## Active (15)
+## Active (16)
 
+- [S1 Persistent Session Closure Acceptance Plan](plans/2026-05-31-s1-closure-acceptance.md) — created 2026-05-31
 - [S1c Persistent Session Runtime MVP Plan](plans/2026-05-31-s1c-session-runtime-mvp.md) — created 2026-05-31
 - [S1d Persistent Session Lifecycle Completion Plan](plans/2026-05-31-s1d-session-lifecycle-completion.md) — created 2026-05-31
 - [S1a Persistent-Session Contract Spike Plan](plans/2026-05-30-s1a-session-contract-spike.md) — created 2026-05-30
