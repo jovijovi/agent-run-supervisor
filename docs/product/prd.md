@@ -140,12 +140,12 @@ Checklist:
 - [x] Refuse cross-role, cross-workspace, stale-policy, acpx-version, or adapter-mismatched session reuse before mutation.
 - [x] Create/open real acpx sessions under a validated `AgentRoleSpec`. *(S1c MVP: fixture-shaped `sessions new` runtime; acceptance via fake-executor/fixtures, real-acpx smoke deferred.)*
 - [x] Reattach/send prompts only when role/workspace/session metadata still match policy. *(S1c: lease-locked `prompt -s` turn with binding revalidation before any mutation.)*
-- [ ] Define close/abort semantics and failure statuses.
-- [x] Provide CLI/library session operations after design and fixtures are proven. *(S1c MVP: `session create|send|status`; close/abort/list remain later slices.)*
+- [x] Define close/abort semantics and failure statuses. *(S1d: fixture-proven `sessions close`/`cancel -s`; close performs an atomic `closed` transition, abort reports honest `cancelled: true|false` without a business verdict, and `send`/`close`/`abort` fail closed on an already-closed session; fake-executor/fixture acceptance.)*
+- [x] Provide CLI/library session operations after design and fixtures are proven. *(S1c MVP: `session create|send|status`; S1d adds `session close|abort|list`.)*
 
 Acceptance:
 
-- Session fixtures and tests cover create, send, resume, close, stale-lock recovery, mismatch refusal, and crash/interruption behavior. *(S1c covers create/send/status, lease release on success and failure, and mismatch refusal; close/abort and crash/interruption recovery remain open.)*
+- Session fixtures and tests cover create, send, resume, close, stale-lock recovery, mismatch refusal, and crash/interruption behavior. *(S1c covers create/send/status, lease release on success and failure, and mismatch refusal; S1d adds close, abort/cancel, local read-only list, and closed-session refusal; multi-turn resume and crash/interruption recovery remain open.)*
 - Session artifacts are redacted and local-first.
 - Persistent sessions do not imply public ingress, Gateway operations, real delivery, or agent-to-agent routing.
 
@@ -217,8 +217,8 @@ Checklist:
 - [x] `doctor` baseline.
 - [x] `run --role <role-file> --prompt-file <file> [--cwd <dir>] --no-real-run`.
 - [x] `run --role <role-file> --prompt-file <file> [--cwd <dir>]` real exec supervision.
-- [x] Session lifecycle commands/API after session design and fixtures are proven. *(S1c MVP: `session create|send|status` plus the `SessionRuntime` library surface; close/abort/list remain later slices.)*
-- [x] Stable JSON outputs for caller automation. *(S1c: session commands emit JSON to stdout with `business_verdict: null` and 0/nonzero exit codes.)*
+- [x] Session lifecycle commands/API after session design and fixtures are proven. *(S1c MVP: `session create|send|status` plus the `SessionRuntime` library surface; S1d adds `session close|abort|list` (local read-only list).)*
+- [x] Stable JSON outputs for caller automation. *(S1c: session `create|send|status`; S1d: session `close|abort|list`; all keep `business_verdict: null` and 0/nonzero exit codes.)*
 
 Acceptance:
 

@@ -59,11 +59,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _add_session_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Persistent-session lifecycle MVP: ``session create|send|status``."""
+    """Persistent-session lifecycle: ``session create|send|status|close|abort|list``."""
     session = subparsers.add_parser(
         "session",
-        help="Persistent session lifecycle (MVP: create / send / status).",
-        description="Create/open a role-bound persistent session, send a prompt turn, or query status.",
+        help="Persistent session lifecycle (create / send / status / close / abort / list).",
+        description="Create/open a role-bound persistent session, send a prompt turn, query status, close, abort/cancel, or list local session records.",
     )
     session_sub = session.add_subparsers(dest="session_command", metavar="session_command")
 
@@ -91,6 +91,27 @@ def _add_session_parser(subparsers: argparse._SubParsersAction) -> None:
 
     status = session_sub.add_parser("status", help="Query a session's status/show record.")
     _add_common(status)
+
+    close = session_sub.add_parser("close", help="Close an open local persistent session.")
+    _add_common(close)
+
+    abort = session_sub.add_parser("abort", help="Cooperatively cancel/abort active session work.")
+    _add_common(abort)
+
+    list_sessions = session_sub.add_parser(
+        "list",
+        help="List local session records (read-only; does not launch acpx/AGENT work).",
+    )
+    list_sessions.add_argument(
+        "--sessions-dir",
+        default=None,
+        help="Directory that holds session records (defaults to .agent-run-supervisor/sessions).",
+    )
+    list_sessions.add_argument(
+        "--role",
+        default=None,
+        help="Optional role file; if given, list only records owned by that role.",
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:

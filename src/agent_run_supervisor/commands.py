@@ -149,14 +149,44 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0 if outcome.result["status"] == "completed" else 1
 
 
+def _resolve_sessions_dir(args: argparse.Namespace) -> Path:
+    return (
+        Path(args.sessions_dir)
+        if args.sessions_dir
+        else Path.cwd() / DEFAULT_SESSIONS_DIR_NAME
+    )
+
+
+def _cmd_session_list(args: argparse.Namespace, sessions_dir: Path) -> int:
+    role = None
+    if getattr(args, "role", None):
+        try:
+            role = _parse_role_file(args.role)
+        except (OSError, json.JSONDecodeError, RoleValidationError) as exc:
+            print(f"session input error: {exc}", file=sys.stderr)
+            return 1
+    runtime = SessionRuntime(sessions_dir=sessions_dir)
+    outcome = runtime.list_sessions(role=role)
+    _print_json(outcome.result)
+    return 0
+
+
 def cmd_session(args: argparse.Namespace) -> int:
     session_command = getattr(args, "session_command", None)
     if session_command is None:
         print(
-            "error: a session subcommand is required (create | send | status)",
+            "error: a session subcommand is required "
+            "(create | send | status | close | abort | list)",
             file=sys.stderr,
         )
         return 2
+
+    sessions_dir = _resolve_sessions_dir(args)
+
+    # ``list`` is local, read-only, and role-optional: handle it before the
+    # role-required subcommands so it never requires a role file.
+    if session_command == "list":
+        return _cmd_session_list(args, sessions_dir)
 
     try:
         role = _parse_role_file(args.role)
@@ -164,11 +194,6 @@ def cmd_session(args: argparse.Namespace) -> int:
         print(f"session input error: {exc}", file=sys.stderr)
         return 1
 
-    sessions_dir = (
-        Path(args.sessions_dir)
-        if args.sessions_dir
-        else Path.cwd() / DEFAULT_SESSIONS_DIR_NAME
-    )
     runtime = SessionRuntime(sessions_dir=sessions_dir)
 
     if session_command == "send":
@@ -205,6 +230,22 @@ def cmd_session(args: argparse.Namespace) -> int:
             )
             _print_json(status.result)
             return 0 if status.ok else 1
+        if session_command == "close":
+            closed = runtime.close(
+                role=role,
+                session_id=args.session_id,
+                cwd=args.cwd,
+            )
+            _print_json(closed.result)
+            return 0
+        if session_command == "abort":
+            aborted = runtime.abort(
+                role=role,
+                session_id=args.session_id,
+                cwd=args.cwd,
+            )
+            _print_json(aborted.result)
+            return 0
     except ExecStrategyError as exc:
         print(f"session strategy error: {exc}", file=sys.stderr)
         return 1

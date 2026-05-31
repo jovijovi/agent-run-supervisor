@@ -16,12 +16,13 @@ import os
 import re
 import secrets
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from agent_run_supervisor.event_store import (
     FILE_MODE,
+    atomic_write_json,
     exclusive_create_bytes,
     secure_mkdir,
 )
@@ -36,6 +37,10 @@ from agent_run_supervisor.workspace import WorkspaceValidationResult, workspace_
 SCHEMA_VERSION = 1
 SESSION_JSON = "session.json"
 LOCK_JSON = "lock.json"
+LIFECYCLE_GUARD = ".lifecycle.guard"
+
+STATE_OPEN = "open"
+STATE_CLOSED = "closed"
 
 # Session ids name a directory under the sessions root, so they must be safe
 # path components: start alphanumeric, then alphanumerics/underscore/hyphen. No
@@ -69,6 +74,15 @@ class SessionBindingError(SessionError):
 
 class SessionLockError(SessionError):
     """Raised when a lease lock is held, missing, or released with a wrong token."""
+
+
+class SessionClosedError(SessionError):
+    """Raised when a mutating operation targets an already-closed session.
+
+    Fails closed: once a session record is ``closed``, send/close/abort must
+    refuse *before* spawning acpx or mutating turn/management artifacts. Safe
+    read-only surfaces (``open``/``status``/``list``) are unaffected.
+    """
 
 
 @dataclass(frozen=True)
@@ -188,6 +202,73 @@ class SessionStore:
         data = _read_json(session_dir / SESSION_JSON)
         return _record_from_dict(data)
 
+    def list_records(self) -> list[SessionRecord]:
+        """List every local session record under the sessions root.
+
+        Read-only and local: no acpx launch, no lock taken. Directories without
+        a ``session.json`` (and stray files) are skipped. Results are sorted by
+        ``session_id`` for deterministic output. A missing root yields ``[]``.
+        """
+        if not self.base_dir.is_dir():
+            return []
+        records: list[SessionRecord] = []
+        for entry in sorted(self.base_dir.iterdir(), key=lambda p: p.name):
+            if not entry.is_dir():
+                continue
+            session_json = entry / SESSION_JSON
+            if not session_json.exists():
+                continue
+            records.append(_record_from_dict(_read_json(session_json)))
+        return records
+
+    # -- lifecycle state --------------------------------------------------
+
+    @contextmanager
+    def lifecycle_guard(self, session_id: str):
+        """Serialize local lifecycle operations for one session.
+
+        This guard is intentionally separate from the short ``lock.json`` guard:
+        ``send`` uses the lease to serialize prompt turns, while ``close`` and
+        ``abort`` use this lifecycle guard so a close cannot race an abort or a
+        second close into stale open-state management work. The guard is local
+        filesystem coordination only; it does not launch or contact acpx.
+        """
+        session_dir = self._require_session_dir(session_id)
+        with _session_lifecycle_guard(session_dir):
+            yield
+
+    @staticmethod
+    def ensure_open(record: SessionRecord) -> None:
+        """Fail closed unless ``record`` is still open.
+
+        Callers invoke this *before* any mutation (send/close/abort) so a closed
+        session can never be re-driven into acpx or have artifacts mutated.
+        """
+        if record.state != STATE_OPEN:
+            raise SessionClosedError(
+                f"session {record.session_id!r} is {record.state!r}; "
+                "mutating operations are refused on non-open sessions",
+            )
+
+    def mark_closed(self, session_id: str, *, now: _dt.datetime | None = None) -> SessionRecord:
+        """Atomically transition an open session record to ``closed``.
+
+        Serialized under the per-session guard and re-checked there, so two
+        concurrent closes cannot both succeed: the second raises
+        ``SessionClosedError``. The record is rewritten atomically at 0600.
+        """
+        session_dir = self._require_session_dir(session_id)
+        with _session_lock_guard(session_dir):
+            record = _record_from_dict(_read_json(session_dir / SESSION_JSON))
+            if record.state == STATE_CLOSED:
+                raise SessionClosedError(
+                    f"session {session_id!r} is already closed",
+                )
+            moment = _ensure_aware(now or _utc_now()).isoformat()
+            closed = replace(record, state=STATE_CLOSED, updated_at=moment)
+            atomic_write_json(session_dir / SESSION_JSON, asdict(closed))
+            return closed
+
     # -- binding gate -----------------------------------------------------
 
     def validate_binding(
@@ -305,6 +386,19 @@ def _session_lock_guard(session_dir: Path):
     a fresh lock created after it read the stale one.
     """
     guard_path = session_dir / ".lock.guard"
+    with open(guard_path, "a+b") as guard:
+        os.chmod(guard_path, FILE_MODE)
+        fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(guard.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _session_lifecycle_guard(session_dir: Path):
+    """Serialize close/abort/list-adjacent lifecycle mutations for one session."""
+    guard_path = session_dir / LIFECYCLE_GUARD
     with open(guard_path, "a+b") as guard:
         os.chmod(guard_path, FILE_MODE)
         fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
