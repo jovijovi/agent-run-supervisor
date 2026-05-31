@@ -59,8 +59,9 @@ Design notes:
 
 Current status: implemented for exec-shaped role config, S1b persistent-session
 configuration (`strategy: persistent` with bounded lease settings), the S1c local
-create/send/status runtime MVP, and the S1d close/abort/list lifecycle slice. Real-acpx
-smoke, multi-turn resume, full crash recovery, and retention cleanup remain future work.
+create/send/status runtime MVP, the S1d close/abort/list lifecycle slice, and S1 closure
+acceptance evidence for real-acpx smoke plus two-turn continuity. Full crash/interruption
+recovery beyond expired-lease replacement and retention cleanup remain H1 operational-hardening work.
 
 ### 3.2 `policy.py` — acpx policy and argv compiler
 
@@ -168,15 +169,16 @@ Runtime responsibilities (`session_runtime.py`, `SessionRuntime`):
 
 Current status: S1b implements the local session store, binding validation, and lease-lock
 foundation in `session.py`. S1c adds `session_runtime.py` with a create/send/status MVP over
-that store: fixture/fake-executor acceptance (no real acpx launch yet), lease release on
-success and failure, binding-mismatch refusal before any subprocess or artifact mutation, and
-redacted turn/management artifacts. S1d adds close/abort/list lifecycle management: close and
-abort are serialized by a local lifecycle guard; close is lease-protected and atomically
-transitions the local record to `closed`; `send` re-checks the closed state under the acquired
-lease before launching a turn; `send`/`close`/`abort` refuse closed sessions before
-subprocess/artifact mutation; list is local and read-only.
-Real-acpx smoke, multi-turn resume, full crash/interruption recovery, and retention/cleanup
-remain future work; this is **not** full S1 completion.
+that store: fixture/fake-executor acceptance, lease release on success and failure,
+binding-mismatch refusal before any subprocess or artifact mutation, and redacted
+turn/management artifacts. S1d adds close/abort/list lifecycle management: close and abort are
+serialized by a local lifecycle guard; close is lease-protected and atomically transitions the
+local record to `closed`; `send` re-checks the closed state under the acquired lease before
+launching a turn; `send`/`close`/`abort` refuse closed sessions before subprocess/artifact
+mutation; list is local and read-only. S1 closure acceptance adds the reproducible local
+real-acpx smoke and two-turn continuity regression, closing S1 for the local persistent-session
+lifecycle. Full crash/interruption recovery beyond expired-lease replacement and
+retention/cleanup remain H1 operational-hardening work.
 
 ### 3.7 `parser.py` — observed event parser
 
@@ -365,8 +367,10 @@ Future runtime extensions should extend the current layout, not replace it:
 ```
 
 The foundation filenames are implemented in S1b, S1c implements create/send/status
-management and turn artifacts, and S1d implements close/abort management evidence plus local
-list output. Snapshots, cleanup, and retention remain future S1/H1 work.
+management and turn artifacts, S1d implements close/abort management evidence plus local
+list output, and S1 closure acceptance proves two-turn continuity plus a real local acpx
+lifecycle smoke. Snapshots, cleanup, retention, and full crash/interruption recovery beyond
+expired-lease replacement remain H1 operational-hardening work, not new S1 subphases.
 
 ## 6. Security and lifecycle boundaries
 

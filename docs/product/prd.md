@@ -138,14 +138,14 @@ Checklist:
 - [x] Implement session locks/leases to prevent concurrent unsafe local mutation.
 - [x] Detect and recover from expired local session locks deterministically.
 - [x] Refuse cross-role, cross-workspace, stale-policy, acpx-version, or adapter-mismatched session reuse before mutation.
-- [x] Create/open real acpx sessions under a validated `AgentRoleSpec`. *(S1c MVP: fixture-shaped `sessions new` runtime; acceptance via fake-executor/fixtures, real-acpx smoke deferred.)*
-- [x] Reattach/send prompts only when role/workspace/session metadata still match policy. *(S1c: lease-locked `prompt -s` turn with binding revalidation before any mutation.)*
+- [x] Create/open real acpx sessions under a validated `AgentRoleSpec`. *(S1c MVP: fixture-shaped `sessions new` runtime; S1 closure acceptance adds reproducible local real-acpx smoke via `scripts/smoke_persistent_session.py`.)*
+- [x] Reattach/send prompts only when role/workspace/session metadata still match policy. *(S1c: lease-locked `prompt -s` turn with binding revalidation before any mutation; S1 closure acceptance adds two-turn continuity regression and real-acpx smoke markers.)*
 - [x] Define close/abort semantics and failure statuses. *(S1d: fixture-proven `sessions close`/`cancel -s`; close performs an atomic `closed` transition, abort reports honest `cancelled: true|false` without a business verdict, and `send`/`close`/`abort` fail closed on an already-closed session; fake-executor/fixture acceptance.)*
 - [x] Provide CLI/library session operations after design and fixtures are proven. *(S1c MVP: `session create|send|status`; S1d adds `session close|abort|list`.)*
 
 Acceptance:
 
-- Session fixtures and tests cover create, send, resume, close, stale-lock recovery, mismatch refusal, and crash/interruption behavior. *(S1c covers create/send/status, lease release on success and failure, and mismatch refusal; S1d adds close, abort/cancel, local read-only list, and closed-session refusal; multi-turn resume and crash/interruption recovery remain open.)*
+- Session fixtures and tests cover create, send, two-turn resume/continuity, status, list, close, stale-lock recovery, and mismatch refusal. *(S1c covers create/send/status, lease release on success and failure, and mismatch refusal; S1d adds close, abort/cancel, local read-only list, and closed-session refusal; S1 closure acceptance adds the multi-turn regression plus real local acpx smoke. Full crash/interruption recovery beyond deterministic expired-lease replacement is carried to H1 operational hardening.)*
 - Session artifacts are redacted and local-first.
 - Persistent sessions do not imply public ingress, Gateway operations, real delivery, or agent-to-agent routing.
 

@@ -2,7 +2,7 @@
 title: "agent-run-supervisor Roadmap Current Status"
 status: active
 created_at: 2026-05-28
-last_validated_at: 2026-05-30T00:00:00+0800
+last_validated_at: 2026-05-31T00:00:00+0800
 ---
 # agent-run-supervisor Roadmap Current Status
 
@@ -13,7 +13,7 @@ last_updated: 2026-05-31
 base_branch: main
 product_role: independent local Python library + dev CLI for supervising ACP/acpx AGENT runs and sessions with redacted audit evidence
 source_of_truth: GOAL.md, docs/product/prd.md, docs/design/architecture.md, docs/design/technical-solution.md, docs/roadmap/features.md, docs/roadmap/current-status.md, docs/AI_FLOW.md
-current_mainline: E1 local one-shot exec runner is merged and closed on main via PR #8 (21b3393); F-EXEC-001 is Done; S1a session contract evidence is merged via PR #14 (99637c6); S1b adds the local session store/lock foundation; S1c adds the local create/send/status runtime MVP; S1d adds local lifecycle completion (close/abort/list + closed-session refusal); real-acpx smoke, multi-turn resume, crash recovery, and retention remain open
+current_mainline: E1 local one-shot exec runner is merged and closed on main via PR #8 (21b3393); F-EXEC-001 is Done; S1a session contract evidence is merged via PR #14 (99637c6); S1b adds the local session store/lock foundation; S1c adds the local create/send/status runtime MVP; S1d adds local lifecycle completion (close/abort/list + closed-session refusal); S1 closure acceptance adds multi-turn continuity regression coverage and a reproducible local real-acpx persistent-session smoke (scripts/smoke_persistent_session.py), closing S1 for the local persistent-session lifecycle (S1a-S1d + closure evidence); full crash/interruption recovery and artifact retention/cleanup are carried to H1 operational hardening (ARS-DOCTOR-COMPLETE, ARS-RETENTION-CLEANUP, F-RETENTION-001) and caller integration remains parked (I1)
 ```
 
 ## 1. How to read this roadmap
@@ -39,7 +39,7 @@ Documentation authority realignment is complete on main via PR #6 (`7dcbe4f`).
 The product requirement includes both one-shot exec and persistent sessions.
 Engineering sequence may implement exec first, then persistent sessions.
 Exec-first sequencing belongs in roadmap/phase planning only, not in PRD, GOAL, or product-level design as a reduced product scope.
-Current implementation: E1 local one-shot exec runner is merged and closed on main via PR #8 (`21b3393`); F-EXEC-001 is Done. S1a persistent-session contract evidence is merged via PR #14 (`99637c6`). S1b adds the local session store/lock foundation. S1c adds the local create/send/status runtime MVP. S1d adds the local lifecycle completion slice (close, abort/cancel, local read-only list, and closed-session refusal). Full S1 remains Partial because real-acpx smoke, multi-turn resume, crash/interruption recovery, and retention/cleanup remain open.
+Current implementation: E1 local one-shot exec runner is merged and closed on main via PR #8 (`21b3393`); F-EXEC-001 is Done. S1a persistent-session contract evidence is merged via PR #14 (`99637c6`). S1b adds the local session store/lock foundation. S1c adds the local create/send/status runtime MVP. S1d adds the local lifecycle completion slice (close, abort/cancel, local read-only list, and closed-session refusal). S1 closure acceptance adds multi-turn continuity regression coverage and a reproducible local real-acpx persistent-session smoke, closing S1 for the **local persistent-session lifecycle** (S1a–S1d plus closure evidence). S1 remains exactly the four approved slices (S1a/S1b/S1c/S1d); closure acceptance introduces no new S1 subphase. Full crash/interruption recovery and artifact retention/cleanup are deliberately carried to H1 operational hardening, not treated as S1 blockers; caller integration stays parked at I1.
 ```
 
 ## 3. Phase roadmap
@@ -158,8 +158,8 @@ Checklist:
 - [x] Add locks/leases to prevent unsafe concurrent local session mutation. *(S1b foundation.)*
 - [x] Add deterministic stale-lock recovery for expired leases. *(S1b foundation; crash/runtime recovery remains open.)*
 - [x] Refuse cross-role, cross-workspace, stale-policy, acpx-version, or adapter-mismatched session reuse before mutation. *(S1b foundation.)*
-- [x] Implement real session create/open runtime against fixture-proven acpx session commands. *(S1c MVP: `SessionRuntime.create_session`; fake-executor/fixture acceptance, real-acpx smoke deferred.)*
-- [x] Implement session send/continue runtime. *(S1c: lease-locked single `prompt -s` turn with redacted artifacts; multi-turn/continue resume remains.)*
+- [x] Implement real session create/open runtime against fixture-proven acpx session commands. *(S1c MVP: `SessionRuntime.create_session`; fake-executor/fixture acceptance; S1 closure acceptance adds reproducible real-acpx smoke.)*
+- [x] Implement session send/continue runtime. *(S1c: lease-locked single `prompt -s` turn with redacted artifacts; S1 closure acceptance proves two-turn continuity.)*
 - [x] Implement session status/list where needed. *(S1c: `status -s` query with safe management JSON summary; S1d adds local read-only `list_sessions` over store records, no acpx launch.)*
 - [x] Implement session close/abort semantics. *(S1d: fixture-proven `sessions close`/`cancel -s` management commands, redacted close/abort artifacts, atomic `closed` state transition, and closed-session refusal for `send`/`close`/`abort`; fake-executor/fixture acceptance.)*
 - [x] Add session parser/event coverage and redaction tests for prompt-turn and management-command schemas. *(S1c: prompt-turn NDJSON parse + `summarize_management_json`; redaction tests in `tests/test_session_runtime.py`.)*
@@ -199,14 +199,23 @@ S1d lifecycle completion evidence (local close/abort/list + closed-session refus
 - The management-command summarizer already allow-lists `session_closed`/`cancel_result` (`closed`/`cancelled` fields), so no parser change was required: `src/agent_run_supervisor/parser.py`; tests `tests/test_parser.py`.
 - This evidence proves the local close/abort/list slice, closed-session fail-closed refusal before subprocess/artifact mutation, atomic state transition, honest cancel semantics, and redacted management evidence. It does **not** prove real acpx launch, multi-turn resume, crash/interruption recovery, or retention/cleanup.
 
+S1 closure-acceptance evidence (real-acpx smoke + multi-turn continuity; closes S1 for the local persistent-session lifecycle, no new S1 subphase):
+
+- Plan: `docs/plans/2026-05-31-s1-closure-acceptance.md`.
+- Reproducible local real-acpx smoke: `scripts/smoke_persistent_session.py` (stdlib-only) drives the existing CLI surface (`validate-role` → `session create` → `send` turn 1 → `send` turn 2 → `status` → `list` → `close`) against a persistent reviewer role with `acpx_binary: null`, so the compiler resolves the pinned `npx -y acpx@0.10.0` prefix and the smoke requires `npx` explicitly. It generates a unique real acpx session name per run, verifies both turn markers, status ok, list count 1, close state `closed`, two distinct redacted turn dirs, and `business_verdict: null` on every lifecycle result; it cleans its temp scratch/sessions artifacts by default (`--keep-artifacts` retains them), best-effort closes after post-create smoke failures, and never commits raw local smoke output.
+- Multi-turn continuity regression: `tests/test_session_runtime.py::test_two_sequential_sends_reuse_record_persist_distinct_turns_and_release_lease` proves two sequential `SessionRuntime.send(...)` calls against the same local session reuse the same record (no second create), drive the same acpx session name, persist two distinct turn dirs, release the lease after each turn, keep the record open, and parse the S1a fixtures `session-prompt-turn1`/`session-prompt-turn2` (`S1A_SESSION_TURN_1_OK`/`S1A_SESSION_TURN_2_OK`). `tests/test_smoke_persistent_session.py` also covers the npx precondition and best-effort close after a post-create smoke failure so failed smokes do not leak real persistent sessions.
+- Recorded manual real-acpx proof: the current CLI ran a full local persistent-session lifecycle via `npx -y acpx@0.10.0` (create, two sends, status, list, close all succeeded) with observed turn markers `S1_CLOSURE_TURN_1_OK` and `S1_CLOSURE_TURN_2_OK`; raw artifacts remain local-only and outside git.
+- This closes S1 for the local persistent-session lifecycle (create/send/multi-turn-resume/status/list/close, binding-mismatch refusal, lease handling, expired-lease recovery, redacted artifacts). It deliberately does **not** claim full crash/interruption recovery beyond deterministic expired-lease replacement, artifact retention/cleanup, or any caller integration — those are H1 / I1 carry-overs below.
+
 Acceptance:
 
 - Fixture validator or session-specific fixture validator passes.
-- Session lifecycle tests cover create, send, resume, close, stale lock, mismatch refusal, and crash recovery before S1 is complete.
+- Session lifecycle tests cover create, send, multi-turn resume, status, list, close, stale (expired) lock recovery, and mismatch refusal; a reproducible local real-acpx smoke plus recorded manual real-acpx evidence exercise the same lifecycle end to end.
+- Full crash/interruption recovery beyond deterministic expired-lease replacement is an H1 operational-hardening tail (`ARS-DOCTOR-COMPLETE` / long-lived use), not an S1 blocker.
 - Session artifacts are redacted and local-only.
 - No public ingress, real delivery, Gateway lifecycle, or agent-to-agent auto-routing is introduced.
 
-Status: **Partial after S1a + S1b + S1c + S1d. S1a captured persistent-session command grammar and stdout-schema evidence; S1b implemented the local role/session-config, store, binding, and lease-lock foundation; S1c implements the local create/send/status runtime MVP with fake-executor/fixture acceptance, safe management summaries, redacted turn artifacts, and CLI/library `session create|send|status`; S1d adds local lifecycle completion — fixture-proven close and abort/cancel, atomic `closed` state transition with closed-session refusal, local read-only `list`, redacted management evidence, and CLI/library `session close|abort|list`. Remaining open tails: real-acpx smoke, multi-turn resume, full crash/interruption recovery, retention/cleanup, and any caller integration.**
+Status: **Closed for the local persistent-session lifecycle after S1a + S1b + S1c + S1d + closure acceptance. S1a captured persistent-session command grammar and stdout-schema evidence; S1b implemented the local role/session-config, store, binding, and lease-lock foundation; S1c implements the local create/send/status runtime MVP with fake-executor/fixture acceptance, safe management summaries, redacted turn artifacts, and CLI/library `session create|send|status`; S1d adds local lifecycle completion — fixture-proven close and abort/cancel, atomic `closed` state transition with closed-session refusal, local read-only `list`, redacted management evidence, and CLI/library `session close|abort|list`; closure acceptance adds multi-turn continuity regression coverage and a reproducible local real-acpx persistent-session smoke (`scripts/smoke_persistent_session.py`) plus recorded manual real-acpx lifecycle evidence. S1 remains exactly S1a/S1b/S1c/S1d; closure introduces no new subphase. Carried to H1 operational hardening (not S1 blockers): full crash/interruption recovery and artifact retention/cleanup. Caller integration stays parked at I1.**
 
 ### H1 — Operational hardening
 
@@ -254,7 +263,6 @@ Status: **Parked pending separate approval**.
 
 | ID | Class | Description | Blocks code work? | Required before | Acceptance method | Status |
 |---|---|---|---:|---|---|---|
-| ARS-SESSIONS | NEXT_PHASE | Persistent session support is product-required and partially implemented: S1a captured command/schema contract evidence; S1b added local session config/store/binding/lease-lock foundation; S1c adds local create/send/status runtime, management summaries, redacted turn artifacts, and CLI surface; S1d adds local close/abort/list with atomic `closed` state transition, closed-session refusal, and redacted management evidence. Real-acpx smoke, multi-turn resume, crash recovery, and cleanup remain open. | Yes for product-complete | S1 | Session fixtures + lifecycle tests | Open |
 | ARS-DOCTOR-COMPLETE | NEXT_PHASE | Doctor is missing adapter/npx/policy/cwd/redaction/session probes. | No | H1 | Structured doctor tests | Open |
 | ARS-RETENTION-CLEANUP | NEXT_PHASE | Run/session artifact retention cleanup knobs are missing. | No | H1 / long-lived use | Cleanup tests and docs | Open |
 | ARS-SANDBOX-BOUNDARY | PARKED | Any claim that `allowed_roots` is an OS/filesystem sandbox remains parked. | No | Separate sandbox phase | OS sandbox proof + negative probes | Parked |
@@ -265,6 +273,7 @@ Status: **Parked pending separate approval**.
 | ID | Closed by | Evidence | Result |
 |---|---|---|---|
 | ARS-EXEC-RUNNER | PR #8 (`21b3393`) | `tests/test_runner_exec.py`, local gates, local smoke `result.json` (`final_message=AGENT_RUN_SUPERVISOR_E1_OK`), `docs/roadmap/features.md` F-EXEC-001 Done | Closed |
+| ARS-SESSIONS | S1a-S1d + closure acceptance branch | S1a fixtures, S1b store/lock foundation, S1c create/send/status runtime, S1d close/abort/list lifecycle, `tests/test_session_runtime.py::test_two_sequential_sends_reuse_record_persist_distinct_turns_and_release_lease`, `tests/test_smoke_persistent_session.py`, and `scripts/smoke_persistent_session.py` real local acpx lifecycle smoke | Closed for the local persistent-session lifecycle; H1 carries full crash/interruption recovery and retention/cleanup |
 | ARS-DOC-AUTHORITY | PR #6 (`7dcbe4f`) | docs index/drift, CI `Verify`, post-merge gates | Closed |
 | ARS-LEGACY-DOCS | PR #6 (`7dcbe4f`) | retired mixed/stale docs deleted, old plan/dev-log artifacts cleared, stale-reference scan | Closed |
 
