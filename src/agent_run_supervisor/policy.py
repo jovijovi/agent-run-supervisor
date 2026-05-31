@@ -26,6 +26,22 @@ def ensure_exec_strategy(role: AgentRoleSpec) -> None:
         )
 
 
+def ensure_persistent_strategy(role: AgentRoleSpec) -> None:
+    """Fail closed unless the role is a persistent-session role.
+
+    The mirror of :func:`ensure_exec_strategy`: an exec-strategy role must never
+    reach the persistent-session command compilers or runtime, just as a
+    persistent role must never launch a one-shot ``acpx exec``.
+    """
+    strategy = role.session.strategy
+    if strategy != "persistent":
+        raise ExecStrategyError(
+            f"role {role.role_id!r} uses session.strategy={strategy!r}; "
+            "persistent-session compilation/launch is refused for "
+            "non-persistent strategies."
+        )
+
+
 ACPX_PERMISSION_KIND_FOR_ROLE: dict[str, str] = {
     "read": "read",
     "search": "search",
@@ -55,44 +71,179 @@ def compile_permission_policy(role: AgentRoleSpec) -> dict:
     }
 
 
+def _acpx_prefix(role: AgentRoleSpec) -> list[str]:
+    """Pinned acpx invocation prefix: explicit binary, else pinned ``npx`` fetch."""
+    if role.runner.acpx_binary:
+        return [role.runner.acpx_binary]
+    return ["npx", "-y", f"acpx@{role.runner.acpx_version}"]
+
+
+def _resolve_cwd(role: AgentRoleSpec, cwd: str | None) -> str:
+    return cwd if cwd else role.workspace.default_cwd
+
+
+def _exec_turn_flags(role: AgentRoleSpec, resolved_cwd: str) -> list[str]:
+    """Authorization/automation flag block for one-shot exec runs."""
+    policy_json = json.dumps(
+        compile_permission_policy(role), sort_keys=True, separators=(",", ":")
+    )
+    flags = [
+        "--format",
+        "json",
+        "--json-strict",
+        "--suppress-reads",
+        "--timeout",
+        str(role.limits.timeout_seconds),
+        "--max-turns",
+        str(role.limits.max_turns),
+        "--cwd",
+        resolved_cwd,
+        "--permission-policy",
+        policy_json,
+        "--non-interactive-permissions",
+        "fail",
+    ]
+    if not role.permissions.terminal:
+        flags.append("--no-terminal")
+    if role.runner.model:
+        flags.extend(["--model", role.runner.model])
+    return flags
+
+
+def _session_prompt_flags(role: AgentRoleSpec, resolved_cwd: str) -> list[str]:
+    """Fixture-proven authorization/automation block for session prompt turns.
+
+    S1a proved `acpx@0.10.0` persistent-session prompt turns with `--deny-all`,
+    not with the exec path's inline `--permission-policy` JSON. S1c therefore
+    stays on that stricter proven shape. The role/policy still binds the local
+    session record and is revalidated before every turn; expanding prompt-turn
+    tool permissions needs a later fixture-proven slice.
+    """
+    flags = [
+        "--format",
+        "json",
+        "--json-strict",
+        "--suppress-reads",
+        "--timeout",
+        str(role.limits.timeout_seconds),
+        "--max-turns",
+        str(role.limits.max_turns),
+        "--cwd",
+        resolved_cwd,
+        "--deny-all",
+        "--non-interactive-permissions",
+        "fail",
+    ]
+    if not role.permissions.terminal:
+        flags.append("--no-terminal")
+    if role.runner.model:
+        flags.extend(["--model", role.runner.model])
+    return flags
+
+
+def _management_flags(resolved_cwd: str) -> list[str]:
+    """Flag block for session *management* commands (no AGENT prompt turn).
+
+    Fixture-proven: management commands (``sessions new/ensure/show``,
+    ``status``) carry only output/cwd flags — never the turn authorization
+    block — because they query/mutate local session bookkeeping rather than
+    running an AGENT under policy.
+    """
+    return ["--format", "json", "--json-strict", "--cwd", resolved_cwd]
+
+
+def _require_session_name(session_name: str) -> str:
+    if not isinstance(session_name, str) or not session_name:
+        raise ValueError("session_name must be a non-empty string")
+    return session_name
+
+
 def compile_command(
     role: AgentRoleSpec,
     cwd: str | None,
     prompt: str,
 ) -> list[str]:
     ensure_exec_strategy(role)
-    if role.runner.acpx_binary:
-        argv: list[str] = [role.runner.acpx_binary]
-    else:
-        argv = ["npx", "-y", f"acpx@{role.runner.acpx_version}"]
-
-    resolved_cwd = cwd if cwd else role.workspace.default_cwd
-    policy = compile_permission_policy(role)
-    policy_json = json.dumps(policy, sort_keys=True, separators=(",", ":"))
-
-    argv.extend(
-        [
-            "--format",
-            "json",
-            "--json-strict",
-            "--suppress-reads",
-            "--timeout",
-            str(role.limits.timeout_seconds),
-            "--max-turns",
-            str(role.limits.max_turns),
-            "--cwd",
-            resolved_cwd,
-            "--permission-policy",
-            policy_json,
-            "--non-interactive-permissions",
-            "fail",
-        ]
-    )
-    if not role.permissions.terminal:
-        argv.append("--no-terminal")
-    if role.runner.model:
-        argv.extend(["--model", role.runner.model])
+    argv = _acpx_prefix(role)
+    argv.extend(_exec_turn_flags(role, _resolve_cwd(role, cwd)))
     argv.extend([role.runner.adapter_agent, "exec", prompt])
+    return argv
+
+
+def compile_session_create_command(
+    role: AgentRoleSpec,
+    cwd: str | None,
+    session_name: str,
+) -> list[str]:
+    """``<adapter> sessions new --name <session_name>`` (creates a named session)."""
+    ensure_persistent_strategy(role)
+    name = _require_session_name(session_name)
+    argv = _acpx_prefix(role)
+    argv.extend(_management_flags(_resolve_cwd(role, cwd)))
+    argv.extend([role.runner.adapter_agent, "sessions", "new", "--name", name])
+    return argv
+
+
+def compile_session_ensure_command(
+    role: AgentRoleSpec,
+    cwd: str | None,
+    session_name: str,
+) -> list[str]:
+    """``<adapter> sessions ensure --name <session_name>`` (idempotent open)."""
+    ensure_persistent_strategy(role)
+    name = _require_session_name(session_name)
+    argv = _acpx_prefix(role)
+    argv.extend(_management_flags(_resolve_cwd(role, cwd)))
+    argv.extend([role.runner.adapter_agent, "sessions", "ensure", "--name", name])
+    return argv
+
+
+def compile_session_show_command(
+    role: AgentRoleSpec,
+    cwd: str | None,
+    session_name: str,
+) -> list[str]:
+    """``<adapter> sessions show <session_name>`` (durable session record query)."""
+    ensure_persistent_strategy(role)
+    name = _require_session_name(session_name)
+    argv = _acpx_prefix(role)
+    argv.extend(_management_flags(_resolve_cwd(role, cwd)))
+    argv.extend([role.runner.adapter_agent, "sessions", "show", name])
+    return argv
+
+
+def compile_session_status_command(
+    role: AgentRoleSpec,
+    cwd: str | None,
+    session_name: str,
+) -> list[str]:
+    """``<adapter> status -s <session_name>`` (live status snapshot query)."""
+    ensure_persistent_strategy(role)
+    name = _require_session_name(session_name)
+    argv = _acpx_prefix(role)
+    argv.extend(_management_flags(_resolve_cwd(role, cwd)))
+    argv.extend([role.runner.adapter_agent, "status", "-s", name])
+    return argv
+
+
+def compile_session_prompt_command(
+    role: AgentRoleSpec,
+    cwd: str | None,
+    session_name: str,
+    prompt: str,
+) -> list[str]:
+    """``<adapter> prompt -s <session_name> <prompt>`` (one role-bound turn).
+
+    Uses the S1a fixture-proven persistent prompt block, including ``--deny-all``.
+    The local session record remains role/policy-bound and is revalidated before
+    each turn; expanding session prompt tool permissions requires fresh fixtures.
+    The prompt is always a single argv element; the compiler never uses a shell.
+    """
+    ensure_persistent_strategy(role)
+    name = _require_session_name(session_name)
+    argv = _acpx_prefix(role)
+    argv.extend(_session_prompt_flags(role, _resolve_cwd(role, cwd)))
+    argv.extend([role.runner.adapter_agent, "prompt", "-s", name, prompt])
     return argv
 
 

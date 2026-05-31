@@ -57,9 +57,10 @@ Design notes:
 - Role permissions describe maximum acpx-controllable behavior.
 - Session configuration must eventually represent both one-shot exec and persistent-session use while preserving role-bound authorization.
 
-Current status: implemented for exec-shaped role config and S1b persistent-session
-configuration (`strategy: persistent` with bounded lease settings). Persistent-session
-runtime behavior remains future work.
+Current status: implemented for exec-shaped role config, S1b persistent-session
+configuration (`strategy: persistent` with bounded lease settings), and the S1c local
+create/send/status runtime MVP. Close/abort/list, real-acpx smoke, full crash recovery,
+and retention cleanup remain future work.
 
 ### 3.2 `policy.py` — acpx policy and argv compiler
 
@@ -71,12 +72,19 @@ Responsibilities:
   - default action -> deny.
 - Build acpx argv as a list, never a shell string.
 - Apply automation flags such as JSON output, strict parsing, read suppression, timeout, max turns, cwd, generated policy, non-interactive permission failure, optional model, and terminal disabling.
-- Compile mode-specific command tails for exec and future persistent-session operations.
+- Compile mode-specific command tails for exec and persistent-session operations.
+- Compile fixture-proven persistent-session commands: `compile_session_create/ensure/show/status/prompt_command`
+  for `sessions new/ensure/show`, `status -s`, and `prompt -s`.
 
 Current status: implemented for current dry-run and real exec paths. S1b adds a
 fail-closed guard so persistent-session roles cannot accidentally launch through the
-one-shot exec compiler. Session-mode command compilation remains future work after the
-S1 lifecycle surface is implemented.
+one-shot exec compiler. S1c adds the persistent-session command compilers and an
+`ensure_persistent_strategy` guard that mirrors the exec guard so persistent roles compile
+only through the session path. The prompt-turn compiler uses the S1a fixture-proven
+`--deny-all` prompt block (`prompt -s <name> <prompt>`), while the local record remains
+role/policy-bound and is revalidated before every send; expanding prompt-turn tool
+permissions requires a later fixture-proven slice. The prompt stays a single argv element
+with no shell. Close/abort command compilation remains future work.
 
 ### 3.3 `workspace.py` — cwd and workspace gate
 
@@ -90,8 +98,9 @@ Responsibilities:
 Security claim: this is configuration/cwd intent validation, not OS/filesystem sandboxing.
 
 Current status: cwd gate implemented for current run path. S1b adds deterministic
-`workspace_hash(...)` for session binding; real attach/resume runtime checks remain future
-work.
+`workspace_hash(...)` for session binding; S1c revalidates the role/workspace/policy/acpx
+binding before `send` and `status` and refuses mismatches before subprocess or artifact
+mutation. Full close/abort/crash-recovery lifecycle checks remain future work.
 
 ### 3.4 `preflight.py` — doctor probes
 
@@ -119,11 +128,11 @@ Responsibilities:
 10. Parse observed stdout and normalized events.
 11. Classify result and persist final artifacts.
 
-Current status: one-shot subprocess launch, stdout/stderr capture, parser/classifier finalization, and watchdog kill metadata are implemented for local exec. Persistent-session supervision remains future work.
+Current status: one-shot subprocess launch, stdout/stderr capture, parser/classifier finalization, and watchdog kill metadata are implemented for local exec. S1c adds separate local persistent-session create/send/status supervision in `session_runtime.py`; close/abort/list and full crash/interruption recovery remain future work.
 
-### 3.6 `session.py` — persistent-session store foundation
+### 3.6 `session.py` / `session_runtime.py` — persistent-session store and runtime
 
-Responsibilities:
+Store responsibilities (`session.py`):
 
 1. Fixture-prove acpx persistent-session command grammar and stream shapes.
 2. Create local session records with validated role/workspace metadata.
@@ -134,10 +143,27 @@ Responsibilities:
 7. Define later close/abort runtime semantics with explicit status and artifact evidence.
 8. Prevent cross-role, cross-workspace, stale-policy, acpx-version, or adapter mismatch leakage.
 
+Runtime responsibilities (`session_runtime.py`, `SessionRuntime`):
+
+1. Drive S1c `create_session`/`send`/`status` over the store: validate the persistent role
+   and workspace, run fixture-shaped acpx management/turn commands through a subprocess
+   executor, and bind the local record to role/workspace/policy/acpx/adapter identity.
+2. Re-open and re-validate the binding before every `send`/`status` mutation.
+3. Acquire the lease lock for a `send` turn and release it on success **and** failure.
+4. Persist redacted prompt-turn artifacts under `sessions/<session_id>/turns/<turn_id>/` and
+   redacted management summaries under `sessions/<session_id>/management/`.
+5. Parse prompt-turn NDJSON with the fixture-proven parser, classify supervisor status, and
+   keep `business_verdict` null.
+6. Fail closed — never create or update the local record — when a management command exits
+   non-zero, returns unparseable output, or reports an error envelope.
+
 Current status: S1b implements the local session store, binding validation, and lease-lock
-foundation in `session.py`. Real acpx persistent-session runtime (`create/open/send/status/
-close/abort`), parser/event coverage, final CLI/library surface, crash/interruption runtime
-recovery, and cleanup policy remain future work.
+foundation in `session.py`. S1c adds `session_runtime.py` with a create/send/status MVP over
+that store: fixture/fake-executor acceptance (no real acpx launch yet), lease release on
+success and failure, binding-mismatch refusal before any subprocess or artifact mutation, and
+redacted turn/management artifacts. Close/abort runtime and semantics, session `list`,
+multi-turn resume, full crash/interruption recovery, and retention/cleanup remain future work;
+this is **not** full S1 completion.
 
 ### 3.7 `parser.py` — observed event parser
 
@@ -148,8 +174,16 @@ Responsibilities:
 - Assemble final messages from ordered text deltas.
 - Preserve unknown update type plus key/type summaries only.
 - Fail closed on malformed framing or max-output overflow.
+- Summarize single-object acpx management-command JSON (`sessions new/ensure/show`, `status`)
+  into a safe allow-listed summary via `summarize_management_json`, kept on a separate parser
+  from the prompt-turn NDJSON path.
 
-Current status: implemented for the current exec fixture family. Persistent-session parser coverage is future work.
+Current status: implemented for the current exec fixture family. S1c adds
+`summarize_management_json`/`ManagementParseError` for single-object session management JSON,
+separate from the prompt-turn NDJSON parser (`parse_acpx_stdout_bytes`). The management
+summarizer returns only allow-listed fields plus top-level key/type evidence (never bulk
+payload) and fails closed on empty, non-JSON, non-object, or JSON-RPC stream records fed to
+the management path. Broader persistent-session parser/event coverage is future work.
 
 ### 3.8 `exit_classifier.py` — status classifier
 
@@ -189,8 +223,10 @@ Run/session artifact responsibilities:
 - Add retention/cleanup knobs before long-lived operation.
 
 Current status: run artifacts and redaction are implemented for current surfaces. S1b adds
-the local `sessions/<session_id>/session.json` and `lock.json` foundation; turn artifacts,
-retention controls, and session cleanup policy remain future work.
+the local `sessions/<session_id>/session.json` and `lock.json` foundation. S1c adds
+redacted session turn artifacts under `sessions/<session_id>/turns/<turn_id>/` and
+redacted management summaries under `sessions/<session_id>/management/`; retention controls
+and session cleanup policy remain future work.
 
 ### 3.10 `commands.py` / `cli.py` — dev CLI
 
@@ -202,14 +238,17 @@ agent-run-supervisor run --role <role-file-or-id> --prompt-file <file> [--cwd <d
 agent-run-supervisor run --role <role-file-or-id> --prompt-file <file> [--cwd <dir>] --no-real-run
 agent-run-supervisor replay <events.ndjson>
 agent-run-supervisor doctor [--role <role-file>]
-# Future session surface after session design/fixtures:
-agent-run-supervisor session create|send|status|close|abort ...
+agent-run-supervisor session create --role <role-file> --session-id <id> [--session-name <name>] [--cwd <dir>]
+agent-run-supervisor session send   --role <role-file> --session-id <id> --prompt-file <file> [--cwd <dir>]
+agent-run-supervisor session status --role <role-file> --session-id <id> [--cwd <dir>]
+# Future session surface: session close|abort|list ...
 ```
 
 Current status: validate-role accepts exec and persistent role strategies; replay, doctor
 baseline, dry-run, and local one-shot real exec are implemented. The `run` path refuses
-persistent roles before artifacts/process launch. Persistent session lifecycle commands
-remain incomplete.
+persistent roles before artifacts/process launch. S1c adds the `session create|send|status`
+MVP (JSON stdout, 0/nonzero exit codes) over `SessionRuntime`; `session close|abort|list`
+remain future work.
 
 ## 4. Data models
 
@@ -276,24 +315,15 @@ Current run layout:
   redaction-report.json
 ```
 
-Current S1b session foundation layout:
+Current S1b/S1c session layout:
 
 ```text
 .agent-run-supervisor/sessions/<session_id>/
   session.json
   lock.json            # present only while a lease is held
-```
-
-Future turn/runtime layout remains to be implemented and should extend the foundation,
-not replace it:
-
-```text
-.agent-run-supervisor/sessions/<session_id>/
-  session.json
-  role.snapshot.json   # future runtime snapshot, if needed
-  workspace.snapshot.json
-  generated-policy.json
-  lock.json
+  management/
+    create.json
+    status.json
   turns/<turn_id>/
     prompt.txt
     acpx-stdout.ndjson
@@ -303,8 +333,21 @@ not replace it:
     redaction-report.json
 ```
 
-The foundation filenames are implemented in S1b; turn artifacts, snapshots, cleanup, and
-runtime result files remain future S1/H1 work.
+Future runtime extensions should extend the current layout, not replace it:
+
+```text
+.agent-run-supervisor/sessions/<session_id>/
+  session.json
+  role.snapshot.json   # future runtime snapshot, if needed
+  workspace.snapshot.json
+  generated-policy.json
+  close.json           # future close/abort/list evidence, if implemented
+  retention.json       # future cleanup policy/evidence, if implemented
+```
+
+The foundation filenames are implemented in S1b, and S1c implements create/send/status
+management and turn artifacts. Snapshots, close/abort/list evidence, cleanup, and retention
+remain future S1/H1 work.
 
 ## 6. Security and lifecycle boundaries
 

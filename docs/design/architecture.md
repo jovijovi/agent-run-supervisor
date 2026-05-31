@@ -74,7 +74,7 @@ flowchart TB
     end
 
     subgraph BOUND["acpx / ACP runner boundary"]
-        ACPX["acpx exec ✅ / acpx session 🟦<br/>launches or resumes ONE AGENT per run"]
+        ACPX["acpx exec ✅ / acpx session 🟡<br/>launches or resumes ONE AGENT per run"]
     end
 
     AGENT["External AGENT<br/>Codex · Claude Code · other ACP worker"]
@@ -139,6 +139,7 @@ flowchart TB
     subgraph LIFE["Lifecycle plane"]
         RUN["runner.py<br/>one-shot exec supervision ✅"]
         SESS["session.py<br/>store + binding + lease locks 🟡 S1b"]
+        SESSRT["session_runtime.py<br/>create / send / status MVP 🟡 S1c"]
     end
 
     subgraph EVID["Evidence plane"]
@@ -176,6 +177,14 @@ flowchart TB
     POL --> ROLE
     PARSE -.-> FIX
     SESS -.-> FIX
+    CMD --> SESSRT
+    SESSRT --> SESS
+    SESSRT --> POL
+    SESSRT --> PARSE
+    SESSRT --> CLASS
+    SESSRT --> RES
+    SESSRT --> ES
+    SESSRT --> RED
 
     classDef surface fill:#ede9fe,stroke:#6d28d9,color:#4c1d95;
     classDef authz fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a;
@@ -189,7 +198,7 @@ flowchart TB
     class CLI,CMD surface;
     class ROLE,POL,WS authz;
     class RUN life;
-    class SESS life;
+    class SESS,SESSRT life;
     class PARSE,CLASS,RES evid;
     class ES,RED store;
     class PRE diag;
@@ -206,9 +215,11 @@ flowchart TB
   default-deny acpx policy and a shell-free argv list; the workspace gate validates the
   effective cwd against `allowed_roots` (intent only — **not** an OS sandbox).
 - **Lifecycle plane** — `runner.py` supervises a real one-shot `acpx exec` subprocess ✅;
-  `session.py` now provides the S1b persistent-session store, binding, and lease-lock
-  foundation 🟡. Real persistent acpx create/send/status/close/abort runtime remains a
-  later S1 slice (see §4).
+  `session.py` provides the S1b persistent-session store, binding, and lease-lock
+  foundation 🟡; `session_runtime.py` adds the S1c create/send/status runtime MVP 🟡 that
+  drives fixture-shaped acpx session commands over that foundation. Persistent-session
+  `close/abort/list` runtime, multi-turn resume, crash/interruption recovery, and
+  retention/cleanup remain later S1 slices (see §4).
 - **Evidence plane** (`parser.py`, `exit_classifier.py`, `result.py`) — converts observed
   acpx output into normalized events, a supervisor-owned status, and a stable result
   payload whose `business_verdict` is always `null`.
@@ -317,15 +328,17 @@ Full status set: `completed`, `runner_error`, `invalid_invocation`, `timed_out`,
 
 ---
 
-## 4. Persistent session lifecycle and control points (Level 2) — 🟡 partial (S1b foundation)
+## 4. Persistent session lifecycle and control points (Level 2) — 🟡 partial (S1b foundation + S1c create/send/status MVP)
 
 > **Status banner.** Persistent ACP/acpx sessions are a **first-class product requirement**
 > (PRD FR-5) scheduled as phase **S1**, **after** the exec runner. S1a captured the
-> `acpx@0.10.0` command/schema contract, and S1b implements the local session store,
-> binding, and lease-lock foundation. Real acpx persistent-session runtime
-> (`create/open/send/status/close/abort`), parser coverage, final CLI/library lifecycle,
-> and full crash/interruption recovery remain open. Persistent sessions are **not** a
-> non-goal.
+> `acpx@0.10.0` command/schema contract, S1b implements the local session store, binding,
+> and lease-lock foundation, and S1c adds the create/send/status runtime MVP
+> (`session_runtime.py`) that compiles fixture-shaped acpx session commands, persists
+> redacted turn + management artifacts, and re-validates the binding under a lease on every
+> mutation. The remaining persistent-session runtime — `close/abort`, session `list`,
+> multi-turn resume, full crash/interruption recovery, and retention/cleanup — stays open;
+> S1 is **not** complete. Persistent sessions are **not** a non-goal.
 
 ```mermaid
 stateDiagram-v2
@@ -356,9 +369,15 @@ stateDiagram-v2
 5. **Explicit close/abort** — defined close/abort semantics with their own statuses and
    artifact evidence.
 
-S1b currently implements the first three local control surfaces for store-level state:
-role/workspace/policy/acpx binding, lease locking, and expired-lease replacement. It does
-not yet drive real acpx prompt turns, close/abort commands, or session parser events.
+S1b implements the first three local control surfaces for store-level state:
+role/workspace/policy/acpx binding, lease locking, and expired-lease replacement. S1c
+exercises control points 1, 2, and 4 against fixture-shaped acpx commands: `create_session`
+validates the role/workspace and binds the record, `send` re-opens the record, re-validates
+the binding, takes a lease, runs a single `prompt -s` turn, and releases the lease on
+success **and** failure, and `status` re-validates the binding for a read-only `status -s`
+query. Control point 5 (`close/abort`) and full crash/interruption stale-lock recovery
+(control point 3 beyond expired-lease replacement) are **not** yet implemented, and there is
+no session `list` or multi-turn resume runtime.
 
 S1 must extend, **not** replace, the role-bound authorization model — sessions bind to
 the same `role_id` boundary as exec runs, never to per-run human approval tickets. S1
@@ -455,25 +474,27 @@ flowchart LR
   result.json
   redaction-report.json
 
-# Current — persistent session foundation (🟡 S1b)
+# Current — persistent session foundation (🟡 S1b) + create/send/status runtime (🟡 S1c)
 .agent-run-supervisor/sessions/<session_id>/
-  session.json
-  lock.json            # only while a lease is held
-
-# Future — persistent session turns/runtime (remaining S1/H1)
-.agent-run-supervisor/sessions/<session_id>/
-  session.json
-  role.snapshot.json
-  workspace.snapshot.json
-  generated-policy.json
-  lock.json
-  turns/<turn_id>/
+  session.json                 # S1b store record
+  lock.json                    # S1b — only while a lease is held
+  management/                  # S1c — redacted management-command summaries
+    create.json
+    status.json
+  turns/<turn_id>/             # S1c — one redacted directory per send turn
     prompt.txt
     acpx-stdout.ndjson
     normalized-events.jsonl
     stderr.log
-    result.json
+    result.json                # business_verdict = null
     redaction-report.json
+
+# Future — remaining persistent session runtime (remaining S1/H1)
+.agent-run-supervisor/sessions/<session_id>/
+  role.snapshot.json           # runtime snapshots, if needed
+  workspace.snapshot.json
+  generated-policy.json
+  # plus close/abort status artifacts, session list, and retention/cleanup
 ```
 
 Determinism/auditability properties: directories are `0700`, files `0600`, final
@@ -550,11 +571,12 @@ prose here may be read as introducing any of them:
 | CLI surface | `src/agent_run_supervisor/cli.py` | F-CLI-001/002/003 | ✅ / 🟡 | `tests/test_cli_smoke.py` |
 | Command handlers | `src/agent_run_supervisor/commands.py` | F-CLI-*, F-RUN-001, F-EXEC-001 | ✅ / 🟡 | `tests/test_cli_commands.py` |
 | Role model + hash | `src/agent_run_supervisor/role.py` | F-ROLE-001 | ✅ / 🟡 session config | `tests/test_role.py` |
-| Policy + argv compiler | `src/agent_run_supervisor/policy.py` | F-POLICY-001 | 🟡 (exec ✅, session runtime pending) | `tests/test_policy.py`, `tests/test_session_strategy_guard.py` |
+| Policy + argv compiler | `src/agent_run_supervisor/policy.py` | F-POLICY-001 | 🟡 (exec ✅, S1c session create/ensure/show/status/prompt compilers ✅, close/abort pending) | `tests/test_policy.py`, `tests/test_session_strategy_guard.py` |
 | cwd / allowed-roots gate | `src/agent_run_supervisor/workspace.py` | F-WORKSPACE-001 | 🟡 | `tests/test_workspace_gate.py` |
 | One-shot exec supervision | `src/agent_run_supervisor/runner.py` | F-EXEC-001 (E1) | ✅ (phase closure roadmap-owned) | `tests/test_runner_exec.py`, `tests/test_runner_dry_run.py` |
 | Persistent session store | `src/agent_run_supervisor/session.py` | F-SESSION-001 (S1) | 🟡 S1b foundation | `tests/test_session_store.py`, `tests/test_session_strategy_guard.py` |
-| Observed event parser | `src/agent_run_supervisor/parser.py` | F-PARSER-001 | 🟡 | `tests/test_parser.py` |
+| Persistent session runtime | `src/agent_run_supervisor/session_runtime.py` | F-SESSION-001 (S1) | 🟡 S1c create/send/status MVP (close/abort/list/crash recovery/retention open) | `tests/test_session_runtime.py` |
+| Observed event parser | `src/agent_run_supervisor/parser.py` | F-PARSER-001 | 🟡 (S1c adds prompt-turn NDJSON + `summarize_management_json` management summarizer) | `tests/test_parser.py` |
 | Status classifier | `src/agent_run_supervisor/exit_classifier.py` | F-STATUS-001 | 🟡 | `tests/test_exit_classifier.py` |
 | Result payload | `src/agent_run_supervisor/result.py` | F-STATUS-001 / F-EXEC-001 | ✅ | covered via runner/classifier tests |
 | EventStore + redaction | `src/agent_run_supervisor/event_store.py`, `redaction.py` | F-STORE-001 | 🟡 | `tests/test_event_store.py`, `tests/test_redaction.py` |
@@ -590,7 +612,7 @@ touches the architecture.
 
 These are tracked in `docs/roadmap/current-status.md` §4 and are **not** re-decided here:
 
-- `ARS-SESSIONS` — persistent session support (S1): S1a contract evidence and S1b store/lock foundation exist; runtime lifecycle remains open.
+- `ARS-SESSIONS` — persistent session support (S1): S1a contract evidence, S1b store/lock foundation, and the S1c create/send/status runtime MVP exist; `close/abort`, session `list`, multi-turn resume, crash/interruption recovery, and retention/cleanup remain open.
 - `ARS-DOCTOR-COMPLETE` — adapter/npx/policy/cwd/redaction/session doctor probes (H1).
 - `ARS-RETENTION-CLEANUP` — run/session artifact retention/cleanup knobs (H1).
 - `ARS-SANDBOX-BOUNDARY` — parked; any real OS sandbox is a separate phase.

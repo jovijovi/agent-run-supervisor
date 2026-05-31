@@ -277,6 +277,111 @@ def parse_acpx_stdout(path: Path) -> ParseResult:
     return parse_acpx_stdout_bytes(Path(path).read_bytes())
 
 
+class ManagementParseError(ValueError):
+    """Raised when management-command output is not a single safe JSON object.
+
+    Fails closed for empty output, non-JSON, JSON that is not an object, and a
+    JSON-RPC *turn* stream record accidentally fed to the management path. A
+    JSON-RPC *error* envelope (``{"jsonrpc":..., "error":{...}}``) is **not** an
+    error here — it is surfaced as a management ``error`` summary so the caller
+    can classify the acpx failure code.
+    """
+
+
+# Management responses we summarize only carry an allow-list of scalar identity
+# and lifecycle fields. Everything else (model catalogs, event-log paths, agent
+# command lines, message bodies) is bulk/untrusted and is deliberately dropped.
+def summarize_management_json(payload: bytes | str) -> dict[str, Any]:
+    """Summarize a single acpx management-command JSON object.
+
+    Management commands (``sessions new/ensure/show``, ``status``,
+    ``sessions close``, ``cancel``) emit exactly one JSON object — never a
+    JSON-RPC NDJSON stream. This returns a safe, allow-listed summary and never
+    echoes bulk payload. Use :func:`parse_acpx_stdout_bytes` for prompt turns.
+    """
+    if isinstance(payload, bytes):
+        try:
+            text = payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ManagementParseError(f"management output is not UTF-8: {exc}") from exc
+    else:
+        text = payload
+    text = text.strip()
+    if not text:
+        raise ManagementParseError("management output is empty")
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ManagementParseError(
+            f"management output is not a single JSON object: {exc}",
+        ) from exc
+    if not isinstance(obj, dict):
+        raise ManagementParseError("management output must be a JSON object")
+
+    if "error" in obj:
+        error = obj.get("error")
+        code = None
+        acpx_code = None
+        if isinstance(error, dict):
+            code = error.get("code")
+            data = error.get("data")
+            if isinstance(data, dict):
+                acpx_code = data.get("acpxCode")
+        return _management_summary(
+            kind="error",
+            obj=obj,
+            code=code,
+            acpx_code=acpx_code,
+        )
+
+    if obj.get("jsonrpc") is not None:
+        # A JSON-RPC *method/result* record (no error) is a turn-stream line, not
+        # a management response. Refuse so streams never masquerade as management.
+        raise ManagementParseError(
+            "management output is a JSON-RPC stream record, not a management object",
+        )
+
+    schema = obj.get("schema")
+    action = obj.get("action")
+    if schema == "acpx.session.v1":
+        kind = "acpx.session.v1"
+    elif isinstance(action, str):
+        kind = action
+    else:
+        kind = "unknown"
+    return _management_summary(kind=kind, obj=obj)
+
+
+def _management_summary(
+    *,
+    kind: str,
+    obj: dict[str, Any],
+    code: Any = None,
+    acpx_code: Any = None,
+) -> dict[str, Any]:
+    def _bool_or_none(value: Any) -> bool | None:
+        return value if isinstance(value, bool) else None
+
+    return {
+        "kind": kind,
+        "acpx_record_id": obj.get("acpxRecordId"),
+        # `show` spells the id `acpSessionId`; everything else `acpxSessionId`.
+        "acpx_session_id": obj.get("acpxSessionId") or obj.get("acpSessionId"),
+        "session_name": obj.get("name") if isinstance(obj.get("name"), str) else None,
+        "created": _bool_or_none(obj.get("created")),
+        "closed": _bool_or_none(obj.get("closed")),
+        "status": obj.get("status") if isinstance(obj.get("status"), str) else None,
+        "cancelled": _bool_or_none(obj.get("cancelled")),
+        "code": code,
+        "acpx_code": acpx_code,
+        # Structural evidence only: top-level key names + value *types*, never
+        # the values themselves.
+        "top_level_keys": sorted(
+            f"{key}:{type(value).__name__}" for key, value in obj.items()
+        ),
+    }
+
+
 def _iter_lines(payload: bytes) -> Iterable[tuple[int, bytes]]:
     line_number = 0
     for raw in payload.splitlines():
