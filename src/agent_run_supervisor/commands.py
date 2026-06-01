@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+from importlib import resources
 import sys
 from pathlib import Path
 from typing import Any
@@ -99,6 +100,19 @@ def cmd_replay(args: argparse.Namespace) -> int:
 
 
 def _default_fixture_dir() -> Path:
+    """Return the default fixture directory for the read-only doctor replay.
+
+    Source checkouts keep the full fixture corpus at repository root. Installed
+    wheels include the small success fixture needed by ``doctor`` as package
+    data, so the console script remains self-contained after non-editable
+    installation.
+    """
+    packaged = resources.files("agent_run_supervisor").joinpath(
+        "fixtures", "acpx-0.10.0"
+    )
+    packaged_replay = packaged.joinpath("success-codex-sentinel", "stdout.ndjson")
+    if packaged_replay.is_file():
+        return Path(str(packaged))
     return Path(__file__).resolve().parents[2] / "fixtures" / "acpx-0.10.0"
 
 

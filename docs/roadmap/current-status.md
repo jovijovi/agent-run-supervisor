@@ -371,6 +371,9 @@ post-PR review, full local post-merge gates, docs index/drift checks, and post-m
 |---|---|---|---:|---|---|---|
 | ARS-SANDBOX-BOUNDARY | PARKED | Any claim that `allowed_roots` is an OS/filesystem sandbox remains parked. | No | Separate sandbox phase | OS sandbox proof + negative probes | Parked |
 | ARS-CALLER-INTEGRATION | PARTIAL | Generic local library caller boundary is implemented in I1; the concrete caller (Hermes) is captured **design-only** in L1 (`docs/plans/2026-06-01-l1-concrete-caller-integration-design.md`, exec + persistent-session document-check, Feishu card as caller-owned view-model only), merged via PR #24 at `5e34f5c`. L2 local/offline Hermes caller + offline Feishu view-model implementation is merged via PR #27 at `eb7912e` under `src/agent_run_supervisor/hermes_caller/` with `tests/hermes_caller/`. Concrete Sachima/Gateway/IM/Feishu-delivery/live behavior remains separate and unapproved. | No | Separate later approval for any live platform seam | PR #27 evidence for local/offline caller package; separate product approval for real Feishu/Sachima/Gateway/live surfaces | Generic boundary done; concrete-caller design closed (L1, design-only); L2 local/offline implementation closed on main; all live/platform behavior parked |
+| ARS-NPX-STRICT-OFFLINE | PARKED | Default role compilation may resolve `npx -y acpx@0.10.0` when no explicit `acpx_binary` is configured; this is documented as fetch risk, not strict offline mode. | No | A future strict-offline hardening phase | Add role/runtime checks that require a local `acpx_binary` when strict offline is enabled; prove no `npx` fetch path with tests | P3 backlog only; not implemented in this docs/packaging cleanup |
+| ARS-REDACTION-DLP-HARDENING | PARKED | Current redaction covers common token/key/JWT/PEM/env/argv shapes; stronger DLP/caller allowlist projection is needed before broader real user/platform data scenarios. | No | Any real-user/platform-data rollout | Add allowlist projection and expanded redaction probes for caller-visible surfaces | P3 backlog only |
+| ARS-LOCK-RELEASE-AUDIT | PARKED | `_release_quietly()` intentionally avoids masking original session errors, but lock-release failures are not yet surfaced as structured audit evidence. | No | A future lifecycle observability hardening phase | Add regression tests and redacted management/audit evidence for release failures without breaking fail-closed behavior | P3 backlog only |
 
 ### K1 post-merge tail-closure evidence
 
@@ -409,7 +412,7 @@ Current docs/code work does not approve:
 - treating `allowed_roots` as an OS/filesystem sandbox;
 - per-run human approval as the default authorization model.
 
-Persistent sessions are **not** a non-goal; they are a product requirement scheduled after the exec runner implementation phase.
+Persistent sessions are **not** a non-goal; they are a product requirement now closed for the local lifecycle, originally sequenced after the exec runner implementation phase.
 
 ## 6. Verification gates for implementation PRs
 

@@ -49,6 +49,15 @@ def test_replay_rejects_management_status_stdout(run_cli, fixtures_root: Path) -
     assert "protocol" in (completed.stdout + completed.stderr).lower()
 
 
+def test_default_doctor_fixture_dir_points_to_packaged_success_fixture() -> None:
+    from agent_run_supervisor.commands import _default_fixture_dir
+
+    replay = _default_fixture_dir() / "success-codex-sentinel" / "stdout.ndjson"
+
+    assert replay.is_file()
+    assert "CODEX_ACPX_OK" in replay.read_text(encoding="utf-8")
+
+
 def test_doctor_runs_without_role_and_does_not_launch_real_agent(run_cli) -> None:
     completed = run_cli(["doctor"])
 

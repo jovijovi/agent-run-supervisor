@@ -1,31 +1,28 @@
 ---
 title: "L2 Hermes Caller + Offline Feishu View-Model Implementation Plan"
-status: active
+status: archived
 created_at: 2026-06-01
-last_validated_at: 2026-06-01T00:00:00+0800
+last_validated_at: 2026-06-01T21:17:29+0800
+archived_at: 2026-06-01T21:17:29+0800
 ---
 # L2 Hermes Caller + Offline Feishu View-Model Implementation Plan
 
-> **Scope banner — plan-only.** This is the **L2 implementation plan** for a later,
-> separately-approved coding phase that would build the **concrete Hermes caller** and an
-> **offline Feishu rich-card view-model adapter** *above* the generic I1 boundary
-> (`src/agent_run_supervisor/caller.py`). It **implements no runtime code in this PR**, changes
-> no runtime module, CLI, config, or `caller.py`, and grants **no** new live/runtime approval.
-> The Feishu document-check task remains a **scenario / presentation target only**: the planned
-> code is **fake/local/offline only** — there is **no** real Feishu API, **no** IM delivery, **no**
-> platform ingress, **no** Gateway/Sachima live behavior, and **no** automatic replies anywhere
-> in this plan. Authoring or merging this plan does **not** approve execution. Execution requires
-> a **separate explicit approval** (§17). All standing non-approvals
-> (`docs/roadmap/current-status.md` §5) remain in force. This plan derives from the **closed L1
-> design** (`docs/plans/2026-06-01-l1-concrete-caller-integration-design.md`) and may not
-> redefine product scope.
+> **Completion banner — archived execution plan.** This document was the L2 implementation
+> plan. The separately approved implementation phase has now landed on `main` via PR #27
+> (`eb7912e`), adding the concrete local Hermes caller and offline Feishu rich-card
+> view-model adapter under `src/agent_run_supervisor/hermes_caller/` with tests under
+> `tests/hermes_caller/`. It remains an execution record, not current pending work. The
+> implementation stayed above the generic I1 boundary (`src/agent_run_supervisor/caller.py`)
+> and preserved all non-approvals: no real Feishu API, no IM delivery, no platform ingress,
+> no Gateway/Sachima live behavior, no automatic replies, no live/default-on behavior, and no
+> platform fields in the generic supervisor API.
 
 ## 1. Goal
 
-Define, at execution-plan level only, **how a later coding phase would implement** the concrete
-local caller (**Hermes**) and its **offline Feishu rich-card view-model adapter** on top of the
-existing generic I1 caller boundary, covering **both** `exec` and `persistent session` modes for
-the document-check scenario, so that:
+Record the approved L2 implementation scope for the concrete local caller (**Hermes**) and its
+**offline Feishu rich-card view-model adapter** on top of the existing generic I1 caller boundary.
+The implemented package covers **both** `exec` and `persistent session` document-check flows, so
+that:
 
 - the supervisor stays **generic and unchanged** (no platform field enters
   `CallerInvocationSpec` / `CallerResult`; `business_verdict` stays `null`);
@@ -35,9 +32,9 @@ the document-check scenario, so that:
 - the work is **conservative stdlib-only** and lives in a **caller-side package** that depends on
   the I1 public surface only.
 
-This plan turns the L1 design's adapters (intake/role adapter and presentation adapter) into a
-concrete file list, dataclass/function signatures, and a TDD task breakdown — without writing the
-code in this PR.
+The implementation PR turned the L1 design's adapters (intake/role adapter and presentation
+adapter) into the concrete stdlib-only package and tests described below. Current closure status is
+PR #27 (`eb7912e`) and `docs/roadmap/current-status.md`.
 
 ## 2. Source-of-truth trace
 
@@ -71,11 +68,11 @@ Read in authority order; this plan is **derivative** of all of them and redefine
 
 ## 3. Scope
 
-In scope (this PR = **plan document only**):
+Implemented / recorded by L2 (current closure = PR #27 `eb7912e`):
 
 - A concrete, file-level implementation plan for the **Hermes caller** and the **offline Feishu
-  view-model adapter** that a later approved phase would build above I1.
-- Proposed **exact implementation files**, all stdlib-only, in a **caller-side package** separate
+  view-model adapter** that L2 built above I1.
+- **Exact implementation files**, all stdlib-only, in a **caller-side package** separate
   from `agent_run_supervisor`.
 - **Dataclass/function signatures** as code snippets (design sketches, not committed code).
 - **TDD task breakdown** with explicit RED/GREEN/REFACTOR steps.
@@ -83,16 +80,14 @@ In scope (this PR = **plan document only**):
 - **Offline Feishu view-model mapping** (normalized event/result → view-model → card payload
   dict, with no delivery).
 - **Fake/local fixture strategy** (fake runner/session-runtime injection + synthetic events).
-- **Static forbidden-surface gates** to prove the planned code adds no platform/live surface.
-- **Docs update steps** for the later implementation PR, **rollback**, **PR/review process**, and
-  **next approval text**.
+- **Static forbidden-surface gates** proving the implemented code adds no platform/live surface.
+- **Completed docs updates**, **rollback**, **PR/review process**, and **remaining parked surfaces**.
 
-Explicitly **out of scope** for L2 (this PR), unchanged from current non-approvals:
+Still explicitly **out of scope** after L2, unchanged from current non-approvals:
 
-- Any runtime code, tests, CLI commands, config, fixtures, or edits to `caller.py` /
-  `SupervisorRunner` / `SessionRuntime` / parser internals **in this PR**.
-- Real Feishu API calls, card delivery, message posting, or any IM delivery (in this plan **and**
-  in the later implementation it describes).
+- Edits that move platform state into `caller.py` / `SupervisorRunner` / `SessionRuntime` /
+  parser internals.
+- Real Feishu API calls, card delivery, message posting, or any IM delivery.
 - Platform ingress / webhook receipt / public endpoints.
 - Sachima behavior integration, Gateway lifecycle, automatic replies, live/default-on behavior,
   `@all`, agent-to-agent / worker auto-routing.
@@ -117,18 +112,21 @@ adds nothing live. Authoring this plan does **not** approve or imply:
 - per-run human approval as the default authorization model (authorization stays role-bound to
   `role_id`).
 
-The planned Hermes caller and Feishu view-model adapter are **fake/local/offline only**. The
+The implemented Hermes caller and Feishu view-model adapter are **fake/local/offline only**. The
 Feishu card is a **render-target view-model**, never a delivered message. Crossing the Sachima
-seam (L1 §14) remains a **separate later approved phase**.
+seam (L1 §14) remains a **separate approved phase if the user later asks for it**.
 
-## 5. Proposed implementation files (later code; stdlib-only, caller-side)
+## 5. Implemented files (stdlib-only, caller-side)
 
-The later implementation phase would add a **new caller-side subpackage** inside the existing distribution (`agent_run_supervisor.hermes_caller`) that depends **only** on
-the I1 public surface (`agent_run_supervisor.caller`). It is packaged under `src/agent_run_supervisor/` so the current `pyproject.toml` include rule (`agent_run_supervisor*`) picks it up, but it is logically outside the supervisor core and must **not** import supervisor internals
-(`runner`, `session_runtime`, `parser`, `policy`, `session`, …) directly, and the supervisor must
-**not** import it. Static import guards enforce the L1 layering even though the subpackage ships in the same distribution.
+PR #27 added a **caller-side subpackage** inside the existing distribution
+(`agent_run_supervisor.hermes_caller`) that depends **only** on the I1 public surface
+(`agent_run_supervisor.caller`). It is packaged under `src/agent_run_supervisor/`, but remains
+logically outside the supervisor core and must **not** import supervisor internals (`runner`,
+`session_runtime`, `parser`, `policy`, `session`, …) directly. The supervisor must **not** import it.
+Static import guards enforce the L1 layering even though the subpackage ships in the same
+distribution.
 
-Proposed layout (illustrative; final names confirmed at implementation time):
+Implemented layout:
 
 ```text
 src/agent_run_supervisor/hermes_caller/
@@ -153,20 +151,20 @@ tests/hermes_caller/
   test_no_forbidden_surface.py      # static forbidden-surface guard over src/agent_run_supervisor/hermes_caller/
 ```
 
-Conservatism rules for the later code:
+Conservatism rules for the implemented code:
 
 - **stdlib-only** (`dataclasses`, `enum`, `typing`, `html`, `pathlib`, `json`); no third-party deps
-  unless a future phase explicitly approves them (per `CLAUDE.md` tooling expectations).
+  unless a separate approved phase adds them (per `CLAUDE.md` tooling expectations).
 - Depend on `agent_run_supervisor.caller` **only**; never reach into supervisor internals.
 - No network, no subprocess, no filesystem writes outside test temp dirs; the adapter consumes
   `CallerResult` and reads already-persisted artifact paths as **evidence references** (it does
   not parse raw acpx streams — that stays supervisor-owned).
 - All identifiers in fixtures/examples are `[REDACTED]`.
 
-## 6. Dataclass / function signatures (design sketches, not committed code)
+## 6. Dataclass / function signatures
 
-These are **design sketches** for the later phase, not code added in this PR. Final shapes are
-confirmed during implementation TDD.
+These are the intended public shapes recorded by the archived plan; PR #27 implemented the concrete
+module interfaces with TDD coverage.
 
 ### 6.1 `task.py` — caller-side intake descriptor
 
@@ -400,7 +398,7 @@ class HermesDocCheckCaller:
         """
 ```
 
-## 7. Exec flow (later implementation shape)
+## 7. Exec flow (implemented shape)
 
 For a bounded, single-pass document check (no follow-up turns):
 
@@ -421,7 +419,7 @@ For a bounded, single-pass document check (no follow-up turns):
 A `dry_run=True` path uses mode `exec_dry_run` to preview the compiled policy/argv with **no AGENT
 launch**, producing a "configuration preview" view-model without running anything.
 
-## 8. Persistent-session flow (later implementation shape)
+## 8. Persistent-session flow (implemented shape)
 
 For an interactive, multi-turn review:
 
@@ -441,7 +439,7 @@ L2 does not add them to the boundary (L1 §8).
 
 ## 9. Offline Feishu view-model mapping (caller-owned)
 
-The later adapter maps supervisor evidence (normalized event families per
+The implemented adapter maps supervisor evidence (normalized event families per
 `docs/design/result-event-schema.md` §4, plus result fields) into the view-model, then into an
 **offline** card payload dict. The Feishu column is the **presentation target only — no delivery**
 (carried verbatim from L1 §12).
@@ -476,16 +474,16 @@ The later adapter maps supervisor evidence (normalized event families per
 
 ## 10. TDD task breakdown (RED → GREEN → REFACTOR)
 
-The later phase implements each module test-first. Every task lists its RED (write failing test),
-GREEN (minimal code to pass), and REFACTOR (tidy, keep green) steps. No production line is written
-before a failing test exists.
+L2 implemented each module test-first. The bullets below preserve the RED/GREEN/REFACTOR
+evidence trail; RED entries describe the original failing tests, and the final implementation now
+passes them.
 
 ### T1 — intake/role adapter (`intake.py`)
 
 - **RED:** `test_intake.py` asserts `build_exec_spec` returns a `CallerInvocationSpec` with
   `mode="exec"`, the supplied role, non-empty `prompt`/`context`, and **no** attribute carrying
   `task_id`/`document_ref`/`requested_by`/`surface`; assert session-spec builders set the correct
-  modes and require `session_id`. Tests fail (module absent).
+  modes and require `session_id`. Originally failed while the module was absent; now passes.
 - **GREEN:** implement the builders mapping `DocCheckTask` → spec fields only.
 - **REFACTOR:** factor shared spec construction; assert frozen-dataclass immutability.
 
@@ -502,7 +500,7 @@ before a failing test exists.
 
 - **RED:** `test_view_model.py` (or a dedicated `test_events.py`) loads a synthetic redacted event
   fixture and asserts only structural fields are exposed (`text_length`, `kind`, `status`,
-  `key_summary`) and that no bulk content leaks. Fails (module absent).
+  `key_summary`) and that no bulk content leaks. Originally failed while the module was absent; now passes.
 - **GREEN:** implement read-only loading/projection of persisted events.
 - **REFACTOR:** make the projection total over all §4 families incl. `unknown_update`.
 
@@ -511,7 +509,7 @@ before a failing test exists.
 - **RED:** assert `build_progress_view_model` maps event families to the §9 elements (phase,
   progress items, badges) and `build_result_view_model` produces `phase=COMPLETED`/`ERROR`,
   carries the verdict banner, the supervisor-status **evidence** chip, and the **untrusted**
-  `findings_text`. Fails.
+  `findings_text`. Originally failed; now passes.
 - **GREEN:** implement the mapping table from §9.
 - **REFACTOR:** table-drive the mapping; cover the card state lifecycle (L1 §12.1).
 
@@ -520,7 +518,7 @@ before a failing test exists.
 - **RED:** `test_feishu_adapter.py` asserts `to_feishu_card_payload` returns a plain `dict`, that
   untrusted text is **escaped** (inject `<script>`/markdown and assert it is neutralized), that the
   payload contains **no** delivery/channel/webhook/recipient keys, and (static) that the module
-  imports **no** network/SDK symbol. Fails.
+  imports **no** network/SDK symbol. Originally failed; now passes.
 - **GREEN:** implement escaped, delivery-free payload construction.
 - **REFACTOR:** centralize escaping; assert idempotent escaping and stable key set.
 
@@ -528,7 +526,7 @@ before a failing test exists.
 
 - **RED:** inject a **fake runner** into `HermesDocCheckCaller.run_exec`; assert it calls
   `invoke_caller` with an exec spec, derives a verdict, and returns a result view-model; assert the
-  `dry_run=True` path uses `exec_dry_run` and launches nothing. Fails.
+  `dry_run=True` path uses `exec_dry_run` and launches nothing. Originally failed; now passes.
 - **GREEN:** implement `run_exec` orchestration over `invoke_caller`.
 - **REFACTOR:** dedupe progress/result view-model assembly shared with the session flow.
 
@@ -536,14 +534,14 @@ before a failing test exists.
 
 - **RED:** inject a **fake session-runtime**; assert `run_session` drives
   create → send×N → status → close, returns one `CallerResult` per call, advances
-  `session_lifecycle`, and builds the final result view-model. Fails.
+  `session_lifecycle`, and builds the final result view-model. Originally failed; now passes.
 - **GREEN:** implement `run_session` orchestration.
 - **REFACTOR:** assert lease/binding/redaction stay supervisor-owned (not re-implemented here).
 
 ### T8 — forbidden-surface guard (`test_no_forbidden_surface.py`)
 
 - **RED:** a static test (see §12) scans `src/agent_run_supervisor/hermes_caller/` and fails on any forbidden import or
-  platform/delivery token used as a real field/call. Initially fails on a deliberately-seeded
+  platform/delivery token used as a real field/call. It was first validated with a deliberately-seeded
   violation in a scratch fixture, then guards the real tree.
 - **GREEN:** ensure the package is clean; the guard passes.
 - **REFACTOR:** keep the allowlist of permitted (prose/comment-only) terms minimal and documented.
@@ -569,120 +567,83 @@ All tests are **fake/local/offline**; no real acpx, Feishu, network, or Sachima.
   the adapter stops at a payload dict, so there is nothing to deliver and nothing to mock for
   delivery.
 
-## 12. Static forbidden-surface gates (later implementation)
+## 12. Implemented static forbidden-surface gates
 
-In addition to the repo gates (§6 of current-status), the later PR adds a **static guard** proving
-the planned code introduces no platform/live surface:
+The L2 implementation PR (#27) added static guards proving the caller package stays local/offline:
 
-- **Import allowlist.** `test_no_forbidden_surface.py` parses each `src/agent_run_supervisor/hermes_caller/*.py` with
-  `ast` and asserts imports come **only** from stdlib + `agent_run_supervisor.caller` +
-  `agent_run_supervisor.role` (for the role type). It **fails** on any import of supervisor
-  internals (`runner`, `session_runtime`, `parser`, `policy`, `session`, `commands`) or any
-  networking/HTTP/SDK module (`socket`, `http`, `urllib`, `requests`, `feishu`/`lark`, etc.).
-- **Token scan as fields/calls.** Grep changed `src/agent_run_supervisor/hermes_caller/` for platform/live terms
-  (`delivery`, `webhook`, `gateway`, `Sachima`, `@all`, `auto_reply`, `public_ingress`, `feishu`
-  as an API client, `send_card`, `post_message`). They may appear **only** in non-approval /
-  scenario / comment prose, **never** as a field, function call, or import.
-- **Generic-contract invariant.** Assert the package adds **no** attribute to
-  `CallerInvocationSpec` / `CallerResult` and never sets a non-null `business_verdict`.
-- **No-delivery payload invariant.** Assert `to_feishu_card_payload` output has no
-  channel/message/webhook/recipient/Gateway/delivery key.
-- **Repo gates** still run unchanged:
-  ```bash
-  python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0
-  python3 -m pytest -q
-  python3 -m compileall -q src scripts tests
-  PYTHONPATH=src python3 -m agent_run_supervisor doctor
-  PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson
-  python tools/build_docs_index.py --check
-  python tools/docs_drift_signal.py --check
-  git diff --check
-  ```
+- **Import allowlist.** `tests/hermes_caller/test_no_forbidden_surface.py` parses
+  `src/agent_run_supervisor/hermes_caller/*.py` and allows only stdlib plus the public
+  `agent_run_supervisor.caller` / `agent_run_supervisor.role` boundary.
+- **No platform/live surface.** The guard fails on networking/HTTP/SDK imports and on delivery,
+  webhook, Gateway, Sachima, recipient, or Feishu-client fields/calls.
+- **Generic-contract invariant.** The package adds no field to `CallerInvocationSpec` /
+  `CallerResult` and never makes the supervisor own `business_verdict`.
+- **No-delivery payload invariant.** `to_feishu_card_payload` returns an offline JSON-like dict
+  with no channel/message/webhook/recipient/Gateway/delivery key.
 
-## 13. Docs update steps for the later implementation PR
+## 13. Docs updates completed by implementation and cleanup PRs
 
-When the later approved phase lands code, that PR (not this one) must:
+The L2 implementation and follow-up cleanup have already landed on `main`:
 
-1. Add an **L2 implementation phase** entry to `docs/roadmap/current-status.md` §3 with evidence
-   (files, tests, gates), and move `ARS-CALLER-INTEGRATION` from "PARTIAL / plan exists" toward
-   "concrete caller implemented (local/offline)" while keeping all live surfaces parked.
-2. Update `docs/roadmap/features.md` `F-INTEGRATION-001` from "L2 plan is the next implementation
-   plan" to "Hermes caller + offline Feishu view-model implemented (local/offline)", citing the
-   new package + tests; keep `F-NONGOAL-001` unchanged.
-3. Update `docs/design/technical-solution.md` / `docs/design/architecture.md` only if the caller
-   package needs a pointer; do **not** add platform fields to the supervisor contract.
-4. Regenerate `docs/INDEX.md` via `python tools/build_docs_index.py --write` and the drift signal
-   via `python tools/docs_drift_signal.py --write`; **never hand-edit** generated outputs.
-5. Bump `last_validated_at` on any knowledge doc the PR cites (use-driven validation, `CLAUDE.md`).
-
-This L2 plan (this PR) performs **only** the plan addition plus minimal pointer edits in §2/§3 of the task (status +
-features), then lets Hermes regenerate `docs/INDEX.md` / `docs/lessons/_drift_report.md` with repo tools; generated files are never hand-edited.
+1. PR #27 (`eb7912e`) added `src/agent_run_supervisor/hermes_caller/` and
+   `tests/hermes_caller/`, covering both one-shot `exec` and local persistent-session flows.
+2. PR #28 (`6a5a661`) closed L2 post-merge status in roadmap/design docs.
+3. This P0/P1 cleanup refreshes stale README, diagrams, roadmap, feature, architecture, and
+   historical-plan wording so they no longer describe L2 as future-only.
+4. Generated docs outputs are refreshed with repo tools; generated files are not hand-edited.
 
 ## 14. Rollback
 
-L2 (this PR) is plan-only and rollback-trivial:
+Because the L2 caller package is caller-side and the supervisor does not import it directly,
+rollback remains contained:
 
-- Revert this plan file and the minimal pointer edits in `docs/roadmap/current-status.md` and
-  `docs/roadmap/features.md`.
-- Regenerate `docs/INDEX.md` / `docs/lessons/_drift_report.md` via the repo tools (Hermes).
-- **No** runtime code, tests, CLI, config, external service, Gateway, Sachima, Feishu, or
-  data-migration rollback exists, because nothing live or runtime was implemented and `caller.py`
-  was not changed.
+- Revert `src/agent_run_supervisor/hermes_caller/` and `tests/hermes_caller/` from PR #27.
+- Revert follow-up roadmap/design/status edits from PR #28 and this P0/P1 cleanup if needed.
+- Regenerate `docs/INDEX.md` / `docs/lessons/_drift_report.md` with repo tools.
+- No live Feishu/Sachima/Gateway/ingress/delivery rollback exists, because those surfaces were
+  never implemented or approved.
 
-For the **later implementation** phase, rollback is: revert the `src/agent_run_supervisor/hermes_caller/` package and
-`tests/hermes_caller/` tree (a self-contained caller-side package), regenerate docs indexes, and
-revert that PR's status/feature edits. Because the package depends only on the I1 public surface
-and the supervisor does not import it, removing it leaves the supervisor untouched.
+## 15. Verification evidence
 
-## 15. Verification plan (this plan PR)
+Current validation is implementation-backed. The completed L2/P0/P1 chain is verified with:
 
-L2 ships **no code**, so verification is documentation-centric. Confirm:
+```bash
+python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0
+python3 -m pytest -q
+PYTHONDONTWRITEBYTECODE=1 python3 -m compileall -q src scripts tests
+PYTHONPATH=src python3 -m agent_run_supervisor doctor
+PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson
+python3 tools/build_docs_index.py --check
+python3 tools/docs_drift_signal.py --check
+git diff --check
+```
 
-1. **Authority alignment** — the plan is derivative of and consistent with
-   `GOAL.md`/PRD/architecture/technical-solution/features/current-status and the **closed L1
-   design**; it redefines no product goal and grants no live approval.
-2. **Doc gates** (run by Hermes; do not hand-edit generated outputs):
-   ```bash
-   python tools/build_docs_index.py --check
-   python tools/docs_drift_signal.py --check
-   git diff --check
-   ```
-   then regenerate with `--write` as part of the docs PR.
-3. **Boundary / non-approval scan** — platform/live terms appear in changed docs **only** in
-   non-approval / scenario / seam / plan-of-record prose, never as approved behavior or as a
-   supervisor field.
-4. **Generic-contract invariants** — the plan adds **no** field to `CallerInvocationSpec` /
-   `CallerResult`, keeps `business_verdict: null`, and keeps verdict + view-model + rendering
-   caller-owned.
-5. **No code drift** — `git diff` shows only docs changes; `src/agent_run_supervisor/caller.py`
-   and all runtime modules and tests are untouched in this PR.
+Additional P0/P1 packaging verification proves a non-editable install can run
+`agent-run-supervisor doctor` against the packaged minimal fixture without launching a real AGENT.
 
-## 16. PR / review process
+## 16. PR / review process used
 
-- **Branch / PR:** one plan task = one PR on `docs/l2-hermes-caller-viewmodel-plan-2026-06-01`,
-  targeting `main`.
-- **Roles:** Claude Code authors as Architect + Documentation Engineer; **Codex CLI** is the
-  fresh-context primary reviewer; **Hermes** owns scope control, verification, evidence, and
-  arbitration, and runs the doc generators.
-- **Reviewers must check** PRD/design/feature/roadmap + **L1** alignment (not only that gates
-  pass): the supervisor stays generic, the verdict stays caller-owned, the Feishu card stays a
-  caller-owned **offline** view-model with no delivery, the planned caller-side subpackage is stdlib-only and
-  depends only on the I1 surface, and the Sachima seam stays defined-but-unapproved.
-- **PR body must include:** summary; source-of-truth docs touched; feature/roadmap status impact
-  (L2 plan-only — `ARS-CALLER-INTEGRATION` gains a next-implementation plan; implementation/live/
-  Sachima/Feishu/Gateway parked); plan-only statement; no-secret statement (`[REDACTED]`
-  placeholders); and an explicit non-approval boundary statement confirming no real delivery /
-  ingress / Gateway / Sachima / auto-reply / live behavior was added or approved.
+- L2 design: PR #24.
+- L1 status closure: PR #25.
+- L2 implementation plan: PR #26.
+- L2 implementation: PR #27.
+- L2 post-merge status closure: PR #28.
+- P0/P1 docs/packaging cleanup: PR #29.
 
-## 17. Next approval text
+Roles stayed split: Claude Code handled architecture/documentation/implementation work where used,
+Codex CLI provided fresh-context primary review, and Hermes owned scope control, verification,
+PR operations, and evidence arbitration.
 
-> **Requested next approval (not granted by this PR):** Approve an **L2 implementation phase** to
-> build the concrete **Hermes caller** and an **offline Feishu rich-card view-model adapter** as a
-> new **stdlib-only, caller-side subpackage** (`src/agent_run_supervisor/hermes_caller/`) above the generic I1 boundary,
-> covering `exec` and `persistent session` document-check flows, **fake/local/offline only**.
-> Explicitly **excluded** from the requested approval and still parked: real Feishu API / IM
-> delivery, platform ingress, Gateway lifecycle, Sachima behavior integration, automatic replies,
-> live/default-on behavior, `@all`, agent-to-agent / worker auto-routing, platform fields in the
-> generic supervisor contract, supervisor-side business verdict, and trusted Markdown/HTML
-> rendering. Crossing the Sachima seam (L1 §14) remains a **separate** later approval with its own
-> authority-chain entries. Until this approval is granted, no `src/agent_run_supervisor/hermes_caller/` code is written.
+## 17. Remaining parked surfaces
+
+Still parked unless a separate future phase explicitly approves and implements them:
+
+- real Feishu API / IM delivery;
+- platform ingress;
+- Gateway lifecycle;
+- Sachima behavior integration;
+- automatic replies / live default-on behavior;
+- `@all` or agent-to-agent / worker auto-routing;
+- platform fields in the generic supervisor contract;
+- supervisor-side business verdict;
+- trusted Markdown/HTML rendering.
