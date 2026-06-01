@@ -50,7 +50,7 @@
     <rect x="602" y="70" width="176" height="116" rx="18" fill="#f8fafc" stroke="#64748b" stroke-dasharray="7 5"/>
     <text x="690" y="108" text-anchor="middle" class="label">ACP/acpx</text>
     <text x="690" y="132" text-anchor="middle" class="sub">边界</text>
-    <text x="690" y="154" text-anchor="middle" class="tiny">exec ✓ · session 已规划</text>
+    <text x="690" y="154" text-anchor="middle" class="tiny">exec ✓ · session ✓（本地）</text>
   </g>
 
   <g filter="url(#shadow)">

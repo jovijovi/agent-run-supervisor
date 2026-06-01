@@ -43,10 +43,10 @@ normalized events, classifies a **supervisor-owned status**, and writes **redact
 restrictive-permission local artifacts**. The caller gets auditable evidence — not a tangle of
 runner-lifecycle code.
 
-The product covers **two execution modes**: one-shot exec (implemented) and persistent sessions
-(product-required, planned — see [Roadmap](#roadmap)). It is deliberately **not** Sachima, a
-Gateway plugin, an IM adapter, or a daemon, and it never emits a business verdict
-(`business_verdict` is always `null`).
+The product covers **two execution modes**, both implemented for local use: one-shot exec and a
+local persistent-session lifecycle (create/send/status/close/abort/list — see
+[Roadmap](#roadmap)). It is deliberately **not** Sachima, a Gateway plugin, an IM adapter, or a
+daemon, and it never emits a business verdict (`business_verdict` is always `null`).
 
 ## How it works
 
@@ -97,6 +97,25 @@ PYTHONPATH=src python3 -m agent_run_supervisor run \
 # (requires acpx/Node available locally; launches ONE explicit, local AGENT)
 PYTHONPATH=src python3 -m agent_run_supervisor run \
   --role <role-file>.json --prompt-file <prompt>.txt
+
+# Local persistent-session lifecycle (role must use a persistent session strategy):
+# create → send turn(s) → status → close/abort. create/send/status/close/abort drive a
+# real local acpx session and need Node + acpx; `session list` is local read-only and
+# launches no AGENT.
+PYTHONPATH=src python3 -m agent_run_supervisor session create \
+  --role <role-file>.json --session-id <id>
+PYTHONPATH=src python3 -m agent_run_supervisor session send \
+  --role <role-file>.json --session-id <id> --prompt-file <prompt>.txt
+PYTHONPATH=src python3 -m agent_run_supervisor session status \
+  --role <role-file>.json --session-id <id>
+PYTHONPATH=src python3 -m agent_run_supervisor session close \
+  --role <role-file>.json --session-id <id>
+PYTHONPATH=src python3 -m agent_run_supervisor session abort \
+  --role <role-file>.json --session-id <id>
+PYTHONPATH=src python3 -m agent_run_supervisor session list
+
+# Plan or apply local artifact retention/cleanup (dry-run by default; --apply deletes)
+PYTHONPATH=src python3 -m agent_run_supervisor cleanup
 ```
 
 Once installed (`pip install -e .`), the same surface is available as the
@@ -104,7 +123,11 @@ Once installed (`pip install -e .`), the same surface is available as the
 
 Run artifacts land under `.agent-run-supervisor/runs/<run_id>/` — redacted prompt/env/argv, the
 generated policy, observed stdout (NDJSON), normalized events, stderr, `result.json`
-(`business_verdict = null`), and `redaction-report.json`.
+(`business_verdict = null`), and `redaction-report.json`. Persistent-session artifacts land under
+`.agent-run-supervisor/sessions/<session_id>/` (local record, redacted `management/` summaries,
+and one redacted `turns/<turn_id>/` directory per send). The `cleanup` command plans and (only
+with `--apply`) deletes aged run/session artifacts, confined to the resolved
+`.agent-run-supervisor` root and never touching open/live-locked sessions.
 
 ## Environment requirements
 
@@ -112,8 +135,8 @@ generated policy, observed stdout (NDJSON), normalized events, stderr, `result.j
 |---|---|
 | Runtime | **Python ≥ 3.11**, standard-library only — zero third-party runtime dependencies. |
 | Tests (optional) | `pytest >= 8, < 10` (the `dev` extra). |
-| Real AGENT runs | **Node + acpx** available locally — required **only** for `run` without `--no-real-run`. |
-| Everything else | `validate-role`, `replay`, `doctor`, and `--no-real-run` need **no** Node/acpx and launch **no** AGENT. |
+| Real AGENT runs / session turns | **Node + acpx** available locally — required for `run` (without `--no-real-run`) and for the real `session create/send/status/close/abort` turn & management commands. |
+| No-AGENT commands | `validate-role`, `replay`, `doctor`, `run --no-real-run`, `session list`, and `cleanup` (dry-run) need **no** Node/acpx and launch **no** AGENT. |
 
 ## Quality and test indicators
 
@@ -121,7 +144,7 @@ Factual local gates that keep the supervisor honest (run from the repository roo
 
 | Indicator | Evidence |
 |---|---|
-| Unit / integration tests | **132 pytest tests** — `python3 -m pytest -q`. |
+| Unit / integration tests | **Full pytest suite** — `python3 -m pytest -q` (current local acceptance: **456 passed**). |
 | acpx contract | acpx `0.10.0` fixtures + validator — `python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0`. |
 | Import / syntax smoke | `python3 -m compileall -q src scripts tests`. |
 | Doctor (read-only) | `… doctor` never launches an AGENT (`launched_real_agent = false`). |
@@ -142,12 +165,18 @@ High-level direction only — full phase status, acceptance, and non-approvals l
 [`docs/roadmap/current-status.md`](docs/roadmap/current-status.md) and
 [`docs/roadmap/features.md`](docs/roadmap/features.md).
 
-- **Now — foundations + one-shot exec.** Role/policy/parser/store foundation plus real local
-  `acpx exec` supervision (role-bound, outer watchdog, kill metadata) are in place.
-- **Next — persistent sessions.** Controlled multi-turn ACP/acpx session lifecycle
-  (create/send/resume/close, locks, stale-lock recovery). Product-required, **not** a non-goal.
-- **Later — hardening + thin integrations.** Fuller doctor probes, artifact retention/cleanup,
-  and a documented result schema; thin caller integration only under separate approval.
+- **Done — foundations + both execution modes.** Role/policy/parser/store foundation, real local
+  `acpx exec` supervision (role-bound, outer watchdog, kill metadata), and the local
+  persistent-session lifecycle (create/send/multi-turn-resume/status/close/abort/list, locks,
+  stale-lock recovery) are implemented and closed for local use.
+- **Done — hardening + local caller integration.** Full read-only doctor probe set, confined
+  artifact retention/cleanup, a documented result/event schema, process-liveness crash recovery,
+  the generic local caller boundary, and a local/offline Hermes caller + offline Feishu
+  view-model adapter are merged.
+- **Backlog — deeper hardening (not started).** `npx` strict-offline enforcement, stronger
+  redaction/DLP plus a caller allowlist, and a lock-release audit trail are tracked as backlog
+  only. Any live/platform integration (real Feishu/IM delivery, Sachima, Gateway lifecycle,
+  public ingress) stays out of scope and requires separate approval.
 
 ## License
 

@@ -22,6 +22,10 @@ agent-run-supervisor = "agent_run_supervisor.cli:main"
 where = ["src"]
 include = ["agent_run_supervisor*"]
 
+
+[tool.setuptools.package-data]
+agent_run_supervisor = ["fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

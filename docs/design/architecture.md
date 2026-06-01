@@ -34,12 +34,13 @@ These markers describe **code reality**, not phase bookkeeping:
 | Marker | Meaning |
 |---|---|
 | ✅ | Implemented as a real code path in this repository. |
-| 🟡 | Partially implemented; exec-shaped surfaces exist, session/long-lived tails remain. |
-| 🟦 | **Planned and product-required** (not a non-goal); not yet implemented. |
+| 🟡 | Partially implemented at the feature level: the core code paths exist and pass tests, but `docs/roadmap/features.md` still tracks acceptance tails. |
+| 🟦 | **Planned and product-required** (not a non-goal); not yet implemented. *(Currently unused — both execution modes are implemented.)* |
 
 > The product is **two execution modes**: one-shot exec **and** persistent sessions.
-> This document never reduces the product to "exec-only". Persistent sessions are a
-> scheduled future phase (`S1`), **not** a non-goal.
+> This document never reduces the product to "exec-only". Both modes are **implemented for
+> local use** — the local persistent-session lifecycle (phase `S1`) is **closed** — and
+> persistent sessions are **not** a non-goal.
 
 ### 0.2 Diagram color legend
 
@@ -74,7 +75,7 @@ flowchart TB
     end
 
     subgraph BOUND["acpx / ACP runner boundary"]
-        ACPX["acpx exec ✅ / acpx session 🟡<br/>launches or resumes ONE AGENT per run"]
+        ACPX["acpx exec ✅ / acpx session ✅<br/>launches or resumes ONE AGENT per run"]
     end
 
     AGENT["External AGENT<br/>Codex · Claude Code · other ACP worker"]
@@ -139,8 +140,8 @@ flowchart TB
 
     subgraph LIFE["Lifecycle plane"]
         RUN["runner.py<br/>one-shot exec supervision ✅"]
-        SESS["session.py<br/>store + binding + lease locks 🟡 S1b"]
-        SESSRT["session_runtime.py<br/>create / send / status MVP 🟡 S1c"]
+        SESS["session.py<br/>store + binding + lease locks ✅"]
+        SESSRT["session_runtime.py<br/>create/send/status/close/abort/list ✅"]
     end
 
     subgraph EVID["Evidence plane"]
@@ -338,7 +339,8 @@ Full status set: `completed`, `runner_error`, `invalid_invocation`, `timed_out`,
 ## 4. Persistent session lifecycle and control points (Level 2) — ✅ S1 closed for local lifecycle
 
 > **Status banner.** Persistent ACP/acpx sessions are a **first-class product requirement**
-> (PRD FR-5) scheduled as phase **S1**, **after** the exec runner. S1a captured the
+> (PRD FR-5), sequenced as phase **S1** in engineering order **after** the exec runner and now
+> **closed** for the local lifecycle. S1a captured the
 > `acpx@0.10.0` command/schema contract, S1b implements the local session store, binding,
 > and lease-lock foundation, and S1c adds the create/send/status runtime MVP
 > (`session_runtime.py`) that compiles fixture-shaped acpx session commands, persists

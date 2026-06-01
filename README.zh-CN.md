@@ -40,9 +40,10 @@
 将观测输出解析为归一化事件、判定一个**由监督层拥有的状态**，并写出**脱敏、权限受限的本地工件**。
 调用方拿到的是可审计的证据 —— 而不是一团运行器生命周期代码。
 
-本产品包含**两种执行模式**：一次性 exec（已实现）与持久会话（产品要求、已规划 —— 见
-[路线图](#路线图)）。它刻意**不是** Sachima、不是 Gateway 插件、不是 IM 适配器，也不是常驻守护
-进程（daemon），并且永不给出业务结论（`business_verdict` 始终为 `null`）。
+本产品包含**两种执行模式**，二者均已为本地使用实现：一次性 exec 与本地持久会话生命周期
+（创建/发送/状态/关闭/中止/列举 —— 见 [路线图](#路线图)）。它刻意**不是** Sachima、不是 Gateway
+插件、不是 IM 适配器，也不是常驻守护进程（daemon），并且永不给出业务结论（`business_verdict`
+始终为 `null`）。
 
 ## 工作原理
 
@@ -91,6 +92,24 @@ PYTHONPATH=src python3 -m agent_run_supervisor run \
 #（需要本地具备 acpx/Node；仅启动一个显式、本地的 AGENT）
 PYTHONPATH=src python3 -m agent_run_supervisor run \
   --role <role-file>.json --prompt-file <prompt>.txt
+
+# 本地持久会话生命周期（角色须使用持久会话策略）：
+# 创建 → 发送轮次 → 状态 → 关闭/中止。create/send/status/close/abort 会驱动一次真实的本地
+# acpx 会话，需要本地具备 Node + acpx；`session list` 为本地只读枚举，不启动任何 AGENT。
+PYTHONPATH=src python3 -m agent_run_supervisor session create \
+  --role <role-file>.json --session-id <id>
+PYTHONPATH=src python3 -m agent_run_supervisor session send \
+  --role <role-file>.json --session-id <id> --prompt-file <prompt>.txt
+PYTHONPATH=src python3 -m agent_run_supervisor session status \
+  --role <role-file>.json --session-id <id>
+PYTHONPATH=src python3 -m agent_run_supervisor session close \
+  --role <role-file>.json --session-id <id>
+PYTHONPATH=src python3 -m agent_run_supervisor session abort \
+  --role <role-file>.json --session-id <id>
+PYTHONPATH=src python3 -m agent_run_supervisor session list
+
+# 规划或执行本地工件的保留/清理（默认 dry-run；--apply 才真正删除）
+PYTHONPATH=src python3 -m agent_run_supervisor cleanup
 ```
 
 安装本包后（`pip install -e .`），同样的接口也可通过 `agent-run-supervisor <command> …`
@@ -98,7 +117,10 @@ PYTHONPATH=src python3 -m agent_run_supervisor run \
 
 运行工件写入 `.agent-run-supervisor/runs/<run_id>/` —— 包括脱敏后的 prompt/env/argv、生成的
 策略、观测 stdout（NDJSON）、归一化事件、stderr、`result.json`（`business_verdict = null`）以及
-`redaction-report.json`。
+`redaction-report.json`。持久会话工件写入 `.agent-run-supervisor/sessions/<session_id>/`（本地
+记录、脱敏的 `management/` 摘要，以及每次 send 一个脱敏的 `turns/<turn_id>/` 目录）。`cleanup`
+命令会规划并（仅在 `--apply` 时）删除过期的运行/会话工件，删除范围被限制在解析出的
+`.agent-run-supervisor` 根目录内，且绝不触碰处于打开/活动锁定状态的会话。
 
 ## 环境要求
 
@@ -106,8 +128,8 @@ PYTHONPATH=src python3 -m agent_run_supervisor run \
 |---|---|
 | 运行时 | **Python ≥ 3.11**，仅标准库 —— 零第三方运行时依赖。 |
 | 测试（可选） | `pytest >= 8, < 10`（`dev` 额外依赖）。 |
-| 真实 AGENT 运行 | 本地具备 **Node + acpx** —— **仅**在不带 `--no-real-run` 的 `run` 时需要。 |
-| 其余一切 | `validate-role`、`replay`、`doctor` 与 `--no-real-run` **无需** Node/acpx，且**不启动**任何 AGENT。 |
+| 真实 AGENT 运行 / 会话轮次 | 本地具备 **Node + acpx** —— 在不带 `--no-real-run` 的 `run`，以及真实的 `session create/send/status/close/abort` 轮次与管理命令时需要。 |
+| 不启动 AGENT 的命令 | `validate-role`、`replay`、`doctor`、`run --no-real-run`、`session list` 与 `cleanup`（dry-run）**无需** Node/acpx，且**不启动**任何 AGENT。 |
 
 ## 质量与测试指标
 
@@ -115,7 +137,7 @@ PYTHONPATH=src python3 -m agent_run_supervisor run \
 
 | 指标 | 证据 |
 |---|---|
-| 单元 / 集成测试 | **132 个 pytest 测试** —— `python3 -m pytest -q`。 |
+| 单元 / 集成测试 | **完整 pytest 套件** —— `python3 -m pytest -q`（当前本地验收：**456 passed**）。 |
 | acpx 契约 | acpx `0.10.0` 夹具 + 校验器 —— `python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0`。 |
 | 导入 / 语法冒烟 | `python3 -m compileall -q src scripts tests`。 |
 | Doctor（只读） | `… doctor` 绝不启动 AGENT（`launched_real_agent = false`）。 |
@@ -136,12 +158,15 @@ PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.10.0/succe
 [`docs/roadmap/current-status.md`](docs/roadmap/current-status.md) 与
 [`docs/roadmap/features.md`](docs/roadmap/features.md)。
 
-- **现在 —— 基础 + 一次性 exec。** 角色/策略/解析器/存储基础，以及真实的本地 `acpx exec` 监督
-  （角色绑定、外层看门狗、终止元数据）均已就位。
-- **下一步 —— 持久会话。** 受控的多轮 ACP/acpx 会话生命周期（创建/发送/恢复/关闭、锁、过期锁
-  恢复）。属于产品要求，**并非**非目标。
-- **再之后 —— 加固 + 轻量集成。** 更完整的 doctor 探针、工件保留/清理，以及有文档的结果 schema；
-  轻量调用方集成仅在单独批准后进行。
+- **已完成 —— 基础 + 两种执行模式。** 角色/策略/解析器/存储基础、真实的本地 `acpx exec` 监督
+  （角色绑定、外层看门狗、终止元数据），以及本地持久会话生命周期（创建/发送/多轮恢复/状态/
+  关闭/中止/列举、锁、过期锁恢复）均已实现，并就本地使用而言已收口。
+- **已完成 —— 加固 + 本地调用方集成。** 完整只读 doctor 探针集、受限的工件保留/清理、有文档的
+  结果/事件 schema、进程存活性崩溃恢复、通用本地调用方边界，以及本地/离线 Hermes 调用方 +
+  离线 Feishu 视图模型适配器均已合并。
+- **待办 —— 更深层加固（尚未开始）。** `npx` 严格离线约束、更强的脱敏/DLP 与调用方白名单，以及
+  锁释放审计轨迹，仅作为待办记录。任何实时/平台集成（真实 Feishu/IM 投递、Sachima、Gateway
+  生命周期、公网入口）仍不在范围内，须经单独批准。
 
 ## 许可证
 
