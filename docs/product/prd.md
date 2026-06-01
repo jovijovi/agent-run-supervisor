@@ -145,7 +145,7 @@ Checklist:
 
 Acceptance:
 
-- Session fixtures and tests cover create, send, two-turn resume/continuity, status, list, close, stale-lock recovery, and mismatch refusal. *(S1c covers create/send/status, lease release on success and failure, and mismatch refusal; S1d adds close, abort/cancel, local read-only list, and closed-session refusal; S1 closure acceptance adds the multi-turn regression plus real local acpx smoke. Full crash/interruption recovery beyond deterministic expired-lease replacement is carried to H1 operational hardening.)*
+- Session fixtures and tests cover create, send, two-turn resume/continuity, status, list, close, stale-lock recovery, and mismatch refusal. *(S1c covers create/send/status, lease release on success and failure, and mismatch refusal; S1d adds close, abort/cancel, local read-only list, and closed-session refusal; S1 closure acceptance adds the multi-turn regression plus real local acpx smoke. H1 adds detection-first stale-lock reporting; K1 adds process-liveness crash/interruption recovery beyond deterministic expired-lease replacement, with conservative `alive`/`crashed`/`unknown` classification and composite supervisor+child safety.)*
 - Session artifacts are redacted and local-first.
 - Persistent sessions do not imply public ingress, Gateway operations, real delivery, or agent-to-agent routing.
 
