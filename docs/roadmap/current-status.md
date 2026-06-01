@@ -422,6 +422,10 @@ python3 -m pytest -q
 python3 -m compileall -q src scripts tests
 PYTHONPATH=src python3 -m agent_run_supervisor doctor
 PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson
+python -m build
+python -m twine check dist/*
+# after installing the built wheel:
+agent-run-supervisor doctor
 python tools/build_docs_index.py --check
 python tools/docs_drift_signal.py --check
 git diff --check

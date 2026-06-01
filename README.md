@@ -148,7 +148,7 @@ Factual local gates that keep the supervisor honest (run from the repository roo
 | acpx contract | acpx `0.10.0` fixtures + validator — `python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0`. |
 | Import / syntax smoke | `python3 -m compileall -q src scripts tests`. |
 | Doctor (read-only) | `… doctor` never launches an AGENT (`launched_real_agent = false`). |
-| Replay determinism | `… replay fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson`. |
+| Package checks | `python -m build` + `python -m twine check dist/*`, plus an installed-wheel `agent-run-supervisor doctor` smoke. |
 | Safe artifacts | Redacted artifacts · `business_verdict = null` · EventStore `0700`/`0600` atomic NDJSON. |
 
 ```bash
@@ -157,6 +157,10 @@ python3 -m pytest -q
 python3 -m compileall -q src scripts tests
 PYTHONPATH=src python3 -m agent_run_supervisor doctor
 PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson
+python -m build
+python -m twine check dist/*
+# after installing the built wheel:
+agent-run-supervisor doctor
 ```
 
 ## Roadmap
@@ -181,7 +185,7 @@ High-level direction only — full phase status, acceptance, and non-approvals l
 ## License
 
 © the `agent-run-supervisor` authors. Released under the **[MIT](https://opensource.org/license/mit)**
-license (`license = { text = "MIT" }` in [`pyproject.toml`](pyproject.toml)). Pre-release software
+license (`license = "MIT"` and [`LICENSE`](LICENSE)). Pre-release software
 (`0.0.0`); surfaces and result schemas may still change.
 
 <p align="center">
