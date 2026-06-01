@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,12 +8,28 @@ version = "0.0.0"
 description = "Supervise external AGENT runs through acpx/ACP with auditable artifacts"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
-authors = [{ name = "Hermes Agent" }]
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "agent-run-supervisor authors" }]
+keywords = ["agent", "acp", "acpx", "supervisor", "audit", "local-first"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Software Development :: Quality Assurance",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/jovijovi/agent-run-supervisor"
+Repository = "https://github.com/jovijovi/agent-run-supervisor"
+Issues = "https://github.com/jovijovi/agent-run-supervisor/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]
+release = ["build>=1,<2", "twine>=5,<7"]
 
 [project.scripts]
 agent-run-supervisor = "agent_run_supervisor.cli:main"

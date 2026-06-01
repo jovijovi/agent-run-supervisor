@@ -2,7 +2,7 @@
 
 # Documentation Index
 
-Total: 22 documents tracked across 2 statuses.
+Total: 23 documents tracked across 2 statuses.
 
 ## Active (20)
 
@@ -27,7 +27,8 @@ Total: 22 documents tracked across 2 statuses.
 - [Roadmap governance](roadmap/README.md) — created 2026-05-28
 - [agent-run-supervisor Roadmap Current Status](roadmap/current-status.md) — created 2026-05-28
 
-## Archived (2)
+## Archived (3)
 
 - [L2 Hermes Caller + Offline Feishu View-Model Implementation Plan](plans/2026-06-01-l2-hermes-caller-view-model-implementation.md) — created 2026-06-01
+- [P2 Release Engineering](plans/2026-06-01-p2-release-engineering.md) — created 2026-06-01
 - [Legacy V0.1a Migration and Conformance Matrix](roadmap/v0.1a-design-conformance.md) — created 2026-05-29

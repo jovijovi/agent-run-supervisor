@@ -141,7 +141,7 @@ PYTHONPATH=src python3 -m agent_run_supervisor cleanup
 | acpx 契约 | acpx `0.10.0` 夹具 + 校验器 —— `python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0`。 |
 | 导入 / 语法冒烟 | `python3 -m compileall -q src scripts tests`。 |
 | Doctor（只读） | `… doctor` 绝不启动 AGENT（`launched_real_agent = false`）。 |
-| 回放确定性 | `… replay fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson`。 |
+| 包检查 | `python -m build` + `python -m twine check dist/*`，再用已安装 wheel 运行 `agent-run-supervisor doctor` 冒烟。 |
 | 安全工件 | 脱敏工件 · `business_verdict = null` · EventStore `0700`/`0600` 原子 NDJSON。 |
 
 ```bash
@@ -150,6 +150,10 @@ python3 -m pytest -q
 python3 -m compileall -q src scripts tests
 PYTHONPATH=src python3 -m agent_run_supervisor doctor
 PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson
+python -m build
+python -m twine check dist/*
+# 安装构建出的 wheel 后：
+agent-run-supervisor doctor
 ```
 
 ## 路线图
@@ -171,7 +175,7 @@ PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.10.0/succe
 ## 许可证
 
 © `agent-run-supervisor` 作者。以 **[MIT](https://opensource.org/license/mit)** 许可证发布
-（`pyproject.toml` 中 `license = { text = "MIT" }`）。预发布软件（`0.0.0`）；接口与结果 schema
+（`pyproject.toml` 中 `license = "MIT"`，并包含 [`LICENSE`](LICENSE)）。预发布软件（`0.0.0`）；接口与结果 schema
 仍可能变动。
 
 <p align="center">
