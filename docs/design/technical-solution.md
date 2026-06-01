@@ -309,12 +309,14 @@ Responsibilities:
 Current status: I1 implements this as a library-only boundary in
 `src/agent_run_supervisor/caller.py` with `tests/test_caller.py`. It adds no CLI command,
 does not parse raw ACP/acpx streams, and carries no platform, delivery, Gateway, public
-ingress, automatic-reply, or concrete caller fields. The *concrete* caller design that sits
-**above** this generic boundary — Hermes as the local AI-assisted caller, with a Feishu
-document-check scenario and a caller-owned progress/result view-model — is documented
-**design-only** in `docs/plans/2026-06-01-l1-concrete-caller-integration-design.md` (L1);
-it keeps `caller.py` generic and adds no platform field, no business verdict, and no
-rendering/delivery to the supervisor.
+ingress, automatic-reply, or concrete caller fields. L1 documents the *concrete* caller design
+above this boundary (`docs/plans/2026-06-01-l1-concrete-caller-integration-design.md`). The L2
+implementation candidate adds the caller-side `src/agent_run_supervisor/hermes_caller/` package
+with `tests/hermes_caller/`: Hermes document-check intake, caller-owned verdict derivation,
+normalized-event evidence projection, progress/result view-models, an escaped offline Feishu
+payload dict, and exec + persistent-session orchestration through `invoke_caller`. `caller.py`
+stays generic; the supervisor still adds no platform field, no business verdict, and no
+rendering/delivery.
 
 ### 3.11 `commands.py` / `cli.py` — dev CLI
 
@@ -503,6 +505,9 @@ The caller must not parse raw ACP/acpx streams directly or infer external delive
 The concrete (Hermes) caller design built on the generic I1 boundary — covering exec and
 persistent-session document-check flows, the input/output contracts, the
 normalized-event → view-model mapping, the ownership matrix, and the defined-but-unapproved
-Sachima seam — lives **design-only** in
-`docs/plans/2026-06-01-l1-concrete-caller-integration-design.md` (L1). It implements no
-runtime code and keeps every standing non-approval in force.
+Sachima seam — lives in
+`docs/plans/2026-06-01-l1-concrete-caller-integration-design.md` (L1). The L2 implementation
+candidate realizes the local/offline caller-side portion in `src/agent_run_supervisor/hermes_caller/`
+and `tests/hermes_caller/` without changing the generic I1 contract. It remains fake/local/offline:
+no real Feishu API, IM delivery, public ingress, Gateway lifecycle, Sachima behavior, automatic
+replies, live/default-on behavior, or trusted Markdown/HTML rendering.

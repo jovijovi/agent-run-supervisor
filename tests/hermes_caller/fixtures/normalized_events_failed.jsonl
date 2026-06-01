@@ -1,0 +1,6 @@
+{"type": "run_started", "method": "initialize", "id": 1}
+{"type": "tool_started", "tool_call_id": "[REDACTED]", "kind": "read"}
+{"type": "tool_completed", "tool_call_id": "[REDACTED]", "status": "failed"}
+{"type": "permission_requested", "tool_call_id": "[REDACTED]", "option_ids": ["allow", "deny"]}
+{"type": "permission_denied", "option_id": "deny"}
+{"type": "run_failed", "code": -32000, "acpx_code": "TIMEOUT"}

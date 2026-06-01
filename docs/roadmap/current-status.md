@@ -332,20 +332,46 @@ Status: **Closed on `main` via PR #24 (`5e34f5c`).** PR #24 passed CI, Codex pri
 No implementation, live behavior, Sachima/Feishu/Gateway integration, or scope change was
 introduced; all standing non-approvals (§5) remain in force.
 
-The next implementation plan derived from the closed L1 design now exists, **plan-only**, at
-`docs/plans/2026-06-01-l2-hermes-caller-view-model-implementation.md` (L2 — concrete Hermes
-caller + offline Feishu rich-card view-model adapter above the I1 boundary, exec + persistent-
-session document-check, stdlib-only caller-side package, fake/local/offline only). It is a
-**plan, not implementation**: executing it requires a **separate explicit approval**, and all
-live/platform behavior (real Feishu/IM delivery, ingress, Gateway lifecycle, Sachima behavior,
-automatic replies, live/default-on) remains parked under the §5 non-approvals.
+### L2 — Hermes caller + offline Feishu view-model implementation (local/offline)
+
+Goal: implement the approved concrete Hermes caller and offline Feishu rich-card view-model
+adapter above the generic I1 boundary, covering both one-shot `exec` and persistent-session
+document-check flows while keeping the supervisor generic.
+
+Checklist:
+
+- [x] Add the caller-side package `src/agent_run_supervisor/hermes_caller/` with `task`,
+  `intake`, caller-owned `verdict`, normalized-event evidence projection, view-model,
+  offline Feishu payload adapter, and `HermesDocCheckCaller` orchestration.
+- [x] Add `tests/hermes_caller/` RED/GREEN coverage for intake, verdict derivation,
+  normalized-event projections, progress/result view-models, escaped offline card payloads,
+  exec flow, persistent-session flow, and static forbidden-surface guards.
+- [x] Preserve the I1 generic contract: no platform fields in `CallerInvocationSpec` /
+  `CallerResult`, supervisor `business_verdict` remains `null`, and caller-owned verdicts live
+  only in `hermes_caller.verdict` / view-models.
+- [x] Keep everything stdlib-only and fake/local/offline: no Feishu SDK/API, no IM delivery,
+  no public ingress, no Gateway/Sachima behavior, no automatic replies, no live/default-on
+  behavior, and no trusted Markdown/HTML rendering.
+
+Acceptance evidence for this branch:
+
+- `python3 -m pytest -q tests/hermes_caller` → 39 passed.
+- `python3 -m pytest -q` → full suite passed.
+- `python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0` → passed.
+- `PYTHONDONTWRITEBYTECODE=1 python3 -m compileall -q src scripts tests` → passed.
+- `PYTHONPATH=src python3 -m agent_run_supervisor doctor` → `ok: true`, `launched_real_agent: false`.
+- `PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson` → `final_message: CODEX_ACPX_OK`, `business_verdict: null`.
+
+Status: **Implementation candidate in the L2 task branch.** Closure still requires PR creation,
+CI, Codex primary post-PR review, merge, and post-merge verification before this phase is recorded
+as closed on `main`.
 
 ## 4. Tail register
 
 | ID | Class | Description | Blocks code work? | Required before | Acceptance method | Status |
 |---|---|---|---:|---|---|---|
 | ARS-SANDBOX-BOUNDARY | PARKED | Any claim that `allowed_roots` is an OS/filesystem sandbox remains parked. | No | Separate sandbox phase | OS sandbox proof + negative probes | Parked |
-| ARS-CALLER-INTEGRATION | PARTIAL | Generic local library caller boundary is implemented in I1; the concrete caller (Hermes) is captured **design-only** in L1 (`docs/plans/2026-06-01-l1-concrete-caller-integration-design.md`, exec + persistent-session document-check, Feishu card as caller-owned view-model only), merged via PR #24 at `5e34f5c`. The **L2 implementation plan** (`docs/plans/2026-06-01-l2-hermes-caller-view-model-implementation.md`) now exists **plan-only** for the later Hermes caller + offline Feishu view-model adapter. Concrete Sachima/Hermes/Gateway/IM/Feishu-delivery behavior remains separate and unapproved. | No | Separate L2 implementation approval | Separate product approval to execute the L2 implementation plan for implementation/live surfaces | Generic boundary done; concrete-caller design closed (L1, design-only); L2 implementation plan written (plan-only); execution and all live/platform behavior parked |
+| ARS-CALLER-INTEGRATION | PARTIAL | Generic local library caller boundary is implemented in I1; the concrete caller (Hermes) is captured **design-only** in L1 (`docs/plans/2026-06-01-l1-concrete-caller-integration-design.md`, exec + persistent-session document-check, Feishu card as caller-owned view-model only), merged via PR #24 at `5e34f5c`. The L2 task branch implements the local/offline Hermes caller + offline Feishu view-model adapter under `src/agent_run_supervisor/hermes_caller/` with `tests/hermes_caller/`. Concrete Sachima/Gateway/IM/Feishu-delivery/live behavior remains separate and unapproved. | No | PR/CI/Codex review and post-merge verification for L2; separate later approval for any live platform seam | L2 implementation PR evidence for local/offline caller package; separate product approval for real Feishu/Sachima/Gateway/live surfaces | Generic boundary done; concrete-caller design closed (L1, design-only); L2 local/offline implementation candidate exists; all live/platform behavior parked |
 
 ### K1 post-merge tail-closure evidence
 
