@@ -433,15 +433,16 @@ def test_send_redacts_prompt_and_stderr_in_turn_artifacts(
     runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
     _create_and(runtime, role)
 
+    prompt_secret = "sk-" + "ABCDEFGH12345678"
     outcome = runtime.send(
         role=role,
         session_id="sess-a",
-        prompt="use sk-ABCDEFGH12345678 then reply",
+        prompt=f"use {prompt_secret} then reply",
         now=T1,
     )
 
     prompt_txt = (outcome.turn_dir / "prompt.txt").read_text(encoding="utf-8")
-    assert "sk-ABCDEFGH12345678" not in prompt_txt
+    assert prompt_secret not in prompt_txt
     assert "[REDACTED]" in prompt_txt
 
     stderr_log = (outcome.turn_dir / "stderr.log").read_text(encoding="utf-8")

@@ -9,7 +9,7 @@ Invariants under test:
   * derivation never trusts a (forged) ``business_verdict`` in the supervisor
     payload, which the supervisor contractually always leaves ``null``.
 
-RED expectation: the ``hermes_caller.verdict`` module does not exist yet.
+GREEN coverage: the ``hermes_caller.verdict`` module exists and owns caller verdicts.
 """
 from __future__ import annotations
 

@@ -7,8 +7,8 @@ Behavioral contract (plan §6.1/§6.2, §7, §10-T1):
   * never carries a task or platform field (task_id/document_ref/requested_by/
     surface/channel/webhook/...).
 
-RED expectation: ``agent_run_supervisor.hermes_caller`` does not exist yet, so
-these imports raise ModuleNotFoundError until the GREEN phase implements intake.
+GREEN coverage: ``agent_run_supervisor.hermes_caller`` intake exists and must
+stay local/offline without platform identifiers.
 """
 from __future__ import annotations
 

@@ -6,7 +6,7 @@ is escaped (never rendered as trusted Markdown/HTML), the payload carries no
 delivery/channel/webhook/recipient/gateway/message identifier at any depth, and
 the module imports no networking/SDK symbol.
 
-RED expectation: the ``hermes_caller.feishu_adapter`` module does not exist yet.
+GREEN coverage: the offline Feishu adapter exists and must stay delivery-free.
 """
 from __future__ import annotations
 

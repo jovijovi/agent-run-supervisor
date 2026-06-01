@@ -6,7 +6,7 @@ close through an injected fake session-runtime (nothing launches acpx). It
 returns one ``CallerResult`` per call plus a final result view-model whose
 session lifecycle has advanced to ``closed``.
 
-RED expectation: the ``hermes_caller.hermes`` module does not exist yet.
+GREEN coverage: the ``hermes_caller.hermes`` module now drives the session flow.
 """
 from __future__ import annotations
 
