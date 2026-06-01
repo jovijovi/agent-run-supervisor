@@ -2,15 +2,16 @@
 
 # Documentation Index
 
-Total: 21 documents tracked across 1 statuses.
+Total: 22 documents tracked across 1 statuses.
 
-## Active (21)
+## Active (22)
 
 - [agent-run-supervisor Result / Event Schema](design/result-event-schema.md) — created 2026-06-01
 - [H1 Operational Hardening Plan](plans/2026-06-01-h1-operational-hardening.md) — created 2026-06-01
 - [I1 Local Caller Thin Integration Plan](plans/2026-06-01-i1-local-caller-thin-integration.md) — created 2026-06-01
 - [K1 Crash Recovery Hardening Plan](plans/2026-06-01-k1-crash-recovery-hardening.md) — created 2026-06-01
 - [L1 Concrete Caller Integration Design](plans/2026-06-01-l1-concrete-caller-integration-design.md) — created 2026-06-01
+- [L2 Hermes Caller + Offline Feishu View-Model Implementation Plan](plans/2026-06-01-l2-hermes-caller-view-model-implementation.md) — created 2026-06-01
 - [S1 Persistent Session Closure Acceptance Plan](plans/2026-05-31-s1-closure-acceptance.md) — created 2026-05-31
 - [S1c Persistent Session Runtime MVP Plan](plans/2026-05-31-s1c-session-runtime-mvp.md) — created 2026-05-31
 - [S1d Persistent Session Lifecycle Completion Plan](plans/2026-05-31-s1d-session-lifecycle-completion.md) — created 2026-05-31
