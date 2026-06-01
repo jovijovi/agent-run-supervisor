@@ -135,6 +135,25 @@ command and for the `doctor` `fixture_replay`. Keys:
 `business_verdict`, `truncated`, `truncate_reason`, `unknown_update_types`,
 `permission_request_count`, `permission_denied_count`, `event_count`.
 
+### 2.5 Local caller wrapper projection (`CallerResult.to_dict`)
+
+I1 adds a generic local library wrapper in `caller.py`. `CallerResult.to_dict()`
+wraps existing supervisor payloads without changing their meaning and without adding
+platform/delivery fields. Keys:
+
+| Key | Type | Meaning |
+|-----|------|---------|
+| `mode` | `string` | Local caller invocation mode: `exec`, `exec_dry_run`, `session_create`, `session_send`, `session_status`, or `session_close`. |
+| `supervisor_status` | `string` \| `null` | Existing supervisor `status` when the wrapped payload has one; otherwise `null`. |
+| `result` | `object` | The existing run/session supervisor payload or projection. The caller wrapper does not parse raw acpx streams. |
+| `artifact_dir` | `string` \| `null` | Local artifact directory for the wrapped result, when applicable. |
+| `run_dir` | `string` \| `null` | Local run/turn artifact directory, when applicable. |
+| `session_dir` | `string` \| `null` | Local session artifact directory, when applicable. |
+| `business_verdict` | `null` | **Always `null`.** The caller owns business verdicts, rendering, and any delivery outside this library. |
+
+The caller wrapper intentionally carries no channel, webhook, recipient, Gateway,
+public-ingress, delivery, or platform state fields.
+
 ## 3. Statuses and error codes
 
 Supervisor status is owned by `exit_classifier.py` and is **never** the caller's

@@ -196,7 +196,7 @@ Checklist:
 - [x] Use atomic writes for final artifacts.
 - [x] Append stream artifacts as JSONL/NDJSON.
 - [x] Redact prompt, env, argv, metadata, stderr, stdout, normalized event text, and final message surfaces.
-- [x] Add retention/cleanup knobs before long-lived use. *(H1: confined, dry-run-first `retention.plan_cleanup`/`apply_cleanup` + `agent-run-supervisor cleanup` CLI; deletes only within a resolved `.agent-run-supervisor` root, never follows symlinks out of root, never deletes open/live-locked sessions; `tests/test_retention.py`, `tests/test_cli_commands.py`. Branch `ai/h1-operational-hardening-2026-06-01`, not yet merged.)*
+- [x] Add retention/cleanup knobs before long-lived use. *(H1: confined, dry-run-first `retention.plan_cleanup`/`apply_cleanup` + `agent-run-supervisor cleanup` CLI; deletes only within a resolved `.agent-run-supervisor` root, never follows symlinks out of root, never deletes open/live-locked sessions; `tests/test_retention.py`, `tests/test_cli_commands.py`. Merged on `main` via PR #19 at `484ae23`.)*
 - [x] Add session artifact foundation layout.
 - [x] Add session turn artifacts. *(S1c: redacted `turns/<turn_id>/` and `management/` artifacts; cleanup policy remains a later slice.)*
 - [ ] Add explicit unsafe raw-capture opt-in only if a later phase proves it necessary.
@@ -219,6 +219,7 @@ Checklist:
 - [x] `run --role <role-file> --prompt-file <file> [--cwd <dir>]` real exec supervision.
 - [x] Session lifecycle commands/API after session design and fixtures are proven. *(S1c MVP: `session create|send|status` plus the `SessionRuntime` library surface; S1d adds `session close|abort|list` (local read-only list).)*
 - [x] Stable JSON outputs for caller automation. *(S1c: session `create|send|status`; S1d: session `close|abort|list`; all keep `business_verdict: null` and 0/nonzero exit codes.)*
+- [x] Generic local caller boundary for library integrations. *(I1: `caller.py` accepts role source, prompt/context, cwd, exec/session mode, and artifact dirs; delegates to `SupervisorRunner`/`SessionRuntime`; returns a wrapper with `business_verdict: null`; no new CLI.)*
 
 Acceptance:
 
@@ -243,7 +244,7 @@ Checklist:
 
 Acceptance:
 
-- Doctor remains read-only unless a future probe explicitly states otherwise. *(All H1 probes are read-only; `launched_real_agent` stays `false`. Doctor output is documented in `docs/design/result-event-schema.md` §5. H1 on branch `ai/h1-operational-hardening-2026-06-01`, not yet merged.)*
+- Doctor remains read-only unless a future probe explicitly states otherwise. *(All H1 probes are read-only; `launched_real_agent` stays `false`. Doctor output is documented in `docs/design/result-event-schema.md` §5. H1 is merged on `main` via PR #19 at `484ae23`.)*
 - Missing/invalid binaries produce structured output rather than tracebacks. *(External-binary probes are informational and never flip `doctor`'s `ok`, so the no-role gate still exits `0`.)*
 
 ## 5. Non-functional requirements

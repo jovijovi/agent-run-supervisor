@@ -13,7 +13,7 @@ last_updated: 2026-06-01
 base_branch: main
 product_role: independent local Python library + dev CLI for supervising ACP/acpx AGENT runs and sessions with redacted audit evidence
 source_of_truth: GOAL.md, docs/product/prd.md, docs/design/architecture.md, docs/design/technical-solution.md, docs/roadmap/features.md, docs/roadmap/current-status.md, docs/AI_FLOW.md
-current_mainline: E1 local one-shot exec runner is merged and closed on main via PR #8 (21b3393); F-EXEC-001 is Done; S1a session contract evidence is merged via PR #14 (99637c6); S1b adds the local session store/lock foundation; S1c adds the local create/send/status runtime MVP; S1d adds local lifecycle completion (close/abort/list + closed-session refusal); S1 closure acceptance adds multi-turn continuity regression coverage and a reproducible local real-acpx persistent-session smoke (scripts/smoke_persistent_session.py), closing S1 for the local persistent-session lifecycle (S1a-S1d + closure evidence); H1 operational hardening is implemented on branch ai/h1-operational-hardening-2026-06-01 (not yet merged) — the full read-only doctor probe set (ARS-DOCTOR-COMPLETE), confined dry-run-first run/session retention/cleanup (ARS-RETENTION-CLEANUP, F-RETENTION-001), the caller-stable result/event schema doc (docs/design/result-event-schema.md), and a narrow detection-first crash tail (read-only stale-lock/.tmp-* detection + provably-expired lock hygiene); full process-liveness crash recovery beyond deterministic expired-lease replacement remains an explicit carry-over (ARS-CRASH-RECOVERY), and caller integration (I1) is next as design-only / thin local integration with all standing non-approvals still in force
+current_mainline: E1 local one-shot exec runner is merged and closed on main via PR #8 (21b3393); F-EXEC-001 is Done; S1a session contract evidence is merged via PR #14 (99637c6); S1b adds the local session store/lock foundation; S1c adds the local create/send/status runtime MVP; S1d adds local lifecycle completion (close/abort/list + closed-session refusal); S1 closure acceptance adds multi-turn continuity regression coverage and a reproducible local real-acpx persistent-session smoke (scripts/smoke_persistent_session.py), closing S1 for the local persistent-session lifecycle (S1a-S1d + closure evidence); H1 operational hardening is merged on main via PR #19 at 484ae23 — the full read-only doctor probe set (ARS-DOCTOR-COMPLETE), confined dry-run-first run/session retention/cleanup (ARS-RETENTION-CLEANUP, F-RETENTION-001), the caller-stable result/event schema doc (docs/design/result-event-schema.md), and a narrow detection-first crash tail (read-only stale-lock/.tmp-* detection + provably-expired lock hygiene); full process-liveness crash recovery beyond deterministic expired-lease replacement remains an explicit carry-over (ARS-CRASH-RECOVERY), and I1 is the approved thin local caller boundary work with all standing non-approvals still in force
 ```
 
 ## 1. How to read this roadmap
@@ -39,7 +39,7 @@ Documentation authority realignment is complete on main via PR #6 (`7dcbe4f`).
 The product requirement includes both one-shot exec and persistent sessions.
 Engineering sequence may implement exec first, then persistent sessions.
 Exec-first sequencing belongs in roadmap/phase planning only, not in PRD, GOAL, or product-level design as a reduced product scope.
-Current implementation: E1 local one-shot exec runner is merged and closed on main via PR #8 (`21b3393`); F-EXEC-001 is Done. S1a persistent-session contract evidence is merged via PR #14 (`99637c6`). S1b adds the local session store/lock foundation. S1c adds the local create/send/status runtime MVP. S1d adds the local lifecycle completion slice (close, abort/cancel, local read-only list, and closed-session refusal). S1 closure acceptance adds multi-turn continuity regression coverage and a reproducible local real-acpx persistent-session smoke, closing S1 for the **local persistent-session lifecycle** (S1a–S1d plus closure evidence). S1 remains exactly the four approved slices (S1a/S1b/S1c/S1d); closure acceptance introduces no new S1 subphase. H1 operational hardening is implemented on branch `ai/h1-operational-hardening-2026-06-01` (not yet merged): the full read-only doctor probe set, confined dry-run-first run/session retention/cleanup, the caller-stable result/event schema doc, and a narrow detection-first crash tail. Full process-liveness crash/interruption recovery beyond deterministic expired-lease replacement is deliberately deferred as an explicit carry-over (`ARS-CRASH-RECOVERY`); caller integration (I1) is the next step as design-only / thin local integration, with implementation gated on a separate integration PRD/plan and all standing non-approvals (§5) still in force.
+Current implementation: E1 local one-shot exec runner is merged and closed on main via PR #8 (`21b3393`); F-EXEC-001 is Done. S1a persistent-session contract evidence is merged via PR #14 (`99637c6`). S1b adds the local session store/lock foundation. S1c adds the local create/send/status runtime MVP. S1d adds the local lifecycle completion slice (close, abort/cancel, local read-only list, and closed-session refusal). S1 closure acceptance adds multi-turn continuity regression coverage and a reproducible local real-acpx persistent-session smoke, closing S1 for the **local persistent-session lifecycle** (S1a–S1d plus closure evidence). S1 remains exactly the four approved slices (S1a/S1b/S1c/S1d); closure acceptance introduces no new S1 subphase. H1 operational hardening is merged on `main` via PR #19 at `484ae23`: the full read-only doctor probe set, confined dry-run-first run/session retention/cleanup, the caller-stable result/event schema doc, and a narrow detection-first crash tail. Full process-liveness crash/interruption recovery beyond deterministic expired-lease replacement is deliberately deferred as an explicit carry-over (`ARS-CRASH-RECOVERY`). I1 is approved only as a generic local caller boundary implemented as a library surface; all standing non-approvals (§5) remain in force.
 ```
 
 ## 3. Phase roadmap
@@ -238,7 +238,7 @@ Acceptance:
 - Retention tests prove safe deletion/listing boundaries. *(`tests/test_retention.py`, `tests/test_cli_commands.py`.)*
 - Feature tracker marks hardening tails complete. *(`docs/roadmap/features.md`: `F-CLI-003` Done, `F-RETENTION-001` Done.)*
 
-H1 evidence (branch `ai/h1-operational-hardening-2026-06-01`, not yet merged; four workstreams):
+H1 evidence (merged on `main` via PR #19 at `484ae23`; four workstreams):
 
 - **W1 — Doctor completion (`ARS-DOCTOR-COMPLETE`).** Full read-only probe set in
   `src/agent_run_supervisor/preflight.py` (`probe_policy`, `probe_workspace`,
@@ -274,34 +274,35 @@ H1 introduces no non-approval from §5: no Sachima/Gateway/IM/public-ingress/pro
 real-delivery/service-restart/live/default-on/automatic-reply behavior; `doctor` never launches
 an AGENT and `cleanup` never deletes outside a resolved `.agent-run-supervisor` root.
 
-Status: **Implemented on branch `ai/h1-operational-hardening-2026-06-01` (not yet merged);
-pending review/merge.** W1–W4 complete with tests green; `ARS-DOCTOR-COMPLETE` and
-`ARS-RETENTION-CLEANUP` are closed on this branch (see §4). Full process-liveness crash recovery
-remains an explicit carry-over (`ARS-CRASH-RECOVERY`).
+Status: **Merged on `main` via PR #19 at `484ae23`; user-provided status says main CI passed.**
+W1–W4 are complete; `ARS-DOCTOR-COMPLETE` and `ARS-RETENTION-CLEANUP` are closed (see §4).
+Full process-liveness crash recovery remains an explicit carry-over (`ARS-CRASH-RECOVERY`).
 
 ### I1 — Thin caller integration
 
-Goal: only after explicit approval, integrate with a caller such as Hermes/Sachima while keeping the supervisor independent.
+Goal: add a generic, local-only library caller boundary while keeping the supervisor independent.
 
 Checklist before start:
 
-- [ ] E1 exec support merged and verified.
-- [ ] S1 session support merged and verified if the caller needs persistent sessions.
-- [ ] Caller integration target and responsibility split are documented.
-- [ ] No public ingress / real delivery / Gateway lifecycle operation is implied.
-- [ ] Caller owns business verdict and rendering.
+- [x] E1 exec support merged and verified.
+- [x] S1 session support merged and verified for local persistent-session lifecycle.
+- [x] H1 operational hardening merged on `main` via PR #19 at `484ae23`.
+- [x] Generic caller responsibility split is documented: caller chooses role/prompt/context/cwd/mode/artifact dirs and owns verdict/rendering.
+- [x] No public ingress / real delivery / Gateway lifecycle operation is implied.
+- [x] Caller owns business verdict and rendering.
 
 Acceptance:
 
-- Separate integration PRD/plan names exact caller behavior and non-goals.
-- Supervisor remains local library/CLI.
+- `caller.py` remains a local library-only wrapper over `SupervisorRunner` and `SessionRuntime`.
+- `CallerResult` wraps existing supervisor payload/projection and keeps `business_verdict: null`.
+- Tests use fake executors and dry-run only; no real external service/platform smoke is required.
+- No new CLI, public ingress, real delivery, Gateway lifecycle, automatic reply, live/default-on behavior, `@all`, or agent-to-agent routing.
 
-Status: **Next, design-only.** With H1 hardening complete on branch, the approved next step is
-local caller-integration *design* / a thin *local* integration sketch — **not** live behavior.
-Integration implementation stays gated on a separate integration PRD/plan and explicit approval;
-the standing non-approvals (§5) all hold (no Sachima behavior, public ingress, real delivery,
-Gateway lifecycle, production config, automatic replies, or agent-to-agent routing). The
-implementation gate is tracked as `ARS-CALLER-INTEGRATION` in §4.
+Status: **Implemented on branch `ai/i1-local-caller-thin-integration-2026-06-01` as a generic
+local library boundary.** Evidence: `src/agent_run_supervisor/caller.py`,
+`tests/test_caller.py`, and design/schema docs. Concrete Sachima/Gateway/IM/public-ingress/
+delivery/auto-reply behavior remains unapproved and separate; the standing non-approvals (§5)
+all hold.
 
 ## 4. Tail register
 
@@ -309,14 +310,14 @@ implementation gate is tracked as `ARS-CALLER-INTEGRATION` in §4.
 |---|---|---|---:|---|---|---|
 | ARS-CRASH-RECOVERY | CARRY | Full process-liveness crash/interruption recovery beyond deterministic expired-lease replacement (no PID inspection, signals, or live-session takeover). H1 closed only the read-only stale-lock/`.tmp-*` detection + provably-expired lock hygiene. | No | Separate hardening phase | Detection + safe-recovery proof without unsafe cross-process assumptions | Carried (deferred from H1) |
 | ARS-SANDBOX-BOUNDARY | PARKED | Any claim that `allowed_roots` is an OS/filesystem sandbox remains parked. | No | Separate sandbox phase | OS sandbox proof + negative probes | Parked |
-| ARS-CALLER-INTEGRATION | PARKED | Sachima/Hermes behavior integration remains separate; I1 *design* may proceed, but integration *implementation* needs separate approval. | No | I1 implementation approval | Explicit integration PRD/plan | Parked |
+| ARS-CALLER-INTEGRATION | PARTIAL | Generic local library caller boundary is implemented in I1; concrete Sachima/Hermes/Gateway/IM behavior remains separate and unapproved. | No | Concrete platform integration | Separate product approval and plan | Generic boundary done; concrete platform parked |
 
 ### Recently closed tails
 
 | ID | Closed by | Evidence | Result |
 |---|---|---|---|
-| ARS-DOCTOR-COMPLETE | H1 branch `ai/h1-operational-hardening-2026-06-01` (not yet merged) | Full read-only doctor probe set in `src/agent_run_supervisor/preflight.py` (`probe_policy/workspace/redaction/npx/adapter/session_readiness`) wired into `cmd_doctor`; `tests/test_preflight.py`, `tests/test_cli_commands.py`; doctor output documented in `docs/design/result-event-schema.md` §5 | Closed on branch (pending merge); `launched_real_agent: false` preserved |
-| ARS-RETENTION-CLEANUP | H1 branch `ai/h1-operational-hardening-2026-06-01` (not yet merged) | `src/agent_run_supervisor/retention.py` (`plan_cleanup`/`apply_cleanup`, confined dry-run-first), `cleanup` CLI in `cli.py`/`commands.py`, read-only `SessionStore.detect_stale_locks`; `tests/test_retention.py`, `tests/test_cli_commands.py`, `tests/test_session_store.py`; plan/result shape in `docs/design/result-event-schema.md` §7 | Closed on branch (pending merge); `F-RETENTION-001` Done; full crash recovery carried as `ARS-CRASH-RECOVERY` |
+| ARS-DOCTOR-COMPLETE | PR #19 (`484ae23`) | Full read-only doctor probe set in `src/agent_run_supervisor/preflight.py` (`probe_policy/workspace/redaction/npx/adapter/session_readiness`) wired into `cmd_doctor`; `tests/test_preflight.py`, `tests/test_cli_commands.py`; doctor output documented in `docs/design/result-event-schema.md` §5 | Closed; `launched_real_agent: false` preserved |
+| ARS-RETENTION-CLEANUP | PR #19 (`484ae23`) | `src/agent_run_supervisor/retention.py` (`plan_cleanup`/`apply_cleanup`, confined dry-run-first), `cleanup` CLI in `cli.py`/`commands.py`, read-only `SessionStore.detect_stale_locks`; `tests/test_retention.py`, `tests/test_cli_commands.py`, `tests/test_session_store.py`; plan/result shape in `docs/design/result-event-schema.md` §7 | Closed; `F-RETENTION-001` Done; full crash recovery carried as `ARS-CRASH-RECOVERY` |
 | ARS-EXEC-RUNNER | PR #8 (`21b3393`) | `tests/test_runner_exec.py`, local gates, local smoke `result.json` (`final_message=AGENT_RUN_SUPERVISOR_E1_OK`), `docs/roadmap/features.md` F-EXEC-001 Done | Closed |
 | ARS-SESSIONS | S1a-S1d + closure acceptance branch | S1a fixtures, S1b store/lock foundation, S1c create/send/status runtime, S1d close/abort/list lifecycle, `tests/test_session_runtime.py::test_two_sequential_sends_reuse_record_persist_distinct_turns_and_release_lease`, `tests/test_smoke_persistent_session.py`, and `scripts/smoke_persistent_session.py` real local acpx lifecycle smoke | Closed for the local persistent-session lifecycle; H1 carries full crash/interruption recovery and retention/cleanup |
 | ARS-DOC-AUTHORITY | PR #6 (`7dcbe4f`) | docs index/drift, CI `Verify`, post-merge gates | Closed |

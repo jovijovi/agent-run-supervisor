@@ -126,6 +126,7 @@ plane (CLI) is the entry point; diagnostics stay strictly read-only.
 ```mermaid
 flowchart TB
     subgraph SURFACE["Surface plane"]
+        CALLER["caller.py<br/>generic local library boundary"]
         CLI["cli.py<br/>argparse subcommands"]
         CMD["commands.py<br/>validate-role · replay · doctor · run"]
     end
@@ -162,6 +163,9 @@ flowchart TB
     end
 
     CLI --> CMD
+    CALLER --> ROLE
+    CALLER --> RUN
+    CALLER --> SESSRT
     CMD --> ROLE
     CMD --> RUN
     CMD --> PARSE
@@ -195,7 +199,7 @@ flowchart TB
     classDef contract fill:#f1f5f9,stroke:#475569,color:#1e293b;
     classDef planned fill:#f8fafc,stroke:#64748b,color:#334155,stroke-dasharray: 5 5;
 
-    class CLI,CMD surface;
+    class CALLER,CLI,CMD surface;
     class ROLE,POL,WS authz;
     class RUN life;
     class SESS,SESSRT life;
@@ -207,9 +211,11 @@ flowchart TB
 
 ### 2.1 Plane responsibilities
 
-- **Surface plane** (`cli.py`, `commands.py`) — the only entry points. `run` reaches the
-  exec runner; `--no-real-run` produces dry-run compile/preview artifacts; `doctor` and
-  `replay` never launch an AGENT.
+- **Surface plane** (`caller.py`, `cli.py`, `commands.py`) — local entry points. `caller.py`
+  is the generic library-only caller boundary and delegates to `SupervisorRunner` /
+  `SessionRuntime`; it adds no CLI command and no platform fields. `run` reaches the exec
+  runner; `--no-real-run` produces dry-run compile/preview artifacts; `doctor` and `replay`
+  never launch an AGENT.
 - **Authorization plane** (`role.py`, `policy.py`, `workspace.py`) — `AgentRoleSpec` is the
   durable authorization boundary; the policy compiler turns role permissions into a
   default-deny acpx policy and a shell-free argv list; the workspace gate validates the
@@ -574,7 +580,7 @@ prose here may be read as introducing any of them:
 | Production config writes · live/default-on | Runs are explicit and local-first. |
 | `@all` · agent-to-agent auto-routing | One explicit AGENT per invocation; no fan-out/routing. |
 | Trusted Markdown/HTML rendering of output | Output is recorded as redacted, untrusted text. |
-| Sachima behavior / real AGENT auto-replies | Not integrated; thin caller integration is a parked future phase. |
+| Sachima behavior / real AGENT auto-replies | Not integrated; I1 is only a generic local library boundary. |
 
 ---
 
@@ -584,17 +590,18 @@ prose here may be read as introducing any of them:
 |---|---|---|---|---|
 | CLI surface | `src/agent_run_supervisor/cli.py` | F-CLI-001/002/003 | ✅ / 🟡 | `tests/test_cli_smoke.py` |
 | Command handlers | `src/agent_run_supervisor/commands.py` | F-CLI-*, F-RUN-001, F-EXEC-001 | ✅ / 🟡 | `tests/test_cli_commands.py` |
+| Generic local caller boundary | `src/agent_run_supervisor/caller.py` | F-INTEGRATION-001 (I1) | ✅ local library boundary only | `tests/test_caller.py` |
 | Role model + hash | `src/agent_run_supervisor/role.py` | F-ROLE-001 | ✅ / 🟡 session config | `tests/test_role.py` |
 | Policy + argv compiler | `src/agent_run_supervisor/policy.py` | F-POLICY-001 | 🟡 (exec ✅, S1c create/ensure/show/status/prompt compilers ✅, S1d close/cancel compilers ✅) | `tests/test_policy.py`, `tests/test_session_strategy_guard.py` |
 | cwd / allowed-roots gate | `src/agent_run_supervisor/workspace.py` | F-WORKSPACE-001 | 🟡 | `tests/test_workspace_gate.py` |
 | One-shot exec supervision | `src/agent_run_supervisor/runner.py` | F-EXEC-001 (E1) | ✅ (phase closure roadmap-owned) | `tests/test_runner_exec.py`, `tests/test_runner_dry_run.py` |
 | Persistent session store | `src/agent_run_supervisor/session.py` | F-SESSION-001 (S1) | ✅ S1 local lifecycle foundation | `tests/test_session_store.py`, `tests/test_session_strategy_guard.py` |
-| Persistent session runtime | `src/agent_run_supervisor/session_runtime.py`, `scripts/smoke_persistent_session.py` | F-SESSION-001 (S1) | ✅ S1 local lifecycle (`create/send/status/close/abort/list` + two-turn continuity); H1 retains crash/retention hardening | `tests/test_session_runtime.py`, `tests/test_smoke_persistent_session.py`, `scripts/smoke_persistent_session.py` |
+| Persistent session runtime | `src/agent_run_supervisor/session_runtime.py`, `scripts/smoke_persistent_session.py` | F-SESSION-001 (S1) | ✅ S1 local lifecycle (`create/send/status/close/abort/list` + two-turn continuity); full crash recovery remains carried | `tests/test_session_runtime.py`, `tests/test_smoke_persistent_session.py`, `scripts/smoke_persistent_session.py` |
 | Observed event parser | `src/agent_run_supervisor/parser.py` | F-PARSER-001 | 🟡 (S1c adds prompt-turn NDJSON + `summarize_management_json` management summarizer) | `tests/test_parser.py` |
 | Status classifier | `src/agent_run_supervisor/exit_classifier.py` | F-STATUS-001 | 🟡 | `tests/test_exit_classifier.py` |
 | Result payload | `src/agent_run_supervisor/result.py` | F-STATUS-001 / F-EXEC-001 | ✅ | covered via runner/classifier tests |
 | EventStore + redaction | `src/agent_run_supervisor/event_store.py`, `redaction.py` | F-STORE-001 | 🟡 | `tests/test_event_store.py`, `tests/test_redaction.py` |
-| Doctor probes | `src/agent_run_supervisor/preflight.py` | F-CLI-003 (H1 tail) | 🟡 | `tests/test_preflight.py` |
+| Doctor probes | `src/agent_run_supervisor/preflight.py` | F-CLI-003 (H1) | ✅ | `tests/test_preflight.py` |
 | acpx contract anchor | `fixtures/acpx-0.10.0`, `scripts/validate_contract_fixtures.py` | C0 | ✅ | `tests/test_validate_contract_fixtures.py` |
 
 > Impl. status reflects code reality; phase acceptance/closure (e.g. E1, S1) is owned by
@@ -626,10 +633,11 @@ touches the architecture.
 
 These are tracked in `docs/roadmap/current-status.md` §4 and are **not** re-decided here:
 
-- `ARS-DOCTOR-COMPLETE` — adapter/npx/policy/cwd/redaction/session doctor probes (H1).
-- `ARS-RETENTION-CLEANUP` — run/session artifact retention/cleanup knobs (H1).
+- `ARS-CRASH-RECOVERY` — full process-liveness crash/interruption recovery beyond
+  deterministic expired-lease replacement.
 - `ARS-SANDBOX-BOUNDARY` — parked; any real OS sandbox is a separate phase.
-- `ARS-CALLER-INTEGRATION` — parked; thin caller integration needs separate approval.
+- `ARS-CALLER-INTEGRATION` — I1 covers only the generic local library boundary; concrete
+  platform behavior remains separate and unapproved.
 
 ---
 
