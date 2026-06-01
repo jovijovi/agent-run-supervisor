@@ -84,12 +84,12 @@ Source inspection shows acpx client fs handlers resolve absolute paths under the
 
 > **Scope.** These `session-*` fixtures are **contract evidence only** for the
 > S1a spike. They prove the observed `acpx@0.10.0` persistent-session *command
-> grammar* and *stdout schemas* ahead of the S1 implementation phase. They do
-> **not** implement session support: `F-SESSION-001` / S1 remain Planned, and
-> nothing here approves Sachima integration, real auto-replies, public ingress,
-> IM delivery, Gateway lifecycle, agent-to-agent routing, or any live behavior.
-> Cross-checked machine summary: `session-contract-summary.json`; manifest
-> section: `session_contract`.
+> grammar* and *stdout schemas*. Local persistent-session support was later
+> implemented and closed by S1; this fixture set itself remains evidence, not a
+> runtime implementation. Nothing here approves Sachima integration, real
+> auto-replies, public ingress, IM delivery, Gateway lifecycle, agent-to-agent
+> routing, or any live behavior. Cross-checked machine summary:
+> `session-contract-summary.json`; manifest section: `session_contract`.
 
 All S1a commands use a deterministic session name `s1a-session-contract` and a
 single scratch cwd ending in `.tmp/acpx-session-contract-scratch/persistent-session`.

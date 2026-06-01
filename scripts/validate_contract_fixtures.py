@@ -566,14 +566,22 @@ def validate_session_contract(root: Path) -> list[str]:
     if not isinstance(contract, dict):
         return ["manifest.session_contract section must be present for the S1a contract spike"]
 
-    # S1a is contract evidence only; it must never claim session implementation.
+    # S1a is contract evidence only. Product/runtime persistent-session support
+    # has since been implemented elsewhere; this fixture set must still avoid
+    # claiming that the fixtures themselves implement runtime behavior.
     if contract.get("contract_evidence_only") is not True:
         errors.append(
             "manifest.session_contract.contract_evidence_only must be true (S1a is evidence only)"
         )
-    if contract.get("implemented") is not False:
+    if "implemented" in contract:
         errors.append(
-            "manifest.session_contract.implemented must be false (S1 session support is not implemented)"
+            "manifest.session_contract.implemented is a stale legacy key; use "
+            "runtime_implementation_in_fixture_set instead"
+        )
+    if contract.get("runtime_implementation_in_fixture_set") is not False:
+        errors.append(
+            "manifest.session_contract.runtime_implementation_in_fixture_set must be false "
+            "(S1a fixtures are evidence only; runtime support lives in source code)"
         )
     if contract.get("session_name") != SESSION_NAME:
         errors.append(f"manifest.session_contract.session_name must be {SESSION_NAME!r}")
