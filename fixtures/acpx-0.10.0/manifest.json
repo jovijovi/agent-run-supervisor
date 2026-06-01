@@ -106,8 +106,8 @@
   "session_contract": {
     "phase": "S1a persistent-session contract spike",
     "contract_evidence_only": true,
-    "implemented": false,
-    "status": "S1a contract spike evidence captured; S1 session support remains Planned and unimplemented.",
+    "runtime_implementation_in_fixture_set": false,
+    "status": "S1a contract spike evidence captured. Local persistent-session support was later implemented and closed by S1; this fixture set remains contract/schema evidence only and does not approve live/platform behavior.",
     "session_name": "s1a-session-contract",
     "scratch_dir_suffix": ".tmp/acpx-session-contract-scratch/persistent-session",
     "summary_file": "session-contract-summary.json",

@@ -10,8 +10,8 @@ class ExecStrategyError(ValueError):
     """Raised when exec compilation/launch is attempted for a non-exec role.
 
     Once a role declares ``session.strategy='persistent'`` the one-shot exec
-    path must fail closed instead of silently launching ``acpx exec``. The
-    persistent-session runner is not implemented in S1b.
+    path must fail closed instead of silently launching ``acpx exec``. Persistent
+    roles use the separate session runtime/CLI surface instead.
     """
 
 
@@ -22,7 +22,7 @@ def ensure_exec_strategy(role: AgentRoleSpec) -> None:
         raise ExecStrategyError(
             f"role {role.role_id!r} uses session.strategy={strategy!r}; exec "
             "compilation/launch is refused for non-exec strategies "
-            "(persistent-session runtime is not implemented in S1b)."
+            "(use the session runtime/CLI for persistent roles)."
         )
 
 
