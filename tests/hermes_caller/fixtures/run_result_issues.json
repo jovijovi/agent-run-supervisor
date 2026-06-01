@@ -1,0 +1,20 @@
+{
+  "run_id": "[REDACTED]",
+  "status": "completed",
+  "business_verdict": null,
+  "error_code": null,
+  "detail_code": null,
+  "origin": "acp",
+  "retryable": false,
+  "acpx_exit_code": 0,
+  "signal": null,
+  "stop_reason": "end_turn",
+  "usage": {"input_tokens": 12, "output_tokens": 44},
+  "final_message": "Document check complete. Found 2 issues: the 'Rollback' section is missing; the cross-reference to [REDACTED] is broken and must be revised.",
+  "truncated": false,
+  "truncate_reason": null,
+  "run_dir": "[REDACTED]",
+  "stderr_path": "stderr.log",
+  "raw_event_path": "acpx-stdout.ndjson",
+  "redaction_report_path": "redaction-report.json"
+}

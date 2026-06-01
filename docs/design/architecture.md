@@ -595,6 +595,7 @@ prose here may be read as introducing any of them:
 | CLI surface | `src/agent_run_supervisor/cli.py` | F-CLI-001/002/003 | ✅ / 🟡 | `tests/test_cli_smoke.py` |
 | Command handlers | `src/agent_run_supervisor/commands.py` | F-CLI-*, F-RUN-001, F-EXEC-001 | ✅ / 🟡 | `tests/test_cli_commands.py` |
 | Generic local caller boundary | `src/agent_run_supervisor/caller.py` | F-INTEGRATION-001 (I1) | ✅ local library boundary only | `tests/test_caller.py` |
+| Concrete Hermes caller + offline Feishu view-model | `src/agent_run_supervisor/hermes_caller/` | F-INTEGRATION-001 (L2) | 🟡 local/offline implementation candidate | `tests/hermes_caller/` |
 | Role model + hash | `src/agent_run_supervisor/role.py` | F-ROLE-001 | ✅ / 🟡 session config | `tests/test_role.py` |
 | Policy + argv compiler | `src/agent_run_supervisor/policy.py` | F-POLICY-001 | 🟡 (exec ✅, S1c create/ensure/show/status/prompt compilers ✅, S1d close/cancel compilers ✅) | `tests/test_policy.py`, `tests/test_session_strategy_guard.py` |
 | cwd / allowed-roots gate | `src/agent_run_supervisor/workspace.py` | F-WORKSPACE-001 | 🟡 | `tests/test_workspace_gate.py` |
@@ -642,13 +643,16 @@ These dispositions are tracked in `docs/roadmap/current-status.md` §4 and are *
   process-owned lock metadata, fail-safe `alive`/`crashed`/`unknown` classification,
   read-only detector fields, and opt-in provably-crashed lease reclamation.
 - `ARS-SANDBOX-BOUNDARY` — parked; any real OS sandbox is a separate phase.
-- `ARS-CALLER-INTEGRATION` — I1 covers only the generic local library boundary; the
-  *design* of a concrete caller (Hermes) on top of that boundary is captured **design-only**
-  in `docs/plans/2026-06-01-l1-concrete-caller-integration-design.md` (L1). L1 keeps the
-  supervisor generic — it adds no platform field to `caller.py`, keeps `business_verdict`
-  caller-owned, and treats Feishu rich cards as a caller-owned view-model/presentation target
-  with no delivery. Concrete platform behavior (real Feishu/IM delivery, Sachima, Gateway,
-  ingress) remains separate and unapproved.
+- `ARS-CALLER-INTEGRATION` — I1 covers the generic local library boundary; L1 captures the
+  concrete caller design (Hermes) on top of that boundary in
+  `docs/plans/2026-06-01-l1-concrete-caller-integration-design.md`. The L2 implementation
+  candidate adds the local/offline caller-side package `src/agent_run_supervisor/hermes_caller/`
+  with `tests/hermes_caller/`: caller-owned verdicts, normalized-event progress/result
+  view-models, an escaped offline Feishu payload dict, and exec + persistent-session orchestration
+  through `invoke_caller`. The supervisor stays generic — no platform field in `caller.py`,
+  `business_verdict` remains caller-owned/null in supervisor results, and concrete platform
+  behavior (real Feishu/IM delivery, Sachima, Gateway, ingress, live/default-on) remains separate
+  and unapproved.
 
 ---
 

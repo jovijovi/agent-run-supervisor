@@ -1,0 +1,20 @@
+{
+  "run_id": "[REDACTED]",
+  "status": "timed_out",
+  "business_verdict": null,
+  "error_code": "TIMED_OUT",
+  "detail_code": "SUPERVISOR_KILL",
+  "origin": "supervisor",
+  "retryable": true,
+  "acpx_exit_code": 3,
+  "signal": null,
+  "stop_reason": null,
+  "usage": null,
+  "final_message": "",
+  "truncated": false,
+  "truncate_reason": null,
+  "run_dir": "[REDACTED]",
+  "stderr_path": "stderr.log",
+  "raw_event_path": "acpx-stdout.ndjson",
+  "redaction_report_path": "redaction-report.json"
+}

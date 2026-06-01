@@ -1,0 +1,11 @@
+{"type": "run_started", "method": "initialize", "id": 1}
+{"type": "session_prompt_sent"}
+{"type": "tool_started", "tool_call_id": "[REDACTED]", "kind": "read"}
+{"type": "tool_updated", "tool_call_id": "[REDACTED]", "status": "in_progress"}
+{"type": "tool_completed", "tool_call_id": "[REDACTED]", "status": "completed"}
+{"type": "agent_message_delta", "text_length": 128, "text": "BULK_AGENT_CONTENT_THAT_MUST_NOT_LEAK [REDACTED] verbatim model output body"}
+{"type": "agent_thought_delta"}
+{"type": "usage_updated"}
+{"type": "available_commands_updated"}
+{"type": "run_completed", "stop_reason": "end_turn"}
+{"type": "unknown_update", "update_type": "weird_future_thing", "key_summary": "alpha:str,beta:int"}
