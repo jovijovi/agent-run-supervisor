@@ -332,12 +332,20 @@ Status: **Closed on `main` via PR #24 (`5e34f5c`).** PR #24 passed CI, Codex pri
 No implementation, live behavior, Sachima/Feishu/Gateway integration, or scope change was
 introduced; all standing non-approvals (§5) remain in force.
 
+The next implementation plan derived from the closed L1 design now exists, **plan-only**, at
+`docs/plans/2026-06-01-l2-hermes-caller-view-model-implementation.md` (L2 — concrete Hermes
+caller + offline Feishu rich-card view-model adapter above the I1 boundary, exec + persistent-
+session document-check, stdlib-only caller-side package, fake/local/offline only). It is a
+**plan, not implementation**: executing it requires a **separate explicit approval**, and all
+live/platform behavior (real Feishu/IM delivery, ingress, Gateway lifecycle, Sachima behavior,
+automatic replies, live/default-on) remains parked under the §5 non-approvals.
+
 ## 4. Tail register
 
 | ID | Class | Description | Blocks code work? | Required before | Acceptance method | Status |
 |---|---|---|---:|---|---|---|
 | ARS-SANDBOX-BOUNDARY | PARKED | Any claim that `allowed_roots` is an OS/filesystem sandbox remains parked. | No | Separate sandbox phase | OS sandbox proof + negative probes | Parked |
-| ARS-CALLER-INTEGRATION | PARTIAL | Generic local library caller boundary is implemented in I1; the concrete caller (Hermes) is captured **design-only** in L1 (`docs/plans/2026-06-01-l1-concrete-caller-integration-design.md`, exec + persistent-session document-check, Feishu card as caller-owned view-model only), merged via PR #24 at `5e34f5c`. Concrete Sachima/Hermes/Gateway/IM/Feishu-delivery behavior remains separate and unapproved. | No | L2 Hermes caller implementation plan, then separate implementation approval | Separate product approval and plan for implementation/live surfaces | Generic boundary done; concrete-caller design closed (L1, design-only); implementation/live platform behavior parked |
+| ARS-CALLER-INTEGRATION | PARTIAL | Generic local library caller boundary is implemented in I1; the concrete caller (Hermes) is captured **design-only** in L1 (`docs/plans/2026-06-01-l1-concrete-caller-integration-design.md`, exec + persistent-session document-check, Feishu card as caller-owned view-model only), merged via PR #24 at `5e34f5c`. The **L2 implementation plan** (`docs/plans/2026-06-01-l2-hermes-caller-view-model-implementation.md`) now exists **plan-only** for the later Hermes caller + offline Feishu view-model adapter. Concrete Sachima/Hermes/Gateway/IM/Feishu-delivery behavior remains separate and unapproved. | No | Separate L2 implementation approval | Separate product approval to execute the L2 implementation plan for implementation/live surfaces | Generic boundary done; concrete-caller design closed (L1, design-only); L2 implementation plan written (plan-only); execution and all live/platform behavior parked |
 
 ### K1 post-merge tail-closure evidence
 
