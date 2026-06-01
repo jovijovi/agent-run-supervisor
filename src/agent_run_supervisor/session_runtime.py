@@ -57,6 +57,7 @@ from agent_run_supervisor.parser import (
     parse_acpx_stdout_bytes,
     summarize_management_json,
 )
+from agent_run_supervisor.process_liveness import LivenessProbe, identity_for_pid
 from agent_run_supervisor.policy import (
     compile_session_cancel_command,
     compile_session_close_command,
@@ -166,12 +167,19 @@ class SessionRuntime:
         executor: SubprocessExecutor | None = None,
         owner: str = DEFAULT_OWNER,
         watchdog_grace_ms: int = DEFAULT_WATCHDOG_GRACE_MS,
+        reclaim_crashed: bool = True,
+        liveness_probe: LivenessProbe | None = None,
     ) -> None:
         self.sessions_dir = Path(sessions_dir)
-        self.store = SessionStore(base_dir=self.sessions_dir)
+        self.store = SessionStore(base_dir=self.sessions_dir, liveness_probe=liveness_probe)
         self.executor = executor or execute_subprocess
         self.owner = owner
         self.watchdog_grace_ms = watchdog_grace_ms
+        # K1 crash recovery: when a prior turn/close crashed and left a
+        # within-TTL lease, reclaim it only if its holder is *provably crashed*
+        # (a live or unverifiable holder still blocks). On by default; a caller
+        # can disable it to restore strict TTL-only lease blocking.
+        self.reclaim_crashed = reclaim_crashed
 
     # -- create -----------------------------------------------------------
 
@@ -256,7 +264,13 @@ class SessionRuntime:
 
         lease_seconds = role.session.lease_seconds or DEFAULT_SESSION_LEASE_SECONDS
         lock = self.store.acquire_lock(
-            session_id, owner=self.owner, now=now, lease_seconds=lease_seconds
+            session_id,
+            owner=self.owner,
+            now=now,
+            lease_seconds=lease_seconds,
+            reclaim_crashed=self.reclaim_crashed,
+            reclaimable=False,
+            holder_kind="supervisor_pending_subprocess",
         )
         try:
             locked_record = self.store.open_session(session_id)
@@ -273,6 +287,7 @@ class SessionRuntime:
                 prompt=prompt,
                 prompt_session_name=prompt_session_name,
                 env=env,
+                lock_token=lock.token,
             )
         finally:
             self._release_quietly(session_id, lock.token)
@@ -343,13 +358,26 @@ class SessionRuntime:
             close_name = locked_record.session_name or session_id
             lease_seconds = role.session.lease_seconds or DEFAULT_SESSION_LEASE_SECONDS
             lock = self.store.acquire_lock(
-                session_id, owner=self.owner, now=now, lease_seconds=lease_seconds
+                session_id,
+                owner=self.owner,
+                now=now,
+                lease_seconds=lease_seconds,
+                reclaim_crashed=self.reclaim_crashed,
+                reclaimable=False,
+                holder_kind="supervisor_pending_subprocess",
             )
             try:
                 argv = compile_session_close_command(
                     role, cwd=str(workspace.effective_cwd), session_name=close_name
                 )
-                outcome = self._run(argv=argv, role=role, workspace=workspace, env=env)
+                outcome = self._run(
+                    argv=argv,
+                    role=role,
+                    workspace=workspace,
+                    env=env,
+                    session_id=session_id,
+                    lock_token=lock.token,
+                )
                 summary = self._require_management_summary(
                     outcome,
                     op="close",
@@ -491,8 +519,21 @@ class SessionRuntime:
         role: AgentRoleSpec,
         workspace: WorkspaceValidationResult,
         env: Mapping[str, str] | None,
+        session_id: str | None = None,
+        lock_token: str | None = None,
     ) -> SubprocessOutcome:
         env_map = dict(env) if env is not None else dict(os.environ)
+        on_spawn = None
+        if session_id is not None and lock_token is not None:
+            def on_spawn(child_pid: int) -> None:
+                self.store.update_lock_holder(
+                    session_id,
+                    lock_token,
+                    identity=identity_for_pid(child_pid),
+                    holder_kind="subprocess",
+                    reclaimable=True,
+                )
+
         return self.executor(
             argv=argv,
             cwd=workspace.effective_cwd,
@@ -501,6 +542,7 @@ class SessionRuntime:
                 role.limits.timeout_seconds, self.watchdog_grace_ms
             ),
             grace_ms=self.watchdog_grace_ms,
+            on_spawn=on_spawn,
         )
 
     def _require_management_summary(
@@ -546,6 +588,7 @@ class SessionRuntime:
         prompt: str,
         prompt_session_name: str,
         env: Mapping[str, str] | None,
+        lock_token: str,
     ) -> SessionTurnOutcome:
         turn_id = _generate_turn_id()
         secure_mkdir(self.sessions_dir / session_id / TURNS_DIR)
@@ -564,7 +607,14 @@ class SessionRuntime:
             session_name=prompt_session_name,
             prompt=prompt,
         )
-        outcome = self._run(argv=argv, role=role, workspace=workspace, env=env)
+        outcome = self._run(
+            argv=argv,
+            role=role,
+            workspace=workspace,
+            env=env,
+            session_id=session_id,
+            lock_token=lock_token,
+        )
 
         handle.write_text("stderr.log", _decode_redacted(outcome.stderr, report, "stderr"))
         stdout_text = outcome.stdout.decode("utf-8", errors="replace")

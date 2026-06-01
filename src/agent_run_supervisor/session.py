@@ -26,6 +26,7 @@ from agent_run_supervisor.event_store import (
     exclusive_create_bytes,
     secure_mkdir,
 )
+from agent_run_supervisor import process_liveness as _liveness
 from agent_run_supervisor.policy import policy_hash
 from agent_run_supervisor.role import (
     DEFAULT_SESSION_LEASE_SECONDS,
@@ -135,10 +136,19 @@ def _validate_session_id(session_id: str) -> str:
 class SessionStore:
     """Filesystem-backed store for persistent-session bindings and lease locks."""
 
-    def __init__(self, base_dir: Path) -> None:
+    def __init__(
+        self,
+        base_dir: Path,
+        *,
+        liveness_probe: _liveness.LivenessProbe | None = None,
+    ) -> None:
         # ``base_dir`` is the sessions root (e.g. .agent-run-supervisor/sessions),
         # either the default location or a caller-provided directory.
         self.base_dir = Path(base_dir)
+        # The liveness probe records the holder identity into ``lock.json`` and
+        # classifies an encountered holder for safe crash recovery. The default
+        # is the real stdlib probe; tests inject a deterministic fake.
+        self._liveness_probe = liveness_probe or _liveness.REAL_PROBE
 
     # -- paths ------------------------------------------------------------
 
@@ -304,17 +314,24 @@ class SessionStore:
     # -- stale-lock detection (W4, read-only) -----------------------------
 
     def detect_stale_locks(self, *, now: _dt.datetime | None = None) -> list[dict]:
-        """Report lock/lease/temp-debris state per record. Read-only.
+        """Report lock/lease/liveness/temp-debris state per record. Read-only.
 
         For every local session record, report whether a ``lock.json`` is
         present, whether its lease is **provably expired** (``expires_at <= now``,
-        matching :meth:`acquire_lock`'s replacement boundary), and any leftover
-        ``.tmp-*`` atomic-write debris in the session directory.
+        matching :meth:`acquire_lock`'s replacement boundary), the recorded
+        holder's liveness classification (``holder_liveness`` —
+        ``alive``/``crashed``/``unknown``, or ``None`` when there is no lock; see
+        :func:`process_liveness.classify_lock`), any leftover ``.tmp-*``
+        atomic-write debris, and whether the lease is ``recoverable``
+        (TTL-expired *or* the reclaimable holder set provably crashed).
 
-        This launches nothing, takes no lock, signals no process, and never
-        removes or rewrites a lock or record. An unreadable/garbage ``lock.json``
-        is treated conservatively as expired (it cannot be a live lease). A
-        non-expired lock is always reported as live and is never force-broken.
+        This launches nothing, takes no lock, removes/rewrites nothing, and
+        sends **no terminating signal to recorded holders and kills no prior holder** — the only syscall
+        it issues against the recorded PID is a no-op ``os.kill(pid, 0)``
+        existence probe. An unreadable/garbage ``lock.json`` is treated
+        conservatively as expired with an ``unknown`` holder (it cannot be a live
+        lease). A non-expired lock with an ``alive``/``unknown`` holder is never
+        ``recoverable`` and is never force-broken.
         """
         moment = _ensure_aware(now or _utc_now())
         report: list[dict] = []
@@ -323,6 +340,7 @@ class SessionStore:
             lock_path = session_dir / LOCK_JSON
             lock_present = lock_path.exists()
             lease_expired = False
+            holder_liveness: str | None = None
             if lock_present:
                 try:
                     existing = _read_json(lock_path)
@@ -330,9 +348,25 @@ class SessionStore:
                         _dt.datetime.fromisoformat(existing["expires_at"])
                     )
                     lease_expired = expires_at <= moment
+                    holder_liveness = (
+                        _liveness.UNKNOWN
+                        if existing.get("reclaimable") is False
+                        else _liveness.classify_lock(existing, probe=self._liveness_probe)
+                    )
                 except (OSError, ValueError, KeyError, TypeError):
-                    # An unreadable/garbage lock is never a live lease.
+                    # An unreadable/garbage lock is never a live lease, and its
+                    # holder cannot be verified.
                     lease_expired = True
+                    holder_liveness = _liveness.UNKNOWN
+            recovery_allowed = True
+            if lock_present:
+                try:
+                    recovery_allowed = _read_json(lock_path).get("reclaimable", True) is not False
+                except (OSError, ValueError, TypeError):
+                    recovery_allowed = True
+            recoverable = lease_expired or (
+                recovery_allowed and holder_liveness == _liveness.CRASHED
+            )
             tmp_debris = sorted(
                 entry.name
                 for entry in session_dir.iterdir()
@@ -344,6 +378,8 @@ class SessionStore:
                     "state": record.state,
                     "lock_present": lock_present,
                     "lease_expired": lease_expired,
+                    "holder_liveness": holder_liveness,
+                    "recoverable": recoverable,
                     "tmp_debris": tmp_debris,
                 }
             )
@@ -358,12 +394,30 @@ class SessionStore:
         *,
         now: _dt.datetime | None = None,
         lease_seconds: int = DEFAULT_SESSION_LEASE_SECONDS,
+        reclaim_crashed: bool = False,
+        reclaimable: bool = True,
+        holder_kind: str = "supervisor",
     ) -> SessionLock:
         """Acquire the session's lease lock, creating ``lock.json`` exclusively.
 
         A non-expired lock blocks (``SessionLockError``). An expired lock is
         replaced deterministically: any expired lease is cleared and a fresh
         lock minted for the new owner.
+
+        K1 crash recovery: when ``reclaim_crashed`` is ``True``, a *within-TTL*
+        lock whose recorded holder set is **provably crashed** (see
+        :func:`process_liveness.classify_lock`) is also reclaimed. Any live
+        holder — or any holder whose liveness cannot be proven (foreign host,
+        missing identity, unreadable start time, indeterminate probe) — still
+        blocks. A composite supervisor+child lock is reclaimed only when both
+        identities are provably crashed.
+        The default (``False``) preserves the strict TTL-only lease contract.
+        Callers may also create an initially unreclaimable lock
+        (``reclaimable=False``), used by the runtime while a subprocess holder is
+        not yet recorded; such a lock can only be recovered by TTL expiry until
+        the caller updates the holder identity.
+        Reclamation happens entirely under the per-session guard, so two
+        acquirers cannot both reclaim: the loser then sees the fresh live lock.
         """
         session_dir = self._require_session_dir(session_id)
         if (
@@ -379,21 +433,32 @@ class SessionStore:
             if lock_path.exists():
                 existing = _read_json(lock_path)
                 expires_at = _ensure_aware(_dt.datetime.fromisoformat(existing["expires_at"]))
-                if moment < expires_at:
+                if moment < expires_at and not (
+                    reclaim_crashed and self._holder_crashed(existing)
+                ):
                     raise SessionLockError(
                         f"session {session_id!r} is locked by "
                         f"{existing.get('owner')!r} until {existing['expires_at']}",
                     )
-                # Lease expired: clear it while the per-session guard is held, so
-                # another acquirer cannot replace the file between our read and unlink.
+                # Either the lease expired, or its holder is provably crashed and
+                # the caller opted into reclamation. Clear it while the
+                # per-session guard is held so another acquirer cannot replace the
+                # file between our read and unlink.
                 lock_path.unlink()
 
             token = secrets.token_hex(16)
+            identity = self._liveness_probe.current()
             payload = {
                 "token": token,
                 "owner": owner,
                 "acquired_at": moment.isoformat(),
                 "expires_at": (moment + _dt.timedelta(seconds=lease_seconds)).isoformat(),
+                "host": identity.host,
+                "pid": identity.pid,
+                "process_start": identity.process_start,
+                "boot_id": identity.boot_id,
+                "holder_kind": holder_kind,
+                "reclaimable": bool(reclaimable),
             }
             try:
                 exclusive_create_bytes(lock_path, _json_bytes(payload))
@@ -405,6 +470,59 @@ class SessionStore:
                 acquired_at=payload["acquired_at"],
                 expires_at=payload["expires_at"],
             )
+
+    def update_lock_holder(
+        self,
+        session_id: str,
+        token: str,
+        *,
+        identity: _liveness.ProcessIdentity,
+        holder_kind: str,
+        reclaimable: bool,
+        now: _dt.datetime | None = None,
+    ) -> None:
+        """Atomically add a child process identity after subprocess spawn.
+
+        The caller must prove ownership with the lease token. Runtime send/close
+        acquire an initially unreclaimable supervisor lock, then call this after
+        the acpx subprocess has spawned. The supervisor identity remains the
+        top-level holder because it still owns artifact mutation after the child
+        exits; the child identity is recorded additively. Liveness reclamation is
+        safe only when the composite supervisor+child holder set is provably
+        crashed.
+        """
+        session_dir = self._require_session_dir(session_id)
+        with _session_lock_guard(session_dir):
+            lock_path = session_dir / LOCK_JSON
+            if not lock_path.exists():
+                raise SessionLockError(f"session {session_id!r} holds no lock to update")
+            existing = _read_json(lock_path)
+            if existing.get("token") != token:
+                raise SessionLockError(
+                    f"session {session_id!r} holder update refused: token does not match holder",
+                )
+            existing.update(
+                {
+                    "holder_kind": "supervisor_with_subprocess",
+                    "reclaimable": bool(reclaimable),
+                    "child_host": identity.host,
+                    "child_pid": identity.pid,
+                    "child_process_start": identity.process_start,
+                    "child_boot_id": identity.boot_id,
+                    "child_holder_kind": holder_kind,
+                    "child_holder_updated_at": _ensure_aware(now or _utc_now()).isoformat(),
+                }
+            )
+            atomic_write_json(lock_path, existing)
+
+    def _holder_crashed(self, lock_data: dict[str, Any]) -> bool:
+        """True only when the recorded lock holder set is provably crashed."""
+        if lock_data.get("reclaimable") is False:
+            return False
+        return (
+            _liveness.classify_lock(lock_data, probe=self._liveness_probe)
+            == _liveness.CRASHED
+        )
 
     def release_lock(self, session_id: str, token: str) -> None:
         """Release the lease lock — requires the matching token; else refuse."""

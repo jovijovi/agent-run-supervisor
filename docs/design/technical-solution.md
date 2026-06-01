@@ -60,8 +60,9 @@ Design notes:
 Current status: implemented for exec-shaped role config, S1b persistent-session
 configuration (`strategy: persistent` with bounded lease settings), the S1c local
 create/send/status runtime MVP, the S1d close/abort/list lifecycle slice, and S1 closure
-acceptance evidence for real-acpx smoke plus two-turn continuity. Full crash/interruption
-recovery beyond expired-lease replacement and retention cleanup remain H1 operational-hardening work.
+acceptance evidence for real-acpx smoke plus two-turn continuity. H1 delivered retention
+cleanup; K1 adds process-liveness crash recovery on the feature branch without changing the
+role schema.
 
 ### 3.2 `policy.py` — acpx policy and argv compiler
 
@@ -103,7 +104,8 @@ Security claim: this is configuration/cwd intent validation, not OS/filesystem s
 Current status: cwd gate implemented for current run path. S1b adds deterministic
 `workspace_hash(...)` for session binding; S1c revalidates the role/workspace/policy/acpx
 binding before `send`, `status`, `close`, and `abort`, and refuses mismatches before
-subprocess or artifact mutation. Full crash-recovery lifecycle checks remain future work.
+subprocess or artifact mutation. K1 preserves this binding gate while adding process-liveness
+lease recovery; liveness never overrides role/workspace/policy/acpx binding mismatches.
 
 ### 3.4 `preflight.py` — doctor probes
 
@@ -142,7 +144,7 @@ Responsibilities:
 10. Parse observed stdout and normalized events.
 11. Classify result and persist final artifacts.
 
-Current status: one-shot subprocess launch, stdout/stderr capture, parser/classifier finalization, and watchdog kill metadata are implemented for local exec. S1c adds separate local persistent-session create/send/status supervision in `session_runtime.py`; S1d adds local close/abort/list lifecycle supervision. Full crash/interruption recovery remains future work.
+Current status: one-shot subprocess launch, stdout/stderr capture, parser/classifier finalization, and watchdog kill metadata are implemented for local exec. S1c adds separate local persistent-session create/send/status supervision in `session_runtime.py`; S1d adds local close/abort/list lifecycle supervision. K1 targets persistent-session lease recovery; it does not change the one-shot exec watchdog/kill path.
 
 ### 3.6 `session.py` / `session_runtime.py` — persistent-session store and runtime
 
@@ -157,6 +159,10 @@ Store responsibilities (`session.py`):
 7. Track lifecycle state locally (`open`/`closed`), serialize close/abort lifecycle sections,
    atomically mark successful closes, and refuse unsafe mutation of closed sessions.
 8. Prevent cross-role, cross-workspace, stale-policy, acpx-version, or adapter mismatch leakage.
+9. K1: record process-ownership identity (`host`/`pid`/`process_start`/`boot_id`) into
+   `lock.json`, classify an encountered lease holder read-only as `alive`/`crashed`/`unknown`,
+   and optionally (`acquire_lock(..., reclaim_crashed=True)`) reclaim a within-TTL lease whose
+   holder is **provably crashed** — never an `alive`/`unknown` holder, never a live session.
 
 Runtime responsibilities (`session_runtime.py`, `SessionRuntime`):
 
@@ -188,8 +194,31 @@ local record to `closed`; `send` re-checks the closed state under the acquired l
 launching a turn; `send`/`close`/`abort` refuse closed sessions before subprocess/artifact
 mutation; list is local and read-only. S1 closure acceptance adds the reproducible local
 real-acpx smoke and two-turn continuity regression, closing S1 for the local persistent-session
-lifecycle. Full crash/interruption recovery beyond expired-lease replacement and
-retention/cleanup remain H1 operational-hardening work.
+lifecycle. K1 (on `ai/k1-crash-recovery-hardening-2026-06-01`, pending PR) adds safe
+process-liveness crash recovery over this foundation: the store records process-ownership
+identity in `lock.json`, `detect_stale_locks` reports additive `holder_liveness`/`recoverable`
+keys read-only, `acquire_lock(reclaim_crashed=True)` reclaims only a provably-crashed,
+reclaimable within-TTL holder set, and `SessionRuntime(reclaim_crashed=True, default on)` threads
+that into `send`/`close` so a crashed prior holder set no longer wedges the session while
+`alive`/`unknown` holders and pending unreclaimable pre-holder locks still refuse. The runtime
+keeps the supervisor identity as the top-level lock holder and records the spawned acpx child in
+additive `child_*` fields; a composite supervisor+child lock can be reclaimed only after both
+identities are provably crashed, which protects the post-child-exit artifact-writing window.
+Retention/cleanup remains H1 operational-hardening work; deletion stays TTL/live-lock
+conservative and does **not** trust liveness.
+
+`process_liveness.py` (K1, new, stdlib-only) is the supporting module: it provides
+`ProcessIdentity`, `current_identity()`, read-only liveness signals (`pid_is_running` via
+`os.kill(pid, 0)`, `read_process_start` via `/proc/<pid>/stat` field 22, `read_boot_id` via
+`/proc/sys/kernel/random/boot_id`), an injectable `LivenessProbe` seam (so tests drive
+crashed/alive/unknown deterministically without real crashed PIDs), and the pure
+`classify_holder(...) -> alive|crashed|unknown` decision. It is **fail-safe by construction** —
+it returns `crashed` only on positive proof (PID absent, start-time mismatch, or reboot) and
+`unknown` whenever liveness cannot be proven (missing/foreign PID, different host, unreadable
+start time, indeterminate probe). The liveness path sends **no terminating signal to
+recorded holders and kills no prior holder**; the only PID syscall is the no-op
+`os.kill(pid, 0)` existence probe. Evidence:
+`src/agent_run_supervisor/process_liveness.py`, `tests/test_process_liveness.py`.
 
 ### 3.7 `parser.py` — observed event parser
 
@@ -256,8 +285,9 @@ redacted session turn artifacts under `sessions/<session_id>/turns/<turn_id>/` a
 redacted management summaries under `sessions/<session_id>/management/`; S1d adds redacted
 `management/close.json` and `management/abort.json` plus the atomic `closed` state transition.
 H1 adds confined, dry-run-first retention/cleanup over run and session artifacts via
-`retention.py` and the `cleanup` CLI. Full process-liveness crash recovery remains a
-roadmap carry-over.
+`retention.py` and the `cleanup` CLI. K1 adds process-liveness metadata to session locks and
+read-only detector fields; retention deletion remains TTL/live-lock conservative and does not
+trust liveness to delete open sessions.
 
 ### 3.10 `caller.py` — generic local caller boundary
 
@@ -305,7 +335,8 @@ baseline, dry-run, and local one-shot real exec are implemented. The `run` path 
 persistent roles before artifacts/process launch. S1c adds the `session create|send|status`
 MVP (JSON stdout, 0/nonzero exit codes) over `SessionRuntime`; S1d adds
 `session close|abort|list`, with `list` local/read-only and role-optional. H1 adds the
-confined, dry-run-first `cleanup` command. I1 deliberately adds no CLI command.
+confined, dry-run-first `cleanup` command. K1 changes session lock recovery internals only and
+adds no CLI command. I1 deliberately adds no CLI command.
 
 ## 4. Data models
 

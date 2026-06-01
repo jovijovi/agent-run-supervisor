@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from agent_run_supervisor.policy import policy_hash
+from agent_run_supervisor.process_liveness import LivenessProbe, ProcessIdentity
 from agent_run_supervisor.role import AgentRoleSpec, load_role, role_hash
 from agent_run_supervisor.session import (
     InvalidSessionIdError,
@@ -612,3 +613,436 @@ def test_detect_stale_locks_empty_when_root_missing(tmp_path: Path) -> None:
     missing = SessionStore(base_dir=tmp_path / "no-sessions-here")
 
     assert missing.detect_stale_locks(now=T0) == []
+
+
+# --- K1 process-liveness crash recovery -----------------------------------
+
+
+def _identity(*, host="host-1", pid=111, start="s1", boot="boot-A") -> ProcessIdentity:
+    return ProcessIdentity(pid=pid, process_start=start, boot_id=boot, host=host)
+
+
+def _make_probe(identity: ProcessIdentity, *, running=None, starts=None) -> LivenessProbe:
+    """Deterministic probe: ``running``/``starts`` are keyed by recorded PID."""
+    running = running or {}
+    starts = starts or {}
+    return LivenessProbe(
+        is_running=lambda pid: running.get(pid, False),
+        read_start=lambda pid: starts.get(pid),
+        current=lambda: identity,
+    )
+
+
+def _store_as(base_dir: Path, identity: ProcessIdentity, **probe_kwargs) -> SessionStore:
+    return SessionStore(
+        base_dir=base_dir, liveness_probe=_make_probe(identity, **probe_kwargs)
+    )
+
+
+def test_acquire_lock_records_holder_process_identity(
+    tmp_path, role, workspace
+) -> None:
+    holder = _identity(host="box-A", pid=4242, start="9000", boot="boot-Z")
+    store = _store_as(tmp_path / "sessions", holder)
+    store.create_session(session_id="sess-id", role=role, workspace_result=workspace, now=T0)
+
+    store.acquire_lock("sess-id", owner="worker-1", now=T0, lease_seconds=100)
+
+    data = json.loads(
+        (store.base_dir / "sess-id" / "lock.json").read_text(encoding="utf-8")
+    )
+    # Existing lease fields are preserved...
+    assert data["owner"] == "worker-1"
+    assert data["expires_at"] == (T0 + timedelta(seconds=100)).isoformat()
+    # ...and the recording process identity is captured for crash recovery.
+    assert data["host"] == "box-A"
+    assert data["pid"] == 4242
+    assert data["process_start"] == "9000"
+    assert data["boot_id"] == "boot-Z"
+
+
+def test_acquire_lock_default_blocks_within_ttl_even_if_holder_crashed(
+    tmp_path, role, workspace
+) -> None:
+    base = tmp_path / "sessions"
+    crashed = _identity(host="h", pid=111)
+    _store_as(base, crashed).create_session(
+        session_id="sess-id", role=role, workspace_result=workspace, now=T0
+    )
+    first = _store_as(base, crashed).acquire_lock(
+        "sess-id", owner="dead-worker", now=T0, lease_seconds=100
+    )
+
+    # A second process whose probe proves the holder crashed, but WITHOUT opting
+    # into reclamation: the default lease contract is unchanged (TTL-only).
+    reviver = _store_as(base, _identity(host="h", pid=222), running={111: False})
+    with pytest.raises(SessionLockError):
+        reviver.acquire_lock(
+            "sess-id", owner="new-worker", now=T0 + timedelta(seconds=10), lease_seconds=100
+        )
+
+    data = json.loads((base / "sess-id" / "lock.json").read_text(encoding="utf-8"))
+    assert data["token"] == first.token  # lock untouched
+
+
+def test_acquire_lock_reclaims_within_ttl_lease_of_crashed_holder(
+    tmp_path, role, workspace
+) -> None:
+    base = tmp_path / "sessions"
+    crashed = _identity(host="h", pid=111, start="s1", boot="b")
+    _store_as(base, crashed).create_session(
+        session_id="sess-id", role=role, workspace_result=workspace, now=T0
+    )
+    first = _store_as(base, crashed).acquire_lock(
+        "sess-id", owner="dead-worker", now=T0, lease_seconds=100
+    )
+
+    # PID 111 is no longer running -> the prior holder provably crashed.
+    reviver = _store_as(base, _identity(host="h", pid=222, start="s2", boot="b"), running={111: False})
+    later = T0 + timedelta(seconds=10)  # still inside the original lease window
+    second = reviver.acquire_lock(
+        "sess-id", owner="new-worker", now=later, lease_seconds=100, reclaim_crashed=True
+    )
+
+    assert second.token != first.token
+    assert second.owner == "new-worker"
+    data = json.loads((base / "sess-id" / "lock.json").read_text(encoding="utf-8"))
+    assert data["token"] == second.token
+    assert data["pid"] == 222  # the reviver's identity now owns the lease
+    assert data["expires_at"] == (later + timedelta(seconds=100)).isoformat()
+
+
+def test_acquire_lock_refuses_within_ttl_lease_of_live_holder(
+    tmp_path, role, workspace
+) -> None:
+    base = tmp_path / "sessions"
+    live = _identity(host="h", pid=111, start="s1", boot="b")
+    _store_as(base, live).create_session(
+        session_id="sess-id", role=role, workspace_result=workspace, now=T0
+    )
+    _store_as(base, live).acquire_lock(
+        "sess-id", owner="live-worker", now=T0, lease_seconds=100
+    )
+
+    # PID 111 is running AND its start time matches -> genuinely alive: refuse
+    # even with reclaim_crashed=True (no live-session takeover). Same host+boot
+    # so liveness is decided by the PID probe, not a reboot.
+    reviver = _store_as(
+        base, _identity(host="h", pid=222, boot="b"), running={111: True}, starts={111: "s1"}
+    )
+    with pytest.raises(SessionLockError):
+        reviver.acquire_lock(
+            "sess-id",
+            owner="intruder",
+            now=T0 + timedelta(seconds=10),
+            lease_seconds=100,
+            reclaim_crashed=True,
+        )
+
+
+def test_acquire_lock_refuses_within_ttl_lease_of_unknown_holder(
+    tmp_path, role, workspace
+) -> None:
+    base = tmp_path / "sessions"
+    holder = _identity(host="host-A", pid=111, start="s1", boot="b")
+    _store_as(base, holder).create_session(
+        session_id="sess-id", role=role, workspace_result=workspace, now=T0
+    )
+    _store_as(base, holder).acquire_lock(
+        "sess-id", owner="worker", now=T0, lease_seconds=100
+    )
+
+    # A different host cannot validate the holder's PID -> UNKNOWN -> fail safe.
+    reviver = _store_as(base, _identity(host="host-B", pid=222), running={111: False})
+    with pytest.raises(SessionLockError):
+        reviver.acquire_lock(
+            "sess-id",
+            owner="other-host",
+            now=T0 + timedelta(seconds=10),
+            lease_seconds=100,
+            reclaim_crashed=True,
+        )
+
+
+def test_acquire_lock_reclaim_flag_still_replaces_expired_lease(
+    tmp_path, role, workspace
+) -> None:
+    base = tmp_path / "sessions"
+    holder = _identity(host="h", pid=111, start="s1", boot="b")
+    _store_as(base, holder).create_session(
+        session_id="sess-id", role=role, workspace_result=workspace, now=T0
+    )
+    first = _store_as(base, holder).acquire_lock(
+        "sess-id", owner="worker-1", now=T0, lease_seconds=100
+    )
+
+    # Past TTL: expired-lease replacement works regardless of liveness, and even
+    # when the holder would classify ALIVE (still running, start matches).
+    reviver = _store_as(
+        base, _identity(host="h", pid=222), running={111: True}, starts={111: "s1"}
+    )
+    later = T0 + timedelta(seconds=101)
+    second = reviver.acquire_lock(
+        "sess-id", owner="worker-2", now=later, lease_seconds=100, reclaim_crashed=True
+    )
+    assert second.token != first.token
+    assert second.owner == "worker-2"
+
+
+def _entry(report: list[dict], session_id: str) -> dict:
+    return {row["session_id"]: row for row in report}[session_id]
+
+
+def test_detect_stale_locks_reports_crashed_holder_as_recoverable(
+    tmp_path, role, workspace
+) -> None:
+    base = tmp_path / "sessions"
+    crashed = _identity(host="h", pid=111, start="s1", boot="b")
+    _store_as(base, crashed).create_session(
+        session_id="sess-id", role=role, workspace_result=workspace, now=T0
+    )
+    _store_as(base, crashed).acquire_lock(
+        "sess-id", owner="dead-worker", now=T0, lease_seconds=100
+    )
+
+    detector = _store_as(base, _identity(host="h", pid=222, boot="b"), running={111: False})
+    report = detector.detect_stale_locks(now=T0 + timedelta(seconds=10))
+
+    entry = _entry(report, "sess-id")
+    assert entry["lock_present"] is True
+    assert entry["lease_expired"] is False  # still within TTL
+    assert entry["holder_liveness"] == "crashed"
+    assert entry["recoverable"] is True  # crashed -> safe to reclaim
+
+
+def test_detect_stale_locks_reports_live_holder_as_not_recoverable(
+    tmp_path, role, workspace
+) -> None:
+    base = tmp_path / "sessions"
+    live = _identity(host="h", pid=111, start="s1", boot="b")
+    _store_as(base, live).create_session(
+        session_id="sess-id", role=role, workspace_result=workspace, now=T0
+    )
+    _store_as(base, live).acquire_lock(
+        "sess-id", owner="live-worker", now=T0, lease_seconds=100
+    )
+
+    detector = _store_as(
+        base, _identity(host="h", pid=222, boot="b"), running={111: True}, starts={111: "s1"}
+    )
+    report = detector.detect_stale_locks(now=T0 + timedelta(seconds=10))
+
+    entry = _entry(report, "sess-id")
+    assert entry["lease_expired"] is False
+    assert entry["holder_liveness"] == "alive"
+    assert entry["recoverable"] is False
+
+
+def test_detect_stale_locks_null_liveness_when_no_lock(store, role, workspace) -> None:
+    store.create_session(
+        session_id="sess-nolock3", role=role, workspace_result=workspace, now=T0
+    )
+
+    entry = _entry(store.detect_stale_locks(now=T0), "sess-nolock3")
+    assert entry["lock_present"] is False
+    assert entry["holder_liveness"] is None
+    assert entry["recoverable"] is False
+
+
+def test_unreclaimable_pending_lock_stays_ttl_only_even_if_holder_crashed(
+    tmp_path, role, workspace
+) -> None:
+    base = tmp_path / "sessions"
+    pending = _identity(host="h", pid=111, start="s1", boot="b")
+    _store_as(base, pending).create_session(
+        session_id="sess-id", role=role, workspace_result=workspace, now=T0
+    )
+    first = _store_as(base, pending).acquire_lock(
+        "sess-id",
+        owner="pending-supervisor",
+        now=T0,
+        lease_seconds=100,
+        reclaimable=False,
+        holder_kind="supervisor_pending_subprocess",
+    )
+
+    # Even if the recorded supervisor PID is gone, an unreclaimable pending lock
+    # might have spawned a child before holder recording failed. K1 deliberately
+    # stays fail-safe: wait for TTL rather than risk taking over live work.
+    reviver = _store_as(base, _identity(host="h", pid=222, boot="b"), running={111: False})
+    with pytest.raises(SessionLockError):
+        reviver.acquire_lock(
+            "sess-id",
+            owner="new-worker",
+            now=T0 + timedelta(seconds=10),
+            lease_seconds=100,
+            reclaim_crashed=True,
+        )
+
+    entry = _entry(reviver.detect_stale_locks(now=T0 + timedelta(seconds=10)), "sess-id")
+    assert entry["holder_liveness"] == "unknown"
+    assert entry["recoverable"] is False
+    data = json.loads((base / "sess-id" / "lock.json").read_text(encoding="utf-8"))
+    assert data["token"] == first.token
+    assert data["reclaimable"] is False
+
+
+def _record_supervisor_with_child(base: Path, role, workspace) -> tuple[SessionStore, str]:
+    supervisor = _identity(host="h", pid=111, start="s1", boot="b")
+    store = _store_as(base, supervisor)
+    store.create_session(session_id="sess-id", role=role, workspace_result=workspace, now=T0)
+    lock = store.acquire_lock(
+        "sess-id",
+        owner="runtime",
+        now=T0,
+        lease_seconds=100,
+        reclaimable=False,
+        holder_kind="supervisor_pending_subprocess",
+    )
+    store.update_lock_holder(
+        "sess-id",
+        lock.token,
+        identity=_identity(host="h", pid=333, start="c1", boot="b"),
+        holder_kind="subprocess",
+        reclaimable=True,
+        now=T0 + timedelta(seconds=1),
+    )
+    return store, lock.token
+
+
+def test_update_lock_holder_adds_child_identity_without_replacing_supervisor(
+    tmp_path, role, workspace
+) -> None:
+    base = tmp_path / "sessions"
+    _record_supervisor_with_child(base, role, workspace)
+
+    data = json.loads((base / "sess-id" / "lock.json").read_text(encoding="utf-8"))
+    assert data["pid"] == 111
+    assert data["process_start"] == "s1"
+    assert data["holder_kind"] == "supervisor_with_subprocess"
+    assert data["reclaimable"] is True
+    assert data["child_pid"] == 333
+    assert data["child_process_start"] == "c1"
+    assert data["child_holder_kind"] == "subprocess"
+
+
+def test_child_exit_does_not_reclaim_while_supervisor_is_alive(
+    tmp_path, role, workspace
+) -> None:
+    base = tmp_path / "sessions"
+    _, token = _record_supervisor_with_child(base, role, workspace)
+
+    detector = _store_as(
+        base,
+        _identity(host="h", pid=222, boot="b"),
+        running={111: True, 333: False},
+        starts={111: "s1"},
+    )
+    entry = _entry(detector.detect_stale_locks(now=T0 + timedelta(seconds=10)), "sess-id")
+    assert entry["holder_liveness"] == "alive"
+    assert entry["recoverable"] is False
+    with pytest.raises(SessionLockError):
+        detector.acquire_lock(
+            "sess-id",
+            owner="new-worker",
+            now=T0 + timedelta(seconds=10),
+            lease_seconds=100,
+            reclaim_crashed=True,
+        )
+    data = json.loads((base / "sess-id" / "lock.json").read_text(encoding="utf-8"))
+    assert data["token"] == token
+
+
+def test_supervisor_exit_does_not_reclaim_while_child_is_alive(
+    tmp_path, role, workspace
+) -> None:
+    base = tmp_path / "sessions"
+    _, token = _record_supervisor_with_child(base, role, workspace)
+
+    detector = _store_as(
+        base,
+        _identity(host="h", pid=222, boot="b"),
+        running={111: False, 333: True},
+        starts={333: "c1"},
+    )
+    entry = _entry(detector.detect_stale_locks(now=T0 + timedelta(seconds=10)), "sess-id")
+    assert entry["holder_liveness"] == "alive"
+    assert entry["recoverable"] is False
+    with pytest.raises(SessionLockError):
+        detector.acquire_lock(
+            "sess-id",
+            owner="new-worker",
+            now=T0 + timedelta(seconds=10),
+            lease_seconds=100,
+            reclaim_crashed=True,
+        )
+    data = json.loads((base / "sess-id" / "lock.json").read_text(encoding="utf-8"))
+    assert data["token"] == token
+
+
+def test_composite_holder_reclaims_only_after_supervisor_and_child_crashed(
+    tmp_path, role, workspace
+) -> None:
+    base = tmp_path / "sessions"
+    _, token = _record_supervisor_with_child(base, role, workspace)
+
+    reviver = _store_as(
+        base,
+        _identity(host="h", pid=222, start="s2", boot="b"),
+        running={111: False, 333: False},
+    )
+    later = T0 + timedelta(seconds=10)
+    entry = _entry(reviver.detect_stale_locks(now=later), "sess-id")
+    assert entry["holder_liveness"] == "crashed"
+    assert entry["recoverable"] is True
+
+    second = reviver.acquire_lock(
+        "sess-id", owner="new-worker", now=later, lease_seconds=100, reclaim_crashed=True
+    )
+    assert second.token != token
+    data = json.loads((base / "sess-id" / "lock.json").read_text(encoding="utf-8"))
+    assert data["token"] == second.token
+    assert data["pid"] == 222
+    assert "child_pid" not in data
+
+
+def test_detect_stale_locks_expired_lease_is_recoverable_regardless_of_liveness(
+    tmp_path, role, workspace
+) -> None:
+    base = tmp_path / "sessions"
+    live = _identity(host="h", pid=111, start="s1", boot="b")
+    _store_as(base, live).create_session(
+        session_id="sess-id", role=role, workspace_result=workspace, now=T0
+    )
+    _store_as(base, live).acquire_lock(
+        "sess-id", owner="worker", now=T0, lease_seconds=100
+    )
+
+    # Holder is "alive" but the lease has expired: TTL alone makes it recoverable.
+    detector = _store_as(
+        base, _identity(host="h", pid=222, boot="b"), running={111: True}, starts={111: "s1"}
+    )
+    entry = _entry(detector.detect_stale_locks(now=T0 + timedelta(seconds=101)), "sess-id")
+    assert entry["lease_expired"] is True
+    assert entry["holder_liveness"] == "alive"
+    assert entry["recoverable"] is True
+
+
+def test_detect_stale_locks_crashed_path_is_read_only(tmp_path, role, workspace) -> None:
+    base = tmp_path / "sessions"
+    crashed = _identity(host="h", pid=111, start="s1", boot="b")
+    _store_as(base, crashed).create_session(
+        session_id="sess-ro2", role=role, workspace_result=workspace, now=T0
+    )
+    _store_as(base, crashed).acquire_lock(
+        "sess-ro2", owner="dead", now=T0, lease_seconds=100
+    )
+    lock_path = base / "sess-ro2" / "lock.json"
+    before = lock_path.read_text(encoding="utf-8")
+
+    detector = _store_as(base, _identity(host="h", pid=222, boot="b"), running={111: False})
+    detector.detect_stale_locks(now=T0 + timedelta(seconds=10))
+
+    # Detection of a crashed holder never removes/rewrites the lock or record.
+    assert lock_path.exists()
+    assert lock_path.read_text(encoding="utf-8") == before
