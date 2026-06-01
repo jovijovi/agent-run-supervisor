@@ -16,11 +16,12 @@ import stat
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import pytest
 
 from agent_run_supervisor.policy import ExecStrategyError
+from agent_run_supervisor.process_liveness import LivenessProbe, ProcessIdentity
 from agent_run_supervisor.role import load_role
 from agent_run_supervisor.runner import SubprocessOutcome
 from agent_run_supervisor.session import (
@@ -29,6 +30,7 @@ from agent_run_supervisor.session import (
     SessionExistsError,
     SessionLockError,
     SessionNotFoundError,
+    SessionStore,
 )
 from agent_run_supervisor.session_runtime import (
     SessionRuntime,
@@ -124,7 +126,11 @@ class FakeExecutor:
         env: Mapping[str, str],
         timeout_seconds: int,
         grace_ms: int,
+        on_spawn: Callable[[int], None] | None = None,
     ) -> SubprocessOutcome:
+        # The fake replays canned outcomes and never spawns a real child, so
+        # there is no genuine pid to hand ``on_spawn``; record it for contract
+        # fidelity with ``SubprocessExecutor`` without inventing a spawn event.
         self.calls.append(
             {
                 "argv": argv,
@@ -132,6 +138,7 @@ class FakeExecutor:
                 "env": dict(env),
                 "timeout_seconds": timeout_seconds,
                 "grace_ms": grace_ms,
+                "on_spawn": on_spawn,
             }
         )
         if not self.steps:
@@ -1000,3 +1007,128 @@ def test_list_sessions_empty_when_no_records(
     assert outcome.result["sessions"] == []
     assert outcome.result["count"] == 0
     assert fake.calls == []
+
+
+# --- K1 crash recovery: reclaim provably-crashed leases -------------------
+
+
+def _identity(*, host="host-1", pid=111, start="s1", boot="boot-A") -> ProcessIdentity:
+    return ProcessIdentity(pid=pid, process_start=start, boot_id=boot, host=host)
+
+
+def _make_probe(identity: ProcessIdentity, *, running=None, starts=None) -> LivenessProbe:
+    running = running or {}
+    starts = starts or {}
+    return LivenessProbe(
+        is_running=lambda pid: running.get(pid, False),
+        read_start=lambda pid: starts.get(pid),
+        current=lambda: identity,
+    )
+
+
+def _seed_stale_lease(sessions_dir: Path, holder: ProcessIdentity, *, lease_seconds=600) -> None:
+    """Leave a within-TTL lease owned by ``holder`` (a crashed/other process)."""
+    SessionStore(sessions_dir, liveness_probe=_make_probe(holder)).acquire_lock(
+        "sess-a", owner="prior-turn", now=T1, lease_seconds=lease_seconds
+    )
+
+
+def test_send_reclaims_within_ttl_lease_of_crashed_prior_turn(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named()), _outcome(_turn1())])
+    # The reviver proves the crashed holder PID 111 is no longer running.
+    reviver = _make_probe(_identity(host="h", pid=222, boot="b"), running={111: False})
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake, liveness_probe=reviver)
+    _create_and(runtime, role)
+
+    # A prior send crashed mid-turn, leaving a within-TTL lease behind.
+    _seed_stale_lease(sessions_dir, _identity(host="h", pid=111, start="s1", boot="b"))
+    assert (sessions_dir / "sess-a" / "lock.json").exists()
+
+    outcome = runtime.send(role=role, session_id="sess-a", prompt="resume turn", now=T1)
+
+    # The crashed lease was safely reclaimed and the turn ran.
+    assert outcome.result["status"] == "completed"
+    assert outcome.result["final_message"] == "S1A_SESSION_TURN_1_OK"
+    assert fake.calls[1]["argv"][-5:] == ["codex", "prompt", "-s", "nightly", "resume turn"]
+    # Lease released after the recovered turn.
+    assert not (sessions_dir / "sess-a" / "lock.json").exists()
+
+
+def test_send_refuses_within_ttl_lease_of_live_holder(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named())])
+    # The probe proves holder PID 111 is genuinely alive (running + start match).
+    reviver = _make_probe(
+        _identity(host="h", pid=222, boot="b"), running={111: True}, starts={111: "s1"}
+    )
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake, liveness_probe=reviver)
+    _create_and(runtime, role)
+    _seed_stale_lease(sessions_dir, _identity(host="h", pid=111, start="s1", boot="b"))
+
+    with pytest.raises(SessionLockError):
+        runtime.send(role=role, session_id="sess-a", prompt="turn", now=T1)
+
+    # No prompt turn ran; no turn artifacts; the live lease is untouched.
+    assert len(fake.calls) == 1
+    assert not (sessions_dir / "sess-a" / "turns").exists()
+    assert (sessions_dir / "sess-a" / "lock.json").exists()
+
+
+def test_send_refuses_within_ttl_lease_of_unknown_holder(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named())])
+    # A different host cannot validate the holder PID -> UNKNOWN -> fail safe.
+    reviver = _make_probe(_identity(host="other-host", pid=222), running={111: False})
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake, liveness_probe=reviver)
+    _create_and(runtime, role)
+    _seed_stale_lease(sessions_dir, _identity(host="h", pid=111, start="s1", boot="b"))
+
+    with pytest.raises(SessionLockError):
+        runtime.send(role=role, session_id="sess-a", prompt="turn", now=T1)
+
+    assert len(fake.calls) == 1
+    assert not (sessions_dir / "sess-a" / "turns").exists()
+
+
+def test_close_reclaims_within_ttl_lease_of_crashed_prior_turn(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named()), _outcome(_close_named())])
+    reviver = _make_probe(_identity(host="h", pid=222, boot="b"), running={111: False})
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake, liveness_probe=reviver)
+    _create_and(runtime, role)
+    _seed_stale_lease(sessions_dir, _identity(host="h", pid=111, start="s1", boot="b"))
+
+    outcome = runtime.close(role=role, session_id="sess-a", now=T1)
+
+    assert outcome.result["state"] == "closed"
+    assert runtime.store.open_session("sess-a").state == "closed"
+    assert not (sessions_dir / "sess-a" / "lock.json").exists()
+
+
+def test_reclaim_crashed_disabled_restores_ttl_only_blocking(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named())])
+    reviver = _make_probe(_identity(host="h", pid=222, boot="b"), running={111: False})
+    runtime = SessionRuntime(
+        sessions_dir=sessions_dir, executor=fake, liveness_probe=reviver, reclaim_crashed=False
+    )
+    _create_and(runtime, role)
+    _seed_stale_lease(sessions_dir, _identity(host="h", pid=111, start="s1", boot="b"))
+
+    # With recovery disabled, even a provably-crashed holder blocks until TTL.
+    with pytest.raises(SessionLockError):
+        runtime.send(role=role, session_id="sess-a", prompt="turn", now=T1)
+
+    assert len(fake.calls) == 1
+    assert not (sessions_dir / "sess-a" / "turns").exists()

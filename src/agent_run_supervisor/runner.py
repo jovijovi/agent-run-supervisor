@@ -7,7 +7,7 @@ import signal as _signal
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 from agent_run_supervisor.event_store import EventStore, RunHandle
 from agent_run_supervisor.exit_classifier import (
@@ -66,6 +66,7 @@ class SubprocessExecutor(Protocol):
         env: Mapping[str, str],
         timeout_seconds: int,
         grace_ms: int,
+        on_spawn: Callable[[int], None] | None = None,
     ) -> SubprocessOutcome: ...
 
 
@@ -371,6 +372,7 @@ def execute_subprocess(
     env: Mapping[str, str],
     timeout_seconds: int,
     grace_ms: int,
+    on_spawn: Callable[[int], None] | None = None,
 ) -> SubprocessOutcome:
     start_new_session = os.name == "posix"
     try:
@@ -402,6 +404,29 @@ def execute_subprocess(
             stdout_closed=True,
             stderr_closed=True,
         )
+
+    if on_spawn is not None:
+        try:
+            on_spawn(process.pid)
+        except Exception as exc:  # fail closed: do not leave an untracked child running
+            stdout, stderr, kill_signal, kill_reason, process_group_used = _stop_after_spawn_callback_error(
+                process, start_new_session=start_new_session, grace_ms=grace_ms
+            )
+            return SubprocessOutcome(
+                exit_code=1,
+                signal=_signal_from_returncode(process.returncode),
+                stdout=stdout,
+                stderr=(stderr or b"")
+                + f"\nspawn callback failed: {exc}".encode("utf-8", errors="replace"),
+                supervisor_killed=True,
+                supervisor_timed_out=False,
+                kill_reason=kill_reason,
+                kill_signal=kill_signal,
+                grace_ms=grace_ms,
+                process_group_used=process_group_used,
+                stdout_closed=True,
+                stderr_closed=True,
+            )
 
     try:
         stdout, stderr = process.communicate(timeout=timeout_seconds)
@@ -446,6 +471,29 @@ def execute_subprocess(
             stdout_closed=True,
             stderr_closed=True,
         )
+
+
+def _stop_after_spawn_callback_error(
+    process: subprocess.Popen[bytes], *, start_new_session: bool, grace_ms: int
+) -> tuple[bytes, bytes, str, str, bool]:
+    stdout = b""
+    stderr = b""
+    kill_signal = "SIGTERM"
+    kill_reason = "spawn_callback_failed"
+    process_group_used = start_new_session and os.name == "posix"
+    _terminate_process(process, use_group=process_group_used)
+    try:
+        more_stdout, more_stderr = process.communicate(timeout=max(grace_ms, 0) / 1000)
+        stdout += more_stdout or b""
+        stderr += more_stderr or b""
+    except subprocess.TimeoutExpired:
+        kill_signal = "SIGKILL"
+        kill_reason = "spawn_callback_failed_force_kill"
+        _kill_process(process, use_group=process_group_used)
+        more_stdout, more_stderr = process.communicate()
+        stdout += more_stdout or b""
+        stderr += more_stderr or b""
+    return stdout, stderr, kill_signal, kill_reason, process_group_used
 
 
 def _terminate_process(process: subprocess.Popen[bytes], *, use_group: bool) -> None:

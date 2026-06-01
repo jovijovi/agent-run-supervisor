@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import pytest
 
@@ -29,6 +29,7 @@ class RecordingExecutor:
         env: Mapping[str, str],
         timeout_seconds: int,
         grace_ms: int,
+        on_spawn: Callable[[int], None] | None = None,
     ) -> SubprocessOutcome:
         self.calls.append(
             {
@@ -37,6 +38,7 @@ class RecordingExecutor:
                 "env": dict(env),
                 "timeout_seconds": timeout_seconds,
                 "grace_ms": grace_ms,
+                "on_spawn": on_spawn,
             }
         )
         if not self.outcomes:

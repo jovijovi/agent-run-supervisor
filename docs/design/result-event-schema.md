@@ -295,9 +295,11 @@ never flip `ok`**. Exit code is `0` when `ok` is `true`, else `1`.
 
 ## 6. Stale-lock detector
 
-`session.SessionStore.detect_stale_locks(now=None)` is read-only (takes no lock,
-removes nothing, signals no process). It returns a list with one entry per local
-record:
+`session.SessionStore.detect_stale_locks(now=None)` is read-only: it takes no
+lock, removes/rewrites nothing, **sends no terminating signal to recorded
+holders, and kills no prior holder**. The only syscall it issues against a recorded holder PID is a no-op
+`os.kill(pid, 0)` existence probe (POSIX delivers no signal for signal `0`). It
+returns a list with one entry per local record:
 
 | Key | Type | Meaning |
 |-----|------|---------|
@@ -305,7 +307,44 @@ record:
 | `state` | `string` | Record state (`open` / `closed`). |
 | `lock_present` | `boolean` | Whether `lock.json` exists. |
 | `lease_expired` | `boolean` | `true` when `expires_at <= now`, or when the lock is unreadable/garbage (conservatively expired). A live (future) lease is `false`. |
+| `holder_liveness` | `string` \| `null` | K1 process-liveness classification of the recorded lock holder set: `alive`, `crashed`, or `unknown`; `null` when there is no lock. Composite supervisor+child locks classify as `crashed` only when both identities are provably crashed; if either is alive the result is `alive`, and if either is unverifiable the result is `unknown`. An unreadable/garbage lock classifies `unknown`. See [§6.1](#61-k1-holder-liveness-and-safe-recovery-posture). |
+| `recoverable` | `boolean` | `true` when the lease is TTL-expired (`lease_expired`) **or** the holder is provably `crashed` and the lock is reclaimable. An `alive`, `unknown`, or explicitly unreclaimable pending holder on a within-TTL lease is **not** `recoverable`. |
 | `tmp_debris` | `array<string>` | Leftover `.tmp-*` atomic-write debris file names in the session dir. |
+
+`holder_liveness` and `recoverable` are **additive** keys (K1); the existing
+`session_id`/`state`/`lock_present`/`lease_expired`/`tmp_debris` keys are
+unchanged. The top-level holder identity is read from the additive `host`/`pid`/
+`process_start`/`boot_id` fields that `acquire_lock` now records into `lock.json`
+alongside the existing `token`/`owner`/`acquired_at`/`expires_at`. When the runtime
+spawns an acpx subprocess, it preserves that top-level supervisor identity and adds
+`child_host`/`child_pid`/`child_process_start`/`child_boot_id` fields; liveness
+recovery requires both supervisor and child identities to be provably crashed.
+
+### 6.1 K1 holder-liveness and safe-recovery posture
+
+K1 adds conservative, **read-only** crash detection plus opt-in, **provably-safe**
+lease recovery (`process_liveness.classify_holder`). The safety posture is:
+
+- **Detection is read-only.** `detect_stale_locks` launches nothing, takes no
+  lock, removes/rewrites nothing, sends **no terminating signal to recorded
+  holders**, and kills no prior holder. The only PID syscall is the no-op
+  `os.kill(pid, 0)` existence probe;
+  on Linux it also reads `/proc/<pid>/stat` field 22 (start time) and
+  `/proc/sys/kernel/random/boot_id` to defeat PID reuse / detect a reboot.
+- **`crashed` requires positive proof** — every recorded holder in the lock's holder
+  set is gone: the PID is absent, its recorded start time no longer matches (PID
+  reuse), or the machine rebooted since the lease. For supervisor+child locks,
+  both identities must independently classify `crashed`.
+- **`alive` and `unknown` are never recoverable via liveness.** A missing/foreign
+  PID, a different host, an unreadable start time, an indeterminate probe, or an
+  explicitly unreclaimable pending lock all classify or behave fail-safe → treated
+  as possibly-alive/unrecorded work → refused. Only TTL expiry can recover an
+  `unknown`/`alive`/pending-unreclaimable holder.
+- **No live-session takeover.** Reclamation of a within-TTL lease (opt-in
+  `acquire_lock(..., reclaim_crashed=True)`; on by default in `SessionRuntime`)
+  happens only when the holder is provably `crashed`, entirely under the existing
+  per-session `flock` guard. The strict TTL-only contract is preserved by
+  default at the store (`reclaim_crashed=False`).
 
 ## 7. Cleanup plan / result
 

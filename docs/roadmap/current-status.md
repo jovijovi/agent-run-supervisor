@@ -308,9 +308,15 @@ all hold.
 
 | ID | Class | Description | Blocks code work? | Required before | Acceptance method | Status |
 |---|---|---|---:|---|---|---|
-| ARS-CRASH-RECOVERY | CARRY | Full process-liveness crash/interruption recovery beyond deterministic expired-lease replacement (no PID inspection, signals, or live-session takeover). H1 closed only the read-only stale-lock/`.tmp-*` detection + provably-expired lock hygiene. | No | Separate hardening phase | Detection + safe-recovery proof without unsafe cross-process assumptions | Carried (deferred from H1) |
+| ARS-CRASH-RECOVERY | CARRY | K1 branch implements safe process-liveness crash/interruption recovery beyond deterministic expired-lease replacement: supervisor-owned lease metadata, additive child-subprocess metadata, fail-safe `alive`/`crashed`/`unknown` classification, additive read-only detector fields, and opt-in reclamation only for provably-crashed, reclaimable holder sets. Its liveness detection/reclamation path sends no terminating signal to recorded holders, kills no prior holder, and never reclaims `alive`/`unknown`/pending-unreclaimable holders; supervisor+child locks require both identities to be provably crashed. The existing runner may still stop its own just-spawned child fail-closed if lock-holder recording fails. | No | K1 PR review/merge | Tests + safe-recovery proof without unsafe cross-process assumptions | Implemented on K1 branch; pending PR review/merge |
 | ARS-SANDBOX-BOUNDARY | PARKED | Any claim that `allowed_roots` is an OS/filesystem sandbox remains parked. | No | Separate sandbox phase | OS sandbox proof + negative probes | Parked |
 | ARS-CALLER-INTEGRATION | PARTIAL | Generic local library caller boundary is implemented in I1; concrete Sachima/Hermes/Gateway/IM behavior remains separate and unapproved. | No | Concrete platform integration | Separate product approval and plan | Generic boundary done; concrete platform parked |
+
+### K1 pending tail-closure evidence
+
+| ID | Branch evidence | Result |
+|---|---|---|
+| ARS-CRASH-RECOVERY | `ai/k1-crash-recovery-hardening-2026-06-01`: `src/agent_run_supervisor/process_liveness.py`, K1 changes in `session.py`/`session_runtime.py`, `tests/test_process_liveness.py`, K1 additions in `tests/test_session_store.py` and `tests/test_session_runtime.py`, and plan `docs/plans/2026-06-01-k1-crash-recovery-hardening.md` | Candidate implemented; final closure waits for Codex review, PR CI, merge, and post-merge verification. |
 
 ### Recently closed tails
 

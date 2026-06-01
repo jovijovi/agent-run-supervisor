@@ -595,8 +595,9 @@ prose here may be read as introducing any of them:
 | Policy + argv compiler | `src/agent_run_supervisor/policy.py` | F-POLICY-001 | 🟡 (exec ✅, S1c create/ensure/show/status/prompt compilers ✅, S1d close/cancel compilers ✅) | `tests/test_policy.py`, `tests/test_session_strategy_guard.py` |
 | cwd / allowed-roots gate | `src/agent_run_supervisor/workspace.py` | F-WORKSPACE-001 | 🟡 | `tests/test_workspace_gate.py` |
 | One-shot exec supervision | `src/agent_run_supervisor/runner.py` | F-EXEC-001 (E1) | ✅ (phase closure roadmap-owned) | `tests/test_runner_exec.py`, `tests/test_runner_dry_run.py` |
-| Persistent session store | `src/agent_run_supervisor/session.py` | F-SESSION-001 (S1) | ✅ S1 local lifecycle foundation | `tests/test_session_store.py`, `tests/test_session_strategy_guard.py` |
-| Persistent session runtime | `src/agent_run_supervisor/session_runtime.py`, `scripts/smoke_persistent_session.py` | F-SESSION-001 (S1) | ✅ S1 local lifecycle (`create/send/status/close/abort/list` + two-turn continuity); full crash recovery remains carried | `tests/test_session_runtime.py`, `tests/test_smoke_persistent_session.py`, `scripts/smoke_persistent_session.py` |
+| Process-liveness crash recovery | `src/agent_run_supervisor/process_liveness.py`, `src/agent_run_supervisor/session.py` | F-SESSION-001 / ARS-CRASH-RECOVERY (K1) | 🟡 implemented on K1 branch, pending PR | `tests/test_process_liveness.py`, `tests/test_session_store.py` |
+| Persistent session store | `src/agent_run_supervisor/session.py` | F-SESSION-001 (S1/K1) | ✅ S1 local lifecycle foundation; K1 liveness-aware lock recovery on branch | `tests/test_session_store.py`, `tests/test_session_strategy_guard.py` |
+| Persistent session runtime | `src/agent_run_supervisor/session_runtime.py`, `scripts/smoke_persistent_session.py` | F-SESSION-001 (S1/K1) | ✅ S1 local lifecycle (`create/send/status/close/abort/list` + two-turn continuity); K1 threads provably-crashed lease recovery into `send`/`close` on branch | `tests/test_session_runtime.py`, `tests/test_smoke_persistent_session.py`, `scripts/smoke_persistent_session.py` |
 | Observed event parser | `src/agent_run_supervisor/parser.py` | F-PARSER-001 | 🟡 (S1c adds prompt-turn NDJSON + `summarize_management_json` management summarizer) | `tests/test_parser.py` |
 | Status classifier | `src/agent_run_supervisor/exit_classifier.py` | F-STATUS-001 | 🟡 | `tests/test_exit_classifier.py` |
 | Result payload | `src/agent_run_supervisor/result.py` | F-STATUS-001 / F-EXEC-001 | ✅ | covered via runner/classifier tests |
@@ -633,8 +634,9 @@ touches the architecture.
 
 These are tracked in `docs/roadmap/current-status.md` §4 and are **not** re-decided here:
 
-- `ARS-CRASH-RECOVERY` — full process-liveness crash/interruption recovery beyond
-  deterministic expired-lease replacement.
+- `ARS-CRASH-RECOVERY` — K1 implements a branch candidate: process-owned lock metadata,
+  fail-safe `alive`/`crashed`/`unknown` classification, read-only detector fields, and opt-in
+  provably-crashed lease reclamation; closure remains roadmap/PR-owned after review and merge.
 - `ARS-SANDBOX-BOUNDARY` — parked; any real OS sandbox is a separate phase.
 - `ARS-CALLER-INTEGRATION` — I1 covers only the generic local library boundary; concrete
   platform behavior remains separate and unapproved.
