@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -120,6 +122,79 @@ def test_doctor_uses_role_acpx_binary_for_version_probe(
     assert payload["acpx_probe"]["available"] is True
     assert payload["acpx_probe"]["version"] == "0.10.0"
     assert payload["acpx_probe"]["ok"] is True
+
+
+def test_doctor_no_role_includes_readonly_probes_and_is_ci_safe(run_cli) -> None:
+    completed = run_cli(["doctor"])
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    # The always-on, pure-local read-only probes are present and pass.
+    assert payload["redaction_probe"]["ok"] is True
+    assert payload["redaction_probe"]["leaked"] == []
+    assert payload["session_probe"]["dir_mode_ok"] is True
+    assert payload["session_probe"]["file_mode_ok"] is True
+    # Role-only probes are absent (null) without --role.
+    assert payload["policy_probe"] is None
+    assert payload["workspace_probe"] is None
+    assert payload["npx_probe"] is None
+    assert payload["adapter_probe"] is None
+    # External-binary absence (node/acpx/npx) never flips ok: clean env -> exit 0.
+    assert payload["ok"] is True
+    assert payload["launched_real_agent"] is False
+
+
+def test_doctor_role_runs_readonly_role_probes(
+    run_cli, tmp_path: Path, valid_role_dict: dict[str, Any]
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    role_payload = dict(valid_role_dict)
+    role_payload["workspace"] = dict(valid_role_dict["workspace"])
+    role_payload["workspace"]["default_cwd"] = str(work)
+    role_payload["workspace"]["allowed_roots"] = [str(work)]
+    role_path = tmp_path / "role.json"
+    role_path.write_text(json.dumps(role_payload), encoding="utf-8")
+
+    completed = run_cli(["doctor", "--role", str(role_path)])
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload["policy_probe"]["ok"] is True
+    assert payload["policy_probe"]["default_action"] == "deny"
+    assert payload["workspace_probe"]["ok"] is True
+    assert payload["workspace_probe"]["allowed_roots_security_boundary"] is False
+    # npx/adapter probes are present but informational (never gate ok).
+    assert payload["npx_probe"] is not None
+    assert payload["adapter_probe"]["declared"] is True
+    assert "not launch" in payload["adapter_probe"]["detail"].lower()
+    assert payload["launched_real_agent"] is False
+
+
+def test_doctor_role_with_cwd_outside_roots_makes_ok_false(
+    run_cli, tmp_path: Path, valid_role_dict: dict[str, Any]
+) -> None:
+    work = tmp_path / "work"
+    outside = tmp_path / "outside"
+    work.mkdir()
+    outside.mkdir()
+    role_payload = dict(valid_role_dict)
+    role_payload["workspace"] = dict(valid_role_dict["workspace"])
+    # default_cwd outside the configured allowed_roots -> workspace probe fails.
+    role_payload["workspace"]["default_cwd"] = str(outside)
+    role_payload["workspace"]["allowed_roots"] = [str(work)]
+    role_path = tmp_path / "role.json"
+    role_path.write_text(json.dumps(role_payload), encoding="utf-8")
+
+    completed = run_cli(["doctor", "--role", str(role_path)])
+
+    assert completed.returncode == 1, completed.stdout
+    payload = json.loads(completed.stdout)
+    assert payload["ok"] is False
+    assert payload["workspace_probe"]["ok"] is False
+    assert payload["workspace_probe"]["error_detail"]
+    # A failed role probe must not imply a launched agent.
+    assert payload["launched_real_agent"] is False
 
 
 def test_run_no_real_run_writes_artifacts(run_cli, tmp_path: Path, role_file: Path, prompt_file: Path) -> None:
@@ -688,3 +763,118 @@ def test_session_close_cli_refuses_already_closed(
 
     assert second.returncode == 1
     assert "closed" in (second.stdout + second.stderr).lower()
+
+
+# --- H1 W2 cleanup CLI (dry-run default / confined apply) ------------------
+
+
+def _artifact_runs_sessions(tmp_path: Path) -> tuple[Path, Path]:
+    base = tmp_path / ".agent-run-supervisor"
+    runs = base / "runs"
+    sessions = base / "sessions"
+    runs.mkdir(parents=True)
+    sessions.mkdir(parents=True)
+    return runs, sessions
+
+
+def _aged_run(runs_dir: Path, run_id: str, *, age_days: float) -> Path:
+    run_dir = runs_dir / run_id
+    run_dir.mkdir()
+    marker = run_dir / "result.json"
+    marker.write_text("{}", encoding="utf-8")
+    ts = time.time() - age_days * 86400
+    os.utime(marker, (ts, ts))
+    os.utime(run_dir, (ts, ts))
+    return run_dir
+
+
+def _aged_session(sessions_dir: Path, session_id: str, *, state: str, age_days: float) -> Path:
+    sess_dir = sessions_dir / session_id
+    sess_dir.mkdir()
+    record = sess_dir / "session.json"
+    record.write_text(json.dumps({"session_id": session_id, "state": state}), encoding="utf-8")
+    ts = time.time() - age_days * 86400
+    os.utime(record, (ts, ts))
+    os.utime(sess_dir, (ts, ts))
+    return sess_dir
+
+
+def test_cleanup_cli_dry_run_then_apply(run_cli, tmp_path: Path) -> None:
+    runs, sessions = _artifact_runs_sessions(tmp_path)
+    old = _aged_run(runs, "run-old", age_days=10)
+    fresh = _aged_run(runs, "run-fresh", age_days=1)
+
+    dry = run_cli(
+        ["cleanup", "--runs-dir", str(runs), "--sessions-dir", str(sessions),
+         "--max-age-days", "5"]
+    )
+
+    assert dry.returncode == 0, dry.stderr
+    plan = json.loads(dry.stdout)
+    assert plan["applied"] is False
+    delete_ids = {c["id"] for c in plan["plan"]["delete"]}
+    skip_ids = {c["id"] for c in plan["plan"]["skip"]}
+    assert delete_ids == {"run-old"}
+    assert "run-fresh" in skip_ids
+    # Dry-run deletes nothing.
+    assert old.exists() and fresh.exists()
+
+    applied = run_cli(
+        ["cleanup", "--runs-dir", str(runs), "--sessions-dir", str(sessions),
+         "--max-age-days", "5", "--apply"]
+    )
+
+    assert applied.returncode == 0, applied.stderr
+    result = json.loads(applied.stdout)
+    assert result["applied"] is True
+    assert result["deleted"] == ["run-old"]
+    assert result["failed"] == []
+    assert not old.exists()
+    assert fresh.exists()
+
+
+def test_cleanup_cli_refuses_unconfined_root(run_cli, tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    sessions = tmp_path / "sessions"
+    runs.mkdir()
+    sessions.mkdir()
+
+    completed = run_cli(
+        ["cleanup", "--runs-dir", str(runs), "--sessions-dir", str(sessions),
+         "--max-age-days", "1"]
+    )
+
+    assert completed.returncode == 1
+    assert "retention error" in completed.stderr.lower()
+
+
+def test_cleanup_cli_never_deletes_open_session(run_cli, tmp_path: Path) -> None:
+    runs, sessions = _artifact_runs_sessions(tmp_path)
+    open_sess = _aged_session(sessions, "sess-open", state="open", age_days=30)
+
+    applied = run_cli(
+        ["cleanup", "--runs-dir", str(runs), "--sessions-dir", str(sessions),
+         "--max-age-days", "1", "--apply"]
+    )
+
+    assert applied.returncode == 0, applied.stderr
+    result = json.loads(applied.stdout)
+    assert result["applied"] is True
+    # An open session is unconditionally protected: never deleted, forced to skip.
+    assert "sess-open" not in result["deleted"]
+    skip = {c["id"]: c for c in result["plan"]["skip"]}
+    assert skip["sess-open"]["reason"] == "open_session"
+    assert open_sess.exists()
+
+
+def test_cleanup_cli_rejects_removed_include_open_flag(run_cli, tmp_path: Path) -> None:
+    runs, sessions = _artifact_runs_sessions(tmp_path)
+
+    completed = run_cli(
+        ["cleanup", "--runs-dir", str(runs), "--sessions-dir", str(sessions),
+         "--max-age-days", "1", "--include-open"]
+    )
+
+    # The flag was removed for H1; argparse refuses it as an unknown option.
+    assert completed.returncode == 2
+    assert "include-open" in (completed.stdout + completed.stderr).lower()

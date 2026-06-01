@@ -113,7 +113,18 @@ Responsibilities:
 - Stay read-only unless a future probe explicitly documents otherwise.
 - Return structured diagnostics.
 
-Current status: Python/Node/acpx basics, role-specific acpx binary probe, fixture replay, and EventStore permission probe are partially implemented.
+Current status: implemented. H1 completes the read-only probe set — `probe_policy`,
+`probe_workspace`, `probe_redaction`, `probe_npx`, `probe_adapter`, and
+`probe_session_readiness` join the existing Python/Node/acpx basics, role-specific acpx binary
+probe, fixture replay, and EventStore permission probe, all wired into `cmd_doctor`. Every probe
+is read-only: no probe launches an AGENT, runs `acpx exec`, sends a session prompt, or triggers
+an `npx` fetch (`launched_real_agent` stays `false`); role-dependent probes
+(`policy`/`workspace`/`npx`/`adapter`/role-aware session readiness) run only with `--role`, and
+`ok` gates only on pure-local deterministic probes so the no-role doctor still exits `0` in CI.
+The doctor output shape is the caller contract in `docs/design/result-event-schema.md` §5.
+Evidence: `src/agent_run_supervisor/preflight.py`, `src/agent_run_supervisor/commands.py`
+(`cmd_doctor`), `tests/test_preflight.py`, `tests/test_cli_commands.py`. (H1 on branch
+`ai/h1-operational-hardening-2026-06-01`, not yet merged.)
 
 ### 3.5 `runner.py` — one-shot exec supervision
 

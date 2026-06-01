@@ -10,13 +10,31 @@ from typing import Any
 from agent_run_supervisor.event_store import EventStore
 from agent_run_supervisor.parser import ParseResult, parse_acpx_stdout
 from agent_run_supervisor.policy import ExecStrategyError
-from agent_run_supervisor.preflight import probe_acpx, probe_node
+from agent_run_supervisor.preflight import (
+    probe_acpx,
+    probe_adapter,
+    probe_node,
+    probe_npx,
+    probe_policy,
+    probe_redaction,
+    probe_session_readiness,
+    probe_workspace,
+)
+from agent_run_supervisor.retention import (
+    CleanupPlan,
+    CleanupResult,
+    RetentionError,
+    RetentionPolicy,
+    apply_cleanup,
+    plan_cleanup,
+)
 from agent_run_supervisor.role import RoleValidationError, load_role, role_hash
 from agent_run_supervisor.runner import SupervisorRunner
 from agent_run_supervisor.session import SessionError
 from agent_run_supervisor.session_runtime import SessionRuntime, SessionRuntimeError
 from agent_run_supervisor.workspace import WorkspaceValidationError
 
+DEFAULT_RUNS_DIR_NAME = Path(".agent-run-supervisor") / "runs"
 DEFAULT_SESSIONS_DIR_NAME = Path(".agent-run-supervisor") / "sessions"
 
 def _load_json(path: str | Path) -> Any:
@@ -110,8 +128,32 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     probe = EventStore(base_dir=Path.cwd() / ".tmp" / "doctor-event-store-probe").permission_probe()
     node_probe = probe_node()
     acpx_probe = probe_acpx(binary=role.runner.acpx_binary if role is not None else None)
+
+    # Always-on, pure-local read-only probes (deterministic in CI).
+    redaction_probe = probe_redaction()
+    session_probe = probe_session_readiness(role)
+
+    # Role-dependent probes only run when a role is supplied.
+    policy_probe = probe_policy(role) if role is not None else None
+    workspace_probe = probe_workspace(role) if role is not None else None
+    npx_probe = probe_npx(role) if role is not None else None
+    adapter_probe = probe_adapter(role) if role is not None else None
+
+    # ``ok`` gates only on pure-local deterministic probes so the no-role CI gate
+    # keeps exiting 0 without node/acpx/npx. External-binary probes
+    # (node/acpx/npx/adapter) are informational and never flip ``ok``.
+    ok = (
+        not fixture_replay.get("protocol_error", True)
+        and bool(probe.get("dir_mode_ok"))
+        and bool(probe.get("file_mode_ok"))
+        and bool(redaction_probe.get("ok"))
+        and bool(session_probe.get("ok"))
+    )
+    if role is not None:
+        ok = ok and bool(policy_probe.get("ok")) and bool(workspace_probe.get("ok"))
+
     payload = {
-        "ok": not fixture_replay.get("protocol_error", True),
+        "ok": ok,
         "python_version": platform.python_version(),
         "node_version_requirement": ">=22.12",
         "launched_real_agent": False,
@@ -120,6 +162,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "role_validation": role_payload,
         "node_probe": node_probe,
         "acpx_probe": acpx_probe,
+        "redaction_probe": redaction_probe,
+        "session_probe": session_probe,
+        "policy_probe": policy_probe,
+        "workspace_probe": workspace_probe,
+        "npx_probe": npx_probe,
+        "adapter_probe": adapter_probe,
     }
     _print_json(payload)
     return 0 if payload["ok"] else 1
@@ -261,3 +309,59 @@ def cmd_session(args: argparse.Namespace) -> int:
 
     print(f"error: unknown session subcommand {session_command!r}", file=sys.stderr)
     return 2
+
+
+def _candidate_payload(candidate: Any) -> dict[str, Any]:
+    return {
+        "kind": candidate.kind,
+        "id": candidate.id,
+        "path": str(candidate.path),
+        "age_seconds": candidate.age_seconds,
+        "action": candidate.action,
+        "reason": candidate.reason,
+    }
+
+
+def _plan_payload(plan: CleanupPlan) -> dict[str, Any]:
+    return {
+        "root": str(plan.root),
+        "runs_dir": str(plan.runs_dir),
+        "sessions_dir": str(plan.sessions_dir),
+        "delete": [_candidate_payload(c) for c in plan.delete],
+        "skip": [_candidate_payload(c) for c in plan.skip],
+    }
+
+
+def cmd_cleanup(args: argparse.Namespace) -> int:
+    runs_dir = Path(args.runs_dir) if args.runs_dir else Path.cwd() / DEFAULT_RUNS_DIR_NAME
+    sessions_dir = (
+        Path(args.sessions_dir)
+        if args.sessions_dir
+        else Path.cwd() / DEFAULT_SESSIONS_DIR_NAME
+    )
+    policy = RetentionPolicy(max_age_days=args.max_age_days, max_count=args.max_count)
+    try:
+        plan = plan_cleanup(
+            runs_dir=runs_dir,
+            sessions_dir=sessions_dir,
+            policy=policy,
+        )
+    except RetentionError as exc:
+        print(f"retention error: {exc}", file=sys.stderr)
+        return 1
+
+    if not args.apply:
+        # Dry-run is the default: list first, delete nothing.
+        _print_json({"applied": False, "plan": _plan_payload(plan)})
+        return 0
+
+    result: CleanupResult = apply_cleanup(plan, confirm=True)
+    _print_json(
+        {
+            "applied": True,
+            "deleted": result.deleted,
+            "failed": result.failed,
+            "plan": _plan_payload(plan),
+        }
+    )
+    return 0 if not result.failed else 1

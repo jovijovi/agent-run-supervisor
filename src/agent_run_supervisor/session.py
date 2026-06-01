@@ -301,6 +301,54 @@ class SessionStore:
                 f"{', '.join(mismatches)} differ from the current role",
             )
 
+    # -- stale-lock detection (W4, read-only) -----------------------------
+
+    def detect_stale_locks(self, *, now: _dt.datetime | None = None) -> list[dict]:
+        """Report lock/lease/temp-debris state per record. Read-only.
+
+        For every local session record, report whether a ``lock.json`` is
+        present, whether its lease is **provably expired** (``expires_at <= now``,
+        matching :meth:`acquire_lock`'s replacement boundary), and any leftover
+        ``.tmp-*`` atomic-write debris in the session directory.
+
+        This launches nothing, takes no lock, signals no process, and never
+        removes or rewrites a lock or record. An unreadable/garbage ``lock.json``
+        is treated conservatively as expired (it cannot be a live lease). A
+        non-expired lock is always reported as live and is never force-broken.
+        """
+        moment = _ensure_aware(now or _utc_now())
+        report: list[dict] = []
+        for record in self.list_records():
+            session_dir = self.base_dir / record.session_id
+            lock_path = session_dir / LOCK_JSON
+            lock_present = lock_path.exists()
+            lease_expired = False
+            if lock_present:
+                try:
+                    existing = _read_json(lock_path)
+                    expires_at = _ensure_aware(
+                        _dt.datetime.fromisoformat(existing["expires_at"])
+                    )
+                    lease_expired = expires_at <= moment
+                except (OSError, ValueError, KeyError, TypeError):
+                    # An unreadable/garbage lock is never a live lease.
+                    lease_expired = True
+            tmp_debris = sorted(
+                entry.name
+                for entry in session_dir.iterdir()
+                if entry.name.startswith(".tmp") or entry.name.endswith(".tmp")
+            )
+            report.append(
+                {
+                    "session_id": record.session_id,
+                    "state": record.state,
+                    "lock_present": lock_present,
+                    "lease_expired": lease_expired,
+                    "tmp_debris": tmp_debris,
+                }
+            )
+        return report
+
     # -- lease lock -------------------------------------------------------
 
     def acquire_lock(
