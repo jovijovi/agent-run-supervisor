@@ -532,3 +532,83 @@ def test_release_lock_without_lock_raises(store, role, workspace) -> None:
     )
     with pytest.raises(SessionLockError):
         store.release_lock("sess-nolock", token="any" + "thing")
+
+
+# --- W4 stale-lock detector (read-only) -----------------------------------
+
+
+def test_detect_stale_locks_flags_expired_lease(store, role, workspace) -> None:
+    store.create_session(
+        session_id="sess-stale", role=role, workspace_result=workspace, now=T0
+    )
+    store.acquire_lock("sess-stale", owner="worker-1", now=T0, lease_seconds=100)
+
+    # now is past the lease expiry -> the lock is provably expired.
+    report = store.detect_stale_locks(now=T0 + timedelta(seconds=101))
+
+    entry = {row["session_id"]: row for row in report}["sess-stale"]
+    assert entry["state"] == "open"
+    assert entry["lock_present"] is True
+    assert entry["lease_expired"] is True
+    assert entry["tmp_debris"] == []
+
+
+def test_detect_stale_locks_treats_live_lock_as_not_expired(store, role, workspace) -> None:
+    store.create_session(
+        session_id="sess-live", role=role, workspace_result=workspace, now=T0
+    )
+    store.acquire_lock("sess-live", owner="worker-1", now=T0, lease_seconds=100)
+
+    # now is still inside the lease window -> the lock is live, never stale.
+    report = store.detect_stale_locks(now=T0 + timedelta(seconds=50))
+
+    entry = {row["session_id"]: row for row in report}["sess-live"]
+    assert entry["lock_present"] is True
+    assert entry["lease_expired"] is False
+
+
+def test_detect_stale_locks_reports_record_without_lock(store, role, workspace) -> None:
+    store.create_session(
+        session_id="sess-nolock2", role=role, workspace_result=workspace, now=T0
+    )
+
+    report = store.detect_stale_locks(now=T0)
+
+    entry = {row["session_id"]: row for row in report}["sess-nolock2"]
+    assert entry["lock_present"] is False
+    assert entry["lease_expired"] is False
+
+
+def test_detect_stale_locks_lists_tmp_debris(store, role, workspace) -> None:
+    store.create_session(
+        session_id="sess-debris", role=role, workspace_result=workspace, now=T0
+    )
+    debris = store.base_dir / "sess-debris" / (".tmp-" + "leftover")
+    debris.write_text("partial", encoding="utf-8")
+
+    report = store.detect_stale_locks(now=T0)
+
+    entry = {row["session_id"]: row for row in report}["sess-debris"]
+    assert (".tmp-" + "leftover") in entry["tmp_debris"]
+
+
+def test_detect_stale_locks_is_read_only(store, role, workspace) -> None:
+    store.create_session(
+        session_id="sess-ro", role=role, workspace_result=workspace, now=T0
+    )
+    store.acquire_lock("sess-ro", owner="worker-1", now=T0, lease_seconds=100)
+    before = (store.base_dir / "sess-ro" / "lock.json").read_text(encoding="utf-8")
+    record_before = store.open_session("sess-ro")
+
+    store.detect_stale_locks(now=T0 + timedelta(seconds=500))
+
+    # The detector never removes/replaces the lock or mutates the record.
+    assert (store.base_dir / "sess-ro" / "lock.json").exists()
+    assert (store.base_dir / "sess-ro" / "lock.json").read_text(encoding="utf-8") == before
+    assert store.open_session("sess-ro") == record_before
+
+
+def test_detect_stale_locks_empty_when_root_missing(tmp_path: Path) -> None:
+    missing = SessionStore(base_dir=tmp_path / "no-sessions-here")
+
+    assert missing.detect_stale_locks(now=T0) == []

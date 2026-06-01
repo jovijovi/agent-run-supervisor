@@ -55,7 +55,48 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     _add_session_parser(subparsers)
+    _add_cleanup_parser(subparsers)
     return parser
+
+
+def _add_cleanup_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Confined, dry-run-first run/session artifact retention/cleanup."""
+    cleanup = subparsers.add_parser(
+        "cleanup",
+        help="Plan (dry-run) or apply confined retention cleanup of local run/session artifacts.",
+        description=(
+            "List run/session artifacts under a .agent-run-supervisor root that a "
+            "retention policy would remove. Dry-run by default; --apply deletes only "
+            "the planned, confined, non-live entries."
+        ),
+    )
+    cleanup.add_argument(
+        "--runs-dir",
+        default=None,
+        help="Directory that holds run artifacts (defaults to .agent-run-supervisor/runs).",
+    )
+    cleanup.add_argument(
+        "--sessions-dir",
+        default=None,
+        help="Directory that holds session records (defaults to .agent-run-supervisor/sessions).",
+    )
+    cleanup.add_argument(
+        "--max-age-days",
+        type=int,
+        default=None,
+        help="Delete artifacts strictly older than this many days.",
+    )
+    cleanup.add_argument(
+        "--max-count",
+        type=int,
+        default=None,
+        help="Keep only the newest N eligible artifacts; delete the rest.",
+    )
+    cleanup.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually delete the planned entries (default is a read-only dry-run).",
+    )
 
 
 def _add_session_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -142,6 +183,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from agent_run_supervisor.commands import cmd_session
 
         return cmd_session(args)
+    if args.command == "cleanup":
+        from agent_run_supervisor.commands import cmd_cleanup
+
+        return cmd_cleanup(args)
     parser.print_usage(sys.stderr)
     print(f"error: unknown command {args.command}", file=sys.stderr)
     return 2

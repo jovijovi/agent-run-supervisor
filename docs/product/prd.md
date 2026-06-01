@@ -196,7 +196,7 @@ Checklist:
 - [x] Use atomic writes for final artifacts.
 - [x] Append stream artifacts as JSONL/NDJSON.
 - [x] Redact prompt, env, argv, metadata, stderr, stdout, normalized event text, and final message surfaces.
-- [ ] Add retention/cleanup knobs before long-lived use.
+- [x] Add retention/cleanup knobs before long-lived use. *(H1: confined, dry-run-first `retention.plan_cleanup`/`apply_cleanup` + `agent-run-supervisor cleanup` CLI; deletes only within a resolved `.agent-run-supervisor` root, never follows symlinks out of root, never deletes open/live-locked sessions; `tests/test_retention.py`, `tests/test_cli_commands.py`. Branch `ai/h1-operational-hardening-2026-06-01`, not yet merged.)*
 - [x] Add session artifact foundation layout.
 - [x] Add session turn artifacts. *(S1c: redacted `turns/<turn_id>/` and `management/` artifacts; cleanup policy remains a later slice.)*
 - [ ] Add explicit unsafe raw-capture opt-in only if a later phase proves it necessary.
@@ -234,17 +234,17 @@ Checklist:
 - [x] Honor role-specific `runner.acpx_binary` in acpx probe.
 - [x] Replay fixture through parser.
 - [x] Probe EventStore permissions.
-- [ ] Probe adapter availability.
-- [ ] Detect runtime `npx` fetch risk.
-- [ ] Check policy parseability/dry-run safely.
-- [ ] Report role cwd/allowed-roots validation.
-- [ ] Report redaction probe.
-- [ ] Add session-readiness probes once session support exists.
+- [x] Probe adapter availability. *(H1: `preflight.probe_adapter` — declared + hostable only; never launches the adapter/agent; `tests/test_preflight.py`.)*
+- [x] Detect runtime `npx` fetch risk. *(H1: `preflight.probe_npx` — read-only `npx --version`; `fetch_risk` true only when no explicit `acpx_binary`; never runs `npx acpx`; `tests/test_preflight.py`.)*
+- [x] Check policy parseability/dry-run safely. *(H1: `preflight.probe_policy` — pure-local permission-policy compile, asserts `default_action == "deny"`, no subprocess; `tests/test_preflight.py`.)*
+- [x] Report role cwd/allowed-roots validation. *(H1: `preflight.probe_workspace` — reuses the workspace intent gate; always reports the not-a-sandbox disclaimer; `tests/test_preflight.py`.)*
+- [x] Report redaction probe. *(H1: `preflight.probe_redaction` — synthetic pattern-shaped samples only, asserts `leaked == []`; `tests/test_preflight.py`.)*
+- [x] Add session-readiness probes once session support exists. *(H1: `preflight.probe_session_readiness` — temp-store `0700`/`0600` mode probe + read-only stale-lock detection; no acpx launch; `tests/test_preflight.py`, `tests/test_session_store.py`.)*
 
 Acceptance:
 
-- Doctor remains read-only unless a future probe explicitly states otherwise.
-- Missing/invalid binaries produce structured output rather than tracebacks.
+- Doctor remains read-only unless a future probe explicitly states otherwise. *(All H1 probes are read-only; `launched_real_agent` stays `false`. Doctor output is documented in `docs/design/result-event-schema.md` §5. H1 on branch `ai/h1-operational-hardening-2026-06-01`, not yet merged.)*
+- Missing/invalid binaries produce structured output rather than tracebacks. *(External-binary probes are informational and never flip `doctor`'s `ok`, so the no-role gate still exits `0`.)*
 
 ## 5. Non-functional requirements
 

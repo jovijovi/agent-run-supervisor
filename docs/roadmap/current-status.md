@@ -2,18 +2,18 @@
 title: "agent-run-supervisor Roadmap Current Status"
 status: active
 created_at: 2026-05-28
-last_validated_at: 2026-05-31T00:00:00+0800
+last_validated_at: 2026-06-01T00:00:00+0800
 ---
 # agent-run-supervisor Roadmap Current Status
 
 > Living roadmap, phase tracker, and implementation-stage acceptance register. This file replaces the deleted standalone implementation plan.
 
 ```text
-last_updated: 2026-05-31
+last_updated: 2026-06-01
 base_branch: main
 product_role: independent local Python library + dev CLI for supervising ACP/acpx AGENT runs and sessions with redacted audit evidence
 source_of_truth: GOAL.md, docs/product/prd.md, docs/design/architecture.md, docs/design/technical-solution.md, docs/roadmap/features.md, docs/roadmap/current-status.md, docs/AI_FLOW.md
-current_mainline: E1 local one-shot exec runner is merged and closed on main via PR #8 (21b3393); F-EXEC-001 is Done; S1a session contract evidence is merged via PR #14 (99637c6); S1b adds the local session store/lock foundation; S1c adds the local create/send/status runtime MVP; S1d adds local lifecycle completion (close/abort/list + closed-session refusal); S1 closure acceptance adds multi-turn continuity regression coverage and a reproducible local real-acpx persistent-session smoke (scripts/smoke_persistent_session.py), closing S1 for the local persistent-session lifecycle (S1a-S1d + closure evidence); full crash/interruption recovery and artifact retention/cleanup are carried to H1 operational hardening (ARS-DOCTOR-COMPLETE, ARS-RETENTION-CLEANUP, F-RETENTION-001) and caller integration remains parked (I1)
+current_mainline: E1 local one-shot exec runner is merged and closed on main via PR #8 (21b3393); F-EXEC-001 is Done; S1a session contract evidence is merged via PR #14 (99637c6); S1b adds the local session store/lock foundation; S1c adds the local create/send/status runtime MVP; S1d adds local lifecycle completion (close/abort/list + closed-session refusal); S1 closure acceptance adds multi-turn continuity regression coverage and a reproducible local real-acpx persistent-session smoke (scripts/smoke_persistent_session.py), closing S1 for the local persistent-session lifecycle (S1a-S1d + closure evidence); H1 operational hardening is implemented on branch ai/h1-operational-hardening-2026-06-01 (not yet merged) — the full read-only doctor probe set (ARS-DOCTOR-COMPLETE), confined dry-run-first run/session retention/cleanup (ARS-RETENTION-CLEANUP, F-RETENTION-001), the caller-stable result/event schema doc (docs/design/result-event-schema.md), and a narrow detection-first crash tail (read-only stale-lock/.tmp-* detection + provably-expired lock hygiene); full process-liveness crash recovery beyond deterministic expired-lease replacement remains an explicit carry-over (ARS-CRASH-RECOVERY), and caller integration (I1) is next as design-only / thin local integration with all standing non-approvals still in force
 ```
 
 ## 1. How to read this roadmap
@@ -39,7 +39,7 @@ Documentation authority realignment is complete on main via PR #6 (`7dcbe4f`).
 The product requirement includes both one-shot exec and persistent sessions.
 Engineering sequence may implement exec first, then persistent sessions.
 Exec-first sequencing belongs in roadmap/phase planning only, not in PRD, GOAL, or product-level design as a reduced product scope.
-Current implementation: E1 local one-shot exec runner is merged and closed on main via PR #8 (`21b3393`); F-EXEC-001 is Done. S1a persistent-session contract evidence is merged via PR #14 (`99637c6`). S1b adds the local session store/lock foundation. S1c adds the local create/send/status runtime MVP. S1d adds the local lifecycle completion slice (close, abort/cancel, local read-only list, and closed-session refusal). S1 closure acceptance adds multi-turn continuity regression coverage and a reproducible local real-acpx persistent-session smoke, closing S1 for the **local persistent-session lifecycle** (S1a–S1d plus closure evidence). S1 remains exactly the four approved slices (S1a/S1b/S1c/S1d); closure acceptance introduces no new S1 subphase. Full crash/interruption recovery and artifact retention/cleanup are deliberately carried to H1 operational hardening, not treated as S1 blockers; caller integration stays parked at I1.
+Current implementation: E1 local one-shot exec runner is merged and closed on main via PR #8 (`21b3393`); F-EXEC-001 is Done. S1a persistent-session contract evidence is merged via PR #14 (`99637c6`). S1b adds the local session store/lock foundation. S1c adds the local create/send/status runtime MVP. S1d adds the local lifecycle completion slice (close, abort/cancel, local read-only list, and closed-session refusal). S1 closure acceptance adds multi-turn continuity regression coverage and a reproducible local real-acpx persistent-session smoke, closing S1 for the **local persistent-session lifecycle** (S1a–S1d plus closure evidence). S1 remains exactly the four approved slices (S1a/S1b/S1c/S1d); closure acceptance introduces no new S1 subphase. H1 operational hardening is implemented on branch `ai/h1-operational-hardening-2026-06-01` (not yet merged): the full read-only doctor probe set, confined dry-run-first run/session retention/cleanup, the caller-stable result/event schema doc, and a narrow detection-first crash tail. Full process-liveness crash/interruption recovery beyond deterministic expired-lease replacement is deliberately deferred as an explicit carry-over (`ARS-CRASH-RECOVERY`); caller integration (I1) is the next step as design-only / thin local integration, with implementation gated on a separate integration PRD/plan and all standing non-approvals (§5) still in force.
 ```
 
 ## 3. Phase roadmap
@@ -223,22 +223,61 @@ Goal: close long-lived-use tails.
 
 Checklist:
 
-- [ ] Doctor probes adapter availability without launching AGENT work.
-- [ ] Doctor detects runtime `npx` fetch risk.
-- [ ] Doctor checks policy parseability safely.
-- [ ] Doctor reports role cwd/allowed-roots validation.
-- [ ] Doctor reports redaction probe.
-- [ ] Doctor reports session readiness after S1.
-- [ ] Retention/cleanup knobs exist for run/session artifacts.
-- [ ] Result/event schema is documented for caller stability.
+- [x] Doctor probes adapter availability without launching AGENT work. *(W1: `preflight.probe_adapter` — declared + hostable only, never launches the adapter/agent.)*
+- [x] Doctor detects runtime `npx` fetch risk. *(W1: `preflight.probe_npx` — read-only `npx --version`; `fetch_risk` true only when no explicit `acpx_binary`; never runs `npx acpx`.)*
+- [x] Doctor checks policy parseability safely. *(W1: `preflight.probe_policy` — pure-local permission-policy compile, asserts `default_action == "deny"`, no subprocess.)*
+- [x] Doctor reports role cwd/allowed-roots validation. *(W1: `preflight.probe_workspace` — reuses the workspace intent gate; always reports the not-a-sandbox disclaimer.)*
+- [x] Doctor reports redaction probe. *(W1: `preflight.probe_redaction` — synthetic pattern-shaped samples only, asserts `leaked == []`.)*
+- [x] Doctor reports session readiness after S1. *(W1/W4: `preflight.probe_session_readiness` — temp-store `0700`/`0600` mode probe + read-only stale-lock detection; no acpx launch.)*
+- [x] Retention/cleanup knobs exist for run/session artifacts. *(W2: `retention.plan_cleanup`/`apply_cleanup` + `agent-run-supervisor cleanup` CLI — confined, dry-run-first.)*
+- [x] Result/event schema is documented for caller stability. *(W3: `docs/design/result-event-schema.md`, pinned by `tests/test_result_event_schema.py`.)*
 
 Acceptance:
 
-- Doctor tests cover success/failure for each probe.
-- Retention tests prove safe deletion/listing boundaries.
-- Feature tracker marks hardening tails complete.
+- Doctor tests cover success/failure for each probe. *(`tests/test_preflight.py`, `tests/test_cli_commands.py`.)*
+- Retention tests prove safe deletion/listing boundaries. *(`tests/test_retention.py`, `tests/test_cli_commands.py`.)*
+- Feature tracker marks hardening tails complete. *(`docs/roadmap/features.md`: `F-CLI-003` Done, `F-RETENTION-001` Done.)*
 
-Status: **Planned**.
+H1 evidence (branch `ai/h1-operational-hardening-2026-06-01`, not yet merged; four workstreams):
+
+- **W1 — Doctor completion (`ARS-DOCTOR-COMPLETE`).** Full read-only probe set in
+  `src/agent_run_supervisor/preflight.py` (`probe_policy`, `probe_workspace`,
+  `probe_redaction`, `probe_npx`, `probe_adapter`, `probe_session_readiness`) wired into
+  `cmd_doctor` (`src/agent_run_supervisor/commands.py`). Every probe is read-only:
+  `launched_real_agent` stays `false`; no probe runs `acpx exec`, the adapter, a session
+  prompt, or an `npx` fetch. `ok` gates only on pure-local deterministic probes so the no-role
+  CI `doctor` still exits `0`; role-dependent probes run only with `--role`. Tests:
+  `tests/test_preflight.py`, `tests/test_cli_commands.py`.
+- **W2 — Retention/cleanup (`ARS-RETENTION-CLEANUP`, `F-RETENTION-001`).** New
+  `src/agent_run_supervisor/retention.py` (`plan_cleanup`/`apply_cleanup`,
+  `RetentionPolicy`, `CleanupCandidate`/`CleanupPlan`/`CleanupResult`, `RetentionError`) plus
+  the `agent-run-supervisor cleanup` command (`cli.py`, `commands.py`). Dry-run is the default;
+  `--apply` deletes **only** planned entries. Hard artifact-root confinement to a resolved
+  `.agent-run-supervisor` root, symlink-escape refusal, open/live-locked-session protection,
+  and TOCTOU re-checks at apply time. Tests: `tests/test_retention.py`, `tests/test_cli_commands.py`.
+- **W3 — Caller-stable schema doc.** `docs/design/result-event-schema.md` documents the
+  `result.json` payload, session result projections, statuses/error codes, normalized event
+  families, `doctor` output, and the cleanup plan/result shape, with an additive-only
+  stability contract (`business_verdict` always `null`). Fidelity test
+  `tests/test_result_event_schema.py` pins the documented top-level `result.json` key set
+  against `result.build_result_payload`.
+- **W4 — Narrow detection-first crash tail.** Read-only
+  `SessionStore.detect_stale_locks` (`src/agent_run_supervisor/session.py`) reports expired
+  leases and `.tmp-*` debris (takes no lock, removes nothing, signals no process); it is
+  surfaced by `probe_session_readiness` and consumed by the cleanup planner, and provably
+  expired `lock.json` files are removed only as part of an eligible session dir. Tests:
+  `tests/test_session_store.py`. **Carry-over:** full process-liveness crash/interruption
+  recovery beyond deterministic expired-lease replacement (no PID inspection, signals, or
+  live-session takeover) is deliberately deferred — tracked as `ARS-CRASH-RECOVERY` in §4.
+
+H1 introduces no non-approval from §5: no Sachima/Gateway/IM/public-ingress/production-config/
+real-delivery/service-restart/live/default-on/automatic-reply behavior; `doctor` never launches
+an AGENT and `cleanup` never deletes outside a resolved `.agent-run-supervisor` root.
+
+Status: **Implemented on branch `ai/h1-operational-hardening-2026-06-01` (not yet merged);
+pending review/merge.** W1–W4 complete with tests green; `ARS-DOCTOR-COMPLETE` and
+`ARS-RETENTION-CLEANUP` are closed on this branch (see §4). Full process-liveness crash recovery
+remains an explicit carry-over (`ARS-CRASH-RECOVERY`).
 
 ### I1 — Thin caller integration
 
@@ -257,21 +296,27 @@ Acceptance:
 - Separate integration PRD/plan names exact caller behavior and non-goals.
 - Supervisor remains local library/CLI.
 
-Status: **Parked pending separate approval**.
+Status: **Next, design-only.** With H1 hardening complete on branch, the approved next step is
+local caller-integration *design* / a thin *local* integration sketch — **not** live behavior.
+Integration implementation stays gated on a separate integration PRD/plan and explicit approval;
+the standing non-approvals (§5) all hold (no Sachima behavior, public ingress, real delivery,
+Gateway lifecycle, production config, automatic replies, or agent-to-agent routing). The
+implementation gate is tracked as `ARS-CALLER-INTEGRATION` in §4.
 
 ## 4. Tail register
 
 | ID | Class | Description | Blocks code work? | Required before | Acceptance method | Status |
 |---|---|---|---:|---|---|---|
-| ARS-DOCTOR-COMPLETE | NEXT_PHASE | Doctor is missing adapter/npx/policy/cwd/redaction/session probes. | No | H1 | Structured doctor tests | Open |
-| ARS-RETENTION-CLEANUP | NEXT_PHASE | Run/session artifact retention cleanup knobs are missing. | No | H1 / long-lived use | Cleanup tests and docs | Open |
+| ARS-CRASH-RECOVERY | CARRY | Full process-liveness crash/interruption recovery beyond deterministic expired-lease replacement (no PID inspection, signals, or live-session takeover). H1 closed only the read-only stale-lock/`.tmp-*` detection + provably-expired lock hygiene. | No | Separate hardening phase | Detection + safe-recovery proof without unsafe cross-process assumptions | Carried (deferred from H1) |
 | ARS-SANDBOX-BOUNDARY | PARKED | Any claim that `allowed_roots` is an OS/filesystem sandbox remains parked. | No | Separate sandbox phase | OS sandbox proof + negative probes | Parked |
-| ARS-CALLER-INTEGRATION | PARKED | Sachima/Hermes behavior integration remains separate. | No | I1 approval | Explicit integration PRD/plan | Parked |
+| ARS-CALLER-INTEGRATION | PARKED | Sachima/Hermes behavior integration remains separate; I1 *design* may proceed, but integration *implementation* needs separate approval. | No | I1 implementation approval | Explicit integration PRD/plan | Parked |
 
 ### Recently closed tails
 
 | ID | Closed by | Evidence | Result |
 |---|---|---|---|
+| ARS-DOCTOR-COMPLETE | H1 branch `ai/h1-operational-hardening-2026-06-01` (not yet merged) | Full read-only doctor probe set in `src/agent_run_supervisor/preflight.py` (`probe_policy/workspace/redaction/npx/adapter/session_readiness`) wired into `cmd_doctor`; `tests/test_preflight.py`, `tests/test_cli_commands.py`; doctor output documented in `docs/design/result-event-schema.md` §5 | Closed on branch (pending merge); `launched_real_agent: false` preserved |
+| ARS-RETENTION-CLEANUP | H1 branch `ai/h1-operational-hardening-2026-06-01` (not yet merged) | `src/agent_run_supervisor/retention.py` (`plan_cleanup`/`apply_cleanup`, confined dry-run-first), `cleanup` CLI in `cli.py`/`commands.py`, read-only `SessionStore.detect_stale_locks`; `tests/test_retention.py`, `tests/test_cli_commands.py`, `tests/test_session_store.py`; plan/result shape in `docs/design/result-event-schema.md` §7 | Closed on branch (pending merge); `F-RETENTION-001` Done; full crash recovery carried as `ARS-CRASH-RECOVERY` |
 | ARS-EXEC-RUNNER | PR #8 (`21b3393`) | `tests/test_runner_exec.py`, local gates, local smoke `result.json` (`final_message=AGENT_RUN_SUPERVISOR_E1_OK`), `docs/roadmap/features.md` F-EXEC-001 Done | Closed |
 | ARS-SESSIONS | S1a-S1d + closure acceptance branch | S1a fixtures, S1b store/lock foundation, S1c create/send/status runtime, S1d close/abort/list lifecycle, `tests/test_session_runtime.py::test_two_sequential_sends_reuse_record_persist_distinct_turns_and_release_lease`, `tests/test_smoke_persistent_session.py`, and `scripts/smoke_persistent_session.py` real local acpx lifecycle smoke | Closed for the local persistent-session lifecycle; H1 carries full crash/interruption recovery and retention/cleanup |
 | ARS-DOC-AUTHORITY | PR #6 (`7dcbe4f`) | docs index/drift, CI `Verify`, post-merge gates | Closed |
