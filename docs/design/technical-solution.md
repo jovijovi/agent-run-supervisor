@@ -123,8 +123,8 @@ an `npx` fetch (`launched_real_agent` stays `false`); role-dependent probes
 `ok` gates only on pure-local deterministic probes so the no-role doctor still exits `0` in CI.
 The doctor output shape is the caller contract in `docs/design/result-event-schema.md` §5.
 Evidence: `src/agent_run_supervisor/preflight.py`, `src/agent_run_supervisor/commands.py`
-(`cmd_doctor`), `tests/test_preflight.py`, `tests/test_cli_commands.py`. (H1 on branch
-`ai/h1-operational-hardening-2026-06-01`, not yet merged.)
+(`cmd_doctor`), `tests/test_preflight.py`, `tests/test_cli_commands.py`. H1 is merged on
+`main` via PR #19 at `484ae23`.
 
 ### 3.5 `runner.py` — one-shot exec supervision
 
@@ -255,9 +255,33 @@ the local `sessions/<session_id>/session.json` and `lock.json` foundation. S1c a
 redacted session turn artifacts under `sessions/<session_id>/turns/<turn_id>/` and
 redacted management summaries under `sessions/<session_id>/management/`; S1d adds redacted
 `management/close.json` and `management/abort.json` plus the atomic `closed` state transition.
-Retention controls and session cleanup policy remain future work.
+H1 adds confined, dry-run-first retention/cleanup over run and session artifacts via
+`retention.py` and the `cleanup` CLI. Full process-liveness crash recovery remains a
+roadmap carry-over.
 
-### 3.10 `commands.py` / `cli.py` — dev CLI
+### 3.10 `caller.py` — generic local caller boundary
+
+Responsibilities:
+
+1. Accept a local `CallerInvocationSpec` with exactly one role source (`role` or
+   `role_file`), caller-owned `prompt`/`context`, optional `cwd`, artifact directories,
+   mode, and session identifiers.
+2. Validate unsupported modes, missing prompts, missing `session_id`, and `session_name`
+   usage before delegating to runner/session surfaces.
+3. Combine caller-owned context and prompt into one prompt string without interpreting
+   business success.
+4. Delegate one-shot `exec` / `exec_dry_run` to `SupervisorRunner.run` /
+   `SupervisorRunner.dry_run`, and session `create` / `send` / `status` / `close` to
+   `SessionRuntime`.
+5. Return `CallerResult`, a local wrapper around the existing supervisor payload or
+   projection with artifact path fields and `business_verdict: null`.
+
+Current status: I1 implements this as a library-only boundary in
+`src/agent_run_supervisor/caller.py` with `tests/test_caller.py`. It adds no CLI command,
+does not parse raw ACP/acpx streams, and carries no platform, delivery, Gateway, public
+ingress, automatic-reply, or concrete caller fields.
+
+### 3.11 `commands.py` / `cli.py` — dev CLI
 
 CLI responsibilities:
 
@@ -273,13 +297,15 @@ agent-run-supervisor session status --role <role-file> --session-id <id> [--cwd 
 agent-run-supervisor session close  --role <role-file> --session-id <id> [--cwd <dir>]
 agent-run-supervisor session abort  --role <role-file> --session-id <id> [--cwd <dir>]
 agent-run-supervisor session list   [--role <role-file>] [--sessions-dir <dir>]
+agent-run-supervisor cleanup [--runs-dir <dir>] [--sessions-dir <dir>] [--apply]
 ```
 
 Current status: validate-role accepts exec and persistent role strategies; replay, doctor
 baseline, dry-run, and local one-shot real exec are implemented. The `run` path refuses
 persistent roles before artifacts/process launch. S1c adds the `session create|send|status`
 MVP (JSON stdout, 0/nonzero exit codes) over `SessionRuntime`; S1d adds
-`session close|abort|list`, with `list` local/read-only and role-optional.
+`session close|abort|list`, with `list` local/read-only and role-optional. H1 adds the
+confined, dry-run-first `cleanup` command. I1 deliberately adds no CLI command.
 
 ## 4. Data models
 
