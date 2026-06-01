@@ -225,8 +225,8 @@ flowchart TB
   foundation ✅; `session_runtime.py` adds the S1c create/send/status runtime plus the S1d
   close/abort/list lifecycle slice ✅ that drives fixture-shaped acpx session commands over
   that foundation. S1 closure acceptance adds two-turn continuity evidence and a reproducible
-  local real-acpx smoke; full crash/interruption recovery beyond expired-lease replacement and
-  retention/cleanup remain H1 operational-hardening tails (see §4).
+  local real-acpx smoke; H1 later delivered retention/cleanup and detection-first crash
+  hygiene, and K1 closed full process-liveness crash recovery (see §4).
 - **Evidence plane** (`parser.py`, `exit_classifier.py`, `result.py`) — converts observed
   acpx output into normalized events, a supervisor-owned status, and a stable result
   payload whose `business_verdict` is always `null`.
@@ -348,8 +348,8 @@ Full status set: `completed`, `runner_error`, `invalid_invocation`, `timed_out`,
 > read-only `list`. S1 closure acceptance adds two-turn continuity regression coverage and
 > a reproducible local real-acpx smoke (`scripts/smoke_persistent_session.py`). S1 is
 > closed for the **local persistent-session lifecycle** without adding S1e/S1f-style labels;
-> full crash/interruption recovery beyond expired-lease replacement plus artifact
-> retention/cleanup are H1 operational-hardening tails. Persistent sessions are **not** a non-goal.
+> artifact retention/cleanup was delivered by H1, and full process-liveness crash
+> recovery beyond expired-lease replacement was closed by K1. Persistent sessions are **not** a non-goal.
 
 ```mermaid
 stateDiagram-v2
@@ -394,8 +394,9 @@ lease before launching a turn so a completed close cannot race into a stale prom
 session operations refuse a closed session before subprocess/artifact mutation. A
 local read-only `list_sessions` enumerates store records without launching acpx. S1 closure
 acceptance proves two sequential sends over the same local session record and exercises a
-real local acpx lifecycle smoke. Full crash/interruption stale-lock recovery (control point 3
-beyond expired-lease replacement) and artifact retention/cleanup remain H1 work.
+real local acpx lifecycle smoke. H1 delivered artifact retention/cleanup and detection-first
+crash hygiene; K1 later closed full process-liveness stale-lock recovery for control point 3
+beyond expired-lease replacement.
 
 S1 must extend, **not** replace, the role-bound authorization model — sessions bind to
 the same `role_id` boundary as exec runs, never to per-run human approval tickets. S1
@@ -509,12 +510,15 @@ flowchart LR
     result.json                # business_verdict = null
     redaction-report.json
 
-# Future — H1 operational hardening, if needed
+# Current H1/K1 hardening notes + future snapshot extension points
+# H1 retention/cleanup operates over the existing run/session tree via retention.py + cleanup.
+# K1 crash recovery records process-holder metadata in lock.json while a lease is held and
+# reports holder_liveness/recoverable through the stale-lock detector; it does not require
+# a new per-session artifact directory.
 .agent-run-supervisor/sessions/<session_id>/
-  role.snapshot.json           # runtime snapshots, if needed
-  workspace.snapshot.json
-  generated-policy.json
-  # plus retention/cleanup or crash/interruption recovery evidence, if implemented
+  role.snapshot.json           # future runtime snapshot, if needed
+  workspace.snapshot.json      # future runtime snapshot, if needed
+  generated-policy.json        # existing policy snapshot where present
 ```
 
 Determinism/auditability properties: directories are `0700`, files `0600`, final
@@ -595,9 +599,9 @@ prose here may be read as introducing any of them:
 | Policy + argv compiler | `src/agent_run_supervisor/policy.py` | F-POLICY-001 | 🟡 (exec ✅, S1c create/ensure/show/status/prompt compilers ✅, S1d close/cancel compilers ✅) | `tests/test_policy.py`, `tests/test_session_strategy_guard.py` |
 | cwd / allowed-roots gate | `src/agent_run_supervisor/workspace.py` | F-WORKSPACE-001 | 🟡 | `tests/test_workspace_gate.py` |
 | One-shot exec supervision | `src/agent_run_supervisor/runner.py` | F-EXEC-001 (E1) | ✅ (phase closure roadmap-owned) | `tests/test_runner_exec.py`, `tests/test_runner_dry_run.py` |
-| Process-liveness crash recovery | `src/agent_run_supervisor/process_liveness.py`, `src/agent_run_supervisor/session.py` | F-SESSION-001 / ARS-CRASH-RECOVERY (K1) | 🟡 implemented on K1 branch, pending PR | `tests/test_process_liveness.py`, `tests/test_session_store.py` |
-| Persistent session store | `src/agent_run_supervisor/session.py` | F-SESSION-001 (S1/K1) | ✅ S1 local lifecycle foundation; K1 liveness-aware lock recovery on branch | `tests/test_session_store.py`, `tests/test_session_strategy_guard.py` |
-| Persistent session runtime | `src/agent_run_supervisor/session_runtime.py`, `scripts/smoke_persistent_session.py` | F-SESSION-001 (S1/K1) | ✅ S1 local lifecycle (`create/send/status/close/abort/list` + two-turn continuity); K1 threads provably-crashed lease recovery into `send`/`close` on branch | `tests/test_session_runtime.py`, `tests/test_smoke_persistent_session.py`, `scripts/smoke_persistent_session.py` |
+| Process-liveness crash recovery | `src/agent_run_supervisor/process_liveness.py`, `src/agent_run_supervisor/session.py` | F-SESSION-001 / ARS-CRASH-RECOVERY (K1) | ✅ merged on `main` via PR #22 (`0ad531e`) | `tests/test_process_liveness.py`, `tests/test_session_store.py` |
+| Persistent session store | `src/agent_run_supervisor/session.py` | F-SESSION-001 (S1/K1) | ✅ S1 local lifecycle foundation; K1 liveness-aware lock recovery merged | `tests/test_session_store.py`, `tests/test_session_strategy_guard.py` |
+| Persistent session runtime | `src/agent_run_supervisor/session_runtime.py`, `scripts/smoke_persistent_session.py` | F-SESSION-001 (S1/K1) | ✅ S1 local lifecycle (`create/send/status/close/abort/list` + two-turn continuity); K1 threads provably-crashed lease recovery into `send`/`close` | `tests/test_session_runtime.py`, `tests/test_smoke_persistent_session.py`, `scripts/smoke_persistent_session.py` |
 | Observed event parser | `src/agent_run_supervisor/parser.py` | F-PARSER-001 | 🟡 (S1c adds prompt-turn NDJSON + `summarize_management_json` management summarizer) | `tests/test_parser.py` |
 | Status classifier | `src/agent_run_supervisor/exit_classifier.py` | F-STATUS-001 | 🟡 | `tests/test_exit_classifier.py` |
 | Result payload | `src/agent_run_supervisor/result.py` | F-STATUS-001 / F-EXEC-001 | ✅ | covered via runner/classifier tests |
@@ -630,13 +634,13 @@ Run the gates from the repository root.
 CI gate `Verify` plus these local gates are the acceptance surface for any change that
 touches the architecture.
 
-### 8.1 Open architectural tails (roadmap-owned)
+### 8.1 Roadmap-owned tails and parked boundaries
 
-These are tracked in `docs/roadmap/current-status.md` §4 and are **not** re-decided here:
+These dispositions are tracked in `docs/roadmap/current-status.md` §4 and are **not** re-decided here:
 
-- `ARS-CRASH-RECOVERY` — K1 implements a branch candidate: process-owned lock metadata,
-  fail-safe `alive`/`crashed`/`unknown` classification, read-only detector fields, and opt-in
-  provably-crashed lease reclamation; closure remains roadmap/PR-owned after review and merge.
+- `ARS-CRASH-RECOVERY` — closed by K1 on `main` via PR #22 (`0ad531e`):
+  process-owned lock metadata, fail-safe `alive`/`crashed`/`unknown` classification,
+  read-only detector fields, and opt-in provably-crashed lease reclamation.
 - `ARS-SANDBOX-BOUNDARY` — parked; any real OS sandbox is a separate phase.
 - `ARS-CALLER-INTEGRATION` — I1 covers only the generic local library boundary; concrete
   platform behavior remains separate and unapproved.

@@ -61,8 +61,8 @@ Current status: implemented for exec-shaped role config, S1b persistent-session
 configuration (`strategy: persistent` with bounded lease settings), the S1c local
 create/send/status runtime MVP, the S1d close/abort/list lifecycle slice, and S1 closure
 acceptance evidence for real-acpx smoke plus two-turn continuity. H1 delivered retention
-cleanup; K1 adds process-liveness crash recovery on the feature branch without changing the
-role schema.
+cleanup; K1 adds process-liveness crash recovery on `main` via PR #22 (`0ad531e`)
+without changing the role schema.
 
 ### 3.2 `policy.py` — acpx policy and argv compiler
 
@@ -144,7 +144,7 @@ Responsibilities:
 10. Parse observed stdout and normalized events.
 11. Classify result and persist final artifacts.
 
-Current status: one-shot subprocess launch, stdout/stderr capture, parser/classifier finalization, and watchdog kill metadata are implemented for local exec. S1c adds separate local persistent-session create/send/status supervision in `session_runtime.py`; S1d adds local close/abort/list lifecycle supervision. K1 targets persistent-session lease recovery; it does not change the one-shot exec watchdog/kill path.
+Current status: one-shot subprocess launch, stdout/stderr capture, parser/classifier finalization, and watchdog kill metadata are implemented for local exec. S1c adds separate local persistent-session create/send/status supervision in `session_runtime.py`; S1d adds local close/abort/list lifecycle supervision. K1 adds persistent-session lease recovery on `main` via PR #22 (`0ad531e`); it does not change the one-shot exec watchdog/kill path.
 
 ### 3.6 `session.py` / `session_runtime.py` — persistent-session store and runtime
 
@@ -194,7 +194,7 @@ local record to `closed`; `send` re-checks the closed state under the acquired l
 launching a turn; `send`/`close`/`abort` refuse closed sessions before subprocess/artifact
 mutation; list is local and read-only. S1 closure acceptance adds the reproducible local
 real-acpx smoke and two-turn continuity regression, closing S1 for the local persistent-session
-lifecycle. K1 (on `ai/k1-crash-recovery-hardening-2026-06-01`, pending PR) adds safe
+lifecycle. K1 (merged on `main` via PR #22 at `0ad531e`) adds safe
 process-liveness crash recovery over this foundation: the store records process-ownership
 identity in `lock.json`, `detect_stale_locks` reports additive `holder_liveness`/`recoverable`
 keys read-only, `acquire_lock(reclaim_crashed=True)` reclaims only a provably-crashed,
@@ -204,8 +204,8 @@ that into `send`/`close` so a crashed prior holder set no longer wedges the sess
 keeps the supervisor identity as the top-level lock holder and records the spawned acpx child in
 additive `child_*` fields; a composite supervisor+child lock can be reclaimed only after both
 identities are provably crashed, which protects the post-child-exit artifact-writing window.
-Retention/cleanup remains H1 operational-hardening work; deletion stays TTL/live-lock
-conservative and does **not** trust liveness.
+Retention/cleanup is H1 operational-hardening work already delivered; deletion stays
+TTL/live-lock conservative and does **not** trust liveness.
 
 `process_liveness.py` (K1, new, stdlib-only) is the supporting module: it provides
 `ProcessIdentity`, `current_identity()`, read-only liveness signals (`pid_is_running` via
@@ -431,14 +431,15 @@ Future runtime extensions should extend the current layout, not replace it:
   role.snapshot.json   # future runtime snapshot, if needed
   workspace.snapshot.json
   generated-policy.json
-  retention.json       # future cleanup policy/evidence, if implemented
+  retention.json       # optional future per-session cleanup snapshot, if needed
 ```
 
 The foundation filenames are implemented in S1b, S1c implements create/send/status
 management and turn artifacts, S1d implements close/abort management evidence plus local
 list output, and S1 closure acceptance proves two-turn continuity plus a real local acpx
-lifecycle smoke. Snapshots, cleanup, retention, and full crash/interruption recovery beyond
-expired-lease replacement remain H1 operational-hardening work, not new S1 subphases.
+lifecycle smoke. Snapshots remain future extension points; H1 delivered cleanup/retention
+and detection-first crash hygiene, and K1 delivered full process-liveness recovery beyond
+expired-lease replacement. None of those are new S1 subphases.
 
 ## 6. Security and lifecycle boundaries
 
