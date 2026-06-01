@@ -2,7 +2,7 @@
 title: "L1 Concrete Caller Integration Design"
 status: active
 created_at: 2026-06-01
-last_validated_at: 2026-06-01T00:00:00+0800
+last_validated_at: 2026-06-01T22:50:20+0800
 ---
 # L1 Concrete Caller Integration Design
 
@@ -600,21 +600,20 @@ L1 is design-only and rollback-trivial:
   data-migration rollback exists, because nothing live or runtime was implemented and
   `caller.py` was not changed.
 
-## 17. PR / review process
+## 17. PR / review process used
 
-- **Branch / PR:** one design task = one PR on `docs/l1-concrete-caller-design-2026-06-01`,
-  targeting `main`.
-- **Roles:** Claude Code authors as Architect + Documentation Engineer; **Codex CLI** is the
-  fresh-context primary reviewer; **Hermes** owns scope control, verification, evidence, and
-  arbitration, and runs the doc generators.
-- **Reviewers must check** PRD/design/feature/roadmap alignment (not only that gates pass):
-  the supervisor stays generic, the verdict stays caller-owned, the Feishu card stays a
-  caller-owned view-model with no delivery, and the Sachima seam stays defined-but-unapproved.
-- **PR body must include:** summary; source-of-truth docs touched; feature/roadmap status
-  impact (L1 design-only, in progress → ready-for-PR; implementation/live/Sachima/Feishu/
-  Gateway parked); design-only statement; no-secret statement (`[REDACTED]` placeholders);
-  and an explicit non-approval boundary statement confirming no real delivery / ingress /
-  Gateway / Sachima / auto-reply / live behavior was added.
-- **Next phase (not this PR):** a separately-approved implementation phase may build the
-  Hermes caller + Feishu view-model adapter against this design; crossing the Sachima seam
-  requires its own approval and authority-chain entries.
+- **Branch / PR:** PR #24 on `docs/l1-concrete-caller-design-2026-06-01`, targeting `main`.
+- **Roles:** Claude Code authored as Architect + Documentation Engineer; **Codex CLI** was the
+  fresh-context primary reviewer; **Hermes** owned scope control, verification, evidence, and
+  arbitration, and ran the doc generators.
+- **Reviewers checked** PRD/design/feature/roadmap alignment (not only that gates passed):
+  the supervisor stayed generic, the verdict stayed caller-owned, the Feishu card stayed a
+  caller-owned view-model with no delivery, and the Sachima seam stayed defined-but-unapproved.
+- **PR body included:** summary; source-of-truth docs touched; feature/roadmap status
+  impact (L1 design-only, closed on `main` via PR #24 / `5e34f5c`; implementation/live/
+  Sachima/Feishu/Gateway parked); design-only statement; no-secret statement (`[REDACTED]`
+  placeholders); and an explicit non-approval boundary statement confirming no real delivery /
+  ingress / Gateway / Sachima / auto-reply / live behavior was added.
+- **Next phase:** the separately-approved L2 implementation phase later built the local/offline
+  Hermes caller + offline Feishu view-model adapter; crossing the Sachima seam still requires
+  its own approval and authority-chain entries.
