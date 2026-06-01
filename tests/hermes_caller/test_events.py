@@ -5,7 +5,7 @@ status, text_length, key_summary) over already-persisted, already-redacted
 events. It never re-parses raw acpx streams and never surfaces bulk agent
 content — even if a (synthetic, adversarial) event carries a verbatim text body.
 
-RED expectation: the ``hermes_caller.events`` module does not exist yet.
+GREEN coverage: normalized event projection exists and must avoid raw bulk text.
 """
 from __future__ import annotations
 

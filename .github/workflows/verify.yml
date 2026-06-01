@@ -60,6 +60,9 @@ jobs:
       - name: Check docs drift report
         run: python tools/docs_drift_signal.py --check
 
+      - name: Static safety scan
+        run: python tools/static_safety_scan.py
+
       - name: Build package and check metadata
         run: |
           rm -rf dist build src/agent_run_supervisor.egg-info

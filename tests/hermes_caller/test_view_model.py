@@ -8,7 +8,7 @@ already-redacted ``final_message`` as *untrusted* findings text, a local
 evidence reference (no upload), and a session-lifecycle chip — and it never
 surfaces bulk agent content.
 
-RED expectation: the ``hermes_caller.view_model`` module does not exist yet.
+GREEN coverage: the ``hermes_caller.view_model`` module exists and keeps output compact.
 """
 from __future__ import annotations
 

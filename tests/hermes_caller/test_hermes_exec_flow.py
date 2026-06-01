@@ -6,7 +6,7 @@ an injected fake runner, so nothing launches acpx), derives a caller-owned
 verdict, and returns ``(CallerResult, CardViewModel)``. The ``dry_run=True`` path
 uses ``exec_dry_run`` and launches no AGENT.
 
-RED expectation: the ``hermes_caller.hermes`` module does not exist yet.
+GREEN coverage: the ``hermes_caller.hermes`` module now drives the exec flow.
 """
 from __future__ import annotations
 
