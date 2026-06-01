@@ -311,7 +311,7 @@ Current status: I1 implements this as a library-only boundary in
 does not parse raw ACP/acpx streams, and carries no platform, delivery, Gateway, public
 ingress, automatic-reply, or concrete caller fields. L1 documents the *concrete* caller design
 above this boundary (`docs/plans/2026-06-01-l1-concrete-caller-integration-design.md`). The L2
-implementation candidate adds the caller-side `src/agent_run_supervisor/hermes_caller/` package
+implementation merged via PR #27 (`eb7912e`) adds the caller-side `src/agent_run_supervisor/hermes_caller/` package
 with `tests/hermes_caller/`: Hermes document-check intake, caller-owned verdict derivation,
 normalized-event evidence projection, progress/result view-models, an escaped offline Feishu
 payload dict, and exec + persistent-session orchestration through `invoke_caller`. `caller.py`
@@ -507,7 +507,7 @@ persistent-session document-check flows, the input/output contracts, the
 normalized-event → view-model mapping, the ownership matrix, and the defined-but-unapproved
 Sachima seam — lives in
 `docs/plans/2026-06-01-l1-concrete-caller-integration-design.md` (L1). The L2 implementation
-candidate realizes the local/offline caller-side portion in `src/agent_run_supervisor/hermes_caller/`
+merged via PR #27 (`eb7912e`) realizes the local/offline caller-side portion in `src/agent_run_supervisor/hermes_caller/`
 and `tests/hermes_caller/` without changing the generic I1 contract. It remains fake/local/offline:
 no real Feishu API, IM delivery, public ingress, Gateway lifecycle, Sachima behavior, automatic
 replies, live/default-on behavior, or trusted Markdown/HTML rendering.
