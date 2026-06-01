@@ -642,8 +642,13 @@ These dispositions are tracked in `docs/roadmap/current-status.md` §4 and are *
   process-owned lock metadata, fail-safe `alive`/`crashed`/`unknown` classification,
   read-only detector fields, and opt-in provably-crashed lease reclamation.
 - `ARS-SANDBOX-BOUNDARY` — parked; any real OS sandbox is a separate phase.
-- `ARS-CALLER-INTEGRATION` — I1 covers only the generic local library boundary; concrete
-  platform behavior remains separate and unapproved.
+- `ARS-CALLER-INTEGRATION` — I1 covers only the generic local library boundary; the
+  *design* of a concrete caller (Hermes) on top of that boundary is captured **design-only**
+  in `docs/plans/2026-06-01-l1-concrete-caller-integration-design.md` (L1). L1 keeps the
+  supervisor generic — it adds no platform field to `caller.py`, keeps `business_verdict`
+  caller-owned, and treats Feishu rich cards as a caller-owned view-model/presentation target
+  with no delivery. Concrete platform behavior (real Feishu/IM delivery, Sachima, Gateway,
+  ingress) remains separate and unapproved.
 
 ---
 

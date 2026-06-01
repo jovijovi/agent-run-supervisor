@@ -13,7 +13,7 @@ last_updated: 2026-06-01
 base_branch: main
 product_role: independent local Python library + dev CLI for supervising ACP/acpx AGENT runs and sessions with redacted audit evidence
 source_of_truth: GOAL.md, docs/product/prd.md, docs/design/architecture.md, docs/design/technical-solution.md, docs/roadmap/features.md, docs/roadmap/current-status.md, docs/AI_FLOW.md
-current_mainline: E1 local one-shot exec runner is merged and closed on main via PR #8 (21b3393); F-EXEC-001 is Done; S1a session contract evidence is merged via PR #14 (99637c6); S1b adds the local session store/lock foundation; S1c adds the local create/send/status runtime MVP; S1d adds local lifecycle completion (close/abort/list + closed-session refusal); S1 closure acceptance adds multi-turn continuity regression coverage and a reproducible local real-acpx persistent-session smoke (scripts/smoke_persistent_session.py), closing S1 for the local persistent-session lifecycle (S1a-S1d + closure evidence); H1 operational hardening is merged on main via PR #19 at 484ae23 — the full read-only doctor probe set (ARS-DOCTOR-COMPLETE), confined dry-run-first run/session retention/cleanup (ARS-RETENTION-CLEANUP, F-RETENTION-001), the caller-stable result/event schema doc (docs/design/result-event-schema.md), and a narrow detection-first crash tail (read-only stale-lock/.tmp-* detection + provably-expired lock hygiene); K1 process-liveness crash recovery is merged on main via PR #22 at 0ad531e, closing ARS-CRASH-RECOVERY with conservative holder-set classification and safe composite supervisor+child reclaim semantics, and the I1 generic local caller boundary work is merged on main via PR #20 at 83d9cb2 with all standing non-approvals still in force
+current_mainline: E1 local one-shot exec runner is merged and closed on main via PR #8 (21b3393); F-EXEC-001 is Done; S1a session contract evidence is merged via PR #14 (99637c6); S1b adds the local session store/lock foundation; S1c adds the local create/send/status runtime MVP; S1d adds local lifecycle completion (close/abort/list + closed-session refusal); S1 closure acceptance adds multi-turn continuity regression coverage and a reproducible local real-acpx persistent-session smoke (scripts/smoke_persistent_session.py), closing S1 for the local persistent-session lifecycle (S1a-S1d + closure evidence); H1 operational hardening is merged on main via PR #19 at 484ae23 — the full read-only doctor probe set (ARS-DOCTOR-COMPLETE), confined dry-run-first run/session retention/cleanup (ARS-RETENTION-CLEANUP, F-RETENTION-001), the caller-stable result/event schema doc (docs/design/result-event-schema.md), and a narrow detection-first crash tail (read-only stale-lock/.tmp-* detection + provably-expired lock hygiene); K1 process-liveness crash recovery is merged on main via PR #22 at 0ad531e, closing ARS-CRASH-RECOVERY with conservative holder-set classification and safe composite supervisor+child reclaim semantics, and the I1 generic local caller boundary work is merged on main via PR #20 at 83d9cb2 with all standing non-approvals still in force; L1 concrete-caller integration design is in progress as a design-only phase (docs/plans/2026-06-01-l1-concrete-caller-integration-design.md — Hermes caller on the I1 boundary, Feishu document-check as presentation target only), implementing no runtime code, with implementation/live/Sachima/Feishu/Gateway parked
 ```
 
 ## 1. How to read this roadmap
@@ -39,7 +39,7 @@ Documentation authority realignment is complete on main via PR #6 (`7dcbe4f`).
 The product requirement includes both one-shot exec and persistent sessions.
 Engineering sequence may implement exec first, then persistent sessions.
 Exec-first sequencing belongs in roadmap/phase planning only, not in PRD, GOAL, or product-level design as a reduced product scope.
-Current implementation: E1 local one-shot exec runner is merged and closed on main via PR #8 (`21b3393`); F-EXEC-001 is Done. S1a persistent-session contract evidence is merged via PR #14 (`99637c6`). S1b adds the local session store/lock foundation. S1c adds the local create/send/status runtime MVP. S1d adds the local lifecycle completion slice (close, abort/cancel, local read-only list, and closed-session refusal). S1 closure acceptance adds multi-turn continuity regression coverage and a reproducible local real-acpx persistent-session smoke, closing S1 for the **local persistent-session lifecycle** (S1a–S1d plus closure evidence). S1 remains exactly the four approved slices (S1a/S1b/S1c/S1d); closure acceptance introduces no new S1 subphase. H1 operational hardening is merged on `main` via PR #19 at `484ae23`: the full read-only doctor probe set, confined dry-run-first run/session retention/cleanup, the caller-stable result/event schema doc, and a narrow detection-first crash tail. I1 is merged on `main` via PR #20 at `83d9cb2` as a generic local caller boundary implemented as a library surface. K1 is merged on `main` via PR #22 at `0ad531e`, closing `ARS-CRASH-RECOVERY` with process-liveness crash/interruption recovery beyond deterministic expired-lease replacement, conservative holder-set classification, and safe composite supervisor+child reclaim semantics. All standing non-approvals (§5) remain in force.
+Current implementation: E1 local one-shot exec runner is merged and closed on main via PR #8 (`21b3393`); F-EXEC-001 is Done. S1a persistent-session contract evidence is merged via PR #14 (`99637c6`). S1b adds the local session store/lock foundation. S1c adds the local create/send/status runtime MVP. S1d adds the local lifecycle completion slice (close, abort/cancel, local read-only list, and closed-session refusal). S1 closure acceptance adds multi-turn continuity regression coverage and a reproducible local real-acpx persistent-session smoke, closing S1 for the **local persistent-session lifecycle** (S1a–S1d plus closure evidence). S1 remains exactly the four approved slices (S1a/S1b/S1c/S1d); closure acceptance introduces no new S1 subphase. H1 operational hardening is merged on `main` via PR #19 at `484ae23`: the full read-only doctor probe set, confined dry-run-first run/session retention/cleanup, the caller-stable result/event schema doc, and a narrow detection-first crash tail. I1 is merged on `main` via PR #20 at `83d9cb2` as a generic local caller boundary implemented as a library surface. K1 is merged on `main` via PR #22 at `0ad531e`, closing `ARS-CRASH-RECOVERY` with process-liveness crash/interruption recovery beyond deterministic expired-lease replacement, conservative holder-set classification, and safe composite supervisor+child reclaim semantics. L1 concrete-caller integration design is in progress as a **design-only** phase (Hermes caller built on the I1 boundary; Feishu document-check as a presentation target only); it implements no runtime code, changes no runtime module or `caller.py`, and keeps any Sachima/Feishu/Gateway behavior parked and unapproved. All standing non-approvals (§5) remain in force.
 ```
 
 ## 3. Phase roadmap
@@ -306,12 +306,38 @@ local library boundary; main `Verify` CI passed.** Evidence: `src/agent_run_supe
 delivery/auto-reply behavior remains unapproved and separate; the standing non-approvals (§5)
 all hold.
 
+### L1 — Concrete caller integration design (design-only)
+
+Goal: design — **without implementing** — how a concrete local caller (Hermes) drives the
+supervisor through the generic I1 boundary for a document-check scenario, in both `exec` and
+`persistent session` modes.
+
+- **Type:** design-only. Implements no runtime code; changes no runtime module, CLI, config,
+  or `caller.py`; grants no live/runtime approval.
+- **Scope:** named concrete caller (Hermes); Feishu document-check scenario as a
+  **presentation target only**; exec + persistent-session flows; input/output contracts
+  reused unchanged from I1; normalized-event → caller-owned view-model mapping; ownership
+  matrix; defined-but-unapproved Sachima seam.
+- **Invariants preserved:** supervisor stays generic (no platform field in
+  `CallerInvocationSpec`/`CallerResult`); `business_verdict` stays `null` and caller-owned;
+  Feishu rich cards stay a caller-owned view-model/presentation adapter with **no delivery**;
+  agent output stays untrusted (no trusted Markdown/HTML rendering).
+- **Plan:** `docs/plans/2026-06-01-l1-concrete-caller-integration-design.md`.
+- **Parked / unapproved (unchanged):** real Feishu/IM delivery, platform ingress, Sachima
+  behavior, Gateway lifecycle, automatic replies, live/default-on. Connecting Hermes to
+  Sachima for real debugging/testing is a separate later approved phase; L1 only defines the
+  seam.
+
+Status: **Design-only, in progress → ready-for-PR on `docs/l1-concrete-caller-design-2026-06-01`.**
+No implementation, live behavior, Sachima/Feishu/Gateway integration, or scope change is
+introduced; all standing non-approvals (§5) remain in force.
+
 ## 4. Tail register
 
 | ID | Class | Description | Blocks code work? | Required before | Acceptance method | Status |
 |---|---|---|---:|---|---|---|
 | ARS-SANDBOX-BOUNDARY | PARKED | Any claim that `allowed_roots` is an OS/filesystem sandbox remains parked. | No | Separate sandbox phase | OS sandbox proof + negative probes | Parked |
-| ARS-CALLER-INTEGRATION | PARTIAL | Generic local library caller boundary is implemented in I1; concrete Sachima/Hermes/Gateway/IM behavior remains separate and unapproved. | No | Concrete platform integration | Separate product approval and plan | Generic boundary done; concrete platform parked |
+| ARS-CALLER-INTEGRATION | PARTIAL | Generic local library caller boundary is implemented in I1; the concrete caller (Hermes) is now captured **design-only** in L1 (`docs/plans/2026-06-01-l1-concrete-caller-integration-design.md`, exec + persistent-session document-check, Feishu card as caller-owned view-model only). Concrete Sachima/Hermes/Gateway/IM/Feishu-delivery behavior remains separate and unapproved. | No | Concrete platform integration | Separate product approval and plan | Generic boundary done; concrete-caller design done (L1, design-only); concrete platform/implementation parked |
 
 ### K1 post-merge tail-closure evidence
 

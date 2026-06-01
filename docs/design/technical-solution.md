@@ -309,7 +309,12 @@ Responsibilities:
 Current status: I1 implements this as a library-only boundary in
 `src/agent_run_supervisor/caller.py` with `tests/test_caller.py`. It adds no CLI command,
 does not parse raw ACP/acpx streams, and carries no platform, delivery, Gateway, public
-ingress, automatic-reply, or concrete caller fields.
+ingress, automatic-reply, or concrete caller fields. The *concrete* caller design that sits
+**above** this generic boundary — Hermes as the local AI-assisted caller, with a Feishu
+document-check scenario and a caller-owned progress/result view-model — is documented
+**design-only** in `docs/plans/2026-06-01-l1-concrete-caller-integration-design.md` (L1);
+it keeps `caller.py` generic and adds no platform field, no business verdict, and no
+rendering/delivery to the supervisor.
 
 ### 3.11 `commands.py` / `cli.py` — dev CLI
 
@@ -494,3 +499,10 @@ caller interprets final output under its own business contract
 ```
 
 The caller must not parse raw ACP/acpx streams directly or infer external delivery approval from supervisor results.
+
+The concrete (Hermes) caller design built on the generic I1 boundary — covering exec and
+persistent-session document-check flows, the input/output contracts, the
+normalized-event → view-model mapping, the ownership matrix, and the defined-but-unapproved
+Sachima seam — lives **design-only** in
+`docs/plans/2026-06-01-l1-concrete-caller-integration-design.md` (L1). It implements no
+runtime code and keeps every standing non-approval in force.
