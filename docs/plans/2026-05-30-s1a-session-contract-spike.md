@@ -1,8 +1,9 @@
 ---
 title: "S1a Persistent-Session Contract Spike Plan"
-status: active
+status: archived
 created_at: 2026-05-30
 last_validated_at: 2026-05-30T00:00:00+0800
+archived_at: 2026-06-03T18:14:07+0800
 ---
 # S1a Persistent-Session Contract Spike Plan
 

@@ -144,7 +144,7 @@ Factual local gates that keep the supervisor honest (run from the repository roo
 
 | Indicator | Evidence |
 |---|---|
-| Unit / integration tests | **Full pytest suite** — `python3 -m pytest -q` (current local acceptance: **456 passed**). |
+| Unit / integration tests | **Full pytest suite** — `python3 -m pytest -q` (current local acceptance: **459 passed**). |
 | acpx contract | acpx `0.10.0` fixtures + validator — `python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0`. |
 | Import / syntax smoke | `python3 -m compileall -q src scripts tests`. |
 | Doctor (read-only) | `… doctor` never launches an AGENT (`launched_real_agent = false`). |

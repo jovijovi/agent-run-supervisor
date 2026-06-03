@@ -1,8 +1,9 @@
 ---
 title: "L1 Concrete Caller Integration Design"
-status: active
+status: archived
 created_at: 2026-06-01
 last_validated_at: 2026-06-01T22:50:20+0800
+archived_at: 2026-06-03T18:14:07+0800
 ---
 # L1 Concrete Caller Integration Design
 

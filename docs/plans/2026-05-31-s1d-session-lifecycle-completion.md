@@ -1,8 +1,9 @@
 ---
 title: "S1d Persistent Session Lifecycle Completion Plan"
-status: active
+status: archived
 created_at: 2026-05-31
 last_validated_at: 2026-05-31T00:00:00+0800
+archived_at: 2026-06-03T18:14:07+0800
 ---
 # S1d Persistent Session Lifecycle Completion Plan
 

@@ -137,7 +137,7 @@ PYTHONPATH=src python3 -m agent_run_supervisor cleanup
 
 | 指标 | 证据 |
 |---|---|
-| 单元 / 集成测试 | **完整 pytest 套件** —— `python3 -m pytest -q`（当前本地验收：**456 passed**）。 |
+| 单元 / 集成测试 | **完整 pytest 套件** —— `python3 -m pytest -q`（当前本地验收：**459 passed**）。 |
 | acpx 契约 | acpx `0.10.0` 夹具 + 校验器 —— `python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0`。 |
 | 导入 / 语法冒烟 | `python3 -m compileall -q src scripts tests`。 |
 | Doctor（只读） | `… doctor` 绝不启动 AGENT（`launched_real_agent = false`）。 |

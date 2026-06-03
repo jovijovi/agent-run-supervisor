@@ -1,7 +1,8 @@
 ---
 title: "S1 Persistent Session Closure Acceptance Plan"
-status: active
+status: archived
 created_at: 2026-05-31
+archived_at: 2026-06-03T18:14:07+0800
 ---
 # S1 Persistent Session Closure Acceptance Plan
 

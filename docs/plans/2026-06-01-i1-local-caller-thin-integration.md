@@ -1,8 +1,9 @@
 ---
 title: "I1 Local Caller Thin Integration Plan"
-status: active
+status: archived
 created_at: 2026-06-01
 last_validated_at: 2026-06-01T00:00:00+0800
+archived_at: 2026-06-03T18:14:07+0800
 ---
 # I1 Local Caller Thin Integration Plan
 
