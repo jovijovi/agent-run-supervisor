@@ -250,10 +250,12 @@ def validate_manifest(root: Path) -> list[str]:
 # --- S1a persistent-session contract spike --------------------------------
 #
 # These fixtures prove the observed acpx@0.10.0 *persistent-session* command
-# grammar and stdout schemas. They are contract evidence only; S1 session
-# support is not implemented. Management commands emit a single summarized JSON
-# object, while prompt turns emit a raw newline-delimited ACP/JSON-RPC stream,
-# so the two schema families are validated separately and never conflated.
+# grammar and stdout schemas. They are contract evidence captured during the
+# earlier S1a spike and do not by themselves prove runtime implementation;
+# persistent-session runtime support lives in the source package. Management
+# commands emit a single summarized JSON object, while prompt turns emit a raw
+# newline-delimited ACP/JSON-RPC stream, so the two schema families are
+# validated separately and never conflated.
 
 SESSION_NAME = "s1a-session-contract"
 SESSION_SCRATCH_SUFFIX = "/.tmp/acpx-session-contract-scratch/persistent-session"

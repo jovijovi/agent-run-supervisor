@@ -1,8 +1,9 @@
 ---
 title: "E1 One-shot Exec Runner Implementation Plan"
-status: active
+status: archived
 created_at: 2026-05-29
 last_validated_at: 2026-05-29T13:33:48+0800
+archived_at: 2026-06-03T18:14:07+0800
 ---
 # E1 One-shot Exec Runner Implementation Plan
 

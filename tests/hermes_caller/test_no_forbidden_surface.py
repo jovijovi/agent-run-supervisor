@@ -1,16 +1,16 @@
 """T8 — static forbidden-surface guard (plan §10-T8, §12).
 
-A local ``ast``-based scanner proves the planned caller-side package introduces
+A local ``ast``-based scanner proves the caller-side package introduces
 no platform/live surface: no networking/SDK import, no supervisor-internal
 import, and no delivery/platform token used as a real field, call, or function.
 
 The scanner is validated against a deliberately-seeded scratch fixture
 (``fixtures/static_violation.py``) so the guard is not vacuously green. It then
-guards the real ``src/agent_run_supervisor/hermes_caller/`` tree — skipped in the
-RED stage because the package does not exist yet.
+guards the real ``src/agent_run_supervisor/hermes_caller/`` tree, skipping only
+when that package directory is absent from the checkout.
 
-This module imports no ``hermes_caller`` symbol, so it stays collectable and
-exercises the scanner even before the package is implemented.
+This module imports no ``hermes_caller`` symbol, so the scanner stays
+collectable and exercises the seeded fixture independently of the package.
 """
 from __future__ import annotations
 
@@ -124,7 +124,7 @@ def test_scanner_catches_seeded_violation() -> None:
 
 def test_real_package_is_clean() -> None:
     if not PACKAGE_DIR.is_dir():
-        pytest.skip("hermes_caller package not implemented yet (RED stage)")
+        pytest.skip("hermes_caller package directory not present in this checkout")
 
     offenders: dict[str, list[str]] = {}
     for module_path in sorted(PACKAGE_DIR.glob("*.py")):

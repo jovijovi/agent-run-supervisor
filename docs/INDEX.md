@@ -4,21 +4,11 @@
 
 Total: 23 documents tracked across 2 statuses.
 
-## Active (20)
+## Active (10)
 
 - [agent-run-supervisor Result / Event Schema](design/result-event-schema.md) — created 2026-06-01
-- [H1 Operational Hardening Plan](plans/2026-06-01-h1-operational-hardening.md) — created 2026-06-01
-- [I1 Local Caller Thin Integration Plan](plans/2026-06-01-i1-local-caller-thin-integration.md) — created 2026-06-01
-- [K1 Crash Recovery Hardening Plan](plans/2026-06-01-k1-crash-recovery-hardening.md) — created 2026-06-01
-- [L1 Concrete Caller Integration Design](plans/2026-06-01-l1-concrete-caller-integration-design.md) — created 2026-06-01
-- [S1 Persistent Session Closure Acceptance Plan](plans/2026-05-31-s1-closure-acceptance.md) — created 2026-05-31
-- [S1c Persistent Session Runtime MVP Plan](plans/2026-05-31-s1c-session-runtime-mvp.md) — created 2026-05-31
-- [S1d Persistent Session Lifecycle Completion Plan](plans/2026-05-31-s1d-session-lifecycle-completion.md) — created 2026-05-31
-- [S1a Persistent-Session Contract Spike Plan](plans/2026-05-30-s1a-session-contract-spike.md) — created 2026-05-30
-- [S1b Session Store and Lock Foundation Plan](plans/2026-05-30-s1b-session-store-locks.md) — created 2026-05-30
 - [agent-run-supervisor System Architecture](design/architecture.md) — created 2026-05-29
 - [agent-run-supervisor Technical Solution](design/technical-solution.md) — created 2026-05-29
-- [E1 One-shot Exec Runner Implementation Plan](plans/2026-05-29-e1-one-shot-exec-runner.md) — created 2026-05-29
 - [Implementation plans directory](plans/README.md) — created 2026-05-29
 - [agent-run-supervisor PRD](product/prd.md) — created 2026-05-29
 - [Feature and Capability Tracker](roadmap/features.md) — created 2026-05-29
@@ -27,8 +17,18 @@ Total: 23 documents tracked across 2 statuses.
 - [Roadmap governance](roadmap/README.md) — created 2026-05-28
 - [agent-run-supervisor Roadmap Current Status](roadmap/current-status.md) — created 2026-05-28
 
-## Archived (3)
+## Archived (13)
 
+- [H1 Operational Hardening Plan](plans/2026-06-01-h1-operational-hardening.md) — created 2026-06-01
+- [I1 Local Caller Thin Integration Plan](plans/2026-06-01-i1-local-caller-thin-integration.md) — created 2026-06-01
+- [K1 Crash Recovery Hardening Plan](plans/2026-06-01-k1-crash-recovery-hardening.md) — created 2026-06-01
+- [L1 Concrete Caller Integration Design](plans/2026-06-01-l1-concrete-caller-integration-design.md) — created 2026-06-01
 - [L2 Hermes Caller + Offline Feishu View-Model Implementation Plan](plans/2026-06-01-l2-hermes-caller-view-model-implementation.md) — created 2026-06-01
 - [P2 Release Engineering](plans/2026-06-01-p2-release-engineering.md) — created 2026-06-01
+- [S1 Persistent Session Closure Acceptance Plan](plans/2026-05-31-s1-closure-acceptance.md) — created 2026-05-31
+- [S1c Persistent Session Runtime MVP Plan](plans/2026-05-31-s1c-session-runtime-mvp.md) — created 2026-05-31
+- [S1d Persistent Session Lifecycle Completion Plan](plans/2026-05-31-s1d-session-lifecycle-completion.md) — created 2026-05-31
+- [S1a Persistent-Session Contract Spike Plan](plans/2026-05-30-s1a-session-contract-spike.md) — created 2026-05-30
+- [S1b Session Store and Lock Foundation Plan](plans/2026-05-30-s1b-session-store-locks.md) — created 2026-05-30
+- [E1 One-shot Exec Runner Implementation Plan](plans/2026-05-29-e1-one-shot-exec-runner.md) — created 2026-05-29
 - [Legacy V0.1a Migration and Conformance Matrix](roadmap/v0.1a-design-conformance.md) — created 2026-05-29
