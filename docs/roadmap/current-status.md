@@ -365,6 +365,21 @@ Acceptance evidence for this branch:
 Status: **Closed on `main` via PR #27 (`eb7912e`).** PR #27 passed CI, Codex primary
 post-PR review, full local post-merge gates, docs index/drift checks, and post-merge verification.
 
+### Phase B — ARS evidence hardening (support for the external Sachima controlled-local-execution PRD)
+
+Evidence/test-only; **not** a new ARS product phase. This is *Phase B — `agent-run-supervisor`
+role support hardening* from the external *Sachima × agent-run-supervisor Controlled Local Agent
+Execution* PRD gate and the Claude architect design packet (rev. 2). It adds a **local
+static/compiler-evidence gate** — parametrized `compile_command` golden tests in
+`tests/test_policy.py` pinning the pinned-local `runner.acpx_binary` prefix (no `npx`) and
+`<adapter> exec <prompt>` for `adapter_agent in {codex, claude}`, with default-deny permission
+policy and argv-list/no-shell behavior preserved — plus the plan
+`docs/plans/2026-06-12-phase-b-ars-evidence-hardening.md`. It makes **no schema or runtime
+behavior change**. This host currently has **no local `acpx` binary**, so a truthful
+strict-offline real Claude `acpx` fixture capture is **blocked** and carried forward; Phase B
+captures **no** new live fixture and runs no `npx`/`acpx`. It approves **no** live behavior and
+**no** Sachima integration; all §5 non-approvals remain in force.
+
 ## 4. Tail register
 
 | ID | Class | Description | Blocks code work? | Required before | Acceptance method | Status |
