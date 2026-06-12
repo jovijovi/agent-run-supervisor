@@ -2,10 +2,11 @@
 
 # Documentation Index
 
-Total: 23 documents tracked across 2 statuses.
+Total: 24 documents tracked across 2 statuses.
 
-## Active (10)
+## Active (11)
 
+- [Phase B — ARS Evidence Hardening Plan](plans/2026-06-12-phase-b-ars-evidence-hardening.md) — created 2026-06-12
 - [agent-run-supervisor Result / Event Schema](design/result-event-schema.md) — created 2026-06-01
 - [agent-run-supervisor System Architecture](design/architecture.md) — created 2026-05-29
 - [agent-run-supervisor Technical Solution](design/technical-solution.md) — created 2026-05-29

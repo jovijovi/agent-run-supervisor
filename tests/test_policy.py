@@ -143,6 +143,49 @@ def test_compile_command_uses_role_default_cwd_when_not_overridden() -> None:
     assert argv[cwd_index + 1] == VALID_ROLE["workspace"]["default_cwd"]
 
 
+# --- Phase B: compile-command golden evidence -----------------------------
+#
+# Pinned-binary + adapter golden tests supporting the upcoming Sachima
+# controlled-local-execution work (PRD FR-3/FR-4/FR-13, NFR-2; design packet
+# [B1]). Static compiler evidence only: no acpx/npx is launched and no real
+# fixture is captured. See docs/plans/2026-06-12-phase-b-ars-evidence-hardening.md.
+
+
+@pytest.mark.parametrize("adapter_agent", ["codex", "claude"])
+def test_compile_command_pins_binary_and_emits_adapter_exec_prompt(
+    adapter_agent: str,
+) -> None:
+    spec = copy.deepcopy(VALID_ROLE)
+    spec["runner"] = {
+        **spec["runner"],
+        "acpx_binary": "/opt/acpx/bin/acpx",
+        "adapter_agent": adapter_agent,
+    }
+    role = load_role(spec)
+
+    # A prompt carrying shell metacharacters proves the no-shell / argv-list
+    # contract: it must survive as one untouched argv element.
+    prompt = "review this; printf SAFE && echo $(whoami)"
+    argv = compile_command(role, cwd="/tmp/work", prompt=prompt)
+
+    # [B1] Pinned local binary prefix; the npx fetch fallback never appears.
+    assert argv[0] == "/opt/acpx/bin/acpx"
+    assert "npx" not in argv
+
+    # FR-3 / FR-4: the command tail is exactly ``<adapter> exec <prompt>``.
+    assert argv[-3:] == [adapter_agent, "exec", prompt]
+
+    # Default-deny permission policy is preserved for both adapters.
+    policy_index = argv.index("--permission-policy")
+    parsed = json.loads(argv[policy_index + 1])
+    assert parsed["defaultAction"] == "deny"
+
+    # NFR-2: argv-list / no-shell — every element is a plain string and the
+    # prompt stays a single element, never split or shell-expanded.
+    assert all(isinstance(part, str) for part in argv)
+    assert argv[-1] == prompt
+
+
 def test_policy_hash_changes_with_permissions() -> None:
     role_a = load_role(VALID_ROLE)
     spec_b = copy.deepcopy(VALID_ROLE)
