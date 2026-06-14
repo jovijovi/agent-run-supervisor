@@ -112,6 +112,24 @@ PYTHONPATH=src python3 -m agent_run_supervisor session list
 PYTHONPATH=src python3 -m agent_run_supervisor cleanup
 ```
 
+### Codex/acpx 冒烟 helper
+
+如果要显式检查本地 Codex 链路，并同时覆盖两个受监督表面 —— 先跑一次性 exec，
+再跑两轮持久会话 —— 使用维护好的 helper：
+
+```bash
+python3 scripts/smoke_codex_acpx.py --model 'gpt-5.5[xhigh]'
+```
+
+该 helper 会创建临时 no-tool 角色，要求 Codex 回复精确 sentinel，校验
+`business_verdict = null`，关闭持久会话，并默认清理临时工件（`--keep-artifacts`
+会保留 temp scratch/runs/sessions 目录）。它刻意使用 `runner.acpx_binary = null`，
+因此会走现有编译器的固定 `npx -y acpx@0.10.0` 路径。
+
+Codex ACP 模型名要使用 ACP session 广告出来的精确 ID，例如 `gpt-5.5[xhigh]`、
+`gpt-5.5[high]` 或 `gpt-5.4-mini[medium]`。裸 ID（如 `gpt-5.5`）可能被拒绝并报
+`the ACP agent did not advertise that model`；helper 会在启动任何东西前拒绝这种写法。
+
 安装本包后（`pip install -e .`），同样的接口也可通过 `agent-run-supervisor <command> …`
 控制台脚本使用。
 
@@ -128,7 +146,7 @@ PYTHONPATH=src python3 -m agent_run_supervisor cleanup
 |---|---|
 | 运行时 | **Python ≥ 3.11**，仅标准库 —— 零第三方运行时依赖。 |
 | 测试（可选） | `pytest >= 8, < 10`（`dev` 额外依赖）。 |
-| 真实 AGENT 运行 / 会话轮次 | 本地具备 **Node + acpx** —— 在不带 `--no-real-run` 的 `run`，以及真实的 `session create/send/status/close/abort` 轮次与管理命令时需要。 |
+| 真实 AGENT 运行 / 会话轮次 | 本地具备 **Node + acpx + 目标 AGENT CLI** —— 在不带 `--no-real-run` 的 `run`，以及真实的 `session create/send/status/close/abort` 轮次与管理命令时需要。Codex 冒烟 helper 还需要 `npx`，以及通过 `CODEX_PATH` 或 `PATH` 可用的 Codex CLI。 |
 | 不启动 AGENT 的命令 | `validate-role`、`replay`、`doctor`、`run --no-real-run`、`session list` 与 `cleanup`（dry-run）**无需** Node/acpx，且**不启动**任何 AGENT。 |
 
 ## 质量与测试指标
@@ -137,7 +155,7 @@ PYTHONPATH=src python3 -m agent_run_supervisor cleanup
 
 | 指标 | 证据 |
 |---|---|
-| 单元 / 集成测试 | **完整 pytest 套件** —— `python3 -m pytest -q`（当前本地验收：**459 passed**）。 |
+| 单元 / 集成测试 | **完整 pytest 套件** —— `python3 -m pytest -q`（当前本地验收：**466 collected tests passing**）。 |
 | acpx 契约 | acpx `0.10.0` 夹具 + 校验器 —— `python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0`。 |
 | 导入 / 语法冒烟 | `python3 -m compileall -q src scripts tests`。 |
 | Doctor（只读） | `… doctor` 绝不启动 AGENT（`launched_real_agent = false`）。 |
