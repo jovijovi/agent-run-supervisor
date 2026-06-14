@@ -118,6 +118,26 @@ PYTHONPATH=src python3 -m agent_run_supervisor session list
 PYTHONPATH=src python3 -m agent_run_supervisor cleanup
 ```
 
+### Codex/acpx smoke helper
+
+For an explicit local connectivity check that exercises both supervised Codex surfaces —
+one-shot exec first, then a two-turn persistent session — use the maintained helper:
+
+```bash
+python3 scripts/smoke_codex_acpx.py --model 'gpt-5.5[xhigh]'
+```
+
+The helper creates temporary no-tool roles, asks Codex for exact sentinel replies, verifies
+`business_verdict = null`, closes the persistent session, and cleans artifacts by default
+(`--keep-artifacts` keeps the temp scratch/runs/sessions directories). It intentionally uses
+`runner.acpx_binary = null`, so the existing compiler invokes the pinned
+`npx -y acpx@0.10.0` path.
+
+Use the exact Codex ACP model IDs advertised by the ACP session, such as
+`gpt-5.5[xhigh]`, `gpt-5.5[high]`, or `gpt-5.4-mini[medium]`. A bare id like
+`gpt-5.5` can be rejected with `the ACP agent did not advertise that model`, and the
+helper refuses it before launching anything.
+
 Once installed (`pip install -e .`), the same surface is available as the
 `agent-run-supervisor <command> …` console script.
 
@@ -135,7 +155,7 @@ with `--apply`) deletes aged run/session artifacts, confined to the resolved
 |---|---|
 | Runtime | **Python ≥ 3.11**, standard-library only — zero third-party runtime dependencies. |
 | Tests (optional) | `pytest >= 8, < 10` (the `dev` extra). |
-| Real AGENT runs / session turns | **Node + acpx** available locally — required for `run` (without `--no-real-run`) and for the real `session create/send/status/close/abort` turn & management commands. |
+| Real AGENT runs / session turns | **Node + acpx + the target AGENT CLI** available locally — required for `run` (without `--no-real-run`) and for the real `session create/send/status/close/abort` turn & management commands. The Codex smoke helper specifically needs `npx` plus Codex CLI via `CODEX_PATH` or `PATH`. |
 | No-AGENT commands | `validate-role`, `replay`, `doctor`, `run --no-real-run`, `session list`, and `cleanup` (dry-run) need **no** Node/acpx and launch **no** AGENT. |
 
 ## Quality and test indicators
@@ -144,7 +164,7 @@ Factual local gates that keep the supervisor honest (run from the repository roo
 
 | Indicator | Evidence |
 |---|---|
-| Unit / integration tests | **Full pytest suite** — `python3 -m pytest -q` (current local acceptance: **459 passed**). |
+| Unit / integration tests | **Full pytest suite** — `python3 -m pytest -q` (current local acceptance: **466 collected tests passing**). |
 | acpx contract | acpx `0.10.0` fixtures + validator — `python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0`. |
 | Import / syntax smoke | `python3 -m compileall -q src scripts tests`. |
 | Doctor (read-only) | `… doctor` never launches an AGENT (`launched_real_agent = false`). |

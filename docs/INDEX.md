@@ -2,10 +2,11 @@
 
 # Documentation Index
 
-Total: 24 documents tracked across 2 statuses.
+Total: 25 documents tracked across 2 statuses.
 
-## Active (11)
+## Active (12)
 
+- [Codex acpx Smoke Helper and Docs Plan](plans/2026-06-14-codex-acpx-smoke-helper.md) — created 2026-06-14
 - [Phase B — ARS Evidence Hardening Plan](plans/2026-06-12-phase-b-ars-evidence-hardening.md) — created 2026-06-12
 - [agent-run-supervisor Result / Event Schema](design/result-event-schema.md) — created 2026-06-01
 - [agent-run-supervisor System Architecture](design/architecture.md) — created 2026-05-29
