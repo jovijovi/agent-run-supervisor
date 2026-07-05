@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import datetime as _dt
+import inspect
 import os
+import queue
 import secrets
 import signal as _signal
 import subprocess
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 from agent_run_supervisor.event_store import EventStore, RunHandle
+from agent_run_supervisor.live_stream import LiveEventSink
 from agent_run_supervisor.exit_classifier import (
     AgentRunStatus,
     ClassifierInput,
@@ -55,6 +60,7 @@ class SubprocessOutcome:
     process_group_used: bool | None = None
     stdout_closed: bool | None = None
     stderr_closed: bool | None = None
+    stdout_sink_failed: bool = False
 
 
 class SubprocessExecutor(Protocol):
@@ -67,6 +73,7 @@ class SubprocessExecutor(Protocol):
         timeout_seconds: int,
         grace_ms: int,
         on_spawn: Callable[[int], None] | None = None,
+        stdout_sink: Callable[[bytes], None] | None = None,
     ) -> SubprocessOutcome: ...
 
 
@@ -239,7 +246,9 @@ class SupervisorRunner:
             dry_run=False,
             workspace=workspace,
         )
-        subprocess_outcome = self.executor(
+        live_sink = LiveEventSink(bundle.handle, bundle.redaction_report, max_output_bytes=role.limits.max_output_bytes)
+        subprocess_outcome = execute_with_optional_stdout_sink(
+            self.executor,
             argv=bundle.argv,
             cwd=workspace.effective_cwd,
             env=env_map,
@@ -248,11 +257,13 @@ class SupervisorRunner:
                 self.watchdog_grace_ms,
             ),
             grace_ms=self.watchdog_grace_ms,
+            stdout_sink=live_sink.feed,
         )
         return self._finalize_prepared_outcome(
             bundle=bundle,
             role=role,
             subprocess_outcome=subprocess_outcome,
+            live_sink=live_sink,
         )
 
     def finalize_outcome(
@@ -286,15 +297,29 @@ class SupervisorRunner:
         bundle: _ArtifactBundle,
         role: AgentRoleSpec,
         subprocess_outcome: SubprocessOutcome,
+        live_sink: LiveEventSink | None = None,
     ) -> RunOutcome:
         bundle.handle.write_text("stderr.log", _decode_redacted(subprocess_outcome.stderr, bundle.redaction_report, "stderr"))
-        _persist_stdout(bundle.handle, subprocess_outcome.stdout, bundle.redaction_report)
 
-        parse_result = parse_acpx_stdout_bytes(
-            subprocess_outcome.stdout,
-            max_output_bytes=role.limits.max_output_bytes,
+        use_live_sink = (
+            live_sink is not None
+            and live_sink.started
+            and not subprocess_outcome.stdout_sink_failed
+            and subprocess_outcome.stdout_closed is not False
         )
-        _persist_normalized_events(bundle.handle, parse_result)
+        if use_live_sink:
+            parse_result = live_sink.finish("running")
+        else:
+            if live_sink is not None and live_sink.started:
+                live_sink.disable()
+            _persist_stdout(bundle.handle, subprocess_outcome.stdout, bundle.redaction_report)
+            if live_sink is not None and live_sink.started:
+                bundle.handle.write_text("normalized-events.jsonl", "")
+            parse_result = parse_acpx_stdout_bytes(
+                subprocess_outcome.stdout,
+                max_output_bytes=role.limits.max_output_bytes,
+            )
+            _persist_normalized_events(bundle.handle, parse_result)
 
         acpx_code, origin = _extract_error_metadata(parse_result)
 
@@ -330,6 +355,10 @@ class SupervisorRunner:
             run_dir=bundle.handle.run_dir,
         )
         result.update(_kill_metadata_payload(subprocess_outcome))
+        if use_live_sink:
+            live_sink.write_progress(classification.status.value)
+        elif live_sink is not None and live_sink.started:
+            _write_progress(bundle.handle, classification.status.value, len(parse_result.events))
         bundle.handle.write_json("result.json", result)
         self._persist_redaction_report(bundle)
         return RunOutcome(
@@ -365,6 +394,54 @@ def _outer_watchdog_timeout_seconds(acpx_timeout_seconds: int, grace_ms: int) ->
     return acpx_timeout_seconds + grace_seconds
 
 
+def execute_with_optional_stdout_sink(
+    executor: SubprocessExecutor,
+    *,
+    argv: list[str],
+    cwd: Path,
+    env: Mapping[str, str],
+    timeout_seconds: int,
+    grace_ms: int,
+    on_spawn: Callable[[int], None] | None = None,
+    stdout_sink: Callable[[bytes], None] | None = None,
+) -> SubprocessOutcome:
+    signature = _executor_signature(executor)
+    kwargs: dict[str, Any] = {
+        "argv": argv,
+        "cwd": cwd,
+        "env": env,
+        "timeout_seconds": timeout_seconds,
+        "grace_ms": grace_ms,
+    }
+    if on_spawn is not None or _executor_accepts_param(signature, "on_spawn", executor):
+        kwargs["on_spawn"] = on_spawn
+    if stdout_sink is not None and _executor_accepts_param(signature, "stdout_sink", executor):
+        kwargs["stdout_sink"] = stdout_sink
+    return executor(**kwargs)
+
+
+def _executor_signature(executor: SubprocessExecutor) -> inspect.Signature | None:
+    try:
+        return inspect.signature(executor)
+    except (TypeError, ValueError):
+        return None
+
+
+def _executor_accepts_param(
+    signature: inspect.Signature | None,
+    name: str,
+    executor: SubprocessExecutor,
+) -> bool:
+    if executor is execute_subprocess:
+        return True
+    if signature is None:
+        return False
+    return name in signature.parameters or any(
+        param.kind is inspect.Parameter.VAR_KEYWORD
+        for param in signature.parameters.values()
+    )
+
+
 def execute_subprocess(
     *,
     argv: list[str],
@@ -373,8 +450,11 @@ def execute_subprocess(
     timeout_seconds: int,
     grace_ms: int,
     on_spawn: Callable[[int], None] | None = None,
+    stdout_sink: Callable[[bytes], None] | None = None,
 ) -> SubprocessOutcome:
     start_new_session = os.name == "posix"
+    deadline = time.monotonic() + timeout_seconds
+    sink_failed = False
     try:
         process = subprocess.Popen(
             argv,
@@ -428,49 +508,189 @@ def execute_subprocess(
                 stderr_closed=True,
             )
 
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+    sink_queue: queue.SimpleQueue[bytes | None] | None = (
+        queue.SimpleQueue() if stdout_sink is not None else None
+    )
+
+    def pump_stdout() -> None:
+        assert process.stdout is not None
+        while True:
+            chunk = process.stdout.readline()
+            if not chunk:
+                break
+            stdout_chunks.append(chunk)
+            if sink_queue is not None:
+                sink_queue.put(chunk)
+        if sink_queue is not None:
+            sink_queue.put(None)
+
+    def pump_stdout_sink() -> None:
+        nonlocal sink_failed
+        assert stdout_sink is not None
+        assert sink_queue is not None
+        while True:
+            chunk = sink_queue.get()
+            if chunk is None:
+                break
+            if sink_failed:
+                continue
+            try:
+                stdout_sink(chunk)
+            except Exception:
+                # Keep draining so the child cannot block on a full pipe. The
+                # complete stdout buffer is still returned for final fallback.
+                sink_failed = True
+
+    def pump_stderr() -> None:
+        assert process.stderr is not None
+        while True:
+            chunk = process.stderr.readline()
+            if not chunk:
+                break
+            stderr_chunks.append(chunk)
+
+    stdout_thread = threading.Thread(target=pump_stdout, daemon=True)
+    stderr_thread = threading.Thread(target=pump_stderr, daemon=True)
+    sink_thread = (
+        threading.Thread(target=pump_stdout_sink, daemon=True)
+        if stdout_sink is not None
+        else None
+    )
+    if sink_thread is not None:
+        sink_thread.start()
+    stdout_thread.start()
+    stderr_thread.start()
+
     try:
-        stdout, stderr = process.communicate(timeout=timeout_seconds)
-        return SubprocessOutcome(
-            exit_code=_normalize_returncode(process.returncode),
-            signal=_signal_from_returncode(process.returncode),
-            stdout=stdout or b"",
-            stderr=stderr or b"",
-            stdout_closed=True,
-            stderr_closed=True,
-        )
-    except subprocess.TimeoutExpired:
-        stdout = b""
-        stderr = b""
+        process.wait(timeout=timeout_seconds)
+        remaining = max(deadline - time.monotonic(), 0)
+        if _join_output_threads(stdout_thread, stderr_thread, sink_thread, remaining):
+            return SubprocessOutcome(
+                exit_code=_normalize_returncode(process.returncode),
+                signal=_signal_from_returncode(process.returncode),
+                stdout=b"".join(stdout_chunks),
+                stderr=b"".join(stderr_chunks),
+                stdout_closed=True,
+                stderr_closed=True,
+                stdout_sink_failed=sink_failed,
+            )
+
+        if not stdout_thread.is_alive() and not stderr_thread.is_alive():
+            sink_still_running = False
+            if sink_thread is not None and sink_thread.is_alive():
+                sink_thread.join(max(grace_ms, 0) / 1000)
+                sink_still_running = sink_thread.is_alive()
+                if sink_still_running:
+                    _disable_stdout_sink(stdout_sink)
+                    if sink_queue is not None:
+                        sink_queue.put(None)
+            return SubprocessOutcome(
+                exit_code=_normalize_returncode(process.returncode),
+                signal=_signal_from_returncode(process.returncode),
+                stdout=b"".join(stdout_chunks),
+                stderr=b"".join(stderr_chunks),
+                stdout_closed=True,
+                stderr_closed=True,
+                stdout_sink_failed=sink_failed or sink_still_running,
+            )
+
         kill_signal = "SIGTERM"
-        kill_reason = "watchdog_timeout"
-        process_group_used = False
-        _terminate_process(process, use_group=start_new_session)
+        kill_reason = "watchdog_timeout_pipe_drain"
         process_group_used = start_new_session and os.name == "posix"
-        try:
-            more_stdout, more_stderr = process.communicate(timeout=max(grace_ms, 0) / 1000)
-            stdout += more_stdout or b""
-            stderr += more_stderr or b""
-        except subprocess.TimeoutExpired:
+        _terminate_process(process, use_group=process_group_used)
+        if not _join_output_threads(stdout_thread, stderr_thread, sink_thread, max(grace_ms, 0) / 1000):
             kill_signal = "SIGKILL"
-            kill_reason = "watchdog_timeout_force_kill"
+            kill_reason = "watchdog_timeout_pipe_drain_force_kill"
             _kill_process(process, use_group=process_group_used)
-            more_stdout, more_stderr = process.communicate()
-            stdout += more_stdout or b""
-            stderr += more_stderr or b""
+            _join_output_threads(stdout_thread, stderr_thread, sink_thread, max(grace_ms, 0) / 1000)
+        _disable_stdout_sink(stdout_sink)
+        if sink_queue is not None:
+            sink_queue.put(None)
         return SubprocessOutcome(
             exit_code=3,
             signal=_signal_from_returncode(process.returncode),
-            stdout=stdout,
-            stderr=stderr,
+            stdout=b"".join(stdout_chunks),
+            stderr=b"".join(stderr_chunks),
             supervisor_killed=True,
             supervisor_timed_out=True,
             kill_reason=kill_reason,
             kill_signal=kill_signal,
             grace_ms=grace_ms,
             process_group_used=process_group_used,
-            stdout_closed=True,
-            stderr_closed=True,
+            stdout_closed=not stdout_thread.is_alive(),
+            stderr_closed=not stderr_thread.is_alive(),
+            stdout_sink_failed=True,
         )
+    except subprocess.TimeoutExpired:
+        kill_signal = "SIGTERM"
+        kill_reason = "watchdog_timeout"
+        process_group_used = False
+        _terminate_process(process, use_group=start_new_session)
+        process_group_used = start_new_session and os.name == "posix"
+        try:
+            process.wait(timeout=max(grace_ms, 0) / 1000)
+        except subprocess.TimeoutExpired:
+            kill_signal = "SIGKILL"
+            kill_reason = "watchdog_timeout_force_kill"
+            _kill_process(process, use_group=process_group_used)
+            process.wait()
+        if not _join_output_threads(stdout_thread, stderr_thread, sink_thread, max(grace_ms, 0) / 1000):
+            kill_signal = "SIGKILL"
+            kill_reason = "watchdog_timeout_force_kill"
+            _kill_process(process, use_group=process_group_used)
+            _join_output_threads(stdout_thread, stderr_thread, sink_thread, max(grace_ms, 0) / 1000)
+        _disable_stdout_sink(stdout_sink)
+        if sink_queue is not None:
+            sink_queue.put(None)
+        sink_thread_alive = sink_thread is not None and sink_thread.is_alive()
+        return SubprocessOutcome(
+            exit_code=3,
+            signal=_signal_from_returncode(process.returncode),
+            stdout=b"".join(stdout_chunks),
+            stderr=b"".join(stderr_chunks),
+            supervisor_killed=True,
+            supervisor_timed_out=True,
+            kill_reason=kill_reason,
+            kill_signal=kill_signal,
+            grace_ms=grace_ms,
+            process_group_used=process_group_used,
+            stdout_closed=not stdout_thread.is_alive(),
+            stderr_closed=not stderr_thread.is_alive(),
+            stdout_sink_failed=sink_failed or stdout_thread.is_alive() or sink_thread_alive,
+        )
+
+
+def _disable_stdout_sink(stdout_sink: Callable[[bytes], None] | None) -> None:
+    if stdout_sink is None:
+        return
+    owner = getattr(stdout_sink, "__self__", None)
+    disable = getattr(owner, "disable", None)
+    if callable(disable):
+        try:
+            disable()
+        except Exception:
+            pass
+
+
+def _join_output_threads(
+    stdout_thread: threading.Thread,
+    stderr_thread: threading.Thread,
+    sink_thread: threading.Thread | None,
+    timeout_seconds: float,
+) -> bool:
+    deadline = time.monotonic() + max(timeout_seconds, 0)
+    for thread in (stdout_thread, stderr_thread, sink_thread):
+        if thread is None:
+            continue
+        remaining = max(deadline - time.monotonic(), 0)
+        thread.join(remaining)
+    return (
+        not stdout_thread.is_alive()
+        and not stderr_thread.is_alive()
+        and (sink_thread is None or not sink_thread.is_alive())
+    )
 
 
 def _stop_after_spawn_callback_error(
@@ -535,6 +755,19 @@ def _signal_from_returncode(returncode: int | None) -> int | None:
     return None
 
 
+def _write_progress(handle: RunHandle, state: str, event_count: int) -> None:
+    handle.write_json(
+        "progress.json",
+        {
+            "schema_version": 1,
+            "state": state,
+            "last_seq": event_count,
+            "event_count": event_count,
+            "updated_at": _utc_now_iso(),
+        },
+    )
+
+
 def _persist_stdout(handle: RunHandle, stdout: bytes, report: RedactionReport) -> None:
     text = stdout.decode("utf-8", errors="replace")
     redacted, stdout_report = redact_text(text, location="acpx_stdout")
@@ -543,8 +776,10 @@ def _persist_stdout(handle: RunHandle, stdout: bytes, report: RedactionReport) -
 
 
 def _persist_normalized_events(handle: RunHandle, parse_result: ParseResult) -> None:
-    for event in parse_result.events:
-        handle.append_ndjson("normalized-events.jsonl", event)
+    for seq, event in enumerate(parse_result.events, start=1):
+        payload = dict(event)
+        payload["seq"] = seq
+        handle.append_ndjson("normalized-events.jsonl", payload)
 
 
 def _extract_error_metadata(parse_result: ParseResult) -> tuple[str | None, str | None]:

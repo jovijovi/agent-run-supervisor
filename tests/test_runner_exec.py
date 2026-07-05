@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -268,3 +269,100 @@ def test_execute_subprocess_timeout_does_not_duplicate_partial_output(tmp_path: 
     assert outcome.stdout == b"A"
     assert outcome.stdout_closed is True
     assert outcome.stderr_closed is True
+
+
+def test_execute_subprocess_pipe_holder_descendant_still_hits_watchdog(tmp_path: Path) -> None:
+    child = (
+        "import subprocess,sys,time; "
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)'], "
+        "stdout=sys.stdout, stderr=sys.stderr); "
+        "print('parent done', flush=True)"
+    )
+
+    outcome = execute_subprocess(
+        argv=[sys.executable, "-c", child],
+        cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin"},
+        timeout_seconds=1,
+        grace_ms=50,
+    )
+
+    assert outcome.supervisor_timed_out is True
+    assert outcome.supervisor_killed is True
+    assert outcome.kill_reason in {
+        "watchdog_timeout_pipe_drain",
+        "watchdog_timeout_pipe_drain_force_kill",
+    }
+    assert b"parent done" in outcome.stdout
+    assert outcome.stdout_closed is True
+    assert outcome.stderr_closed is True
+
+
+def test_execute_subprocess_slow_stdout_sink_after_success_does_not_timeout(tmp_path: Path) -> None:
+    def slow_sink(_: bytes) -> None:
+        time.sleep(0.2)
+
+    outcome = execute_subprocess(
+        argv=[sys.executable, "-c", "print('done', flush=True)"],
+        cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin"},
+        timeout_seconds=5,
+        grace_ms=10,
+        stdout_sink=slow_sink,
+    )
+
+    assert outcome.exit_code == 0
+    assert outcome.supervisor_timed_out is False
+    assert outcome.kill_reason is None
+    assert outcome.stdout == b"done\n"
+    assert outcome.stdout_closed is True
+    assert outcome.stderr_closed is True
+
+
+def test_execute_subprocess_high_output_slow_sink_does_not_backpressure_child(
+    tmp_path: Path,
+) -> None:
+    def slow_sink(_: bytes) -> None:
+        time.sleep(0.001)
+
+    child = "import sys\nfor i in range(2000): print('line', flush=False)\nsys.stdout.flush()"
+    outcome = execute_subprocess(
+        argv=[sys.executable, "-c", child],
+        cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin"},
+        timeout_seconds=1,
+        grace_ms=50,
+        stdout_sink=slow_sink,
+    )
+
+    assert outcome.exit_code == 0
+    assert outcome.supervisor_timed_out is False
+    assert outcome.kill_reason is None
+    assert len(outcome.stdout.splitlines()) == 2000
+    assert outcome.stdout_sink_failed is True
+    assert outcome.stdout_closed is True
+    assert outcome.stderr_closed is True
+
+
+def test_execute_subprocess_stalled_stdout_sink_is_bounded_after_child_exit(
+    tmp_path: Path,
+) -> None:
+    def stalled_sink(_: bytes) -> None:
+        time.sleep(5)
+
+    start = time.monotonic()
+    outcome = execute_subprocess(
+        argv=[sys.executable, "-c", "print('done', flush=True)"],
+        cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin"},
+        timeout_seconds=1,
+        grace_ms=50,
+        stdout_sink=stalled_sink,
+    )
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 2
+    assert outcome.exit_code == 0
+    assert outcome.supervisor_timed_out is False
+    assert outcome.stdout == b"done\n"
+    assert outcome.stdout_sink_failed is True

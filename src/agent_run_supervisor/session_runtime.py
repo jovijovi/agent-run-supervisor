@@ -51,6 +51,7 @@ from agent_run_supervisor.exit_classifier import (
     ClassifierInput,
     classify_exit,
 )
+from agent_run_supervisor.live_stream import LiveEventSink
 from agent_run_supervisor.parser import (
     ManagementParseError,
     ParseResult,
@@ -81,6 +82,7 @@ from agent_run_supervisor.runner import (
     SubprocessExecutor,
     SubprocessOutcome,
     execute_subprocess,
+    execute_with_optional_stdout_sink,
 )
 from agent_run_supervisor.session import (
     SessionExistsError,
@@ -521,6 +523,7 @@ class SessionRuntime:
         env: Mapping[str, str] | None,
         session_id: str | None = None,
         lock_token: str | None = None,
+        stdout_sink: Any | None = None,
     ) -> SubprocessOutcome:
         env_map = dict(env) if env is not None else dict(os.environ)
         on_spawn = None
@@ -534,7 +537,8 @@ class SessionRuntime:
                     reclaimable=True,
                 )
 
-        return self.executor(
+        return execute_with_optional_stdout_sink(
+            self.executor,
             argv=argv,
             cwd=workspace.effective_cwd,
             env=env_map,
@@ -543,6 +547,7 @@ class SessionRuntime:
             ),
             grace_ms=self.watchdog_grace_ms,
             on_spawn=on_spawn,
+            stdout_sink=stdout_sink,
         )
 
     def _require_management_summary(
@@ -607,6 +612,7 @@ class SessionRuntime:
             session_name=prompt_session_name,
             prompt=prompt,
         )
+        live_sink = LiveEventSink(handle, report, max_output_bytes=role.limits.max_output_bytes)
         outcome = self._run(
             argv=argv,
             role=role,
@@ -614,19 +620,34 @@ class SessionRuntime:
             env=env,
             session_id=session_id,
             lock_token=lock_token,
+            stdout_sink=live_sink.feed,
         )
 
         handle.write_text("stderr.log", _decode_redacted(outcome.stderr, report, "stderr"))
-        stdout_text = outcome.stdout.decode("utf-8", errors="replace")
-        redacted_stdout, stdout_report = redact_text(stdout_text, location="acpx_stdout")
-        report.merge(stdout_report)
-        handle.write_text("acpx-stdout.ndjson", redacted_stdout)
-
-        parse_result = parse_acpx_stdout_bytes(
-            outcome.stdout, max_output_bytes=role.limits.max_output_bytes
+        use_live_sink = (
+            live_sink.started
+            and not outcome.stdout_sink_failed
+            and outcome.stdout_closed is not False
         )
-        for event in parse_result.events:
-            handle.append_ndjson("normalized-events.jsonl", event)
+        if use_live_sink:
+            parse_result = live_sink.finish("running")
+        else:
+            if live_sink.started:
+                live_sink.disable()
+            stdout_text = outcome.stdout.decode("utf-8", errors="replace")
+            redacted_stdout, stdout_report = redact_text(stdout_text, location="acpx_stdout")
+            report.merge(stdout_report)
+            handle.write_text("acpx-stdout.ndjson", redacted_stdout)
+            if live_sink.started:
+                handle.write_text("normalized-events.jsonl", "")
+
+            parse_result = parse_acpx_stdout_bytes(
+                outcome.stdout, max_output_bytes=role.limits.max_output_bytes
+            )
+            for seq, event in enumerate(parse_result.events, start=1):
+                payload = dict(event)
+                payload["seq"] = seq
+                handle.append_ndjson("normalized-events.jsonl", payload)
 
         acpx_code, origin = _acpx_error_metadata(parse_result)
         classification = classify_exit(
@@ -663,6 +684,19 @@ class SessionRuntime:
         result["session_id"] = session_id
         result["turn_id"] = turn_id
         result.update(_kill_metadata(outcome))
+        if use_live_sink:
+            live_sink.write_progress(classification.status.value)
+        elif live_sink.started:
+            handle.write_json(
+                "progress.json",
+                {
+                    "schema_version": 1,
+                    "state": classification.status.value,
+                    "last_seq": len(parse_result.events),
+                    "event_count": len(parse_result.events),
+                    "updated_at": _dt.datetime.now(tz=_dt.timezone.utc).isoformat(),
+                },
+            )
         handle.write_json("result.json", result)
         handle.write_json("redaction-report.json", _redaction_payload(report))
 
