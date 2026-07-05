@@ -14,7 +14,15 @@ is carried as evidence only and never equated with the verdict.
 """
 from __future__ import annotations
 
-from .events import NormalizedEventView, load_events
+from .events import (
+    EventPage,
+    EventRecord,
+    NormalizedEventView,
+    ProgressSnapshot,
+    load_events,
+    load_progress,
+    read_event_page,
+)
 from .feishu_adapter import escape_untrusted, to_feishu_card_payload
 from .hermes import HermesDocCheckCaller
 from .intake import (
@@ -43,6 +51,11 @@ __all__ = [
     "derive_verdict",
     "NormalizedEventView",
     "load_events",
+    "EventRecord",
+    "EventPage",
+    "read_event_page",
+    "ProgressSnapshot",
+    "load_progress",
     "CardPhase",
     "CardViewModel",
     "ProgressItem",
