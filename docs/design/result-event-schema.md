@@ -260,6 +260,49 @@ the child is running. Shape:
 metadata, platform state, or business verdict. It is a local supervisor artifact
 only; it does not grant Gateway/IM/Sachima delivery behavior.
 
+### 4.2 Caller-side cursor/read API
+
+`agent_run_supervisor.hermes_caller.events` exposes a small, stable,
+**local/offline/read-only** cursor API over an artifact directory so a caller
+(future Sachima/Hermes) can poll live progress without re-parsing raw acpx
+streams or surfacing model text. The same surface serves one-shot run dirs and
+persistent-session turn dirs because both are artifact directories carrying the
+same live files. It reads only the already-persisted, already-redacted
+`normalized-events.jsonl` and `progress.json`; it launches nothing, opens no
+network/IM/Gateway path, and derives no business verdict.
+
+**`read_event_page(artifact_dir, *, after_seq=None, limit=100) -> EventPage`**
+
+Returns a bounded, cursor-paged window of structural `EventRecord` projections
+(each carries `seq` plus the same allow-listed structural fields as
+[§4](#4-normalized-event-families) — `family`, `kind`, `status`, `text_length`,
+`summary` — never raw text/body/content/message).
+
+| Concept | Semantics |
+|---------|-----------|
+| `after_seq` | **Exclusive** cursor. Only records whose cursor is strictly greater are returned. `None` starts at the beginning. Validated: `None` or a non-negative int. |
+| Cursor value | The persisted integer `seq` when present ([§4.1](#41-persisted-event-cursors-and-live-progress)); for legacy streams that predate `seq`, a stable 1-based line cursor. |
+| `limit` | Bounds the window; validated to `1..1000` (default `100`), else `ValueError`. |
+| `EventPage.records` | Tuple of `EventRecord` in stream order. |
+| `EventPage.next_cursor` | Cursor to pass back as `after_seq` to resume. The last returned record's `seq`, or the input cursor **unchanged** when the page is empty. |
+| `EventPage.has_more` | `True` when more matching records remain past this window. |
+
+A missing `normalized-events.jsonl` (e.g. a dry-run preview dir) yields an empty
+page with the cursor left unchanged — never an error.
+
+**`load_progress(artifact_dir) -> ProgressSnapshot | None`**
+
+Returns the [§4.1](#41-persisted-event-cursors-and-live-progress) `progress.json`
+fields (`schema_version`, `state`, `last_seq`, `event_count`, `updated_at`) as a
+`ProgressSnapshot`, or `None` when no progress artifact exists (not an error).
+Invalid required integer fields (`schema_version`, `last_seq`, `event_count`)
+fail closed with a clear `ValueError`. It never exposes raw AGENT text, platform
+state, or a business verdict.
+
+The pre-existing `load_events(artifact_dir) -> list[NormalizedEventView]`
+whole-stream projection is unchanged and remains the simplest read for callers
+that do not need cursors.
+
 ## 5. `doctor` output
 
 `commands.cmd_doctor` prints a single JSON object. All probes are **read-only**:
