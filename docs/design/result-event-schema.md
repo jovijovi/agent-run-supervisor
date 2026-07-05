@@ -2,7 +2,7 @@
 title: "agent-run-supervisor Result / Event Schema"
 status: active
 created_at: 2026-06-01
-last_validated_at: 2026-06-01T00:00:00+0800
+last_validated_at: 2026-07-05T00:00:00+0800
 ---
 # agent-run-supervisor Result / Event Schema
 
@@ -236,6 +236,29 @@ allow-listed set of structural fields (never bulk content):
 hints only — never values. Watchdog/kill/lifecycle metadata is **not** emitted as
 a stream event; it is attached to the turn `result.json` (see
 [§2.1](#21-session-turn-resultjson-persisted)).
+
+### 4.1 Persisted event cursors and live progress
+
+When normalized events are persisted under a run/turn artifact directory, each
+line is augmented with an additive `seq` integer. `seq` is scoped to that artifact
+stream, starts at `1`, and increases monotonically in write order. Parser return
+values used by `replay` may omit `seq`; callers that need cursor semantics should
+read the persisted `normalized-events.jsonl` artifact.
+
+Live exec/session paths also maintain `progress.json` next to `result.json` while
+the child is running. Shape:
+
+| Key | Type | Meaning |
+|-----|------|---------|
+| `schema_version` | `number` | Progress artifact schema version (`1`). |
+| `state` | `string` | Current supervisor state projection: usually `running` while streaming, then the final supervisor status value. |
+| `last_seq` | `number` | Last persisted normalized-event `seq` observed for this artifact stream. |
+| `event_count` | `number` | Count of persisted normalized events. Equal to `last_seq` for v1 streams. |
+| `updated_at` | `string` | UTC ISO timestamp for the progress write. |
+
+`progress.json` never embeds raw AGENT text, tool output, secrets, delivery
+metadata, platform state, or business verdict. It is a local supervisor artifact
+only; it does not grant Gateway/IM/Sachima delivery behavior.
 
 ## 5. `doctor` output
 

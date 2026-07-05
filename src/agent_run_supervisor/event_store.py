@@ -35,8 +35,11 @@ class RunHandle:
         return json.loads((self.run_dir / name).read_text(encoding="utf-8"))
 
     def append_ndjson(self, name: str, record: Mapping[str, Any]) -> None:
+        self.append_text(name, json.dumps(record, sort_keys=True) + "\n")
+
+    def append_text(self, name: str, value: str) -> None:
         path = self.run_dir / name
-        encoded = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
+        encoded = value.encode("utf-8")
         if not path.exists():
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, FILE_MODE)
             try:

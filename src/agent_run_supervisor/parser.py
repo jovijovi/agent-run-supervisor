@@ -391,15 +391,97 @@ def _iter_lines(payload: bytes) -> Iterable[tuple[int, bytes]]:
         yield line_number, raw
 
 
+def _drive_line(result: ParseResult, line_number: int, raw: bytes) -> bool:
+    """Consume one non-blank NDJSON line into ``result``.
+
+    Returns ``True`` when parsing must halt (invalid JSON or a non-jsonrpc
+    envelope), mirroring the fatal-line handling of the batch parser. A protocol
+    error flagged *inside* :func:`_consume_record` does not halt the stream.
+    """
+    try:
+        record = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        _flag_protocol_error(result, f"line {line_number}: invalid JSON: {exc}")
+        return True
+    if not _is_jsonrpc_envelope(record):
+        _flag_protocol_error(result, f"line {line_number}: non-jsonrpc envelope")
+        return True
+    _consume_record(result, record)
+    result.bytes_consumed += len(raw)
+    return False
+
+
 def _drive_lines(lines: Iterable[tuple[int, bytes]], result: ParseResult) -> None:
     for line_number, raw in lines:
-        try:
-            record = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            _flag_protocol_error(result, f"line {line_number}: invalid JSON: {exc}")
+        if _drive_line(result, line_number, raw):
             return
-        if not _is_jsonrpc_envelope(record):
-            _flag_protocol_error(result, f"line {line_number}: non-jsonrpc envelope")
-            return
-        _consume_record(result, record)
-        result.bytes_consumed += len(raw)
+
+
+@dataclass
+class IncrementalParseState:
+    """Live NDJSON parse state for consuming acpx stdout while it streams.
+
+    Holds the accumulating :class:`ParseResult` plus a byte buffer for the
+    partial trailing line at a reader boundary. Once a fatal line halts parsing
+    (``_stopped``), further input is ignored, mirroring the batch parser which
+    stops at the first malformed line.
+    """
+
+    result: ParseResult = field(default_factory=ParseResult)
+    _buffer: bytes = b""
+    _line_number: int = 0
+    _stopped: bool = False
+
+
+def consume_acpx_line(
+    state: IncrementalParseState, line: bytes | str
+) -> list[dict[str, Any]]:
+    """Consume one complete JSON-RPC NDJSON record (no trailing newline).
+
+    Returns only the events newly emitted by this record. Blank lines and input
+    after a fatal line are no-ops.
+    """
+    raw = line.encode("utf-8") if isinstance(line, str) else line
+    state._line_number += 1
+    if state._stopped or not raw.strip():
+        return []
+    result = state.result
+    before = len(result.events)
+    if _drive_line(result, state._line_number, raw):
+        state._stopped = True
+    return result.events[before:]
+
+
+def feed_acpx_bytes(
+    state: IncrementalParseState, chunk: bytes
+) -> list[dict[str, Any]]:
+    """Buffer streamed bytes and parse only newline-terminated records.
+
+    A partial trailing line (no newline yet) is retained and emits nothing until
+    a later chunk completes its record. Returns the concatenation of events
+    emitted by every complete record in this chunk.
+    """
+    state._buffer += chunk
+    emitted: list[dict[str, Any]] = []
+    while True:
+        newline_index = state._buffer.find(b"\n")
+        if newline_index == -1:
+            break
+        line = state._buffer[:newline_index]
+        state._buffer = state._buffer[newline_index + 1 :]
+        if line.endswith(b"\r"):  # tolerate CRLF line endings like ``splitlines``
+            line = line[:-1]
+        emitted.extend(consume_acpx_line(state, line))
+    return emitted
+
+
+
+def finish_acpx_bytes(state: IncrementalParseState) -> list[dict[str, Any]]:
+    """Flush the final unterminated NDJSON record at stream EOF, if present."""
+    if not state._buffer:
+        return []
+    line = state._buffer
+    state._buffer = b""
+    if line.endswith(b"\r"):
+        line = line[:-1]
+    return consume_acpx_line(state, line)
