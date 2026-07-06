@@ -113,7 +113,7 @@ def _exec_turn_flags(role: AgentRoleSpec, resolved_cwd: str) -> list[str]:
 def _session_prompt_flags(role: AgentRoleSpec, resolved_cwd: str) -> list[str]:
     """Fixture-proven authorization/automation block for session prompt turns.
 
-    S1a proved `acpx@0.10.0` persistent-session prompt turns with `--deny-all`,
+    S1a now proves `acpx@0.12.0` persistent-session prompt turns with `--deny-all`,
     not with the exec path's inline `--permission-policy` JSON. S1c therefore
     stays on that stricter proven shape. The role/policy still binds the local
     session record and is revalidated before every turn; expanding prompt-turn
@@ -233,7 +233,7 @@ def compile_session_close_command(
 ) -> list[str]:
     """``<adapter> sessions close <session_name>`` (terminal session close).
 
-    Fixture-proven by ``fixtures/acpx-0.10.0/session-close-named``. A management
+    Fixture-proven by ``fixtures/acpx-0.12.0/session-close-named``. A management
     command: it carries only the output/cwd block, never an exec/turn
     authorization block, and the session name is always a single argv element.
     """
@@ -252,7 +252,7 @@ def compile_session_cancel_command(
 ) -> list[str]:
     """``<adapter> cancel -s <session_name>`` (cooperative cancel of active work).
 
-    Fixture-proven by ``fixtures/acpx-0.10.0/session-cancel-no-active``. Note the
+    Fixture-proven by ``fixtures/acpx-0.12.0/session-cancel-no-active``. Note the
     grammar is ``cancel -s <name>`` (not ``sessions cancel``). A management
     command: output/cwd block only, no exec/turn authorization, single argv name.
     """

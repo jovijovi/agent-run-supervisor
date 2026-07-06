@@ -32,7 +32,7 @@ from agent_run_supervisor.session import SESSION_JSON, SessionStore
 from agent_run_supervisor.workspace import WorkspaceValidationResult
 
 NODE_MIN_VERSION = "22.12.0"
-ACPX_EXPECTED_VERSION = "0.10.0"
+ACPX_EXPECTED_VERSION = "0.12.0"
 _PROBE_TIMEOUT_SECONDS = 5.0
 
 

@@ -19,7 +19,7 @@ VALID_ROLE: dict = {
     "description": "Read-only reviewer.",
     "runner": {
         "type": "acpx",
-        "acpx_version": "0.10.0",
+        "acpx_version": "0.12.0",
         "acpx_binary": "/usr/bin/acpx",
         "adapter_agent": "codex",
         "model": "gpt-5.5[low]",

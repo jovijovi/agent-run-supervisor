@@ -79,7 +79,7 @@ PYTHONPATH=src python3 -m agent_run_supervisor validate-role <role-file>.json
 
 # 将观测到的 acpx stdout 流经解析器回放（确定性，不启动任何 AGENT）
 PYTHONPATH=src python3 -m agent_run_supervisor replay \
-  fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson
+  fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjson
 
 # 探测本地就绪状态（只读，绝不启动 AGENT）
 PYTHONPATH=src python3 -m agent_run_supervisor doctor
@@ -124,7 +124,7 @@ python3 scripts/smoke_codex_acpx.py --model 'gpt-5.5[xhigh]'
 该 helper 会创建临时 no-tool 角色，要求 Codex 回复精确 sentinel，校验
 `business_verdict = null`，关闭持久会话，并默认清理临时工件（`--keep-artifacts`
 会保留 temp scratch/runs/sessions 目录）。它刻意使用 `runner.acpx_binary = null`，
-因此会走现有编译器的固定 `npx -y acpx@0.10.0` 路径。
+因此会走现有编译器的固定 `npx -y acpx@0.12.0` 路径。
 
 Codex ACP 模型名要使用 ACP session 广告出来的精确 ID，例如 `gpt-5.5[xhigh]`、
 `gpt-5.5[high]` 或 `gpt-5.4-mini[medium]`。裸 ID（如 `gpt-5.5`）可能被拒绝并报
@@ -155,19 +155,19 @@ Codex ACP 模型名要使用 ACP session 广告出来的精确 ID，例如 `gpt-
 
 | 指标 | 证据 |
 |---|---|
-| 单元 / 集成测试 | **完整 pytest 套件** —— `python3 -m pytest -q`（当前本地验收：**466 collected tests passing**）。 |
-| acpx 契约 | acpx `0.10.0` 夹具 + 校验器 —— `python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0`。 |
+| 单元 / 集成测试 | **完整 pytest 套件** —— `python3 -m pytest -q`（当前本地验收：full suite passing）。 |
+| acpx 契约 | acpx `0.12.0` 夹具 + 校验器 —— `python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0`。 |
 | 导入 / 语法冒烟 | `python3 -m compileall -q src scripts tests`。 |
 | Doctor（只读） | `… doctor` 绝不启动 AGENT（`launched_real_agent = false`）。 |
 | 包检查 | `python -m build` + `python -m twine check dist/*`，再用已安装 wheel 运行 `agent-run-supervisor doctor` 冒烟。 |
 | 安全工件 | 脱敏工件 · `business_verdict = null` · EventStore `0700`/`0600` 原子 NDJSON。 |
 
 ```bash
-python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0
+python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0
 python3 -m pytest -q
 python3 -m compileall -q src scripts tests
 PYTHONPATH=src python3 -m agent_run_supervisor doctor
-PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson
+PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjson
 python -m build
 python -m twine check dist/*
 # 安装构建出的 wheel 后：

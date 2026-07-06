@@ -100,11 +100,11 @@ Never include secrets, tokens, cookies, raw environment values, real webhook val
 Run these before PR or merge unless the task clearly explains why a gate is irrelevant:
 
 ```bash
-python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0
+python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0
 python3 -m pytest -q
 python3 -m compileall -q src scripts tests
 PYTHONPATH=src python3 -m agent_run_supervisor doctor
-PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson
+PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjson
 python tools/build_docs_index.py --check
 python tools/docs_drift_signal.py --check
 git diff --check

@@ -31,7 +31,7 @@ jobs:
           python -m pip install -e '.[dev,release]'
 
       - name: Validate acpx contract fixtures
-        run: python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0
+        run: python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0
 
       - name: Run tests
         run: python3 -m pytest -q
@@ -52,7 +52,7 @@ jobs:
           PY
 
       - name: CLI replay smoke
-        run: agent-run-supervisor replay fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson
+        run: agent-run-supervisor replay fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjson
 
       - name: Check docs index
         run: python tools/build_docs_index.py --check

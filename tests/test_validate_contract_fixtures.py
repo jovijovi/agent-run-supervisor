@@ -14,7 +14,7 @@ from scripts.validate_contract_fixtures import (
     validate_session_contract,
 )
 
-REPO_FIXTURES_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "acpx-0.10.0"
+REPO_FIXTURES_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "acpx-0.12.0"
 
 
 def _session_prompt_argv(prompt: str, *, scratch: str | None = None) -> list[str]:
@@ -22,7 +22,7 @@ def _session_prompt_argv(prompt: str, *, scratch: str | None = None) -> list[str
     return [
         "npx",
         "-y",
-        "acpx@0.10.0",
+        "acpx@0.12.0",
         "--format",
         "json",
         "--json-strict",
@@ -96,7 +96,7 @@ def test_validate_command_argv_rejects_misordered_exec_flags() -> None:
         [
             "npx",
             "-y",
-            "acpx@0.10.0",
+            "acpx@0.12.0",
             "--json-strict",
             "--format",
             "json",
@@ -155,23 +155,23 @@ def test_validate_manifest_checks_management_status_no_session(tmp_path: Path) -
             "runtime-error-agent",
             "permission-denied-codex-read",
         }:
-            argv = ["npx", "-y", "acpx@0.10.0", "--format", "json", "--json-strict", "--suppress-reads", "--timeout", "1", "--max-turns", "1", "--cwd", f"/tmp/.tmp/acpx-contract-scratch/{name}", "exec", "hello"]
+            argv = ["npx", "-y", "acpx@0.12.0", "--format", "json", "--json-strict", "--suppress-reads", "--timeout", "1", "--max-turns", "1", "--cwd", f"/tmp/.tmp/acpx-contract-scratch/{name}", "exec", "hello"]
             if name == "success-codex-sentinel":
-                argv = ["npx", "-y", "acpx@0.10.0", "--format", "json", "--json-strict", "--suppress-reads", "--timeout", "180", "--max-turns", "1", "--cwd", f"/tmp/.tmp/acpx-contract-scratch/{name}", "--deny-all", "--non-interactive-permissions", "fail", "--no-terminal", "--model", "gpt-5.5[low]", "codex", "exec", "hello"]
+                argv = ["npx", "-y", "acpx@0.12.0", "--format", "json", "--json-strict", "--suppress-reads", "--timeout", "180", "--max-turns", "1", "--cwd", f"/tmp/.tmp/acpx-contract-scratch/{name}", "--deny-all", "--non-interactive-permissions", "fail", "--no-terminal", "--model", "gpt-5.5[low]", "codex", "exec", "hello"]
             elif name == "permission-denied-codex-read":
-                argv = ["npx", "-y", "acpx@0.10.0", "--format", "json", "--json-strict", "--suppress-reads", "--timeout", "180", "--max-turns", "3", "--cwd", f"/tmp/.tmp/acpx-contract-scratch/{name}", "--deny-all", "--non-interactive-permissions", "fail", "--no-terminal", "--model", "gpt-5.5[low]", "codex", "exec", "hello"]
+                argv = ["npx", "-y", "acpx@0.12.0", "--format", "json", "--json-strict", "--suppress-reads", "--timeout", "180", "--max-turns", "3", "--cwd", f"/tmp/.tmp/acpx-contract-scratch/{name}", "--deny-all", "--non-interactive-permissions", "fail", "--no-terminal", "--model", "gpt-5.5[low]", "codex", "exec", "hello"]
             elif name == "runtime-error-agent":
-                argv = ["npx", "-y", "acpx@0.10.0", "--format", "json", "--json-strict", "--suppress-reads", "--timeout", "10", "--max-turns", "1", "--cwd", f"/tmp/.tmp/acpx-contract-scratch/{name}", "--agent", "node /tmp/tools/fake-agents/exit-before-initialize.mjs", "exec", "hello"]
+                argv = ["npx", "-y", "acpx@0.12.0", "--format", "json", "--json-strict", "--suppress-reads", "--timeout", "10", "--max-turns", "1", "--cwd", f"/tmp/.tmp/acpx-contract-scratch/{name}", "--agent", "node /tmp/tools/fake-agents/exit-before-initialize.mjs", "exec", "hello"]
             elif name == "timeout-hanging-agent":
-                argv = ["npx", "-y", "acpx@0.10.0", "--format", "json", "--json-strict", "--suppress-reads", "--timeout", "1", "--max-turns", "1", "--cwd", f"/tmp/.tmp/acpx-contract-scratch/{name}", "--agent", "node /tmp/tools/fake-agents/hang-agent.mjs", "exec", "hello"]
+                argv = ["npx", "-y", "acpx@0.12.0", "--format", "json", "--json-strict", "--suppress-reads", "--timeout", "1", "--max-turns", "1", "--cwd", f"/tmp/.tmp/acpx-contract-scratch/{name}", "--agent", "node /tmp/tools/fake-agents/hang-agent.mjs", "exec", "hello"]
             elif name == "permission-policy-deny-all-sentinel":
-                argv = ["npx", "-y", "acpx@0.10.0", "--format", "json", "--json-strict", "--suppress-reads", "--timeout", "180", "--max-turns", "1", "--cwd", f"/tmp/.tmp/acpx-contract-scratch/{name}", "--permission-policy", json.dumps({"defaultAction": "deny", "autoDeny": ["read"]}), "--non-interactive-permissions", "fail", "--no-terminal", "--model", "gpt-5.5[low]", "codex", "exec", "hello"]
+                argv = ["npx", "-y", "acpx@0.12.0", "--format", "json", "--json-strict", "--suppress-reads", "--timeout", "180", "--max-turns", "1", "--cwd", f"/tmp/.tmp/acpx-contract-scratch/{name}", "--permission-policy", json.dumps({"defaultAction": "deny", "autoDeny": ["read"]}), "--non-interactive-permissions", "fail", "--no-terminal", "--model", "gpt-5.5[low]", "codex", "exec", "hello"]
         elif name == "usage-error-invalid-flag":
-            argv = ["npx", "-y", "acpx@0.10.0", "--format", "json", "--json-strict", "--bad-flag"]
+            argv = ["npx", "-y", "acpx@0.12.0", "--format", "json", "--json-strict", "--bad-flag"]
         elif name == "management-no-session-exit4":
-            argv = ["npx", "-y", "acpx@0.10.0", "--format", "json", "--json-strict", "--cwd", "/tmp/.tmp/acpx-contract-scratch/management-no-session", "codex", "-s", "definitely-missing-session", "--no-wait", "hello"]
+            argv = ["npx", "-y", "acpx@0.12.0", "--format", "json", "--json-strict", "--cwd", "/tmp/.tmp/acpx-contract-scratch/management-no-session", "codex", "-s", "definitely-missing-session", "--no-wait", "hello"]
         else:
-            argv = ["npx", "-y", "acpx@0.10.0", "--format", "json", "--json-strict", "--cwd", "/tmp/.tmp/acpx-contract-scratch/management-no-session", "codex", "-s", "definitely-missing-session", "status"]
+            argv = ["npx", "-y", "acpx@0.12.0", "--format", "json", "--json-strict", "--cwd", "/tmp/.tmp/acpx-contract-scratch/management-no-session", "codex", "-s", "definitely-missing-session", "status"]
         (fixture / "command.argv.json").write_text(json.dumps(argv), encoding="utf-8")
     status_dir = root / "management-status-no-session-exit0"
     (status_dir / "metadata.json").write_text(json.dumps({"stdout_file": "stdout.json"}), encoding="utf-8")
@@ -189,7 +189,7 @@ def test_validate_session_command_argv_accepts_management_grammar() -> None:
     argv = [
         "npx",
         "-y",
-        "acpx@0.10.0",
+        "acpx@0.12.0",
         "--format",
         "json",
         "--json-strict",
@@ -215,7 +215,7 @@ def test_validate_session_command_argv_rejects_wrong_session_name() -> None:
     argv = [
         "npx",
         "-y",
-        "acpx@0.10.0",
+        "acpx@0.12.0",
         "--format",
         "json",
         "--json-strict",
@@ -258,7 +258,7 @@ def test_validate_session_contract_passes_on_captured_fixtures() -> None:
 
 
 def test_validate_session_contract_detects_turn2_setup_pollution(tmp_path: Path) -> None:
-    root = tmp_path / "acpx-0.10.0"
+    root = tmp_path / "acpx-0.12.0"
     shutil.copytree(REPO_FIXTURES_ROOT, root)
 
     turn2 = root / "session-prompt-turn2" / "stdout.ndjson"
@@ -282,7 +282,7 @@ def test_validate_session_contract_detects_turn2_setup_pollution(tmp_path: Path)
 
 
 def test_validate_session_contract_detects_flipped_created_flag(tmp_path: Path) -> None:
-    root = tmp_path / "acpx-0.10.0"
+    root = tmp_path / "acpx-0.12.0"
     shutil.copytree(REPO_FIXTURES_ROOT, root)
 
     new_stdout = root / "session-new-named" / "stdout.json"
@@ -296,7 +296,7 @@ def test_validate_session_contract_detects_flipped_created_flag(tmp_path: Path) 
 
 
 def test_validate_session_contract_detects_summary_text_mismatch(tmp_path: Path) -> None:
-    root = tmp_path / "acpx-0.10.0"
+    root = tmp_path / "acpx-0.12.0"
     shutil.copytree(REPO_FIXTURES_ROOT, root)
 
     summary_path = root / "session-contract-summary.json"
@@ -310,7 +310,7 @@ def test_validate_session_contract_detects_summary_text_mismatch(tmp_path: Path)
 
 
 def test_validate_session_contract_detects_exit_mismatch(tmp_path: Path) -> None:
-    root = tmp_path / "acpx-0.10.0"
+    root = tmp_path / "acpx-0.12.0"
     shutil.copytree(REPO_FIXTURES_ROOT, root)
 
     result_path = root / "session-close-named" / "result.json"

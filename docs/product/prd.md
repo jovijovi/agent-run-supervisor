@@ -155,7 +155,7 @@ The product must parse only fixture-proven observed acpx stdout/event schemas.
 
 Checklist:
 
-- [x] Parse current acpx `0.10.0` exec fixture family.
+- [x] Parse current acpx `0.12.0` exec fixture family.
 - [x] Assemble final messages from ordered observed text deltas.
 - [x] Extract usage updates.
 - [x] Emit normalized events for run lifecycle, message deltas, tools, usage, permission events, unknown updates, completion, and failure.

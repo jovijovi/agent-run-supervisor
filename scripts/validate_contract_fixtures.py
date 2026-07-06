@@ -26,9 +26,9 @@ class SecretFinding:
 
 def validate_command_argv(name: str, argv: list[str]) -> list[str]:
     errors: list[str] = []
-    acpx_prefix = ["npx", "-y", "acpx@0.10.0"]
+    acpx_prefix = ["npx", "-y", "acpx@0.12.0"]
     if argv[:3] != acpx_prefix:
-        errors.append(f"{name}: command argv must start with npx -y acpx@0.10.0")
+        errors.append(f"{name}: command argv must start with npx -y acpx@0.12.0")
         return errors
 
     if name == "usage-error-invalid-flag":
@@ -249,7 +249,7 @@ def validate_manifest(root: Path) -> list[str]:
 
 # --- S1a persistent-session contract spike --------------------------------
 #
-# These fixtures prove the observed acpx@0.10.0 *persistent-session* command
+# These fixtures prove the observed acpx@0.12.0 *persistent-session* command
 # grammar and stdout schemas. They are contract evidence captured during the
 # earlier S1a spike and do not by themselves prove runtime implementation;
 # persistent-session runtime support lives in the source package. Management
@@ -295,7 +295,7 @@ SESSION_PROMPT_FACTS: dict[str, dict[str, Any]] = {
     },
 }
 
-SESSION_PROMPT_HEAD = ["npx", "-y", "acpx@0.10.0"] + [
+SESSION_PROMPT_HEAD = ["npx", "-y", "acpx@0.12.0"] + [
     "--format",
     "json",
     "--json-strict",
@@ -318,14 +318,14 @@ SESSION_PROMPT_TAIL = [
     "-s",
     SESSION_NAME,
 ]
-SESSION_MANAGEMENT_HEAD = ["npx", "-y", "acpx@0.10.0", "--format", "json", "--json-strict", "--cwd"]
+SESSION_MANAGEMENT_HEAD = ["npx", "-y", "acpx@0.12.0", "--format", "json", "--json-strict", "--cwd"]
 
 
 def validate_session_command_argv(name: str, argv: list[str]) -> list[str]:
     """Validate the exact ordered argv grammar for an S1a session fixture."""
     errors: list[str] = []
-    if argv[:3] != ["npx", "-y", "acpx@0.10.0"]:
-        errors.append(f"{name}: session command argv must start with npx -y acpx@0.10.0")
+    if argv[:3] != ["npx", "-y", "acpx@0.12.0"]:
+        errors.append(f"{name}: session command argv must start with npx -y acpx@0.12.0")
         return errors
 
     if name in SESSION_PROMPT_FIXTURES:
@@ -672,7 +672,7 @@ def validate_session_contract(root: Path) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate acpx contract fixtures")
-    parser.add_argument("root", type=Path, help="Fixture root, e.g. fixtures/acpx-0.10.0")
+    parser.add_argument("root", type=Path, help="Fixture root, e.g. fixtures/acpx-0.12.0")
     args = parser.parse_args()
 
     errors = validate_manifest(args.root)

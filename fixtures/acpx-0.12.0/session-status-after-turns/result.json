@@ -1,0 +1,10 @@
+{
+  "exit_code": 0,
+  "expected_exit": 0,
+  "matches_expected_exit": true,
+  "name": "session-status-after-turns",
+  "stderr_bytes": 0,
+  "stderr_lines": 0,
+  "stdout_bytes": 640,
+  "stdout_lines": 1
+}

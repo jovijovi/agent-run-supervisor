@@ -1,0 +1,10 @@
+{
+  "exit_code": 3,
+  "expected_exit": 3,
+  "matches_expected_exit": true,
+  "name": "timeout-hanging-agent",
+  "stderr_bytes": 0,
+  "stderr_lines": 0,
+  "stdout_bytes": 367,
+  "stdout_lines": 2
+}

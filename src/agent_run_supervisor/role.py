@@ -140,9 +140,9 @@ def _runner(raw: Mapping[str, Any]) -> AgentRunnerSpec:
     if runner_type != "acpx":
         raise RoleValidationError(f"{where}: type must be 'acpx' (got {runner_type!r})")
     acpx_version = _require_str(raw, "acpx_version", where)
-    if acpx_version != "0.10.0":
+    if acpx_version != "0.12.0":
         raise RoleValidationError(
-            f"{where}: acpx_version must be '0.10.0' for the current acpx contract (got {acpx_version!r})",
+            f"{where}: acpx_version must be '0.12.0' for the current acpx contract (got {acpx_version!r})",
         )
     adapter_agent = _require_str(raw, "adapter_agent", where)
     acpx_binary = raw.get("acpx_binary")

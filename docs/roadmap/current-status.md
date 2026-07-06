@@ -77,14 +77,14 @@ Goal: preserve the observed acpx contract that implementation and tests rely on.
 
 Checklist:
 
-- [x] Capture real `acpx@0.10.0` fixtures.
+- [x] Capture real `acpx@0.12.0` fixtures.
 - [x] Capture command grammar and observed stdout schema for current fixture family.
 - [x] Validate fixture naming, schema markers, exit semantics, and secret-shaped content.
 - [x] Record that `allowed_roots` is cwd/config evidence only, not a sandbox.
 
 Acceptance:
 
-- `python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0` passes.
+- `python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0` passes.
 
 Status: **Complete**.
 
@@ -169,9 +169,9 @@ Checklist:
 S1a contract-spike evidence (command/schema only, not implementation):
 
 - Plan: `docs/plans/2026-05-30-s1a-session-contract-spike.md`.
-- Prompt-turn fixtures (raw `stdout.ndjson`): `fixtures/acpx-0.10.0/session-prompt-turn1/`, `fixtures/acpx-0.10.0/session-prompt-turn2/` (turn2 reuses the same ACP session id and skips `initialize`/`session/new`).
-- Management-command fixtures (single-object `stdout.json`): `fixtures/acpx-0.10.0/session-new-named/`, `session-ensure-existing/`, `session-show-open/`, `session-show-after-turns/`, `session-show-closed/`, `session-history-after-turns/`, `session-read-tail-after-turns/`, `session-status-after-turns/`, `session-cancel-no-active/`, `session-close-named/`.
-- Cross-checked summary `fixtures/acpx-0.10.0/session-contract-summary.json`, manifest section `session_contract` in `fixtures/acpx-0.10.0/manifest.json`, fixtures README `fixtures/acpx-0.10.0/README.md`, validator `scripts/validate_contract_fixtures.py`, and tests `tests/test_validate_contract_fixtures.py`.
+- Prompt-turn fixtures (raw `stdout.ndjson`): `fixtures/acpx-0.12.0/session-prompt-turn1/`, `fixtures/acpx-0.12.0/session-prompt-turn2/` (turn2 reuses the same ACP session id and skips `initialize`/`session/new`).
+- Management-command fixtures (single-object `stdout.json`): `fixtures/acpx-0.12.0/session-new-named/`, `session-ensure-existing/`, `session-show-open/`, `session-show-after-turns/`, `session-show-closed/`, `session-history-after-turns/`, `session-read-tail-after-turns/`, `session-status-after-turns/`, `session-cancel-no-active/`, `session-close-named/`.
+- Cross-checked summary `fixtures/acpx-0.12.0/session-contract-summary.json`, manifest section `session_contract` in `fixtures/acpx-0.12.0/manifest.json`, fixtures README `fixtures/acpx-0.12.0/README.md`, validator `scripts/validate_contract_fixtures.py`, and tests `tests/test_validate_contract_fixtures.py`.
 
 S1b foundation evidence (local store/binding/lock only, not acpx runtime):
 
@@ -202,9 +202,9 @@ S1d lifecycle completion evidence (local close/abort/list + closed-session refus
 S1 closure-acceptance evidence (real-acpx smoke + multi-turn continuity; closes S1 for the local persistent-session lifecycle, no new S1 subphase):
 
 - Plan: `docs/plans/2026-05-31-s1-closure-acceptance.md`.
-- Reproducible local real-acpx smoke: `scripts/smoke_persistent_session.py` (stdlib-only) drives the existing CLI surface (`validate-role` → `session create` → `send` turn 1 → `send` turn 2 → `status` → `list` → `close`) against a persistent reviewer role with `acpx_binary: null`, so the compiler resolves the pinned `npx -y acpx@0.10.0` prefix and the smoke requires `npx` explicitly. It generates a unique real acpx session name per run, verifies both turn markers, status ok, list count 1, close state `closed`, two distinct redacted turn dirs, and `business_verdict: null` on every lifecycle result; it cleans its temp scratch/sessions artifacts by default (`--keep-artifacts` retains them), best-effort closes after post-create smoke failures, and never commits raw local smoke output.
+- Reproducible local real-acpx smoke: `scripts/smoke_persistent_session.py` (stdlib-only) drives the existing CLI surface (`validate-role` → `session create` → `send` turn 1 → `send` turn 2 → `status` → `list` → `close`) against a persistent reviewer role with `acpx_binary: null`, so the compiler resolves the pinned `npx -y acpx@0.12.0` prefix and the smoke requires `npx` explicitly. It generates a unique real acpx session name per run, verifies both turn markers, status ok, list count 1, close state `closed`, two distinct redacted turn dirs, and `business_verdict: null` on every lifecycle result; it cleans its temp scratch/sessions artifacts by default (`--keep-artifacts` retains them), best-effort closes after post-create smoke failures, and never commits raw local smoke output.
 - Multi-turn continuity regression: `tests/test_session_runtime.py::test_two_sequential_sends_reuse_record_persist_distinct_turns_and_release_lease` proves two sequential `SessionRuntime.send(...)` calls against the same local session reuse the same record (no second create), drive the same acpx session name, persist two distinct turn dirs, release the lease after each turn, keep the record open, and parse the S1a fixtures `session-prompt-turn1`/`session-prompt-turn2` (`S1A_SESSION_TURN_1_OK`/`S1A_SESSION_TURN_2_OK`). `tests/test_smoke_persistent_session.py` also covers the npx precondition and best-effort close after a post-create smoke failure so failed smokes do not leak real persistent sessions.
-- Recorded manual real-acpx proof: the current CLI ran a full local persistent-session lifecycle via `npx -y acpx@0.10.0` (create, two sends, status, list, close all succeeded) with observed turn markers `S1_CLOSURE_TURN_1_OK` and `S1_CLOSURE_TURN_2_OK`; raw artifacts remain local-only and outside git.
+- Recorded manual real-acpx proof: the current CLI ran a full local persistent-session lifecycle via `npx -y acpx@0.12.0` (create, two sends, status, list, close all succeeded) with observed turn markers `S1_CLOSURE_TURN_1_OK` and `S1_CLOSURE_TURN_2_OK`; raw artifacts remain local-only and outside git.
 - This closes S1 for the local persistent-session lifecycle (create/send/multi-turn-resume/status/list/close, binding-mismatch refusal, lease handling, expired-lease recovery, redacted artifacts). It deliberately does **not** claim full crash/interruption recovery beyond deterministic expired-lease replacement, artifact retention/cleanup, or any caller integration — those are H1 / I1 carry-overs below.
 
 Acceptance:
@@ -357,10 +357,10 @@ Acceptance evidence for this branch:
 
 - `python3 -m pytest -q tests/hermes_caller` → 39 passed.
 - `python3 -m pytest -q` → full suite passed.
-- `python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0` → passed.
+- `python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0` → passed.
 - `PYTHONDONTWRITEBYTECODE=1 python3 -m compileall -q src scripts tests` → passed.
 - `PYTHONPATH=src python3 -m agent_run_supervisor doctor` → `ok: true`, `launched_real_agent: false`.
-- `PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson` → `final_message: CODEX_ACPX_OK`, `business_verdict: null`.
+- `PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjson` → `final_message: CODEX_ACPX_OK`, `business_verdict: null`.
 
 Status: **Closed on `main` via PR #27 (`eb7912e`).** PR #27 passed CI, Codex primary
 post-PR review, full local post-merge gates, docs index/drift checks, and post-merge verification.
@@ -386,7 +386,7 @@ captures **no** new live fixture and runs no `npx`/`acpx`. It approves **no** li
 |---|---|---|---:|---|---|---|
 | ARS-SANDBOX-BOUNDARY | PARKED | Any claim that `allowed_roots` is an OS/filesystem sandbox remains parked. | No | Separate sandbox phase | OS sandbox proof + negative probes | Parked |
 | ARS-CALLER-INTEGRATION | PARTIAL | Generic local library caller boundary is implemented in I1; the concrete caller (Hermes) is captured **design-only** in L1 (`docs/plans/2026-06-01-l1-concrete-caller-integration-design.md`, exec + persistent-session document-check, Feishu card as caller-owned view-model only), merged via PR #24 at `5e34f5c`. L2 local/offline Hermes caller + offline Feishu view-model implementation is merged via PR #27 at `eb7912e` under `src/agent_run_supervisor/hermes_caller/` with `tests/hermes_caller/`. Concrete Sachima/Gateway/IM/Feishu-delivery/live behavior remains separate and unapproved. | No | Separate later approval for any live platform seam | PR #27 evidence for local/offline caller package; separate product approval for real Feishu/Sachima/Gateway/live surfaces | Generic boundary done; concrete-caller design closed (L1, design-only); L2 local/offline implementation closed on main; all live/platform behavior parked |
-| ARS-NPX-STRICT-OFFLINE | PARKED | Default role compilation may resolve `npx -y acpx@0.10.0` when no explicit `acpx_binary` is configured; this is documented as fetch risk, not strict offline mode. | No | A future strict-offline hardening phase | Add role/runtime checks that require a local `acpx_binary` when strict offline is enabled; prove no `npx` fetch path with tests | P3 backlog only; not implemented in this docs/packaging cleanup |
+| ARS-NPX-STRICT-OFFLINE | PARKED | Default role compilation may resolve `npx -y acpx@0.12.0` when no explicit `acpx_binary` is configured; this is documented as fetch risk, not strict offline mode. | No | A future strict-offline hardening phase | Add role/runtime checks that require a local `acpx_binary` when strict offline is enabled; prove no `npx` fetch path with tests | P3 backlog only; not implemented in this docs/packaging cleanup |
 | ARS-REDACTION-DLP-HARDENING | PARKED | Current redaction covers common token/key/JWT/PEM/env/argv shapes; stronger DLP/caller allowlist projection is needed before broader real user/platform data scenarios. | No | Any real-user/platform-data rollout | Add allowlist projection and expanded redaction probes for caller-visible surfaces | P3 backlog only |
 | ARS-LOCK-RELEASE-AUDIT | PARKED | `_release_quietly()` intentionally avoids masking original session errors, but lock-release failures are not yet surfaced as structured audit evidence. | No | A future lifecycle observability hardening phase | Add regression tests and redacted management/audit evidence for release failures without breaking fail-closed behavior | P3 backlog only |
 
@@ -432,11 +432,11 @@ Persistent sessions are **not** a non-goal; they are a product requirement now c
 ## 6. Verification gates for implementation PRs
 
 ```bash
-python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0
+python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0
 python3 -m pytest -q
 python3 -m compileall -q src scripts tests
 PYTHONPATH=src python3 -m agent_run_supervisor doctor
-PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson
+PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjson
 python -m build
 python -m twine check dist/*
 # after installing the built wheel:

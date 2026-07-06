@@ -84,7 +84,7 @@ PYTHONPATH=src python3 -m agent_run_supervisor validate-role <role-file>.json
 
 # Replay an observed acpx stdout stream through the parser (deterministic, launches no AGENT)
 PYTHONPATH=src python3 -m agent_run_supervisor replay \
-  fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson
+  fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjson
 
 # Probe local readiness (read-only, never launches an AGENT)
 PYTHONPATH=src python3 -m agent_run_supervisor doctor
@@ -131,7 +131,7 @@ The helper creates temporary no-tool roles, asks Codex for exact sentinel replie
 `business_verdict = null`, closes the persistent session, and cleans artifacts by default
 (`--keep-artifacts` keeps the temp scratch/runs/sessions directories). It intentionally uses
 `runner.acpx_binary = null`, so the existing compiler invokes the pinned
-`npx -y acpx@0.10.0` path.
+`npx -y acpx@0.12.0` path.
 
 Use the exact Codex ACP model IDs advertised by the ACP session, such as
 `gpt-5.5[xhigh]`, `gpt-5.5[high]`, or `gpt-5.4-mini[medium]`. A bare id like
@@ -164,19 +164,19 @@ Factual local gates that keep the supervisor honest (run from the repository roo
 
 | Indicator | Evidence |
 |---|---|
-| Unit / integration tests | **Full pytest suite** — `python3 -m pytest -q` (current local acceptance: **466 collected tests passing**). |
-| acpx contract | acpx `0.10.0` fixtures + validator — `python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0`. |
+| Unit / integration tests | **Full pytest suite** — `python3 -m pytest -q` (current local acceptance: full suite passing). |
+| acpx contract | acpx `0.12.0` fixtures + validator — `python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0`. |
 | Import / syntax smoke | `python3 -m compileall -q src scripts tests`. |
 | Doctor (read-only) | `… doctor` never launches an AGENT (`launched_real_agent = false`). |
 | Package checks | `python -m build` + `python -m twine check dist/*`, plus an installed-wheel `agent-run-supervisor doctor` smoke. |
 | Safe artifacts | Redacted artifacts · `business_verdict = null` · EventStore `0700`/`0600` atomic NDJSON. |
 
 ```bash
-python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0
+python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0
 python3 -m pytest -q
 python3 -m compileall -q src scripts tests
 PYTHONPATH=src python3 -m agent_run_supervisor doctor
-PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson
+PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjson
 python -m build
 python -m twine check dist/*
 # after installing the built wheel:

@@ -110,12 +110,12 @@ def test_probe_node_nonzero_exit_is_unavailable() -> None:
 
 
 def test_probe_acpx_reports_version_when_runner_succeeds() -> None:
-    result = probe_acpx(runner=_runner(0, stdout="0.10.0\n"))
+    result = probe_acpx(runner=_runner(0, stdout="0.12.0\n"))
 
     assert result["binary"] == "acpx"
     assert result["available"] is True
-    assert result["version"] == "0.10.0"
-    assert result["expected_version"] == "0.10.0"
+    assert result["version"] == "0.12.0"
+    assert result["expected_version"] == "0.12.0"
     assert result["ok"] is True
     assert result["error_detail"] is None
 
@@ -134,7 +134,7 @@ def test_probe_acpx_version_mismatch_fails_ok() -> None:
 
     assert result["available"] is True
     assert result["version"] == "0.9.5"
-    assert result["expected_version"] == "0.10.0"
+    assert result["expected_version"] == "0.12.0"
     assert result["ok"] is False
     assert result["error_detail"]
 
@@ -144,7 +144,7 @@ def test_probe_acpx_does_not_launch_acpx_exec() -> None:
 
     def _record(argv):
         seen.append(list(argv))
-        return ProbeRun(returncode=0, stdout="0.10.0\n", stderr="")
+        return ProbeRun(returncode=0, stdout="0.12.0\n", stderr="")
 
     probe_acpx(runner=_record)
 
@@ -159,7 +159,7 @@ def test_probe_acpx_honors_explicit_binary_override() -> None:
 
     def _record(argv):
         seen.append(list(argv))
-        return ProbeRun(returncode=0, stdout="0.10.0\n", stderr="")
+        return ProbeRun(returncode=0, stdout="0.12.0\n", stderr="")
 
     probe_acpx(binary="/opt/acpx/bin/acpx", runner=_record)
 
@@ -287,7 +287,7 @@ def test_probe_npx_no_binary_reports_fetch_risk_and_pinned_spec(valid_role_dict)
     result = probe_npx(role, runner=runner)
 
     assert result["fetch_risk"] is True
-    assert result["pinned_spec"] == "acpx@0.10.0"
+    assert result["pinned_spec"] == "acpx@0.12.0"
     assert result["npx_available"] is True
     # Read-only: only `npx --version`, never a fetch/exec of acpx itself.
     assert seen == [["npx", "--version"]]
@@ -309,7 +309,7 @@ def test_probe_npx_missing_npx_is_not_available(valid_role_dict) -> None:
 
 
 def test_probe_adapter_declared_and_hostable(valid_role_dict) -> None:
-    runner, seen = _recording_runner(0, stdout="0.10.0\n")
+    runner, seen = _recording_runner(0, stdout="0.12.0\n")
     role = _role(
         valid_role_dict,
         runner={**valid_role_dict["runner"], "acpx_binary": "/opt/acpx/bin/acpx"},

@@ -1,6 +1,6 @@
 """Persistent-session runtime over the local :class:`SessionStore`.
 
-This module connects S1a's fixture-proven ``acpx@0.10.0`` persistent-session
+This module connects S1a's fixture-proven ``acpx@0.12.0`` persistent-session
 command contract to S1b's local store/binding/lease-lock foundation. S1c added
 ``create_session``/``send``/``status``; S1d extends the local lifecycle with
 ``close``/``abort`` and local ``list_sessions``.

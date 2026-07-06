@@ -20,7 +20,7 @@ from agent_run_supervisor.parser import (
     parse_acpx_stdout_bytes,
 )
 
-FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "acpx-0.10.0"
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "acpx-0.12.0"
 
 
 def _read(name: str, filename: str = "stdout.ndjson") -> bytes:

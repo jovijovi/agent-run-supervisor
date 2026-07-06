@@ -49,7 +49,7 @@ from typing import Any
 REPO = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO / "src"
 
-ACPX_VERSION = "0.10.0"
+ACPX_VERSION = "0.12.0"
 ADAPTER_AGENT = "codex"
 MODEL = "gpt-5.5[low]"
 

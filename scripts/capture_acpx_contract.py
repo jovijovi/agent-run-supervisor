@@ -11,9 +11,10 @@ from pathlib import Path
 from typing import Any
 
 REPO = Path(__file__).resolve().parents[1]
-FIXTURE_ROOT = REPO / "fixtures" / "acpx-0.10.0"
+FIXTURE_ROOT = REPO / "fixtures" / "acpx-0.12.0"
 SCRATCH_ROOT = REPO / ".tmp" / "acpx-contract-scratch"
-ACPX = ["npx", "-y", "acpx@0.10.0"]
+SESSION_SCRATCH = REPO / ".tmp" / "acpx-session-contract-scratch" / "persistent-session"
+ACPX = ["npx", "-y", "acpx@0.12.0"]
 COMMON_FLAGS = [
     "--format", "json",
     "--json-strict",
@@ -30,13 +31,15 @@ CODEX_ENV = {
     "CODEX_PATH": "/home/ecs-user/.local/bin/codex",
     "npm_config_update_notifier": "false",
 }
+SESSION_NAME = "s1a-session-contract"
+SESSION_MODEL = "gpt-5.5[low]"
 
 
 @dataclass(frozen=True)
 class FixtureSpec:
     name: str
     argv: list[str]
-    expected_exit: int
+    expected_exit: int = 0
     stdout_name: str = "stdout.ndjson"
     timeout_seconds: int = 240
     description: str = ""
@@ -151,6 +154,215 @@ def schema_summary() -> dict[str, Any]:
     }
 
 
+# --- Persistent-session contract capture -----------------------------------
+
+SESSION_PROMPT_FIXTURES: tuple[str, ...] = ("session-prompt-turn1", "session-prompt-turn2")
+
+
+def init_session_scratch() -> Path:
+    if SESSION_SCRATCH.exists():
+        shutil.rmtree(SESSION_SCRATCH)
+    SESSION_SCRATCH.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", "-b", "main"],
+        cwd=SESSION_SCRATCH,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+    )
+    (SESSION_SCRATCH / "README.md").write_text(
+        "persistent session contract sentinel file\n",
+        encoding="utf-8",
+    )
+    return SESSION_SCRATCH
+
+
+def best_effort_close_session(scratch: Path) -> None:
+    run(
+        ACPX
+        + [
+            "--format",
+            "json",
+            "--json-strict",
+            "--cwd",
+            str(scratch),
+            "codex",
+            "sessions",
+            "close",
+            SESSION_NAME,
+        ],
+        timeout=120,
+    )
+
+
+def run_session_fixture(spec: FixtureSpec) -> dict[str, Any]:
+    fixture_dir = FIXTURE_ROOT / spec.name
+    if fixture_dir.exists():
+        shutil.rmtree(fixture_dir)
+    fixture_dir.mkdir(parents=True)
+
+    started = iso_now()
+    start = time.monotonic()
+    exit_code, stdout, stderr = run(spec.argv, timeout=spec.timeout_seconds)
+    duration = time.monotonic() - start
+    ended = iso_now()
+
+    (fixture_dir / spec.stdout_name).write_text(stdout, encoding="utf-8")
+    (fixture_dir / "stderr.log").write_text(stderr, encoding="utf-8")
+    write_json(fixture_dir / "command.argv.json", spec.argv)
+    write_json(
+        fixture_dir / "metadata.json",
+        {
+            "name": spec.name,
+            "description": spec.description,
+            "started_at": started,
+            "ended_at": ended,
+            "duration_seconds": round(duration, 3),
+            "expected_exit": spec.expected_exit,
+            "stdout_file": spec.stdout_name,
+            "stderr_file": "stderr.log",
+        },
+    )
+    result = {
+        "name": spec.name,
+        "exit_code": exit_code,
+        "expected_exit": spec.expected_exit,
+        "matches_expected_exit": exit_code == spec.expected_exit,
+        "stdout_bytes": len(stdout.encode("utf-8")),
+        "stderr_bytes": len(stderr.encode("utf-8")),
+        "stdout_lines": len(stdout.splitlines()),
+        "stderr_lines": len(stderr.splitlines()),
+    }
+    write_json(fixture_dir / "result.json", result)
+    return result
+
+
+def summarize_prompt_records(records: list[Any]) -> dict[str, Any]:
+    methods: set[str] = set()
+    update_types: set[str] = set()
+    session_ids: set[str] = set()
+    texts: list[str] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        method = record.get("method")
+        if isinstance(method, str):
+            methods.add(method)
+        params = record.get("params")
+        if not isinstance(params, dict):
+            continue
+        session_id = params.get("sessionId")
+        if isinstance(session_id, str):
+            session_ids.add(session_id)
+        update = params.get("update")
+        if not isinstance(update, dict):
+            continue
+        update_type = update.get("sessionUpdate")
+        if isinstance(update_type, str):
+            update_types.add(update_type)
+        if update_type == "agent_message_chunk":
+            content = update.get("content")
+            if (
+                isinstance(content, dict)
+                and content.get("type") == "text"
+                and isinstance(content.get("text"), str)
+            ):
+                texts.append(content["text"])
+    return {
+        "methods": sorted(methods),
+        "session_update_types": sorted(update_types),
+        "unique_session_id_count": len(session_ids),
+        "joined_agent_text": "".join(texts),
+    }
+
+
+def nonempty_line_count(path: Path) -> int:
+    return len([line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()])
+
+
+def capture_session_contract() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    scratch = init_session_scratch()
+    best_effort_close_session(scratch)
+    management_head = ACPX + ["--format", "json", "--json-strict", "--cwd", str(scratch)]
+    prompt_head = ACPX + [
+        "--format",
+        "json",
+        "--json-strict",
+        "--suppress-reads",
+        "--timeout",
+        "180",
+        "--max-turns",
+        "1",
+        "--cwd",
+        str(scratch),
+        "--deny-all",
+        "--non-interactive-permissions",
+        "fail",
+        "--no-terminal",
+        "--model",
+        SESSION_MODEL,
+        "codex",
+        "prompt",
+        "-s",
+        SESSION_NAME,
+    ]
+    session_specs = [
+        FixtureSpec("session-new-named", management_head + ["codex", "sessions", "new", "--name", SESSION_NAME], stdout_name="stdout.json", description="Create a fresh named persistent session."),
+        FixtureSpec("session-ensure-existing", management_head + ["codex", "sessions", "ensure", "--name", SESSION_NAME], stdout_name="stdout.json", description="Ensure the existing named session without creating another."),
+        FixtureSpec("session-show-open", management_head + ["codex", "sessions", "show", SESSION_NAME], stdout_name="stdout.json", description="Show open session record before prompt turns."),
+        FixtureSpec("session-prompt-turn1", prompt_head + ["Persistent session contract turn 1. Do not inspect files, run tools, or edit. Reply exactly: S1A_SESSION_TURN_1_OK"], stdout_name="stdout.ndjson", timeout_seconds=360, description="Initial persistent prompt turn."),
+        FixtureSpec("session-prompt-turn2", prompt_head + ["Persistent session contract turn 2. Do not inspect files, run tools, or edit. Reply exactly: S1A_SESSION_TURN_2_OK"], stdout_name="stdout.ndjson", timeout_seconds=360, description="Follow-up persistent prompt turn reusing the same ACP session."),
+        FixtureSpec("session-show-after-turns", management_head + ["codex", "sessions", "show", SESSION_NAME], stdout_name="stdout.json", description="Show session after two prompt turns."),
+        FixtureSpec("session-history-after-turns", management_head + ["codex", "sessions", "history", "--limit", "8", SESSION_NAME], stdout_name="stdout.json", description="Read session history after turns."),
+        FixtureSpec("session-read-tail-after-turns", management_head + ["codex", "sessions", "read", "--tail", "8", SESSION_NAME], stdout_name="stdout.json", description="Read session tail after turns."),
+        FixtureSpec("session-status-after-turns", management_head + ["codex", "status", "-s", SESSION_NAME], stdout_name="stdout.json", description="Live status snapshot after turns."),
+        FixtureSpec("session-cancel-no-active", management_head + ["codex", "cancel", "-s", SESSION_NAME], stdout_name="stdout.json", description="Idle cancel should not close the session."),
+        FixtureSpec("session-close-named", management_head + ["codex", "sessions", "close", SESSION_NAME], stdout_name="stdout.json", description="Close the named session."),
+        FixtureSpec("session-show-closed", management_head + ["codex", "sessions", "show", SESSION_NAME], stdout_name="stdout.json", description="Show closed session record."),
+    ]
+    results = [run_session_fixture(spec) for spec in session_specs]
+    turn1 = summarize_prompt_records(parse_ndjson_lines(FIXTURE_ROOT / "session-prompt-turn1" / "stdout.ndjson"))
+    turn2 = summarize_prompt_records(parse_ndjson_lines(FIXTURE_ROOT / "session-prompt-turn2" / "stdout.ndjson"))
+    summary = {"fixtures": {}, "schema": {"turn1": turn1, "turn2": turn2}}
+    for spec, result in zip(session_specs, results, strict=True):
+        summary["fixtures"][spec.name] = {
+            "exit_code": result["exit_code"],
+            "expected_exit": result["expected_exit"],
+            "stdout_file": spec.stdout_name,
+            "stdout_lines": nonempty_line_count(FIXTURE_ROOT / spec.name / spec.stdout_name),
+        }
+    write_json(FIXTURE_ROOT / "session-contract-summary.json", summary)
+    return results, {
+        "phase": "S1a persistent-session contract spike refreshed for acpx 0.12.0",
+        "contract_evidence_only": True,
+        "runtime_implementation_in_fixture_set": False,
+        "status": "acpx 0.12.0 persistent-session contract evidence captured. Local persistent-session runtime support lives in source code; this fixture set remains schema/grammar evidence only and does not approve live/platform behavior.",
+        "session_name": SESSION_NAME,
+        "scratch_dir_suffix": ".tmp/acpx-session-contract-scratch/persistent-session",
+        "summary_file": "session-contract-summary.json",
+        "management_command_schema": "Each management command emits a single summarized JSON object (acpx.session.v1 record or an action snapshot), NOT a raw ACP NDJSON stream.",
+        "prompt_command_schema": "Prompt turns emit raw newline-delimited ACP/JSON-RPC stdout; turn2 reuses the same ACP session id and omits initialize/session-new setup.",
+        "schema_summary": {
+            "turn1_methods": turn1["methods"],
+            "turn1_update_types": turn1["session_update_types"],
+            "turn1_joined_agent_text": turn1["joined_agent_text"],
+            "turn2_methods": turn2["methods"],
+            "turn2_update_types": turn2["session_update_types"],
+            "turn2_joined_agent_text": turn2["joined_agent_text"],
+            "session_continuity": "turn1 and turn2 share exactly one ACP session id",
+        },
+        "fixtures": [
+            {
+                "name": spec.name,
+                "expected_exit": spec.expected_exit,
+                "kind": "prompt" if spec.stdout_name == "stdout.ndjson" else "management",
+                "semantics": spec.description,
+            }
+            for spec in session_specs
+        ],
+    }
+
+
 def main() -> int:
     if FIXTURE_ROOT.exists():
         shutil.rmtree(FIXTURE_ROOT)
@@ -224,7 +436,10 @@ def main() -> int:
         FixtureSpec(
             name="permission-denied-codex-read",
             expected_exit=5,
-            description="Codex attempts file access under deny-all; acpx exits 5 after permission denial.",
+            description=(
+                "Codex attempts file access under deny-all; acpx exits 5 after "
+                "permission denial under the observed 0.12.0 contract."
+            ),
             argv=ACPX + ["--format", "json", "--json-strict", "--suppress-reads", "--timeout", "180", "--max-turns", "3", "--cwd", str(permission_scratch), "--deny-all", "--non-interactive-permissions", "fail", "--no-terminal", "--model", "gpt-5.5[low]", "codex", "exec", "You must use the available file read capability to read README.md, then answer exactly READ_DONE. Do not answer without trying the file read."],
             timeout_seconds=240,
         ),
@@ -246,6 +461,7 @@ def main() -> int:
     results = []
     for spec in fixtures:
         results.append(run_fixture(spec))
+    session_results, session_contract = capture_session_contract()
 
     skipped = [
         {
@@ -259,6 +475,7 @@ def main() -> int:
     manifest = {
         "schema_version": 1,
         "captured_at": iso_now(),
+        "session_contract": session_contract,
         "acpx_version": version_stdout.strip(),
         "acpx_version_exit": version_exit,
         "node_version": node_stdout.strip(),
@@ -272,11 +489,11 @@ def main() -> int:
         "permission_policy_fixture": {
             "fixture": "permission-policy-deny-all-sentinel",
             "policy": DENY_PERMISSION_POLICY,
-            "conclusion": "acpx@0.10.0 accepts --permission-policy JSON with autoDeny/defaultAction in the observed runner flag family.",
+            "conclusion": "acpx@0.12.0 accepts --permission-policy JSON with autoDeny/defaultAction in the observed runner flag family.",
         },
         "path_enforcement_conclusion": {
-            "summary": "acpx@0.10.0 client fs handlers source-resolve absolute paths inside cwd, but Phase -1 did not prove AgentRoleSpec allowed_roots as an OS/filesystem sandbox.",
-            "source_inspection": "FileSystemHandlers.resolvePathWithinRoot checks absolute path and isWithinRoot(rootDir, resolved) in acpx@0.10.0 dist/live-checkpoint-CuFft_Nd.js.",
+            "summary": "acpx@0.12.0 client fs handlers source-resolve absolute paths inside cwd, but Phase -1 did not prove AgentRoleSpec allowed_roots as an OS/filesystem sandbox.",
+            "source_inspection": "FileSystemHandlers.resolvePathWithinRoot checks absolute path and isWithinRoot(rootDir, resolved) in acpx@0.12.0 dist/live-checkpoint-CuFft_Nd.js.",
             "v0_1a_rule": "Treat allowed_roots as cwd/config validation only unless a later OS sandbox/path-policy layer is added.",
         },
         "fixtures": [
@@ -289,11 +506,11 @@ def main() -> int:
         ],
         "skipped_fixtures": skipped,
         "schema_summary": schema_summary(),
-        "npx_runtime_fetch_risk": "commands intentionally used npx -y acpx@0.10.0 for Phase -1 capture; V0.1a run path should prefer a pinned local binary/digest.",
+        "npx_runtime_fetch_risk": "commands intentionally used npx -y acpx@0.12.0 for Phase -1 capture; V0.1a run path should prefer a pinned local binary/digest.",
     }
     write_json(FIXTURE_ROOT / "manifest.json", manifest)
 
-    readme = f"""# acpx@0.10.0 Contract Fixtures
+    readme = f"""# acpx@0.12.0 Contract Fixtures
 
 Captured: {manifest['captured_at']}
 
@@ -321,7 +538,7 @@ The V0.1a parser must target this observed stdout schema. Management-command JSO
 
 ## Permission policy finding
 
-`permission-policy-deny-all-sentinel` proves `acpx@0.10.0` accepts this policy shape under the V0.1a runner flags:
+`permission-policy-deny-all-sentinel` proves `acpx@0.12.0` accepts this policy shape under the V0.1a runner flags:
 
 ```json
 {json.dumps(DENY_PERMISSION_POLICY, ensure_ascii=False, indent=2)}
@@ -336,11 +553,16 @@ Source inspection shows acpx client fs handlers resolve absolute paths under the
 """
     for result in results:
         readme += f"- `{result['name']}`: exit `{result['exit_code']}` expected `{result['expected_exit']}`, stdout lines `{result['stdout_lines']}`.\n"
+    readme += "\n## Persistent session contract refresh\n\n"
+    readme += f"- Session name: `{SESSION_NAME}`\n"
+    readme += "- Scope: contract evidence only; runtime support lives in source code.\n"
+    for result in session_results:
+        readme += f"- `{result['name']}`: exit `{result['exit_code']}` expected `{result['expected_exit']}`, stdout lines `{result['stdout_lines']}`.\n"
     readme += "\n## Skipped\n\n- `interrupted-exit130`: skipped for live acpx capture; classifier should still table-test exit 130.\n"
     (FIXTURE_ROOT / "README.md").write_text(readme, encoding="utf-8")
 
-    all_ok = all(result["matches_expected_exit"] for result in results)
-    print(json.dumps({"fixture_root": str(FIXTURE_ROOT), "all_expected_exits_matched": all_ok, "fixtures": results}, ensure_ascii=False, indent=2))
+    all_ok = all(result["matches_expected_exit"] for result in [*results, *session_results])
+    print(json.dumps({"fixture_root": str(FIXTURE_ROOT), "all_expected_exits_matched": all_ok, "fixtures": [*results, *session_results]}, ensure_ascii=False, indent=2))
     return 0 if all_ok else 1
 
 

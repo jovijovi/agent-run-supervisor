@@ -1,0 +1,106 @@
+{
+  "fixtures": {
+    "session-cancel-no-active": {
+      "exit_code": 0,
+      "expected_exit": 0,
+      "stdout_file": "stdout.json",
+      "stdout_lines": 1
+    },
+    "session-close-named": {
+      "exit_code": 0,
+      "expected_exit": 0,
+      "stdout_file": "stdout.json",
+      "stdout_lines": 1
+    },
+    "session-ensure-existing": {
+      "exit_code": 0,
+      "expected_exit": 0,
+      "stdout_file": "stdout.json",
+      "stdout_lines": 1
+    },
+    "session-history-after-turns": {
+      "exit_code": 0,
+      "expected_exit": 0,
+      "stdout_file": "stdout.json",
+      "stdout_lines": 1
+    },
+    "session-new-named": {
+      "exit_code": 0,
+      "expected_exit": 0,
+      "stdout_file": "stdout.json",
+      "stdout_lines": 1
+    },
+    "session-prompt-turn1": {
+      "exit_code": 0,
+      "expected_exit": 0,
+      "stdout_file": "stdout.ndjson",
+      "stdout_lines": 19
+    },
+    "session-prompt-turn2": {
+      "exit_code": 0,
+      "expected_exit": 0,
+      "stdout_file": "stdout.ndjson",
+      "stdout_lines": 12
+    },
+    "session-read-tail-after-turns": {
+      "exit_code": 0,
+      "expected_exit": 0,
+      "stdout_file": "stdout.json",
+      "stdout_lines": 1
+    },
+    "session-show-after-turns": {
+      "exit_code": 0,
+      "expected_exit": 0,
+      "stdout_file": "stdout.json",
+      "stdout_lines": 1
+    },
+    "session-show-closed": {
+      "exit_code": 0,
+      "expected_exit": 0,
+      "stdout_file": "stdout.json",
+      "stdout_lines": 1
+    },
+    "session-show-open": {
+      "exit_code": 0,
+      "expected_exit": 0,
+      "stdout_file": "stdout.json",
+      "stdout_lines": 1
+    },
+    "session-status-after-turns": {
+      "exit_code": 0,
+      "expected_exit": 0,
+      "stdout_file": "stdout.json",
+      "stdout_lines": 1
+    }
+  },
+  "schema": {
+    "turn1": {
+      "joined_agent_text": "S1A_SESSION_TURN_1_OK",
+      "methods": [
+        "initialize",
+        "session/new",
+        "session/prompt",
+        "session/set_model",
+        "session/update"
+      ],
+      "session_update_types": [
+        "agent_message_chunk",
+        "available_commands_update",
+        "usage_update"
+      ],
+      "unique_session_id_count": 1
+    },
+    "turn2": {
+      "joined_agent_text": "S1A_SESSION_TURN_2_OK",
+      "methods": [
+        "session/prompt",
+        "session/update"
+      ],
+      "session_update_types": [
+        "agent_message_chunk",
+        "usage_update"
+      ],
+      "unique_session_id_count": 1
+    }
+  }
+}

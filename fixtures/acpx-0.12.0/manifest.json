@@ -1,0 +1,224 @@
+{
+  "acpx_version": "0.12.0",
+  "acpx_version_exit": 0,
+  "captured_at": "2026-07-06T06:52:45.935686+00:00",
+  "codex_status_exit": 0,
+  "codex_status_stderr_bytes": 0,
+  "codex_status_stdout": "{\"action\":\"status_snapshot\",\"status\":\"no-session\",\"summary\":\"no active session\"}",
+  "fixtures": [
+    {
+      "description": "No-tool Codex connectivity sentinel using exact V0.1a runner flag family.",
+      "expected_exit": 0,
+      "name": "success-codex-sentinel"
+    },
+    {
+      "description": "Real --permission-policy JSON is accepted while the task uses no tools.",
+      "expected_exit": 0,
+      "name": "permission-policy-deny-all-sentinel"
+    },
+    {
+      "description": "Invalid CLI flag should classify as usage error.",
+      "expected_exit": 2,
+      "name": "usage-error-invalid-flag"
+    },
+    {
+      "description": "Custom hanging ACP process should trigger acpx --timeout and exit 3.",
+      "expected_exit": 3,
+      "name": "timeout-hanging-agent"
+    },
+    {
+      "description": "Custom ACP process exits before initialize; acpx should classify as runtime error.",
+      "expected_exit": 1,
+      "name": "runtime-error-agent"
+    },
+    {
+      "description": "Codex attempts file access under deny-all; acpx exits 5 after permission denial under the observed 0.12.0 contract.",
+      "expected_exit": 5,
+      "name": "permission-denied-codex-read"
+    },
+    {
+      "description": "Missing named session with --no-wait exits 4; management/session path only.",
+      "expected_exit": 4,
+      "name": "management-no-session-exit4"
+    },
+    {
+      "description": "Status command with no session exits 0 but reports status=no-session; management schema, not exec success.",
+      "expected_exit": 0,
+      "name": "management-status-no-session-exit0"
+    }
+  ],
+  "node_version": "v24.14.0",
+  "node_version_exit": 0,
+  "npm_version": "11.17.0",
+  "npm_version_exit": 0,
+  "npx_runtime_fetch_risk": "commands intentionally used npx -y acpx@0.12.0 for Phase -1 capture; V0.1a run path should prefer a pinned local binary/digest.",
+  "path_enforcement_conclusion": {
+    "source_inspection": "FileSystemHandlers.resolvePathWithinRoot checks absolute path and isWithinRoot(rootDir, resolved) in acpx@0.12.0 dist/live-checkpoint-CuFft_Nd.js.",
+    "summary": "acpx@0.12.0 client fs handlers source-resolve absolute paths inside cwd, but Phase -1 did not prove AgentRoleSpec allowed_roots as an OS/filesystem sandbox.",
+    "v0_1a_rule": "Treat allowed_roots as cwd/config validation only unless a later OS sandbox/path-policy layer is added."
+  },
+  "permission_policy_fixture": {
+    "conclusion": "acpx@0.12.0 accepts --permission-policy JSON with autoDeny/defaultAction in the observed runner flag family.",
+    "fixture": "permission-policy-deny-all-sentinel",
+    "policy": {
+      "autoDeny": [
+        "read",
+        "search",
+        "edit",
+        "execute",
+        "delete",
+        "move",
+        "fetch",
+        "switch_mode",
+        "other"
+      ],
+      "defaultAction": "deny"
+    }
+  },
+  "runner_flags_family": [
+    "--format",
+    "json",
+    "--json-strict",
+    "--suppress-reads",
+    "--timeout",
+    "180",
+    "--max-turns",
+    "1"
+  ],
+  "schema_summary": {
+    "jsonrpc_present": true,
+    "line_count": 15,
+    "methods": [
+      "initialize",
+      "session/new",
+      "session/prompt",
+      "session/set_model",
+      "session/update"
+    ],
+    "session_update_types": [
+      "agent_message_chunk",
+      "available_commands_update",
+      "usage_update"
+    ],
+    "stdout_shape": "newline-delimited JSON objects observed from acpx --format json"
+  },
+  "schema_version": 1,
+  "session_contract": {
+    "contract_evidence_only": true,
+    "fixtures": [
+      {
+        "expected_exit": 0,
+        "kind": "management",
+        "name": "session-new-named",
+        "semantics": "Create a fresh named persistent session."
+      },
+      {
+        "expected_exit": 0,
+        "kind": "management",
+        "name": "session-ensure-existing",
+        "semantics": "Ensure the existing named session without creating another."
+      },
+      {
+        "expected_exit": 0,
+        "kind": "management",
+        "name": "session-show-open",
+        "semantics": "Show open session record before prompt turns."
+      },
+      {
+        "expected_exit": 0,
+        "kind": "prompt",
+        "name": "session-prompt-turn1",
+        "semantics": "Initial persistent prompt turn."
+      },
+      {
+        "expected_exit": 0,
+        "kind": "prompt",
+        "name": "session-prompt-turn2",
+        "semantics": "Follow-up persistent prompt turn reusing the same ACP session."
+      },
+      {
+        "expected_exit": 0,
+        "kind": "management",
+        "name": "session-show-after-turns",
+        "semantics": "Show session after two prompt turns."
+      },
+      {
+        "expected_exit": 0,
+        "kind": "management",
+        "name": "session-history-after-turns",
+        "semantics": "Read session history after turns."
+      },
+      {
+        "expected_exit": 0,
+        "kind": "management",
+        "name": "session-read-tail-after-turns",
+        "semantics": "Read session tail after turns."
+      },
+      {
+        "expected_exit": 0,
+        "kind": "management",
+        "name": "session-status-after-turns",
+        "semantics": "Live status snapshot after turns."
+      },
+      {
+        "expected_exit": 0,
+        "kind": "management",
+        "name": "session-cancel-no-active",
+        "semantics": "Idle cancel should not close the session."
+      },
+      {
+        "expected_exit": 0,
+        "kind": "management",
+        "name": "session-close-named",
+        "semantics": "Close the named session."
+      },
+      {
+        "expected_exit": 0,
+        "kind": "management",
+        "name": "session-show-closed",
+        "semantics": "Show closed session record."
+      }
+    ],
+    "management_command_schema": "Each management command emits a single summarized JSON object (acpx.session.v1 record or an action snapshot), NOT a raw ACP NDJSON stream.",
+    "phase": "S1a persistent-session contract spike refreshed for acpx 0.12.0",
+    "prompt_command_schema": "Prompt turns emit raw newline-delimited ACP/JSON-RPC stdout; turn2 reuses the same ACP session id and omits initialize/session-new setup.",
+    "runtime_implementation_in_fixture_set": false,
+    "schema_summary": {
+      "session_continuity": "turn1 and turn2 share exactly one ACP session id",
+      "turn1_joined_agent_text": "S1A_SESSION_TURN_1_OK",
+      "turn1_methods": [
+        "initialize",
+        "session/new",
+        "session/prompt",
+        "session/set_model",
+        "session/update"
+      ],
+      "turn1_update_types": [
+        "agent_message_chunk",
+        "available_commands_update",
+        "usage_update"
+      ],
+      "turn2_joined_agent_text": "S1A_SESSION_TURN_2_OK",
+      "turn2_methods": [
+        "session/prompt",
+        "session/update"
+      ],
+      "turn2_update_types": [
+        "agent_message_chunk",
+        "usage_update"
+      ]
+    },
+    "scratch_dir_suffix": ".tmp/acpx-session-contract-scratch/persistent-session",
+    "session_name": "s1a-session-contract",
+    "status": "acpx 0.12.0 persistent-session contract evidence captured. Local persistent-session runtime support lives in source code; this fixture set remains schema/grammar evidence only and does not approve live/platform behavior.",
+    "summary_file": "session-contract-summary.json"
+  },
+  "skipped_fixtures": [
+    {
+      "expected_exit": 130,
+      "name": "interrupted-exit130",
+      "reason": "Reliable SIGINT orchestration is deferred; V0.1a classifier will still table-test 130 without a live acpx fixture.",
+      "status": "skipped"
+    }
+  ]
+}
