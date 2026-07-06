@@ -160,7 +160,7 @@ flowchart TB
     end
 
     subgraph CONTRACT["acpx contract anchor"]
-        FIX["fixtures/acpx-0.10.0<br/>+ scripts/validate_contract_fixtures.py"]
+        FIX["fixtures/acpx-0.12.0<br/>+ scripts/validate_contract_fixtures.py"]
     end
 
     CLI --> CMD
@@ -234,7 +234,7 @@ flowchart TB
 - **Artifact plane** (`event_store.py`, `redaction.py`) — restrictive-permission, atomic,
   redacted local artifacts (see §5).
 - **Diagnostics plane** (`preflight.py`) — read-only environment/fixture probes for `doctor`.
-- **Contract anchor** (`fixtures/acpx-0.10.0` + validator) — the parser only consumes
+- **Contract anchor** (`fixtures/acpx-0.12.0` + validator) — the parser only consumes
   fixture-proven acpx schemas; new shapes require fresh fixtures before code trusts them.
 
 ---
@@ -341,7 +341,7 @@ Full status set: `completed`, `runner_error`, `invalid_invocation`, `timed_out`,
 > **Status banner.** Persistent ACP/acpx sessions are a **first-class product requirement**
 > (PRD FR-5), sequenced as phase **S1** in engineering order **after** the exec runner and now
 > **closed** for the local lifecycle. S1a captured the
-> `acpx@0.10.0` command/schema contract, S1b implements the local session store, binding,
+> `acpx@0.12.0` command/schema contract, S1b implements the local session store, binding,
 > and lease-lock foundation, and S1c adds the create/send/status runtime MVP
 > (`session_runtime.py`) that compiles fixture-shaped acpx session commands, persists
 > redacted turn + management artifacts, and re-validates the binding under a lease on every
@@ -610,7 +610,7 @@ prose here may be read as introducing any of them:
 | Result payload | `src/agent_run_supervisor/result.py` | F-STATUS-001 / F-EXEC-001 | ✅ | covered via runner/classifier tests |
 | EventStore + redaction | `src/agent_run_supervisor/event_store.py`, `redaction.py` | F-STORE-001 | 🟡 | `tests/test_event_store.py`, `tests/test_redaction.py` |
 | Doctor probes | `src/agent_run_supervisor/preflight.py` | F-CLI-003 (H1) | ✅ | `tests/test_preflight.py` |
-| acpx contract anchor | `fixtures/acpx-0.10.0`, `scripts/validate_contract_fixtures.py` | C0 | ✅ | `tests/test_validate_contract_fixtures.py` |
+| acpx contract anchor | `fixtures/acpx-0.12.0`, `scripts/validate_contract_fixtures.py` | C0 | ✅ | `tests/test_validate_contract_fixtures.py` |
 
 > Impl. status reflects code reality; phase acceptance/closure (e.g. E1, S1) is owned by
 > `docs/roadmap/current-status.md` and `docs/roadmap/features.md`.
@@ -624,11 +624,11 @@ Run the gates from the repository root.
 
 | Gate | Command | Architectural invariant it protects |
 |---|---|---|
-| Contract fixtures | `python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0` | The parser only trusts the proven acpx `0.10.0` contract; drift fails closed. |
+| Contract fixtures | `python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0` | The parser only trusts the proven acpx `0.12.0` contract; drift fails closed. |
 | Unit/integration tests | `python3 -m pytest -q` | Role/policy/workspace/parser/classifier/store/redaction + fake-subprocess & watchdog behavior. |
 | Syntax/import smoke | `python3 -m compileall -q src scripts tests` | All modules import cleanly. |
 | Doctor (read-only) | `PYTHONPATH=src python3 -m agent_run_supervisor doctor` | Diagnostics never launch an AGENT (`launched_real_agent = false`). |
-| Replay determinism | `PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson` | Fixture replay is deterministic and parser-stable. |
+| Replay determinism | `PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjson` | Fixture replay is deterministic and parser-stable. |
 | Docs index | `python tools/build_docs_index.py --check` | `docs/INDEX.md` matches frontmatter; this doc is registered. |
 | Drift signal | `python tools/docs_drift_signal.py --check` | Lesson/practice drift report is current. |
 | Whitespace/diff | `git diff --check` | No accidental whitespace/conflict-marker damage. |

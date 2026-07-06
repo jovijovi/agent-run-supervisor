@@ -34,7 +34,7 @@ def _persistent_role(**overrides: dict):
     spec = copy.deepcopy(VALID_ROLE)
     spec["session"] = {"strategy": "persistent"}
     # Default to the pinned ``npx`` fetch path so the compiled prefix matches the
-    # S1a fixtures (npx -y acpx@0.10.0); the binary path has its own test.
+    # S1a fixtures (npx -y acpx@0.12.0); the binary path has its own test.
     spec["runner"] = {**spec["runner"], "acpx_binary": None}
     for key, value in overrides.items():
         spec[key] = value
@@ -216,13 +216,13 @@ def test_compile_permission_policy_does_not_include_terminal_in_kinds_list() -> 
 
 # --- S1c persistent-session command compilation ---------------------------
 #
-# These pin the fixture-proven acpx@0.10.0 persistent-session command grammar
-# (fixtures/acpx-0.10.0/session-*). Management commands carry only
+# These pin the fixture-proven acpx@0.12.0 persistent-session command grammar
+# (fixtures/acpx-0.12.0/session-*). Management commands carry only
 # ``--format json --json-strict --cwd`` plus a management tail; prompt turns
 # use the stricter S1a fixture-proven ``--deny-all`` block and end with
 # ``prompt -s <name> <prompt>``.
 
-_MANAGEMENT_PREFIX = ["npx", "-y", "acpx@0.10.0", "--format", "json", "--json-strict"]
+_MANAGEMENT_PREFIX = ["npx", "-y", "acpx@0.12.0", "--format", "json", "--json-strict"]
 
 
 def test_ensure_persistent_strategy_refuses_exec_role() -> None:
@@ -335,7 +335,7 @@ def test_compile_session_prompt_command_keeps_prompt_as_single_argv_element() ->
 
 # --- S1d close / cancel command compilation -------------------------------
 #
-# Fixture-proven (fixtures/acpx-0.10.0/session-close-named,
+# Fixture-proven (fixtures/acpx-0.12.0/session-close-named,
 # session-cancel-no-active). Both are management commands: they carry only the
 # ``--format json --json-strict --cwd`` block plus a management tail, never the
 # exec/turn authorization flags, and never a shell string.

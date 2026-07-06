@@ -108,12 +108,12 @@ def _default_fixture_dir() -> Path:
     installation.
     """
     packaged = resources.files("agent_run_supervisor").joinpath(
-        "fixtures", "acpx-0.10.0"
+        "fixtures", "acpx-0.12.0"
     )
     packaged_replay = packaged.joinpath("success-codex-sentinel", "stdout.ndjson")
     if packaged_replay.is_file():
         return Path(str(packaged))
-    return Path(__file__).resolve().parents[2] / "fixtures" / "acpx-0.10.0"
+    return Path(__file__).resolve().parents[2] / "fixtures" / "acpx-0.12.0"
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:

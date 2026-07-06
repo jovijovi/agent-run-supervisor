@@ -11,7 +11,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"
-FIXTURES_ROOT = REPO_ROOT / "fixtures" / "acpx-0.10.0"
+FIXTURES_ROOT = REPO_ROOT / "fixtures" / "acpx-0.12.0"
 
 
 def _run_cli_impl(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -52,7 +52,7 @@ def valid_role_dict() -> dict[str, Any]:
         "description": "Read-only reviewer.",
         "runner": {
             "type": "acpx",
-            "acpx_version": "0.10.0",
+            "acpx_version": "0.12.0",
             "acpx_binary": None,
             "adapter_agent": "codex",
             "model": "gpt-5.5[low]",

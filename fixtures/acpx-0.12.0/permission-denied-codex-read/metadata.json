@@ -1,0 +1,20 @@
+{
+  "description": "Codex attempts file access under deny-all; acpx exits 5 after permission denial under the observed 0.12.0 contract.",
+  "duration_seconds": 14.94,
+  "ended_at": "2026-07-06T06:52:24.559564+00:00",
+  "expected_exit": 5,
+  "name": "permission-denied-codex-read",
+  "runner_flags_family": [
+    "--format",
+    "json",
+    "--json-strict",
+    "--suppress-reads",
+    "--timeout",
+    "180",
+    "--max-turns",
+    "1"
+  ],
+  "started_at": "2026-07-06T06:52:09.619307+00:00",
+  "stderr_file": "stderr.log",
+  "stdout_file": "stdout.ndjson"
+}

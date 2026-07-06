@@ -9,7 +9,7 @@ from agent_run_supervisor.role import load_role
 from agent_run_supervisor.runner import SubprocessOutcome, SupervisorRunner
 from agent_run_supervisor.session_runtime import SessionRuntime
 
-FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "acpx-0.10.0"
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "acpx-0.12.0"
 
 INIT = b'{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}\n'
 MSG = (

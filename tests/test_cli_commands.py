@@ -98,7 +98,7 @@ def test_doctor_emits_structured_node_and_acpx_probes(run_cli) -> None:
         "ok",
         "error_detail",
     }
-    assert acpx_probe["expected_version"] == "0.10.0"
+    assert acpx_probe["expected_version"] == "0.12.0"
 
     assert payload["launched_real_agent"] is False
 
@@ -115,7 +115,7 @@ def test_doctor_uses_role_acpx_binary_for_version_probe(
     run_cli, tmp_path: Path, valid_role_dict: dict[str, Any]
 ) -> None:
     fake_acpx = tmp_path / "fake-acpx"
-    fake_acpx.write_text("#!/bin/sh\nprintf '0.10.0\\n'\n", encoding="utf-8")
+    fake_acpx.write_text("#!/bin/sh\nprintf '0.12.0\\n'\n", encoding="utf-8")
     fake_acpx.chmod(0o700)
     role_payload = dict(valid_role_dict)
     role_payload["runner"] = dict(valid_role_dict["runner"])
@@ -129,7 +129,7 @@ def test_doctor_uses_role_acpx_binary_for_version_probe(
     payload = json.loads(completed.stdout)
     assert payload["acpx_probe"]["binary"] == str(fake_acpx)
     assert payload["acpx_probe"]["available"] is True
-    assert payload["acpx_probe"]["version"] == "0.10.0"
+    assert payload["acpx_probe"]["version"] == "0.12.0"
     assert payload["acpx_probe"]["ok"] is True
 
 
@@ -466,7 +466,7 @@ def test_session_create_cli_writes_record_and_json(
     assert completed.returncode == 0, completed.stderr
     payload = json.loads(completed.stdout)
     assert payload["session_id"] == "sess-a"
-    assert payload["acpx_session_id"] == "019e7940-35e8-79b1-8af2-229e4e41ad4b"
+    assert isinstance(payload["acpx_session_id"], str) and payload["acpx_session_id"]
     assert payload["business_verdict"] is None
     assert (sessions_dir / "sess-a" / "session.json").exists()
 

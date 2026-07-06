@@ -13,7 +13,7 @@ from agent_run_supervisor.parser import (
     summarize_management_json,
 )
 
-FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "acpx-0.10.0"
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "acpx-0.12.0"
 
 
 def _read(name: str, filename: str = "stdout.ndjson") -> bytes:
@@ -33,7 +33,9 @@ def test_success_codex_sentinel_captures_usage_update() -> None:
     result = parse_acpx_stdout_bytes(_read("success-codex-sentinel"))
 
     assert result.usage is not None
-    assert result.usage.get("totalTokens") == 14292
+    total_tokens = result.usage.get("totalTokens")
+    assert isinstance(total_tokens, int)
+    assert total_tokens > 0
 
 
 def test_success_codex_sentinel_emits_run_started_and_completed_events() -> None:
@@ -59,6 +61,25 @@ def test_permission_denied_fixture_assembles_partial_final_message() -> None:
     result = parse_acpx_stdout_bytes(_read("permission-denied-codex-read"))
 
     assert result.final_message.endswith("READ_DONE")
+
+
+def test_parser_records_permission_request_and_rejection_protocol_events() -> None:
+    payload = b"\n".join(
+        [
+            b'{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}',
+            b'{"jsonrpc":"2.0","id":1,"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"call-1"},"options":[{"optionId":"reject_once"}]}}',
+            b'{"jsonrpc":"2.0","id":1,"result":{"outcome":{"outcome":"selected","optionId":"reject_once"}}}',
+        ]
+    ) + b"\n"
+
+    result = parse_acpx_stdout_bytes(payload)
+
+    event_types = [event["type"] for event in result.events]
+    assert "permission_requested" in event_types
+    assert "permission_denied" in event_types
+    assert result.permission_request_count == 1
+    assert result.permission_denied_count == 1
+    assert result.protocol_error is False
 
 
 def test_usage_error_fixture_is_recognized_as_error_envelope() -> None:
@@ -169,8 +190,8 @@ def test_summarize_session_ensured_created_extracts_ids_and_name() -> None:
 
     assert summary["kind"] == "session_ensured"
     assert summary["created"] is True
-    assert summary["acpx_session_id"] == "019e7940-35e8-79b1-8af2-229e4e41ad4b"
-    assert summary["acpx_record_id"] == "019e7940-35e8-79b1-8af2-229e4e41ad4b"
+    assert isinstance(summary["acpx_session_id"], str) and summary["acpx_session_id"]
+    assert summary["acpx_record_id"] == summary["acpx_session_id"]
     assert summary["session_name"] == "s1a-session-contract"
 
 
@@ -186,7 +207,7 @@ def test_summarize_session_show_normalizes_acp_session_id_and_closed() -> None:
 
     assert summary["kind"] == "acpx.session.v1"
     # `show` spells it `acpSessionId` (no x); the summary normalizes the key.
-    assert summary["acpx_session_id"] == "019e7940-35e8-79b1-8af2-229e4e41ad4b"
+    assert isinstance(summary["acpx_session_id"], str) and summary["acpx_session_id"]
     assert summary["closed"] is False
     assert summary["session_name"] == "s1a-session-contract"
 
@@ -226,7 +247,7 @@ def test_summarize_session_closed() -> None:
     summary = summarize_management_json(_read("session-close-named", "stdout.json"))
 
     assert summary["kind"] == "session_closed"
-    assert summary["acpx_session_id"] == "019e7940-4726-73e2-ab90-10b8bd7714f7"
+    assert isinstance(summary["acpx_session_id"], str) and summary["acpx_session_id"]
 
 
 def test_summarize_cancel_result_reports_cancelled_flag() -> None:

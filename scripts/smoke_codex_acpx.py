@@ -8,7 +8,7 @@ surfaces that matter for local orchestration confidence:
 2. persistent session: ``session create -> send turn1 -> send turn2 -> status -> close``.
 
 It intentionally uses ``runner.acpx_binary = null`` so the supervisor compiler takes
-the pinned ``npx -y acpx@0.10.0`` path. The default model is the concrete Codex ACP
+the pinned ``npx -y acpx@0.12.0`` path. The default model is the concrete Codex ACP
 advertised model id ``gpt-5.5[xhigh]``; a bare model id such as ``gpt-5.5`` is
 rejected before launching anything because Codex ACP can reject non-advertised ids.
 
@@ -39,7 +39,7 @@ from typing import Any
 REPO = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO / "src"
 
-ACPX_VERSION = "0.10.0"
+ACPX_VERSION = "0.12.0"
 ADAPTER_AGENT = "codex"
 DEFAULT_MODEL = "gpt-5.5[xhigh]"
 

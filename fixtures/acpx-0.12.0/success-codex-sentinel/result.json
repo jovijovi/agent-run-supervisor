@@ -1,0 +1,10 @@
+{
+  "exit_code": 0,
+  "expected_exit": 0,
+  "matches_expected_exit": true,
+  "name": "success-codex-sentinel",
+  "stderr_bytes": 0,
+  "stderr_lines": 0,
+  "stdout_bytes": 40562,
+  "stdout_lines": 15
+}

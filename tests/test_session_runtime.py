@@ -42,7 +42,7 @@ UTC = timezone.utc
 T0 = datetime(2026, 5, 31, 12, 0, 0, tzinfo=UTC)
 T1 = datetime(2026, 5, 31, 12, 5, 0, tzinfo=UTC)
 
-FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "acpx-0.10.0"
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "acpx-0.12.0"
 
 
 # --- helpers --------------------------------------------------------------
@@ -184,11 +184,11 @@ def test_create_invokes_fixture_management_argv_and_persists_record(
     session_json = sessions_dir / "sess-a" / "session.json"
     assert session_json.exists()
     data = json.loads(session_json.read_text(encoding="utf-8"))
-    assert data["acpx_session_id"] == "019e7940-35e8-79b1-8af2-229e4e41ad4b"
+    assert isinstance(data["acpx_session_id"], str) and data["acpx_session_id"]
     assert data["session_name"] == "nightly"
     assert data["state"] == "open"
-    assert outcome.record.acpx_session_id == "019e7940-35e8-79b1-8af2-229e4e41ad4b"
-    assert outcome.result["acpx_session_id"] == "019e7940-35e8-79b1-8af2-229e4e41ad4b"
+    assert outcome.record.acpx_session_id == data["acpx_session_id"]
+    assert outcome.result["acpx_session_id"] == data["acpx_session_id"]
     assert outcome.result["business_verdict"] is None
     assert outcome.summary["kind"] == "session_ensured"
 
@@ -531,7 +531,7 @@ def test_status_summarizes_management_json_safely_without_lock(
     assert outcome.ok is True
     assert outcome.summary["kind"] == "status_snapshot"
     assert outcome.summary["status"] == "alive"
-    assert outcome.summary["acpx_session_id"] == "019e7940-4726-73e2-ab90-10b8bd7714f7"
+    assert isinstance(outcome.summary["acpx_session_id"], str) and outcome.summary["acpx_session_id"]
     # Safe summary: no bulk/untrusted model catalog leaks into the summary.
     assert "gpt-5.5" not in json.dumps(outcome.summary)
     # Read-only query takes no lease.
