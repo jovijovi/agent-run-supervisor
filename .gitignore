@@ -21,7 +21,10 @@
 [Ll]ib
 [Ll]ib64
 [Ll]ocal
-[Ss]cripts
+# Virtualenv activate/helpers only — do not ignore repo-root scripts/
+.venv/[Ss]cripts/
+venv/[Ss]cripts/
+env/[Ss]cripts/
 pyvenv.cfg
 .venv
 pip-selfcheck.json
