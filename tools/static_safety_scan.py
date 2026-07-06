@@ -34,7 +34,7 @@ TEXT_SUFFIXES = {
     ".txt",
 }
 TEXT_NAMES = {"LICENSE", "AGENTS.md", "GOAL.md", "CLAUDE.md"}
-SKIP_PARTS = {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "dist", "build"}
+SKIP_PARTS = {".git", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "dist", "build"}
 
 FORBIDDEN_IMPORT_ROOTS = {
     "requests",

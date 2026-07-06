@@ -30,7 +30,10 @@ Concrete task/phase implementation plans live under `docs/plans/`, named `docs/p
 
 ## Development workflow
 
-Use short-lived task branches and isolated worktrees for AI-assisted work. Derive implementation plans from PRD/design/roadmap; a plan must not redefine product goals.
+Use short-lived task branches and isolated worktrees for AI-assisted work. Branch prefixes:
+`feat/`, `fix/`, `docs/`, `cicd/` — see `docs/AI_FLOW.md` § Branch model. Do not use `cursor/`
+or other ad-hoc prefixes. Derive implementation plans from PRD/design/roadmap; a plan must not
+redefine product goals.
 
 Default role split unless explicitly changed:
 

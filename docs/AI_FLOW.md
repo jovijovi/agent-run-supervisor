@@ -42,16 +42,26 @@ Use trunk-based development with short-lived per-task branches.
 
 ```text
 main                              # integration trunk
-  ├── ai/<topic>-<yyyy-mm-dd>      # AI-led task branch
-  ├── feat/<topic>                 # feature branch
-  ├── fix/<topic>                  # bugfix branch
-  └── docs/<topic>-<yyyy-mm-dd>     # documentation/governance branch
+  ├── feat/<topic>                 # feature / product capability work
+  ├── fix/<topic>                    # bugfix
+  ├── docs/<topic>                   # documentation-only changes
+  └── cicd/<topic>                   # CI/CD, release engineering, dev workflow tooling
 ```
+
+Prefix rules:
+
+| Prefix | Use for |
+|---|---|
+| `feat/` | New features or product capability implementation |
+| `fix/` | Bug fixes |
+| `docs/` | Documentation-only updates (no runtime behavior change) |
+| `cicd/` | CI/CD pipelines, release/packaging workflow, local dev gate scripts |
 
 Rules:
 
 - `main` is the integration trunk and should stay releasable.
 - One task branch = one task = one PR.
+- Do **not** use `cursor/`, `ai/`, or other ad-hoc prefixes for task branches.
 - Do not commit directly to `main` except explicitly approved trivial metadata changes.
 - Start from a clean `origin/main` worktree.
 

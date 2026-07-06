@@ -24,7 +24,7 @@
   &nbsp;·&nbsp;
   <code>MIT</code>
   &nbsp;·&nbsp;
-  <code>状态：预发布&nbsp;(0.0.0)</code>
+  <code>状态：0.1.0</code>
 </p>
 
 ---
@@ -66,50 +66,61 @@
 
 ## 安装与使用
 
-> **尚未发布软件包**（版本 `0.0.0`）。请从源码检出运行。运行时为 **Python ≥ 3.11，仅标准库**；
-> `pytest` 是唯一的（可选）开发依赖。
+```bash
+pip install agent-run-supervisor
+```
+
+或从源码检出运行（见 [开发](#开发)）。
+
+```bash
+# 校验一个 AgentRoleSpec（JSON）并打印其稳定的 role hash
+agent-run-supervisor validate-role <role-file>.json
+
+# 将观测到的 acpx stdout 流经解析器回放（确定性，不启动任何 AGENT）
+agent-run-supervisor replay \
+  fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjson
+
+# 探测本地就绪状态（只读，绝不启动 AGENT）
+agent-run-supervisor doctor
+
+# 干跑（dry-run）：编译策略 + argv 并持久化预览工件，不启动任何进程
+agent-run-supervisor run \
+  --role <role-file>.json --prompt-file <prompt>.txt --no-real-run
+
+# 真实的一次性 exec：在角色策略下监督一次本地 `acpx exec`
+#（需要本地具备 acpx/Node；仅启动一个显式、本地的 AGENT）
+agent-run-supervisor run \
+  --role <role-file>.json --prompt-file <prompt>.txt
+
+# 本地持久会话生命周期（角色须使用持久会话策略）：
+# 创建 → 发送轮次 → 状态 → 关闭/中止。create/send/status/close/abort 会驱动一次真实的本地
+# acpx 会话，需要本地具备 Node + acpx；`session list` 为本地只读枚举，不启动任何 AGENT。
+agent-run-supervisor session create \
+  --role <role-file>.json --session-id <id>
+agent-run-supervisor session send \
+  --role <role-file>.json --session-id <id> --prompt-file <prompt>.txt
+agent-run-supervisor session status \
+  --role <role-file>.json --session-id <id>
+agent-run-supervisor session close \
+  --role <role-file>.json --session-id <id>
+agent-run-supervisor session abort \
+  --role <role-file>.json --session-id <id>
+agent-run-supervisor session list
+
+# 规划或执行本地工件的保留/清理（默认 dry-run；--apply 才真正删除）
+agent-run-supervisor cleanup
+```
+
+未安装时从源码检出运行，将 `agent-run-supervisor` 替换为
+`PYTHONPATH=src python3 -m agent_run_supervisor`。
 
 ```bash
 # 克隆并进入仓库
 git clone https://github.com/jovijovi/agent-run-supervisor.git
 cd agent-run-supervisor
 
-# 校验一个 AgentRoleSpec（JSON）并打印其稳定的 role hash
+# 示例：从检出运行 validate-role（无需安装）
 PYTHONPATH=src python3 -m agent_run_supervisor validate-role <role-file>.json
-
-# 将观测到的 acpx stdout 流经解析器回放（确定性，不启动任何 AGENT）
-PYTHONPATH=src python3 -m agent_run_supervisor replay \
-  fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjson
-
-# 探测本地就绪状态（只读，绝不启动 AGENT）
-PYTHONPATH=src python3 -m agent_run_supervisor doctor
-
-# 干跑（dry-run）：编译策略 + argv 并持久化预览工件，不启动任何进程
-PYTHONPATH=src python3 -m agent_run_supervisor run \
-  --role <role-file>.json --prompt-file <prompt>.txt --no-real-run
-
-# 真实的一次性 exec：在角色策略下监督一次本地 `acpx exec`
-#（需要本地具备 acpx/Node；仅启动一个显式、本地的 AGENT）
-PYTHONPATH=src python3 -m agent_run_supervisor run \
-  --role <role-file>.json --prompt-file <prompt>.txt
-
-# 本地持久会话生命周期（角色须使用持久会话策略）：
-# 创建 → 发送轮次 → 状态 → 关闭/中止。create/send/status/close/abort 会驱动一次真实的本地
-# acpx 会话，需要本地具备 Node + acpx；`session list` 为本地只读枚举，不启动任何 AGENT。
-PYTHONPATH=src python3 -m agent_run_supervisor session create \
-  --role <role-file>.json --session-id <id>
-PYTHONPATH=src python3 -m agent_run_supervisor session send \
-  --role <role-file>.json --session-id <id> --prompt-file <prompt>.txt
-PYTHONPATH=src python3 -m agent_run_supervisor session status \
-  --role <role-file>.json --session-id <id>
-PYTHONPATH=src python3 -m agent_run_supervisor session close \
-  --role <role-file>.json --session-id <id>
-PYTHONPATH=src python3 -m agent_run_supervisor session abort \
-  --role <role-file>.json --session-id <id>
-PYTHONPATH=src python3 -m agent_run_supervisor session list
-
-# 规划或执行本地工件的保留/清理（默认 dry-run；--apply 才真正删除）
-PYTHONPATH=src python3 -m agent_run_supervisor cleanup
 ```
 
 ### Codex/acpx 冒烟 helper
@@ -149,29 +160,84 @@ Codex ACP 模型名要使用 ACP session 广告出来的精确 ID，例如 `gpt-
 | 真实 AGENT 运行 / 会话轮次 | 本地具备 **Node + acpx + 目标 AGENT CLI** —— 在不带 `--no-real-run` 的 `run`，以及真实的 `session create/send/status/close/abort` 轮次与管理命令时需要。Codex 冒烟 helper 还需要 `npx`，以及通过 `CODEX_PATH` 或 `PATH` 可用的 Codex CLI。 |
 | 不启动 AGENT 的命令 | `validate-role`、`replay`、`doctor`、`run --no-real-run`、`session list` 与 `cleanup`（dry-run）**无需** Node/acpx，且**不启动**任何 AGENT。 |
 
+## 开发
+
+推荐使用 [uv](https://docs.astral.sh/uv/) 获得可复现的开发环境。根目录 [`Makefile`](Makefile)
+提供快捷命令：
+
+```bash
+git clone https://github.com/jovijovi/agent-run-supervisor.git
+cd agent-run-supervisor
+make sync      # uv sync --extra dev --extra release
+make verify    # 完整本地关卡（与 CI 一致）
+make build     # sdist/wheel + twine check
+make smoke     # build + 已安装 wheel 冒烟
+make clean     # 清理构建产物、缓存与本地临时数据
+make help      # 列出全部 target
+```
+
+无 Make 时的等价命令：
+
+```bash
+uv sync --extra dev --extra release
+./scripts/verify_local.sh
+```
+
+`make verify` / `./scripts/verify_local.sh` 是单一本地关卡入口 —— 与 CI 及
+[`docs/roadmap/current-status.md`](docs/roadmap/current-status.md) §6 对齐（测试、doctor/replay
+冒烟、文档索引/漂移、静态安全扫描、build/twine 检查与已安装 wheel 冒烟）。
+
+**pip 回退**（无 uv 时）：
+
+```bash
+pip install -e '.[dev,release]'
+python3 -m pytest -q
+```
+
+## 发布
+
+**正式 PyPI** —— 由 git tag 触发 GitHub Actions Trusted Publishing（仓库内不放 API token）：
+
+```bash
+make verify              # 或 ./scripts/verify_local.sh
+# 在 pyproject.toml 与 CHANGELOG.md 中 bump 版本，合并到 main
+make release-tag         # 打印 git tag vX.Y.Z && git push 命令
+agent-run-supervisor doctor   # PyPI 安装后验证
+```
+
+**TestPyPI 试发**（本地用环境变量传 token，切勿提交到 git）：
+
+```bash
+export TWINE_USERNAME=__token__
+export TWINE_PASSWORD=pypi-...    # TestPyPI token
+make release-test                 # verify + 上传到 TestPyPI
+
+pip install --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple/ \
+            agent-run-supervisor==0.1.0
+agent-run-supervisor doctor
+```
+
+维护者须在首次正式 tag 推送前，于 PyPI 配置 Trusted Publishing（workflow `release.yml`、environment
+`pypi`）。操作清单见 `docs/plans/2026-07-06-p3-engineering-basics.md`。
+
 ## 质量与测试指标
 
-保持监督层诚实的本地关卡（在仓库根目录执行）：
+保持监督层诚实的本地关卡（在仓库根目录执行 `./scripts/verify_local.sh`，或逐步执行）：
 
 | 指标 | 证据 |
 |---|---|
-| 单元 / 集成测试 | **完整 pytest 套件** —— `python3 -m pytest -q`（当前本地验收：full suite passing）。 |
-| acpx 契约 | acpx `0.12.0` 夹具 + 校验器 —— `python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0`。 |
-| 导入 / 语法冒烟 | `python3 -m compileall -q src scripts tests`。 |
+| 完整本地关卡 | `make verify` 或 `./scripts/verify_local.sh` —— 与 CI verify workflow 对齐。 |
+| 单元 / 集成测试 | **完整 pytest 套件** —— `uv run pytest -q`（当前本地验收：full suite passing）。 |
+| acpx 契约 | acpx `0.12.0` 夹具 + 校验器 —— `scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0`。 |
+| 导入 / 语法冒烟 | `python -m compileall -q src scripts tests`。 |
 | Doctor（只读） | `… doctor` 绝不启动 AGENT（`launched_real_agent = false`）。 |
-| 包检查 | `python -m build` + `python -m twine check dist/*`，再用已安装 wheel 运行 `agent-run-supervisor doctor` 冒烟。 |
+| 包检查 | `python -m build` + `twine check dist/*`，再用已安装 wheel 运行 `agent-run-supervisor doctor` 冒烟。 |
 | 安全工件 | 脱敏工件 · `business_verdict = null` · EventStore `0700`/`0600` 原子 NDJSON。 |
 
 ```bash
-python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0
-python3 -m pytest -q
-python3 -m compileall -q src scripts tests
-PYTHONPATH=src python3 -m agent_run_supervisor doctor
-PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjson
-python -m build
-python -m twine check dist/*
-# 安装构建出的 wheel 后：
-agent-run-supervisor doctor
+uv sync --extra dev --extra release
+./scripts/verify_local.sh
 ```
 
 ## 路线图
@@ -193,8 +259,8 @@ agent-run-supervisor doctor
 ## 许可证
 
 © `agent-run-supervisor` 作者。以 **[MIT](https://opensource.org/license/mit)** 许可证发布
-（`pyproject.toml` 中 `license = "MIT"`，并包含 [`LICENSE`](LICENSE)）。预发布软件（`0.0.0`）；接口与结果 schema
-仍可能变动。
+（`pyproject.toml` 中 `license = "MIT"`，并包含 [`LICENSE`](LICENSE)）。当前版本 `0.1.0`；接口与结果 schema
+在稳定 `1.0.0` 之前仍可能变动。
 
 <p align="center">
   <img src="docs/assets/branding/logo-mark.png" alt="agent-run-supervisor 标志" width="72" height="72">
