@@ -24,7 +24,7 @@
   &nbsp;·&nbsp;
   <code>MIT</code>
   &nbsp;·&nbsp;
-  <code>status:&nbsp;pre-release&nbsp;(0.0.0)</code>
+  <code>status:&nbsp;0.1.0</code>
 </p>
 
 ---
@@ -71,51 +71,61 @@ production config writes, live/default-on behavior, `@all` fan-out, and agent-to
 
 ## Install and use
 
-> **No published package yet** (version `0.0.0`). Run from a source checkout. The runtime is
-> **Python ≥ 3.11, standard-library only**; `pytest` is the only (optional) dev dependency.
+```bash
+pip install agent-run-supervisor
+```
+
+Or install from a source checkout (see [Development](#development)).
 
 ```bash
-# Clone and enter the repository
-git clone https://github.com/jovijovi/agent-run-supervisor.git
-cd agent-run-supervisor
-
 # Validate an AgentRoleSpec (JSON) and print its stable role hash
-PYTHONPATH=src python3 -m agent_run_supervisor validate-role <role-file>.json
+agent-run-supervisor validate-role <role-file>.json
 
 # Replay an observed acpx stdout stream through the parser (deterministic, launches no AGENT)
-PYTHONPATH=src python3 -m agent_run_supervisor replay \
+agent-run-supervisor replay \
   fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjson
 
 # Probe local readiness (read-only, never launches an AGENT)
-PYTHONPATH=src python3 -m agent_run_supervisor doctor
+agent-run-supervisor doctor
 
 # Dry-run: compile policy + argv and persist preview artifacts, launch nothing
-PYTHONPATH=src python3 -m agent_run_supervisor run \
+agent-run-supervisor run \
   --role <role-file>.json --prompt-file <prompt>.txt --no-real-run
 
 # Real one-shot exec: supervise a local `acpx exec` under the role's policy
 # (requires acpx/Node available locally; launches ONE explicit, local AGENT)
-PYTHONPATH=src python3 -m agent_run_supervisor run \
+agent-run-supervisor run \
   --role <role-file>.json --prompt-file <prompt>.txt
 
 # Local persistent-session lifecycle (role must use a persistent session strategy):
 # create → send turn(s) → status → close/abort. create/send/status/close/abort drive a
 # real local acpx session and need Node + acpx; `session list` is local read-only and
 # launches no AGENT.
-PYTHONPATH=src python3 -m agent_run_supervisor session create \
+agent-run-supervisor session create \
   --role <role-file>.json --session-id <id>
-PYTHONPATH=src python3 -m agent_run_supervisor session send \
+agent-run-supervisor session send \
   --role <role-file>.json --session-id <id> --prompt-file <prompt>.txt
-PYTHONPATH=src python3 -m agent_run_supervisor session status \
+agent-run-supervisor session status \
   --role <role-file>.json --session-id <id>
-PYTHONPATH=src python3 -m agent_run_supervisor session close \
+agent-run-supervisor session close \
   --role <role-file>.json --session-id <id>
-PYTHONPATH=src python3 -m agent_run_supervisor session abort \
+agent-run-supervisor session abort \
   --role <role-file>.json --session-id <id>
-PYTHONPATH=src python3 -m agent_run_supervisor session list
+agent-run-supervisor session list
 
 # Plan or apply local artifact retention/cleanup (dry-run by default; --apply deletes)
-PYTHONPATH=src python3 -m agent_run_supervisor cleanup
+agent-run-supervisor cleanup
+```
+
+From a source checkout without installing, prefix commands with `PYTHONPATH=src python3 -m agent_run_supervisor` instead of `agent-run-supervisor`.
+
+```bash
+# Clone and enter the repository
+git clone https://github.com/jovijovi/agent-run-supervisor.git
+cd agent-run-supervisor
+
+# Example: validate-role from checkout (no install)
+PYTHONPATH=src python3 -m agent_run_supervisor validate-role <role-file>.json
 ```
 
 ### Codex/acpx smoke helper
@@ -158,29 +168,87 @@ with `--apply`) deletes aged run/session artifacts, confined to the resolved
 | Real AGENT runs / session turns | **Node + acpx + the target AGENT CLI** available locally — required for `run` (without `--no-real-run`) and for the real `session create/send/status/close/abort` turn & management commands. The Codex smoke helper specifically needs `npx` plus Codex CLI via `CODEX_PATH` or `PATH`. |
 | No-AGENT commands | `validate-role`, `replay`, `doctor`, `run --no-real-run`, `session list`, and `cleanup` (dry-run) need **no** Node/acpx and launch **no** AGENT. |
 
+## Development
+
+Primary path uses [uv](https://docs.astral.sh/uv/) for a reproducible dev environment.
+Short commands are available via the root [`Makefile`](Makefile):
+
+```bash
+git clone https://github.com/jovijovi/agent-run-supervisor.git
+cd agent-run-supervisor
+make sync      # uv sync --extra dev --extra release
+make verify    # full local gates (same as CI)
+make build     # sdist/wheel + twine check
+make smoke     # build + installed-wheel smoke
+make clean     # remove build artifacts, caches, local scratch data
+make help      # list all targets
+```
+
+Equivalent without Make:
+
+```bash
+uv sync --extra dev --extra release
+./scripts/verify_local.sh
+```
+
+`make verify` / `./scripts/verify_local.sh` is the single local gate entry — it mirrors CI and
+[`docs/roadmap/current-status.md`](docs/roadmap/current-status.md) §6 (tests, doctor/replay smoke,
+docs index/drift, static safety scan, build/twine check, and installed-wheel smoke).
+
+**pip fallback** (without uv):
+
+```bash
+pip install -e '.[dev,release]'
+python3 -m pytest -q
+```
+
+## Publishing
+
+**Production PyPI** — tag-triggered via GitHub Actions Trusted Publishing (no API tokens in the
+repo):
+
+```bash
+make verify              # or ./scripts/verify_local.sh
+# bump version in pyproject.toml + CHANGELOG.md, merge to main
+make release-tag         # prints git tag vX.Y.Z && git push commands
+agent-run-supervisor doctor   # after pip install from PyPI
+```
+
+**TestPyPI dry-run** (local upload with API token in env — never commit tokens):
+
+```bash
+export TWINE_USERNAME=__token__
+export TWINE_PASSWORD=pypi-...    # TestPyPI token
+make release-test                 # verify + upload to TestPyPI
+
+pip install --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple/ \
+            agent-run-supervisor==0.1.0
+agent-run-supervisor doctor
+```
+
+Maintainers must configure PyPI Trusted Publishing for workflow `release.yml` and environment
+`pypi` before the first production tag push. See `docs/plans/2026-07-06-p3-engineering-basics.md`
+for the operator checklist.
+
 ## Quality and test indicators
 
-Factual local gates that keep the supervisor honest (run from the repository root):
+Factual local gates that keep the supervisor honest (run from the repository root with
+`./scripts/verify_local.sh`, or step-by-step):
 
 | Indicator | Evidence |
 |---|---|
-| Unit / integration tests | **Full pytest suite** — `python3 -m pytest -q` (current local acceptance: full suite passing). |
-| acpx contract | acpx `0.12.0` fixtures + validator — `python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0`. |
-| Import / syntax smoke | `python3 -m compileall -q src scripts tests`. |
+| Full local gate | `make verify` or `./scripts/verify_local.sh` — mirrors CI verify workflow. |
+| Unit / integration tests | **Full pytest suite** — `uv run pytest -q` (current local acceptance: full suite passing). |
+| acpx contract | acpx `0.12.0` fixtures + validator — `scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0`. |
+| Import / syntax smoke | `python -m compileall -q src scripts tests`. |
 | Doctor (read-only) | `… doctor` never launches an AGENT (`launched_real_agent = false`). |
-| Package checks | `python -m build` + `python -m twine check dist/*`, plus an installed-wheel `agent-run-supervisor doctor` smoke. |
+| Package checks | `python -m build` + `twine check dist/*`, plus an installed-wheel `agent-run-supervisor doctor` smoke. |
 | Safe artifacts | Redacted artifacts · `business_verdict = null` · EventStore `0700`/`0600` atomic NDJSON. |
 
 ```bash
-python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0
-python3 -m pytest -q
-python3 -m compileall -q src scripts tests
-PYTHONPATH=src python3 -m agent_run_supervisor doctor
-PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjson
-python -m build
-python -m twine check dist/*
-# after installing the built wheel:
-agent-run-supervisor doctor
+uv sync --extra dev --extra release
+./scripts/verify_local.sh
 ```
 
 ## Roadmap
@@ -206,7 +274,7 @@ High-level direction only — full phase status, acceptance, and non-approvals l
 
 © the `agent-run-supervisor` authors. Released under the **[MIT](https://opensource.org/license/mit)**
 license (`license = "MIT"` and [`LICENSE`](LICENSE)). Pre-release software
-(`0.0.0`); surfaces and result schemas may still change.
+(`0.1.0`); surfaces and result schemas may still change before a stable `1.0.0`.
 
 <p align="center">
   <img src="docs/assets/branding/logo-mark.png" alt="agent-run-supervisor logo mark" width="72" height="72">

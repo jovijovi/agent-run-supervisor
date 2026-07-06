@@ -2,14 +2,14 @@
 title: "agent-run-supervisor Roadmap Current Status"
 status: active
 created_at: 2026-05-28
-last_validated_at: 2026-06-01T00:00:00+0800
+last_validated_at: 2026-07-06T16:00:00+0800
 ---
 # agent-run-supervisor Roadmap Current Status
 
 > Living roadmap, phase tracker, and implementation-stage acceptance register. This file replaces the deleted standalone implementation plan.
 
 ```text
-last_updated: 2026-06-01
+last_updated: 2026-07-06
 base_branch: main
 product_role: independent local Python library + dev CLI for supervising ACP/acpx AGENT runs and sessions with redacted audit evidence
 source_of_truth: GOAL.md, docs/product/prd.md, docs/design/architecture.md, docs/design/technical-solution.md, docs/roadmap/features.md, docs/roadmap/current-status.md, docs/AI_FLOW.md
@@ -365,6 +365,35 @@ Acceptance evidence for this branch:
 Status: **Closed on `main` via PR #27 (`eb7912e`).** PR #27 passed CI, Codex primary
 post-PR review, full local post-merge gates, docs index/drift checks, and post-merge verification.
 
+### P3 — Engineering basics (uv + verify + PyPI)
+
+Goal: reproducible local dev with uv, CI/local gate alignment, and tag-triggered PyPI Trusted
+Publishing for the first public release — without changing supervisor runtime behavior or introducing
+runtime dependencies.
+
+Checklist:
+
+- [x] Track `uv.lock` for reproducible dev tooling (`dev` + `release` extras only; runtime stays
+  stdlib-only).
+- [x] Add `scripts/verify_local.sh` as the single local gate entry mirroring §6 and CI.
+- [x] Add `scripts/smoke_installed_wheel.sh` for reusable installed-wheel smoke.
+- [x] Migrate `.github/workflows/verify.yml` to uv (`astral-sh/setup-uv@v5`, Python 3.11/3.12 matrix,
+  `concurrency` cancel-in-progress).
+- [x] Bump `pyproject.toml` to `0.1.0`; add `CHANGELOG.md`.
+- [x] Add `.github/workflows/release.yml` (tag `v*`, OIDC Trusted Publishing, environment `pypi`).
+- [x] Update README Development + Publishing sections; governance docs and plan
+  `docs/plans/2026-07-06-p3-engineering-basics.md`.
+
+Acceptance:
+
+- `uv sync --extra dev --extra release` + `./scripts/verify_local.sh` pass locally.
+- CI `Verify` workflow uses uv and `./scripts/verify_local.sh` on Python 3.11 and 3.12.
+- `release.yml` ready for maintainer Trusted Publisher setup; no secrets in repo.
+- First live `pip install agent-run-supervisor==0.1.0` awaits operator tag push (`v0.1.0`).
+
+Status: **Implementation complete; first PyPI publish pending operator Trusted Publisher config and
+tag push.** All §5 non-approvals remain in force.
+
 ### Phase B — ARS evidence hardening (support for the external Sachima controlled-local-execution PRD)
 
 Evidence/test-only; **not** a new ARS product phase. This is *Phase B — `agent-run-supervisor`
@@ -431,20 +460,31 @@ Persistent sessions are **not** a non-goal; they are a product requirement now c
 
 ## 6. Verification gates for implementation PRs
 
+Primary local entry (after `uv sync --extra dev --extra release`):
+
 ```bash
-python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0
-python3 -m pytest -q
-python3 -m compileall -q src scripts tests
-PYTHONPATH=src python3 -m agent_run_supervisor doctor
-PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjson
-python -m build
-python -m twine check dist/*
-# after installing the built wheel:
-agent-run-supervisor doctor
-python tools/build_docs_index.py --check
-python tools/docs_drift_signal.py --check
+./scripts/verify_local.sh
+```
+
+Step-by-step equivalent:
+
+```bash
+uv run python scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0
+uv run pytest -q
+uv run python -m compileall -q src scripts tests
+uv run agent-run-supervisor doctor
+uv run agent-run-supervisor replay fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjson
+uv run python tools/build_docs_index.py --check
+uv run python tools/docs_drift_signal.py --check
+uv run python tools/static_safety_scan.py
+uv run python -m build
+uv run python -m twine check dist/*
+./scripts/smoke_installed_wheel.sh
 git diff --check
 ```
+
+**pip fallback** (without uv): replace `uv run …` with `PYTHONPATH=src python3 -m …` or installed
+console scripts after `pip install -e '.[dev,release]'`.
 
 For source changes, also run secret-shaped and static dangerous-pattern scans over added lines.
 

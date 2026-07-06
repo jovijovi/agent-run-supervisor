@@ -2,10 +2,11 @@
 
 # Documentation Index
 
-Total: 26 documents tracked across 2 statuses.
+Total: 27 documents tracked across 2 statuses.
 
-## Active (13)
+## Active (14)
 
+- [P3 Engineering Basics (uv + verify + PyPI)](plans/2026-07-06-p3-engineering-basics.md) — created 2026-07-06
 - [Live event streaming core (PR1)](plans/2026-07-05-live-event-streaming.md) — created 2026-07-05
 - [Codex acpx Smoke Helper and Docs Plan](plans/2026-06-14-codex-acpx-smoke-helper.md) — created 2026-06-14
 - [Phase B — ARS Evidence Hardening Plan](plans/2026-06-12-phase-b-ars-evidence-hardening.md) — created 2026-06-12
