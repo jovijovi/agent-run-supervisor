@@ -293,8 +293,8 @@ The product requirement for exec and persistent sessions does not approve unrela
 
 ## 7. Success metrics
 
-- Feature completion is tracked in `docs/roadmap/features.md` and shows both one-shot exec and persistent-session support complete before the product is considered feature-complete.
-- `docs/roadmap/current-status.md` has phase checklists and acceptance criteria for each active engineering stage.
+- Feature completion is tracked in `docs/roadmap/features.md`.
+- The living board (`docs/roadmap/current-status.md`) states the current phase snapshot and open tails; closed acceptance lives in `docs/roadmap/archive/`.
 - Local gates and CI pass.
 - A caller can inspect redacted artifacts without parsing raw acpx streams.
 - The supervisor never invents caller business verdicts.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Single local verify entry — mirrors docs/roadmap/current-status.md §6 and CI verify gates.
+# Single local verify entry — mirrors docs/roadmap/verification.md and CI verify gates.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -46,6 +46,9 @@ uv run python -m twine check dist/*
 
 echo "==> Installed wheel smoke"
 ./scripts/smoke_installed_wheel.sh
+
+echo "==> Roadmap governance check"
+uv run python tools/check_roadmap_governance.py
 
 echo "==> Whitespace diff check"
 git diff --check

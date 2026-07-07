@@ -3,8 +3,12 @@ title: "Live event streaming core (PR1)"
 status: archived
 created_at: 2026-07-05
 last_validated_at: 2026-07-07T11:30:00+0800
-archived_at: 2026-07-07T11:30:00+0800
+archived_at: 2026-07-07
 ---
+> **Archived plan（冷区）：** 非 active 上下文。Roadmap 章节迁移见
+> [`docs/roadmap/MIGRATION.md`](../roadmap/MIGRATION.md)。
+> 验收摘要见对应 [`docs/roadmap/archive/phases/`](../roadmap/archive/phases/) 条目。
+
 # Live event streaming core — PR1
 
 ## Completion note
@@ -80,7 +84,7 @@ In scope (PR1):
   `normalized-events.jsonl`; monotonic `seq`.
 
 Explicit non-goals / non-approvals (unchanged from
-`docs/roadmap/current-status.md` §5, all still in force):
+`docs/roadmap/non-approvals.md`, all still in force):
 
 - No Gateway lifecycle, Feishu/IM delivery, Sachima behavior, public ingress,
   production config writes, real automatic replies, live/default-on behavior,

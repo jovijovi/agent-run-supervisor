@@ -3,8 +3,12 @@ title: "S1a Persistent-Session Contract Spike Plan"
 status: archived
 created_at: 2026-05-30
 last_validated_at: 2026-05-30T00:00:00+0800
-archived_at: 2026-06-03T18:14:07+0800
+archived_at: 2026-07-07
 ---
+> **Archived plan（冷区）：** 非 active 上下文。Roadmap 章节迁移见
+> [`docs/roadmap/MIGRATION.md`](../roadmap/MIGRATION.md)。
+> 验收摘要见对应 [`docs/roadmap/archive/phases/`](../roadmap/archive/phases/) 条目。
+
 # S1a Persistent-Session Contract Spike Plan
 
 > **For Hermes:** this is a **contract-evidence** spike, not an implementation phase.
@@ -142,7 +146,7 @@ Captured / changed by the spike (evidence + validation):
 
 Documentation updated by this plan:
 
-- `docs/plans/2026-05-30-s1a-session-contract-spike.md` (this file)
+- `docs/plans/archive/2026-05-30-s1a-session-contract-spike.md` (this file)
 - `docs/roadmap/current-status.md` (S1 fixture-capture checklist + evidence note)
 - `docs/roadmap/features.md` (`F-SESSION-001` evidence)
 - `docs/INDEX.md`, `docs/lessons/_drift_report.md` (regenerated, not hand-edited)

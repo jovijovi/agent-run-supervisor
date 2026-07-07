@@ -50,7 +50,7 @@ FORBIDDEN_IMPORT_ROOTS = {
 
 SYNTHETIC_SECRET_PATHS = {
     Path("src/agent_run_supervisor/preflight.py"),
-    Path("docs/plans/2026-06-01-h1-operational-hardening.md"),
+    Path("docs/plans/archive/2026-06-01-h1-operational-hardening.md"),
 }
 
 SECRET_PATTERNS = {

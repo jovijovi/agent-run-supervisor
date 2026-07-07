@@ -3,8 +3,12 @@ title: "L2 Hermes Caller + Offline Feishu View-Model Implementation Plan"
 status: archived
 created_at: 2026-06-01
 last_validated_at: 2026-06-01T21:17:29+0800
-archived_at: 2026-06-01T21:17:29+0800
+archived_at: 2026-07-07
 ---
+> **Archived plan（冷区）：** 非 active 上下文。Roadmap 章节迁移见
+> [`docs/roadmap/MIGRATION.md`](../roadmap/MIGRATION.md)。
+> 验收摘要见对应 [`docs/roadmap/archive/phases/`](../roadmap/archive/phases/) 条目。
+
 # L2 Hermes Caller + Offline Feishu View-Model Implementation Plan
 
 > **Completion banner — archived execution plan.** This document was the L2 implementation
@@ -60,11 +64,11 @@ Read in authority order; this plan is **derivative** of all of them and redefine
   (`ARS-CALLER-INTEGRATION`), §5 (non-approvals).
 - Workflow & plan rules: `docs/AI_FLOW.md`, `docs/plans/README.md`, `CLAUDE.md` / `AGENTS.md`.
 - **Closed L1 design (direct parent):**
-  `docs/plans/2026-06-01-l1-concrete-caller-integration-design.md` (Hermes layering, exec +
+  `docs/plans/archive/2026-06-01-l1-concrete-caller-integration-design.md` (Hermes layering, exec +
   session flows, view-model mapping §12, ownership matrix §13, Sachima seam §14).
 - I1 boundary surface (the only supervisor API this plan consumes):
   `src/agent_run_supervisor/caller.py` (`CallerInvocationSpec`, `CallerResult`, `invoke_caller`).
-- I1 boundary plan: `docs/plans/2026-06-01-i1-local-caller-thin-integration.md`.
+- I1 boundary plan: `docs/plans/archive/2026-06-01-i1-local-caller-thin-integration.md`.
 
 ## 3. Scope
 
@@ -99,7 +103,7 @@ Still explicitly **out of scope** after L2, unchanged from current non-approvals
 
 ## 4. Non-goals / non-approvals
 
-L2 inherits **every** non-approval in `docs/roadmap/current-status.md` §5 and PRD §6 verbatim and
+L2 inherits **every** non-approval in `docs/roadmap/non-approvals.md` and PRD §6 verbatim and
 adds nothing live. Authoring this plan does **not** approve or imply:
 
 - Sachima behavior integration or real AGENT automatic replies;

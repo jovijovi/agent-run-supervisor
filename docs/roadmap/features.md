@@ -2,56 +2,59 @@
 title: "Feature and Capability Tracker"
 status: active
 created_at: 2026-05-29
-last_validated_at: 2026-07-06T16:00:00+0800
+last_validated_at: 2026-07-07T15:30:00+0800
 ---
 # Feature and Capability Tracker
 
-This table is the unified feature/capability completion register for `agent-run-supervisor`. It tracks product features, implementation status, evidence, and next acceptance gates.
+Unified feature/capability register. **Evidence** cells are short pointers only; detail lives in
+[`archive/phases/`](archive/phases/), tests, and [`docs/plans/archive/`](../plans/archive/).
 
-Status legend:
+Status legend: **Done** · **Partial** · **Planned** · **Parked** · **Non-goal**
 
-- **Done** — implemented and covered by tests/docs evidence.
-- **Partial** — meaningful implementation exists, but PRD/design acceptance is incomplete.
-- **Planned** — product requirement accepted, implementation not started or not merged.
-- **Parked** — intentionally outside current engineering sequence, but not necessarily outside product scope.
-- **Non-goal** — explicitly not owned by this product.
-
-| ID | Feature / capability | Product status | Implementation status | Evidence | Remaining acceptance |
+| ID | Feature / capability | Product | Impl | Evidence | Remaining |
 |---|---|---|---|---|---|
-| F-GOV-001 | Documentation-first authority chain: GOAL -> PRD -> design -> feature tracker -> roadmap/status -> phase plans | Required | Done | `GOAL.md`, `docs/product/prd.md`, `docs/design/technical-solution.md`, this file, `docs/roadmap/current-status.md`, PR #6 (`7dcbe4f`) | Maintain this chain as features/phases change |
-| F-ROLE-001 | `AgentRoleSpec` validation and role hash | Required | Done | `src/agent_run_supervisor/role.py`, tests; persistent-session config (`strategy: persistent` + bounded lease settings) added in S1b without changing the role-bound authorization model | Maintenance only: keep the role-bound authorization invariant as the schema evolves; no session-config acceptance outstanding |
-| F-POLICY-001 | acpx policy/argv compiler | Required | Partial | `src/agent_run_supervisor/policy.py`, tests, dry-run and real-exec artifacts; S1c session command compilers (`compile_session_create/ensure/show/status/prompt_command`) and S1d lifecycle compilers (`compile_session_close_command` → `sessions close`, `compile_session_cancel_command` → `cancel -s`) with `tests/test_policy.py` | History/read-tail compilers only if a later slice needs them; broaden prompt-turn tool permissions only with fresh fixtures |
-| F-WORKSPACE-001 | cwd / allowed-roots intent gate | Required | Done | `src/agent_run_supervisor/workspace.py`, tests, real-exec prelaunch gate, plus persistent-session role/workspace/policy/acpx binding revalidation before `send`/`status`/`close`/`abort` (S1c) | Intent-gate scope complete; a real OS/filesystem sandbox is explicitly out of scope and parked separately as `ARS-SANDBOX-BOUNDARY` (not this feature's tail) |
-| F-PARSER-001 | Observed acpx event/stdout parser | Required | Partial | `src/agent_run_supervisor/parser.py`, fixtures, replay tests; S1c prompt-turn NDJSON coverage + `summarize_management_json` safe management summarizer with `tests/test_parser.py`; S1d reuses the existing allow-listed `session_closed`/`cancel_result` summaries (no parser change needed) | Extend coverage only if new management schemas appear |
-| F-STATUS-001 | Supervisor status and exit classification | Required | Partial | `src/agent_run_supervisor/exit_classifier.py`, tests; H1 documents the status/error-code vocabulary for caller stability in `docs/design/result-event-schema.md` §3 | Add session lifecycle detail if needed |
-| F-STORE-001 | EventStore, artifact permissions, redaction | Required | Partial | `src/agent_run_supervisor/event_store.py`, redaction tests; S1c redacted session turn artifacts (`sessions/<id>/turns/<turn_id>/`) and `management/` evidence via `session_runtime.py`; S1d atomic lifecycle state (`SessionStore.mark_closed`/`ensure_open`/`list_records`) and redacted `management/close.json`/`abort.json` with `tests/test_session_store.py`; H1 retention/cleanup over these artifacts delivered via F-RETENTION-001 (`retention.py` + `cleanup` CLI) and read-only `SessionStore.detect_stale_locks` | Retention/cleanup knobs delivered (F-RETENTION-001); optional unsafe raw-capture opt-in remains a future PRD FR-8 item only if a later phase proves it necessary |
-| F-CLI-001 | `validate-role` CLI | Required | Done | CLI smoke/tests | Keep stable |
-| F-CLI-002 | `replay` CLI | Required | Done | Fixture replay smoke/tests | Keep stable |
-| F-CLI-003 | `doctor` CLI | Required | Done | `src/agent_run_supervisor/preflight.py` (full read-only probe set: `probe_policy`/`probe_workspace`/`probe_redaction`/`probe_npx`/`probe_adapter`/`probe_session_readiness`), `cmd_doctor` wiring in `commands.py`, doctor output documented in `docs/design/result-event-schema.md` §5, `tests/test_preflight.py`, `tests/test_cli_commands.py`; H1 merged on `main` via PR #19 at `484ae23` | Doctor probe set complete; keep read-only (`launched_real_agent: false`) and `ok`-gating CI-safe |
-| F-RUN-001 | `run --no-real-run` compile/artifact preview | Useful support feature | Done | dry-run tests/artifacts | Keep or deprecate only with replacement evidence |
-| F-EXEC-001 | Real one-shot acpx exec supervision | Required | Done | `src/agent_run_supervisor/runner.py`, `src/agent_run_supervisor/commands.py`, `tests/test_runner_exec.py`, local smoke `/tmp/agent-run-supervisor-e1-smoke/result.json` | Keep local-only boundary; persistent sessions are tracked by F-SESSION-001/S1 |
-| F-SESSION-001 | Persistent session lifecycle | Required | Done | Product requirement in PRD/design; S1a contract evidence: `fixtures/acpx-0.12.0/session-*`, `fixtures/acpx-0.12.0/session-contract-summary.json`, manifest `session_contract`, `scripts/validate_contract_fixtures.py`, `docs/plans/2026-05-30-s1a-session-contract-spike.md`; S1b foundation: `src/agent_run_supervisor/session.py`, session config/exec guard in `role.py`/`policy.py`/`runner.py`/`commands.py`, workspace binding in `workspace.py`, artifact primitives in `event_store.py`, tests `tests/test_session_store.py`, `tests/test_session_strategy_guard.py`; **S1c runtime MVP**: `src/agent_run_supervisor/session_runtime.py` (create/send/status over `SessionStore` with binding revalidation, lease acquire/release, redacted turn + management artifacts), session command compilers in `policy.py`, `summarize_management_json` in `parser.py`, `session` CLI in `cli.py`/`commands.py`; **S1d lifecycle completion**: `SessionRuntime.close`/`abort`/`list_sessions` with fixture-proven `sessions close`/`cancel -s` compilers, atomic `closed` state transition + closed-session refusal (`SessionStore.mark_closed`/`ensure_open`/`list_records`), redacted `management/close.json`/`abort.json`, honest `cancelled: true|false`, and `session close|abort|list` CLI; **S1 closure acceptance**: `scripts/smoke_persistent_session.py` real local acpx lifecycle smoke, `tests/test_smoke_persistent_session.py` smoke preflight/leak-prevention coverage, plus `tests/test_session_runtime.py::test_two_sequential_sends_reuse_record_persist_distinct_turns_and_release_lease` multi-turn continuity regression. S1 remains exactly S1a/S1b/S1c/S1d; closure adds evidence, not a new subphase. | Local persistent-session lifecycle closed. H1 retention/cleanup (F-RETENTION-001) and read-only stale-lock detection (`SessionStore.detect_stale_locks`) are merged via PR #19 at `484ae23`; K1 process-liveness crash/interruption recovery is merged on `main` via PR #22 at `0ad531e`, closing `ARS-CRASH-RECOVERY` with conservative holder-set classification and safe composite supervisor+child reclaim semantics. |
-| F-RETENTION-001 | Artifact retention/cleanup knobs | Required for long-lived use | Done | `src/agent_run_supervisor/retention.py` (`plan_cleanup`/`apply_cleanup`, confined dry-run-first), `cleanup` CLI in `cli.py`/`commands.py`, read-only `SessionStore.detect_stale_locks` in `session.py`, plan/result shape in `docs/design/result-event-schema.md` §7, `tests/test_retention.py`, `tests/test_cli_commands.py`, `tests/test_session_store.py`; H1 merged on `main` via PR #19 at `484ae23` | Artifact-root confinement, symlink-escape refusal, open/live-lock protection, and TOCTOU re-check covered; full process-crash recovery is implemented and merged as K1 via PR #22 (`0ad531e`), closing `ARS-CRASH-RECOVERY` while preserving retention's TTL/live-lock conservatism |
-| F-INTEGRATION-001 | Thin local caller boundary + local/offline concrete Hermes caller | Approved local-only caller integration | Done for local/offline scope | I1 generic boundary: `src/agent_run_supervisor/caller.py` (`CallerInvocationSpec`, `CallerResult`, `invoke_caller`), `tests/test_caller.py`, PR #20 (`83d9cb2`). L1 design-only concrete caller: `docs/plans/2026-06-01-l1-concrete-caller-integration-design.md`, PR #24 (`5e34f5c`). L2 local/offline implementation: `src/agent_run_supervisor/hermes_caller/` and `tests/hermes_caller/`, merged via PR #27 (`eb7912e`), implement the Hermes document-check caller, caller-owned verdict, normalized-event view, progress/result view-model, escaped offline Feishu payload dict, exec flow, persistent-session flow, and forbidden-surface guards. | Concrete Sachima/Gateway/IM/public-ingress/delivery/auto-reply/live behavior remains unapproved and separate; caller owns business verdict/rendering. |
-| F-SMOKE-001 | Maintained local Codex/acpx smoke helper | Useful support feature | Done | `scripts/smoke_codex_acpx.py` exercises one-shot exec and a two-turn persistent session through the existing CLI; `tests/test_smoke_codex_acpx.py` covers advertised-model enforcement, no-tool role generation, one-shot-before-session ordering, and best-effort session cleanup; README docs show the `gpt-5.5[xhigh]` model-id rule. | Helper launches a real local AGENT only when explicitly run by an operator; it is not a default CI gate and does not approve any live/platform integration. |
-| F-LIVE-STREAM-001 | Live event stream core (PR1) | Required for local live supervision | Done | `src/agent_run_supervisor/live_stream.py` (`LiveEventSink`), incremental parser wiring in `parser.py`, runner/session live stdout sink in `runner.py` and `session_runtime.py`, `tests/test_live_event_stream.py`, `docs/design/result-event-schema.md` §4.1; plan archived at `docs/plans/2026-07-05-live-event-streaming.md` | Local artifact projection only; no delivery/Gateway/IM; merged on `main` pre-`v0.1.0` |
-| F-LIVE-EVENTS-001 | Local event cursor / progress API (PR2) | Useful for caller polling | Done | `src/agent_run_supervisor/hermes_caller/events.py` (`read_event_page`, `load_progress`), `tests/hermes_caller/test_event_cursor.py`, schema §4.2 | Read-only local API; no websocket/long-poll server; Sachima live wiring (PR3) remains unapproved |
-| F-RELEASE-001 | Release engineering: pre-release validation, uv dev workflow, and PyPI publish | Required before publication | Done | `uv.lock` + `scripts/verify_local.sh` + `scripts/smoke_installed_wheel.sh` mirror `docs/roadmap/current-status.md` §6 and CI; `.github/workflows/verify.yml` uses `astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3`, `uv sync --extra dev --extra release`, Python 3.11/3.12/3.13/3.14 matrix on `verify` + `coverage`, `./scripts/verify_local.sh`, Codecov upload via `codecov/codecov-action@v6`, `actions/checkout@v6`, `actions/setup-python@v6`; `.github/workflows/release.yml` publishes on tag `v*` via Trusted Publishing (OIDC, environment `pypi`); `pyproject.toml` at `0.1.0`; `CHANGELOG.md`; README badges + Development/Publishing/Library usage. Plan: `docs/plans/2026-07-06-p3-engineering-basics.md`. **Live:** [`0.1.0` on PyPI](https://pypi.org/project/agent-run-supervisor/0.1.0/) via tag `v0.1.0` (2026-07-06). | GitHub Release `SHA256SUMS` + wheel/sdist assets since the first tag published after this workflow lands (`release.yml`). |
-| F-NONGOAL-001 | Public ingress / real IM delivery / Gateway lifecycle / production config / `@all` | Non-goal | Non-goal | PRD non-goals | Requires separate product/project approval outside this product's local supervisor scope |
+| F-GOV-001 | Doc authority chain | Required | Done | `GOAL.md`, `prd.md`, board, PR #6 | Maintain chain |
+| F-ROLE-001 | AgentRoleSpec + role hash | Required | Done | `role.py`, `tests/test_role.py` | Schema maintenance |
+| F-POLICY-001 | acpx policy/argv compiler | Required | Partial | `policy.py`, `tests/test_policy.py` | Optional read-tail compilers |
+| F-WORKSPACE-001 | cwd / allowed-roots gate | Required | Done | `workspace.py`, `tests/test_workspace_gate.py` | OS sandbox parked |
+| F-PARSER-001 | acpx stdout/event parser | Required | Partial | `parser.py`, `tests/test_parser.py` | New schemas only |
+| F-STATUS-001 | Status / exit classification | Required | Partial | `exit_classifier.py`, schema §3 | Session detail if needed |
+| F-STORE-001 | EventStore + redaction | Required | Partial | `event_store.py`, `session.py`, retention | Optional raw-capture FR-8 |
+| F-CLI-001 | `validate-role` | Required | Done | `commands.py`, CLI tests | Keep stable |
+| F-CLI-002 | `replay` | Required | Done | fixtures, CLI tests | Keep stable |
+| F-CLI-003 | `doctor` | Required | Done | `preflight.py`, `tests/test_preflight.py` | Read-only probes |
+| F-RUN-001 | `run --no-real-run` | Useful | Done | dry-run tests | Keep or replace with evidence |
+| F-EXEC-001 | Real acpx exec | Required | Done | `runner.py`, `tests/test_runner_exec.py` | Local-only |
+| F-SESSION-001 | Persistent session lifecycle | Required | Done | `session_runtime.py`, S1 archive | Closed local lifecycle |
+| F-RETENTION-001 | Retention / cleanup | Required | Done | `retention.py`, `tests/test_retention.py` | K1 crash recovery done |
+| F-INTEGRATION-001 | Caller + Hermes (local) | Approved | Done | `caller.py`, `hermes_caller/` | Live platform parked |
+| F-SMOKE-001 | Codex/acpx smoke helper | Useful | Done | `scripts/smoke_codex_acpx.py` | Operator-only |
+| F-LIVE-STREAM-001 | Live stream core | Required | Done | `live_stream.py`, schema §4.1 | No delivery |
+| F-LIVE-EVENTS-001 | Event cursor API | Useful | Done | `hermes_caller/events.py` | PR3 Sachima unapproved |
+| F-RELEASE-001 | Release engineering | Required | Done | `verify_local.sh`, `release.yml` | See CHANGELOG / PyPI |
+| F-NONGOAL-001 | Public ingress / IM / Gateway | Non-goal | Non-goal | PRD §6 | Separate approval |
+
+Evidence archive links: S1 → [`archive/phases/s1-persistent-sessions.md`](archive/phases/s1-persistent-sessions.md);
+H1 → [`archive/phases/h1-operational-hardening.md`](archive/phases/h1-operational-hardening.md);
+P3 → [`archive/phases/p3-engineering-basics.md`](archive/phases/p3-engineering-basics.md).
 
 ## Completion roll-up
 
-| Area | Done | Partial | Planned/Parked | Note |
+| Area | Done | Partial | Parked | Note |
 |---|---:|---:|---:|---|
-| Governance/docs | 1 | 0 | 0 | Authority realignment complete via PR #6 (`7dcbe4f`). |
-| Core role/policy/workspace | 2 | 1 | 0 | Role and the cwd/workspace intent gate are Done (workspace adds persistent-session binding revalidation); policy stays Partial only for optional history/read-tail compilers. The OS-sandbox is parked separately (`ARS-SANDBOX-BOUNDARY`). |
-| Parser/status/store | 1 | 3 | 0 | Current run surfaces exist; S1c adds prompt-turn/management parsing and session turn artifacts; S1d adds atomic lifecycle state + close/abort evidence; H1 merged confined retention/cleanup over those artifacts (F-RETENTION-001 Done). Parser/status/store classifications unchanged. |
-| CLI | 5 | 0 | 0 | validate/replay/dry-run/real exec/doctor done (doctor completed in H1); S1c adds `session create|send|status`; S1d adds `session close|abort|list`; H1 adds the `cleanup` command (dry-run default). |
-| Execution modes | 2 | 0 | 0 | One-shot exec done; persistent sessions are closed for the local lifecycle after S1a contract evidence, S1b store/lock foundation, S1c create/send/status runtime, S1d close/abort/list lifecycle, multi-turn continuity regression, and the reproducible real-acpx smoke. H1 delivered doctor and retention/cleanup hardening; K1 process-liveness crash/interruption recovery is merged via PR #22 (`0ad531e`) and closes `ARS-CRASH-RECOVERY`. F-LIVE-STREAM-001 adds exec/session-send live artifacts (`progress.json`, seq-stamped events). |
-| Operational smoke helpers | 1 | 0 | 0 | `scripts/smoke_codex_acpx.py` maintains an explicit local Codex/acpx smoke across one-shot exec and persistent-session surfaces; it is operator-run only, not a default CI gate. |
-| Live supervision / polling | 2 | 0 | 0 | PR1 live stream core + PR2 local cursor/progress API closed on `main` pre-`v0.1.0`; Sachima live wiring (PR3) remains unapproved. |
-| Packaging / release checks | 1 | 0 | 0 | uv dev workflow + `verify_local.sh` align local/CI gates; Python 3.11–3.14 matrix + Codecov; tag-triggered PyPI publish via `release.yml`; `0.1.0` live on PyPI since tag `v0.1.0` (2026-07-06). |
+| Governance/docs | 1 | 0 | 0 | R0 closed |
+| Core role/policy/workspace | 2 | 1 | 0 | Policy partial for optional compilers |
+| Parser/status/store | 1 | 3 | 0 | Retention + sessions merged |
+| CLI | 5 | 0 | 0 | Includes session + cleanup |
+| Execution modes | 2 | 0 | 0 | Exec + sessions closed |
+| Smoke helpers | 1 | 0 | 0 | Operator-run only |
+| Live supervision | 2 | 0 | 0 | Local artifacts only |
+| Packaging / release | 1 | 0 | 0 | uv + verify + PyPI workflow |
 
 ## Maintenance rule
 
-Update this file whenever a feature's product requirement, implementation state, or acceptance evidence changes. Do not bury feature completion inside PR bodies, chat logs, or historical dev logs.
+Update when product requirement, implementation state, or acceptance changes.
+
+- **Evidence column:** max ~120 characters; use paths/tests + one archive/plan link.
+- **No** PR narratives, SHAs, or duplicate phase prose — link [`archive/phases/`](archive/phases/).
+- Do not bury completion in PR bodies or chat logs.

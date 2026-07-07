@@ -43,8 +43,10 @@ Read these in order for product, design, roadmap, and implementation work:
 2. System architecture (diagrams and boundaries): `docs/design/architecture.md`
 3. Technical design (module detail): `docs/design/technical-solution.md`
 4. Feature completion tracking: `docs/roadmap/features.md`
-5. Roadmap, phase status, and implementation-stage acceptance: `docs/roadmap/current-status.md`
-6. Development workflow: `docs/AI_FLOW.md`
-7. Generated documentation index: `docs/INDEX.md`
+5. Living roadmap board: `docs/roadmap/current-status.md`
+6. Non-approvals: `docs/roadmap/non-approvals.md`
+7. Verification gates: `docs/roadmap/verification.md`
+8. Development workflow: `docs/AI_FLOW.md`
+9. Generated documentation index: `docs/INDEX.md`
 
 `GOAL.md` is intentionally stable. It defines product positioning and points to the living documents above; it is not a phase tracker.

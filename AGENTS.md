@@ -26,7 +26,10 @@ Before changing files, state the current product position, feature/phase target,
 
 The pre-realignment `docs/plans/` and `docs/dev_log/` artifacts were retired and cleared and remain non-authoritative. Do not treat historical plan/dev-log artifacts as source-of-truth.
 
-Concrete task/phase implementation plans live under `docs/plans/`, named `docs/plans/YYYY-MM-DD-<task-slug>.md`; `docs/roadmap/` owns roadmap/status/feature tracking, not task-level execution plans. See `docs/plans/README.md`.
+Concrete **active** implementation plans live under `docs/plans/active/` (see
+`docs/plans/README.md`). Completed plans live in `docs/plans/archive/` and are **not** default
+agent context. Closed phase acceptance: `docs/roadmap/archive/phases/`. Non-approvals:
+`docs/roadmap/non-approvals.md`.
 
 ## Development workflow
 
@@ -47,14 +50,22 @@ When implementation work is **fully complete** (code, tests, and verification ga
 whether project documentation needs updating. Update when needed — do not treat doc sync as optional
 tail work. Typical surfaces:
 
-- `docs/` — roadmap/status, design, product, plans, and other governed docs when behavior,
-  acceptance, or completion state changed.
+- `docs/` — board, features, `docs/plans/active/` or archive moves, design/product when behavior
+  or acceptance changed; closed phase detail → `docs/roadmap/archive/phases/`.
 - `README.md` and `README.zh-CN.md` — when CLI usage, library API, install/dev/publish instructions,
   or examples changed.
 - `CHANGELOG.md` — when preparing user-visible release notes (usually before a release).
 
+- When a plan's work merges: `git mv` from `docs/plans/active/` to `docs/plans/archive/`,
+  update board `active_plan:` and phase archive as needed.
+
 Run `python tools/build_docs_index.py --write` and `python tools/docs_drift_signal.py --write` after
 governed docs changes (see Tooling expectations).
+
+### Implementation plan context
+
+- Read **`docs/plans/active/`** only for in-flight execution plans (plus board `active_plan:`).
+- Do **not** load `docs/plans/archive/` or `docs/roadmap/archive/` by default — audit/dispute only.
 
 ### Release and publishing authorization
 

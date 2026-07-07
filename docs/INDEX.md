@@ -2,12 +2,14 @@
 
 # Documentation Index
 
-Total: 27 documents tracked across 2 statuses.
+Total: 47 documents tracked across 2 statuses.
 
-## Active (12)
+## Active (16)
 
-- [Codex acpx Smoke Helper and Docs Plan](plans/2026-06-14-codex-acpx-smoke-helper.md) — created 2026-06-14
-- [Phase B — ARS Evidence Hardening Plan](plans/2026-06-12-phase-b-ars-evidence-hardening.md) — created 2026-06-12
+- [Active implementation plans](plans/active/README.md) — created 2026-07-07
+- [Archived implementation plans](plans/archive/README.md) — created 2026-07-07
+- [Roadmap and plans path migration](roadmap/MIGRATION.md) — created 2026-07-07
+- [Roadmap phase archive](roadmap/archive/README.md) — created 2026-07-07
 - [agent-run-supervisor Result / Event Schema](design/result-event-schema.md) — created 2026-06-01
 - [agent-run-supervisor System Architecture](design/architecture.md) — created 2026-05-29
 - [agent-run-supervisor Technical Solution](design/technical-solution.md) — created 2026-05-29
@@ -18,21 +20,39 @@ Total: 27 documents tracked across 2 statuses.
 - [Engineering practices](practices/README.md) — created 2026-05-28
 - [Roadmap governance](roadmap/README.md) — created 2026-05-28
 - [agent-run-supervisor Roadmap Current Status](roadmap/current-status.md) — created 2026-05-28
+- [Current explicit non-approvals](roadmap/non-approvals.md) — created 2026-05-28
+- [Verification gates for implementation PRs](roadmap/verification.md) — created 2026-05-28
 
-## Archived (15)
+## Archived (31)
 
-- [P3 Engineering Basics (uv + verify + PyPI)](plans/2026-07-06-p3-engineering-basics.md) — created 2026-07-06
-- [Live event streaming core (PR1)](plans/2026-07-05-live-event-streaming.md) — created 2026-07-05
-- [H1 Operational Hardening Plan](plans/2026-06-01-h1-operational-hardening.md) — created 2026-06-01
-- [I1 Local Caller Thin Integration Plan](plans/2026-06-01-i1-local-caller-thin-integration.md) — created 2026-06-01
-- [K1 Crash Recovery Hardening Plan](plans/2026-06-01-k1-crash-recovery-hardening.md) — created 2026-06-01
-- [L1 Concrete Caller Integration Design](plans/2026-06-01-l1-concrete-caller-integration-design.md) — created 2026-06-01
-- [L2 Hermes Caller + Offline Feishu View-Model Implementation Plan](plans/2026-06-01-l2-hermes-caller-view-model-implementation.md) — created 2026-06-01
-- [P2 Release Engineering](plans/2026-06-01-p2-release-engineering.md) — created 2026-06-01
-- [S1 Persistent Session Closure Acceptance Plan](plans/2026-05-31-s1-closure-acceptance.md) — created 2026-05-31
-- [S1c Persistent Session Runtime MVP Plan](plans/2026-05-31-s1c-session-runtime-mvp.md) — created 2026-05-31
-- [S1d Persistent Session Lifecycle Completion Plan](plans/2026-05-31-s1d-session-lifecycle-completion.md) — created 2026-05-31
-- [S1a Persistent-Session Contract Spike Plan](plans/2026-05-30-s1a-session-contract-spike.md) — created 2026-05-30
-- [S1b Session Store and Lock Foundation Plan](plans/2026-05-30-s1b-session-store-locks.md) — created 2026-05-30
-- [E1 One-shot Exec Runner Implementation Plan](plans/2026-05-29-e1-one-shot-exec-runner.md) — created 2026-05-29
+- [C0 — acpx contract fixtures and validator](roadmap/archive/phases/c0-acpx-fixtures.md) — created 2026-07-07
+- [E1 — One-shot exec runner completion](roadmap/archive/phases/e1-exec-runner.md) — created 2026-07-07
+- [F0 — Role/policy/parser/store foundation](roadmap/archive/phases/f0-foundation.md) — created 2026-07-07
+- [H1 — Operational hardening](roadmap/archive/phases/h1-operational-hardening.md) — created 2026-07-07
+- [I1 — Thin caller integration](roadmap/archive/phases/i1-caller-boundary.md) — created 2026-07-07
+- [K1 — Process-liveness crash recovery](roadmap/archive/phases/k1-crash-recovery.md) — created 2026-07-07
+- [L1 — Concrete caller integration design](roadmap/archive/phases/l1-caller-design.md) — created 2026-07-07
+- [L2 — Hermes caller + offline Feishu view-model](roadmap/archive/phases/l2-hermes-caller.md) — created 2026-07-07
+- [Live event streaming](roadmap/archive/phases/live-event-streaming.md) — created 2026-07-07
+- [P3 — Engineering basics](roadmap/archive/phases/p3-engineering-basics.md) — created 2026-07-07
+- [Phase B — ARS evidence hardening](roadmap/archive/phases/phase-b-ars-evidence.md) — created 2026-07-07
+- [R0 — Documentation authority realignment](roadmap/archive/phases/r0-doc-authority.md) — created 2026-07-07
+- [S1 — Persistent session support](roadmap/archive/phases/s1-persistent-sessions.md) — created 2026-07-07
+- [Closed tail register](roadmap/archive/tails.md) — created 2026-07-07
+- [P3 Engineering Basics (uv + verify + PyPI)](plans/archive/2026-07-06-p3-engineering-basics.md) — created 2026-07-06
+- [Live event streaming core (PR1)](plans/archive/2026-07-05-live-event-streaming.md) — created 2026-07-05
+- [Codex acpx Smoke Helper and Docs Plan](plans/archive/2026-06-14-codex-acpx-smoke-helper.md) — created 2026-06-14
+- [Phase B — ARS Evidence Hardening Plan](plans/archive/2026-06-12-phase-b-ars-evidence-hardening.md) — created 2026-06-12
+- [H1 Operational Hardening Plan](plans/archive/2026-06-01-h1-operational-hardening.md) — created 2026-06-01
+- [I1 Local Caller Thin Integration Plan](plans/archive/2026-06-01-i1-local-caller-thin-integration.md) — created 2026-06-01
+- [K1 Crash Recovery Hardening Plan](plans/archive/2026-06-01-k1-crash-recovery-hardening.md) — created 2026-06-01
+- [L1 Concrete Caller Integration Design](plans/archive/2026-06-01-l1-concrete-caller-integration-design.md) — created 2026-06-01
+- [L2 Hermes Caller + Offline Feishu View-Model Implementation Plan](plans/archive/2026-06-01-l2-hermes-caller-view-model-implementation.md) — created 2026-06-01
+- [P2 Release Engineering](plans/archive/2026-06-01-p2-release-engineering.md) — created 2026-06-01
+- [S1 Persistent Session Closure Acceptance Plan](plans/archive/2026-05-31-s1-closure-acceptance.md) — created 2026-05-31
+- [S1c Persistent Session Runtime MVP Plan](plans/archive/2026-05-31-s1c-session-runtime-mvp.md) — created 2026-05-31
+- [S1d Persistent Session Lifecycle Completion Plan](plans/archive/2026-05-31-s1d-session-lifecycle-completion.md) — created 2026-05-31
+- [S1a Persistent-Session Contract Spike Plan](plans/archive/2026-05-30-s1a-session-contract-spike.md) — created 2026-05-30
+- [S1b Session Store and Lock Foundation Plan](plans/archive/2026-05-30-s1b-session-store-locks.md) — created 2026-05-30
+- [E1 One-shot Exec Runner Implementation Plan](plans/archive/2026-05-29-e1-one-shot-exec-runner.md) — created 2026-05-29
 - [Legacy V0.1a Migration and Conformance Matrix](roadmap/v0.1a-design-conformance.md) — created 2026-05-29
