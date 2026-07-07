@@ -77,6 +77,14 @@ class NoCallRuntime:
         self.calls += 1
         raise AssertionError("runtime.close should not be called")
 
+    def abort(self, **_: Any) -> Any:
+        self.calls += 1
+        raise AssertionError("runtime.abort should not be called")
+
+    def list_sessions(self, **_: Any) -> Any:
+        self.calls += 1
+        raise AssertionError("runtime.list_sessions should not be called")
+
 
 def _exec_role(valid_role_dict: dict[str, Any], work_dir: Path):
     payload = copy.deepcopy(valid_role_dict)
@@ -360,6 +368,59 @@ def test_session_modes_delegate_to_session_runtime_and_preserve_null_business_ve
     assert status.session_dir == str(sessions_dir / "sess-a")
     assert closed.result["state"] == "closed"
     assert closed.session_dir == str(sessions_dir / "sess-a")
+
+
+def test_session_abort_and_list_delegate_to_session_runtime(
+    tmp_path: Path,
+    valid_role_dict: dict[str, Any],
+    fixtures_root: Path,
+    work_dir: Path,
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    sessions_dir = tmp_path / "sessions"
+    fake = RecordingExecutor(
+        [
+            _outcome((fixtures_root / "session-new-named" / "stdout.json").read_bytes()),
+            _outcome((fixtures_root / "session-cancel-no-active" / "stdout.json").read_bytes()),
+        ]
+    )
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+
+    invoke_caller(
+        CallerInvocationSpec(
+            mode="session_create",
+            role=role,
+            session_id="sess-a",
+            session_name="nightly",
+            sessions_dir=sessions_dir,
+        ),
+        session_runtime=runtime,
+    )
+    aborted = invoke_caller(
+        CallerInvocationSpec(
+            mode="session_abort",
+            role=role,
+            session_id="sess-a",
+            sessions_dir=sessions_dir,
+        ),
+        session_runtime=runtime,
+    )
+    listed = invoke_caller(
+        CallerInvocationSpec(
+            mode="session_list",
+            role=role,
+            sessions_dir=sessions_dir,
+        ),
+        session_runtime=runtime,
+    )
+
+    assert fake.calls[1]["argv"][-3:] == ["cancel", "-s", "nightly"]
+    assert aborted.result["cancelled"] is False
+    assert aborted.result["business_verdict"] is None
+    assert aborted.session_dir == str(sessions_dir / "sess-a")
+    assert listed.result["count"] == 1
+    assert listed.result["sessions"][0]["session_id"] == "sess-a"
+    assert listed.artifact_dir == str(sessions_dir)
 
 
 def test_caller_result_projection_has_only_local_supervisor_fields(

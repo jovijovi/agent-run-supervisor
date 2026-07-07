@@ -264,7 +264,7 @@ print(turn.session_dir)
 ```
 
 Supported modes: `exec`, `exec_dry_run`, `session_create`, `session_send`, `session_status`,
-`session_close`.
+`session_close`, `session_abort`, `session_list`.
 
 **Lower-level surfaces** (advanced): `SupervisorRunner`, `SessionRuntime`, `parse_acpx_stdout_bytes`.
 Inject a fake subprocess executor in tests — see [`tests/test_caller.py`](tests/test_caller.py).
@@ -309,8 +309,8 @@ for event in page.events:
 **Boundaries:**
 
 - Applies to artifact directories from **exec** and **session_send** turns.
-- `invoke_caller` does **not** expose `session abort` or `session list` — use the CLI or lower-level
-  `SessionRuntime` for those operations.
+- `session_abort` cancels an in-flight turn; `session_list` enumerates local session records
+  read-only (optionally filtered by role).
 - Local read API only — no websocket, long-poll server, or IM delivery (see roadmap §5 non-approvals).
 - Schema detail: [`docs/design/result-event-schema.md`](docs/design/result-event-schema.md) §4.
 
