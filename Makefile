@@ -1,4 +1,4 @@
-.PHONY: help sync verify build smoke release-test release-tag clean clean-all
+.PHONY: help sync verify build smoke bump release-test release-tag clean clean-all
 
 VERSION := $(shell grep '^version' pyproject.toml | sed -n 's/version = "\(.*\)"/\1/p')
 
@@ -11,6 +11,7 @@ help:
 	@echo "  make smoke         build + installed-wheel smoke"
 	@echo "  make clean         Remove build artifacts, caches, local runtime scratch"
 	@echo "  make clean-all     clean + remove .venv (re-run make sync after)"
+	@echo "  make bump          Bump version (make bump VERSION=X.Y.Z)"
 	@echo "  make release-test  verify + upload to TestPyPI (needs TWINE_* env)"
 	@echo "  make release-tag   Print tag push commands for GitHub Actions PyPI publish"
 	@echo ""
@@ -38,6 +39,10 @@ clean-all:
 
 release-test: sync
 	./scripts/release.sh testpypi
+
+bump:
+	@test -n "$(VERSION)" || (echo "usage: make bump VERSION=X.Y.Z" >&2 && exit 1)
+	uv run python tools/bump_version.py $(VERSION)
 
 release-tag:
 	@echo "Production PyPI publish uses GitHub Actions Trusted Publishing."

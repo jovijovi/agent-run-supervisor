@@ -2,10 +2,11 @@
 
 # Documentation Index
 
-Total: 47 documents tracked across 2 statuses.
+Total: 48 documents tracked across 2 statuses.
 
-## Active (16)
+## Active (17)
 
+- [Version bump automation](plans/active/2026-07-07-version-bump-automation.md) — created 2026-07-07
 - [Active implementation plans](plans/active/README.md) — created 2026-07-07
 - [Archived implementation plans](plans/archive/README.md) — created 2026-07-07
 - [Roadmap and plans path migration](roadmap/MIGRATION.md) — created 2026-07-07
