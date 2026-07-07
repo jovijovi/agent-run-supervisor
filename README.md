@@ -380,6 +380,15 @@ Trusted Publishing uses workflow [`release.yml`](.github/workflows/release.yml) 
 environment `pypi`. See [`docs/plans/2026-07-06-p3-engineering-basics.md`](docs/plans/2026-07-06-p3-engineering-basics.md)
 for the operator checklist.
 
+Each GitHub Release for tag `v*` uploads `dist/*.tar.gz`, `dist/*.whl`, and
+`dist/SHA256SUMS`. Verify a wheel locally:
+
+```bash
+curl -LO https://github.com/jovijovi/agent-run-supervisor/releases/download/vX.Y.Z/SHA256SUMS
+curl -LO https://github.com/jovijovi/agent-run-supervisor/releases/download/vX.Y.Z/agent_run_supervisor-X.Y.Z-py3-none-any.whl
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
 **TestPyPI dry-run** (local upload with API token in env — never commit tokens):
 
 ```bash
