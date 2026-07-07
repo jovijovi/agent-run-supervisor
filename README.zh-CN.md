@@ -263,6 +263,48 @@ print(turn.session_dir)
 **参考调用方：** [`hermes_caller`](src/agent_run_supervisor/hermes_caller/) 展示带调用方 verdict
 与视图模型的文档检查集成（仅本地/离线）。
 
+### 实时进度轮询（进阶）
+
+在 **exec** 或 **session_send** 期间，监督层会在子进程仍在运行时写出 `progress.json` 与带
+`seq` 的 `normalized-events.jsonl`；运行结束后 **`result.json` 仍是最终权威**。
+
+通过 [`hermes_caller.events`](src/agent_run_supervisor/hermes_caller/events.py) 轮询**结构字段**
+（不含 raw agent 文本）：
+
+```python
+from agent_run_supervisor.caller import CallerInvocationSpec, invoke_caller
+from agent_run_supervisor.hermes_caller.events import load_progress, read_event_page
+from agent_run_supervisor.role import load_role
+
+role = load_role("reviewer.json")
+result = invoke_caller(
+    CallerInvocationSpec(
+        mode="exec",
+        role=role,
+        prompt="总结 diff。",
+        cwd="/path/to/repo",
+    )
+)
+
+# 运行中或结束后 —— 仅结构字段
+snap = load_progress(result.run_dir)
+if snap:
+    print(snap.state, snap.last_seq, snap.event_count)
+
+# 按 seq 游标分页读取 normalized-events.jsonl
+page = read_event_page(result.run_dir, after_seq=0, limit=50)
+for event in page.events:
+    print(event["seq"], event.get("kind"), event.get("text_length"))
+```
+
+**边界说明：**
+
+- 适用于 **exec** 与 **session_send** 产生的 run/turn 工件目录。
+- `invoke_caller` **不**暴露 `session abort` / `session list` —— 请用 CLI 或更低层
+  `SessionRuntime`。
+- 仅本地只读 API —— 无 websocket、long-poll 服务或 IM 投递（见 roadmap §5 非批准项）。
+- Schema 细节：[`docs/design/result-event-schema.md`](docs/design/result-event-schema.md) §4。
+
 **Schema 稳定性：** `0.1.0` 为 alpha 版本；生产集成请 pin 版本，并阅读
 [`docs/design/result-event-schema.md`](docs/design/result-event-schema.md) 了解 `result.json` 字段。
 

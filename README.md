@@ -272,6 +272,48 @@ Inject a fake subprocess executor in tests — see [`tests/test_caller.py`](test
 **Reference caller:** [`hermes_caller`](src/agent_run_supervisor/hermes_caller/) shows a concrete
 document-check integration with caller-owned verdicts and view-models (local/offline only).
 
+### Live progress polling (advanced)
+
+During **exec** or **session_send**, the supervisor writes `progress.json` and seq-stamped
+`normalized-events.jsonl` while the child is still running. `result.json` remains the final
+authority after the run completes.
+
+Poll structural progress only (no raw agent text) via [`hermes_caller.events`](src/agent_run_supervisor/hermes_caller/events.py):
+
+```python
+from agent_run_supervisor.caller import CallerInvocationSpec, invoke_caller
+from agent_run_supervisor.hermes_caller.events import load_progress, read_event_page
+from agent_run_supervisor.role import load_role
+
+role = load_role("reviewer.json")
+result = invoke_caller(
+    CallerInvocationSpec(
+        mode="exec",
+        role=role,
+        prompt="Summarize the diff.",
+        cwd="/path/to/repo",
+    )
+)
+
+# While running or after completion — structural fields only
+snap = load_progress(result.run_dir)
+if snap:
+    print(snap.state, snap.last_seq, snap.event_count)
+
+# Page through normalized-events.jsonl by seq cursor
+page = read_event_page(result.run_dir, after_seq=0, limit=50)
+for event in page.events:
+    print(event["seq"], event.get("kind"), event.get("text_length"))
+```
+
+**Boundaries:**
+
+- Applies to artifact directories from **exec** and **session_send** turns.
+- `invoke_caller` does **not** expose `session abort` or `session list` — use the CLI or lower-level
+  `SessionRuntime` for those operations.
+- Local read API only — no websocket, long-poll server, or IM delivery (see roadmap §5 non-approvals).
+- Schema detail: [`docs/design/result-event-schema.md`](docs/design/result-event-schema.md) §4.
+
 **Schema stability:** `0.1.0` is an alpha release; pin the version in production integrations and
 read [`docs/design/result-event-schema.md`](docs/design/result-event-schema.md) for `result.json`
 fields.
