@@ -5,6 +5,9 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
+from agent_run_supervisor.event_store import EventStore
+from agent_run_supervisor.live_stream import LiveEventSink
+from agent_run_supervisor.redaction import RedactionReport
 from agent_run_supervisor.role import load_role
 from agent_run_supervisor.runner import SubprocessOutcome, SupervisorRunner
 from agent_run_supervisor.session_runtime import SessionRuntime
@@ -326,3 +329,94 @@ def test_session_send_live_path_preserves_max_output_bytes_fail_closed(
     assert [event["type"] for event in events] == ["run_started"]
     progress = json.loads((outcome.turn_dir / "progress.json").read_text(encoding="utf-8"))
     assert progress["state"] == "protocol_error"
+
+
+def _live_sink(tmp_path: Path, **kwargs: Any) -> LiveEventSink:
+    handle = EventStore(tmp_path / "runs").create_run("run-live")
+    return LiveEventSink(handle, RedactionReport(), **kwargs)
+
+
+def test_live_event_sink_ignores_feed_after_disable(tmp_path: Path) -> None:
+    sink = _live_sink(tmp_path)
+    sink.feed(INIT)
+    sink.disable()
+    sink.feed(MSG)
+
+    assert sink.event_count == 1
+    assert sink.started is True
+
+
+def test_live_event_sink_disable_during_append_skips_event_parsing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sink = _live_sink(tmp_path)
+    original_append = sink.handle.append_text
+
+    def append_and_disable(name: str, value: str) -> None:
+        original_append(name, value)
+        sink.disable()
+
+    monkeypatch.setattr(sink.handle, "append_text", append_and_disable)
+    sink.feed(STREAM)
+
+    assert sink.event_count == 0
+    assert not (sink.handle.run_dir / "progress.json").exists()
+
+
+def test_live_event_sink_disable_after_redact_skips_append_and_parse(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sink = _live_sink(tmp_path)
+
+    def redact_and_disable(text: str, **kwargs: Any):
+        sink.disable()
+        return text, RedactionReport()
+
+    monkeypatch.setattr("agent_run_supervisor.live_stream.redact_text", redact_and_disable)
+    sink.feed(INIT)
+
+    assert sink.event_count == 0
+    assert not (sink.handle.run_dir / "acpx-stdout.ndjson").exists()
+
+
+def test_live_event_sink_disable_during_event_loop_stops_after_first_event(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sink = _live_sink(tmp_path)
+    original_append_event = sink._append_event
+
+    def append_and_disable(event: dict[str, Any]) -> None:
+        original_append_event(event)
+        sink.disable()
+
+    monkeypatch.setattr(sink, "_append_event", append_and_disable)
+    sink.feed(STREAM)
+
+    assert sink.event_count == 1
+    events = _read_events(sink.handle.run_dir / "normalized-events.jsonl")
+    assert events[0]["type"] == "run_started"
+
+
+def test_live_event_sink_without_byte_limit_parses_entire_chunk(tmp_path: Path) -> None:
+    sink = _live_sink(tmp_path, max_output_bytes=None)
+    sink.feed(STREAM)
+
+    assert sink.event_count == 3
+    assert sink.result.final_message == "LIVE_OK"
+
+
+def test_live_event_sink_finish_flushes_unterminated_record_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    sink = _live_sink(tmp_path)
+    record = b'{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}'
+    sink.feed(record)
+
+    first = sink.finish("completed")
+    second = sink.finish("completed")
+
+    assert [event["type"] for event in first.events] == ["run_started"]
+    assert second.events == first.events
+    progress = json.loads((sink.handle.run_dir / "progress.json").read_text(encoding="utf-8"))
+    assert progress["state"] == "completed"
+    assert progress["event_count"] == 1
