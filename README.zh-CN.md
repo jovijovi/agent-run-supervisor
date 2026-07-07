@@ -11,6 +11,24 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/jovijovi/agent-run-supervisor/actions/workflows/verify.yml">
+    <img src="https://github.com/jovijovi/agent-run-supervisor/actions/workflows/verify.yml/badge.svg" alt="CI">
+  </a>
+  <a href="https://codecov.io/gh/jovijovi/agent-run-supervisor">
+    <img src="https://codecov.io/gh/jovijovi/agent-run-supervisor/graph/badge.svg" alt="codecov">
+  </a>
+  <a href="https://pypi.org/project/agent-run-supervisor/">
+    <img src="https://img.shields.io/pypi/v/agent-run-supervisor.svg" alt="PyPI">
+  </a>
+  <a href="https://pypi.org/project/agent-run-supervisor/">
+    <img src="https://img.shields.io/pypi/pyversions/agent-run-supervisor.svg" alt="Python">
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT">
+  </a>
+</p>
+
+<p align="center">
   一个小而<b>本地优先</b>的 Python 库与开发 CLI，用于监督<br>
   ACP/acpx 外部 AGENT 运行，并将运行器行为转化为<b>脱敏、可审计的证据</b>。
 </p>
@@ -21,8 +39,6 @@
   <code>仅标准库</code>
   &nbsp;·&nbsp;
   <code>本地优先</code>
-  &nbsp;·&nbsp;
-  <code>MIT</code>
   &nbsp;·&nbsp;
   <code>状态：0.1.0（alpha）</code>
 </p>

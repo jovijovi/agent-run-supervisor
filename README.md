@@ -11,6 +11,24 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/jovijovi/agent-run-supervisor/actions/workflows/verify.yml">
+    <img src="https://github.com/jovijovi/agent-run-supervisor/actions/workflows/verify.yml/badge.svg" alt="CI">
+  </a>
+  <a href="https://codecov.io/gh/jovijovi/agent-run-supervisor">
+    <img src="https://codecov.io/gh/jovijovi/agent-run-supervisor/graph/badge.svg" alt="codecov">
+  </a>
+  <a href="https://pypi.org/project/agent-run-supervisor/">
+    <img src="https://img.shields.io/pypi/v/agent-run-supervisor.svg" alt="PyPI">
+  </a>
+  <a href="https://pypi.org/project/agent-run-supervisor/">
+    <img src="https://img.shields.io/pypi/pyversions/agent-run-supervisor.svg" alt="Python">
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT">
+  </a>
+</p>
+
+<p align="center">
   A small, <b>local-first</b> Python library &amp; dev CLI that supervises<br>
   ACP/acpx external AGENT runs and turns runner behavior into <b>redacted, auditable evidence</b>.
 </p>
@@ -21,8 +39,6 @@
   <code>stdlib-only</code>
   &nbsp;·&nbsp;
   <code>local-first</code>
-  &nbsp;·&nbsp;
-  <code>MIT</code>
   &nbsp;·&nbsp;
   <code>status:&nbsp;0.1.0&nbsp;(alpha)</code>
 </p>
