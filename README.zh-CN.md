@@ -33,16 +33,6 @@
   ACP/acpx 外部 AGENT 运行，并将运行器行为转化为<b>脱敏、可审计的证据</b>。
 </p>
 
-<p align="center">
-  <code>Python&nbsp;≥&nbsp;3.11</code>
-  &nbsp;·&nbsp;
-  <code>仅标准库</code>
-  &nbsp;·&nbsp;
-  <code>本地优先</code>
-  &nbsp;·&nbsp;
-  <code>状态：0.1.2（alpha）</code>
-</p>
-
 ---
 
 ## 它做什么
@@ -57,7 +47,7 @@
 调用方拿到的是可审计的证据 —— 而不是一团运行器生命周期代码。
 
 本产品包含**两种执行模式**，二者均已为本地使用实现：一次性 exec 与本地持久会话生命周期
-（创建/发送/状态/关闭/中止/列举 —— 见 [路线图](#路线图)）。它刻意**不是** Sachima、不是 Gateway
+（创建/发送/状态/关闭/中止/列举）。它刻意**不是** Sachima、不是 Gateway
 插件、不是 IM 适配器，也不是常驻守护进程（daemon），并且永不给出业务结论（`business_verdict`
 始终为 `null`）。
 
@@ -81,9 +71,6 @@
 默认开启/常驻行为、`@all` 扇出，以及 agent 间自动路由。
 
 ## 安装与使用
-
-**PyPI：** [`agent-run-supervisor==0.1.2`](https://pypi.org/project/agent-run-supervisor/0.1.2/) ·
-**发布说明：** [GitHub `v0.1.2`](https://github.com/jovijovi/agent-run-supervisor/releases/tag/v0.1.2)
 
 ```bash
 pip install agent-run-supervisor
@@ -194,20 +181,13 @@ pip install agent-run-supervisor
 `business_verdict` 始终为 `null` —— 业务成败由调用方解释。
 
 ```python
-from importlib.metadata import version
-
 from agent_run_supervisor.caller import CallerInvocationSpec, invoke_caller
-from agent_run_supervisor.role import load_role
-
-print(version("agent-run-supervisor"))  # 例如 0.1.2
-
-role = load_role("reviewer.json")
 
 # 一次性 exec（非 dry-run 时会启动真实本地 AGENT）
 result = invoke_caller(
     CallerInvocationSpec(
         mode="exec",
-        role=role,
+        role_file="reviewer.json",
         prompt="用 plain language 总结 diff。",
         cwd="/path/to/repo",
     )
@@ -221,7 +201,7 @@ assert result.business_verdict is None
 preview = invoke_caller(
     CallerInvocationSpec(
         mode="exec_dry_run",
-        role=role,
+        role_file="reviewer.json",
         prompt="仅预览。",
         cwd="/path/to/repo",
     )
@@ -237,7 +217,7 @@ session_id = "my-local-session"
 invoke_caller(
     CallerInvocationSpec(
         mode="session_create",
-        role=role,
+        role_file="reviewer.json",
         session_id=session_id,
         cwd="/path/to/repo",
     )
@@ -245,7 +225,7 @@ invoke_caller(
 turn = invoke_caller(
     CallerInvocationSpec(
         mode="session_send",
-        role=role,
+        role_file="reviewer.json",
         session_id=session_id,
         prompt="接续上一轮。",
         cwd="/path/to/repo",
@@ -274,37 +254,37 @@ print(turn.session_dir)
 ```python
 from agent_run_supervisor.caller import CallerInvocationSpec, invoke_caller
 from agent_run_supervisor.hermes_caller.events import load_progress, read_event_page
-from agent_run_supervisor.role import load_role
 
-role = load_role("reviewer.json")
+# invoke_caller 会阻塞；可在另一线程中轮询 artifact_dir，或在返回后再读工件。
 result = invoke_caller(
     CallerInvocationSpec(
         mode="exec",
-        role=role,
+        role_file="reviewer.json",
         prompt="总结 diff。",
         cwd="/path/to/repo",
     )
 )
 
-# 运行中或结束后 —— 仅结构字段
+# 仅结构字段（不含 raw agent 文本）
 snap = load_progress(result.run_dir)
 if snap:
     print(snap.state, snap.last_seq, snap.event_count)
 
 # 按 seq 游标分页读取 normalized-events.jsonl
 page = read_event_page(result.run_dir, after_seq=0, limit=50)
-for event in page.events:
-    print(event["seq"], event.get("kind"), event.get("text_length"))
+for event in page.records:
+    print(event.seq, event.kind, event.text_length)
 ```
 
 **边界说明：**
 
 - 适用于 **exec** 与 **session_send** 产生的 run/turn 工件目录。
 - `session_abort` 取消进行中的 turn；`session_list` 只读枚举本地 session 记录（可按 role 过滤）。
-- 仅本地只读 API —— 无 websocket、long-poll 服务或 IM 投递（见 roadmap §5 非批准项）。
+- 仅本地只读 API —— 无 websocket、long-poll 服务或 IM 投递（见
+  [`docs/roadmap/current-status.md` §5](docs/roadmap/current-status.md#5-current-explicit-non-approvals) 非批准项）。
 - Schema 细节：[`docs/design/result-event-schema.md`](docs/design/result-event-schema.md) §4。
 
-**Schema 稳定性：** `0.1.2` 为 alpha 版本；生产集成请 pin 版本，并阅读
+**Schema 稳定性：** 公开 API 与结果 schema 可能演进；请阅读
 [`docs/design/result-event-schema.md`](docs/design/result-event-schema.md) 了解 `result.json` 字段。
 
 ## 环境要求
@@ -352,11 +332,9 @@ python3 -m pytest -q
 
 ## 发布
 
-**当前版本：** [`0.1.2` 已发布至 PyPI](https://pypi.org/project/agent-run-supervisor/0.1.2/) 与
-[GitHub Releases](https://github.com/jovijovi/agent-run-supervisor/releases/tag/v0.1.2)，由 tag
-触发的 GitHub Actions Trusted Publishing 完成（仓库内无 API token）。
+版本通过 tag 触发的 GitHub Actions Trusted Publishing 发布至 PyPI 与 GitHub（仓库内无 API token）。
 
-**后续发布**（维护者）：
+**发布流程**（维护者）：
 
 ```bash
 make verify              # 或 ./scripts/verify_local.sh
@@ -373,8 +351,8 @@ environment `pypi`。操作清单见
 `dist/SHA256SUMS`。本地校验 wheel：
 
 ```bash
-curl -LO https://github.com/jovijovi/agent-run-supervisor/releases/download/v0.1.2/SHA256SUMS
-curl -LO https://github.com/jovijovi/agent-run-supervisor/releases/download/v0.1.2/agent_run_supervisor-0.1.2-py3-none-any.whl
+curl -LO https://github.com/jovijovi/agent-run-supervisor/releases/download/vX.Y.Z/SHA256SUMS
+curl -LO https://github.com/jovijovi/agent-run-supervisor/releases/download/vX.Y.Z/agent_run_supervisor-X.Y.Z-py3-none-any.whl
 sha256sum -c SHA256SUMS --ignore-missing
 ```
 
@@ -387,7 +365,7 @@ make release-test                 # verify + 上传到 TestPyPI
 
 pip install --index-url https://test.pypi.org/simple/ \
             --extra-index-url https://pypi.org/simple/ \
-            agent-run-supervisor==0.1.2
+            agent-run-supervisor
 agent-run-supervisor doctor
 ```
 
@@ -423,8 +401,7 @@ uv sync --extra dev --extra release
   结果/事件 schema、进程存活性崩溃恢复、通用本地调用方边界，以及本地/离线 Hermes 调用方 +
   离线 Feishu 视图模型适配器均已合并。
 - **已完成 —— 发布工程（P3）。** uv 开发工作流、`make verify` / `verify_local.sh`、CI 对齐、
-  [PyPI `0.1.2`](https://pypi.org/project/agent-run-supervisor/0.1.2/)、GitHub Release
-  `SHA256SUMS` 溯源，以及 tag 触发的 Trusted Publishing（`release.yml`）。
+  PyPI 发布、GitHub Release `SHA256SUMS` 溯源，以及 tag 触发的 Trusted Publishing（`release.yml`）。
 - **待办 —— 更深层加固（尚未开始）。** `npx` 严格离线约束、更强的脱敏/DLP 与调用方白名单，以及
   锁释放审计轨迹，仅作为待办记录。任何实时/平台集成（真实 Feishu/IM 投递、Sachima、Gateway
   生命周期、公网入口）仍不在范围内，须经单独批准。
@@ -432,14 +409,4 @@ uv sync --extra dev --extra release
 ## 许可证
 
 © `agent-run-supervisor` 作者。以 **[MIT](https://opensource.org/license/mit)** 许可证发布
-（`pyproject.toml` 中 `license = "MIT"`，并包含 [`LICENSE`](LICENSE)）。**Alpha 版本**
-`0.1.2` 已发布至 [PyPI](https://pypi.org/project/agent-run-supervisor/0.1.2/)；接口与结果 schema
-在稳定 `1.0.0` 之前仍可能变动。
-
-<p align="center">
-  <img src="docs/assets/branding/logo-mark.png" alt="agent-run-supervisor 标志" width="72" height="72">
-  <br>
-  <sub><b>agent-run-supervisor</b> —— 是监督者，不是业务裁判。</sub>
-  <br>
-  <sub><a href="README.md">English README</a></sub>
-</p>
+（`pyproject.toml` 中 `license = "MIT"`，并包含 [`LICENSE`](LICENSE)）。
