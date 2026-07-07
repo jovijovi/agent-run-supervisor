@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-07-07
+
+### Added
+
+- `tools/bump_version.py` and `make bump VERSION=X.Y.Z` to sync `pyproject.toml`,
+  `__init__.py`, `uv.lock`, and a CHANGELOG stub in one step.
+- `tools/check_version_sync.py` verify gate for three-way version consistency.
+- `release.yml` guard: git tag must match `pyproject.toml` version before PyPI publish.
+
+### Changed
+
+- README EN/ZH and AGENTS publish instructions updated for the new bump workflow.
+- `uv.lock` workspace package version synced with `pyproject.toml`.
+
+### Notes
+
+- Release engineering only; no supervisor runtime behavior changes.
 ## [0.1.2] - 2026-07-07
 
 ### Added

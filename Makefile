@@ -42,7 +42,7 @@ release-test: sync
 
 bump:
 	@test -n "$(VERSION)" || (echo "usage: make bump VERSION=X.Y.Z" >&2 && exit 1)
-	uv run python tools/bump_version.py $(VERSION)
+	PYTHONPATH=. uv run python tools/bump_version.py $(VERSION)
 
 release-tag:
 	@echo "Production PyPI publish uses GitHub Actions Trusted Publishing."
