@@ -41,6 +41,30 @@ Default role split unless explicitly changed:
 - Codex CLI: primary reviewer.
 - Hermes: scope control, verification, evidence, and arbitration.
 
+### Post-implementation documentation sync
+
+When implementation work is **fully complete** (code, tests, and verification gates pass), check
+whether project documentation needs updating. Update when needed — do not treat doc sync as optional
+tail work. Typical surfaces:
+
+- `docs/` — roadmap/status, design, product, plans, and other governed docs when behavior,
+  acceptance, or completion state changed.
+- `README.md` and `README.zh-CN.md` — when CLI usage, library API, install/dev/publish instructions,
+  or examples changed.
+- `CHANGELOG.md` — when preparing user-visible release notes (usually before a release).
+
+Run `python tools/build_docs_index.py --write` and `python tools/docs_drift_signal.py --write` after
+governed docs changes (see Tooling expectations).
+
+### Release and publishing authorization
+
+Git tag creation, GitHub Release publication, and PyPI package publishing are **not** part of
+default implementation work. Perform them **only after explicit human permission and authorization**
+— typically after development is finished, documentation is synced, and verification passes.
+
+Do not tag, publish a release, or upload to PyPI proactively, during active implementation, or
+immediately after merge without an explicit request.
+
 ## Product boundaries
 
 The product requirement includes both acpx one-shot exec and persistent sessions. Engineering may implement exec first and sessions later, but PRD/DESIGN/GOAL must not describe the product as exec-only.

@@ -33,16 +33,6 @@
   ACP/acpx external AGENT runs and turns runner behavior into <b>redacted, auditable evidence</b>.
 </p>
 
-<p align="center">
-  <code>Python&nbsp;≥&nbsp;3.11</code>
-  &nbsp;·&nbsp;
-  <code>stdlib-only</code>
-  &nbsp;·&nbsp;
-  <code>local-first</code>
-  &nbsp;·&nbsp;
-  <code>status:&nbsp;0.1.2&nbsp;(alpha)</code>
-</p>
-
 ---
 
 ## What it does
@@ -60,8 +50,8 @@ restrictive-permission local artifacts**. The caller gets auditable evidence —
 runner-lifecycle code.
 
 The product covers **two execution modes**, both implemented for local use: one-shot exec and a
-local persistent-session lifecycle (create/send/status/close/abort/list — see
-[Roadmap](#roadmap)). It is deliberately **not** Sachima, a Gateway plugin, an IM adapter, or a
+local persistent-session lifecycle (create/send/status/close/abort/list). It is deliberately
+**not** Sachima, a Gateway plugin, an IM adapter, or a
 daemon, and it never emits a business verdict (`business_verdict` is always `null`).
 
 ## How it works
@@ -86,9 +76,6 @@ Out of scope — caller/platform territory: public ingress, real IM delivery, Ga
 production config writes, live/default-on behavior, `@all` fan-out, and agent-to-agent routing.
 
 ## Install and use
-
-**PyPI:** [`agent-run-supervisor==0.1.2`](https://pypi.org/project/agent-run-supervisor/0.1.2/) ·
-**Release notes:** [GitHub `v0.1.2`](https://github.com/jovijovi/agent-run-supervisor/releases/tag/v0.1.2)
 
 ```bash
 pip install agent-run-supervisor
@@ -203,20 +190,13 @@ supervisor-owned status and redacted artifacts; `business_verdict` is always `nu
 application interprets success/failure.
 
 ```python
-from importlib.metadata import version
-
 from agent_run_supervisor.caller import CallerInvocationSpec, invoke_caller
-from agent_run_supervisor.role import load_role
-
-print(version("agent-run-supervisor"))  # e.g. 0.1.2
-
-role = load_role("reviewer.json")
 
 # One-shot exec (launches a real local AGENT when not dry-run)
 result = invoke_caller(
     CallerInvocationSpec(
         mode="exec",
-        role=role,
+        role_file="reviewer.json",
         prompt="Summarize the diff in plain language.",
         cwd="/path/to/repo",
     )
@@ -230,7 +210,7 @@ assert result.business_verdict is None
 preview = invoke_caller(
     CallerInvocationSpec(
         mode="exec_dry_run",
-        role=role,
+        role_file="reviewer.json",
         prompt="Preview only.",
         cwd="/path/to/repo",
     )
@@ -246,7 +226,7 @@ session_id = "my-local-session"
 invoke_caller(
     CallerInvocationSpec(
         mode="session_create",
-        role=role,
+        role_file="reviewer.json",
         session_id=session_id,
         cwd="/path/to/repo",
     )
@@ -254,7 +234,7 @@ invoke_caller(
 turn = invoke_caller(
     CallerInvocationSpec(
         mode="session_send",
-        role=role,
+        role_file="reviewer.json",
         session_id=session_id,
         prompt="Continue from the previous turn.",
         cwd="/path/to/repo",
@@ -283,27 +263,27 @@ Poll structural progress only (no raw agent text) via [`hermes_caller.events`](s
 ```python
 from agent_run_supervisor.caller import CallerInvocationSpec, invoke_caller
 from agent_run_supervisor.hermes_caller.events import load_progress, read_event_page
-from agent_run_supervisor.role import load_role
 
-role = load_role("reviewer.json")
+# invoke_caller is blocking; poll artifact_dir from another thread while it runs,
+# or read artifacts after it returns.
 result = invoke_caller(
     CallerInvocationSpec(
         mode="exec",
-        role=role,
+        role_file="reviewer.json",
         prompt="Summarize the diff.",
         cwd="/path/to/repo",
     )
 )
 
-# While running or after completion — structural fields only
+# Structural fields only (no raw agent text)
 snap = load_progress(result.run_dir)
 if snap:
     print(snap.state, snap.last_seq, snap.event_count)
 
 # Page through normalized-events.jsonl by seq cursor
 page = read_event_page(result.run_dir, after_seq=0, limit=50)
-for event in page.events:
-    print(event["seq"], event.get("kind"), event.get("text_length"))
+for event in page.records:
+    print(event.seq, event.kind, event.text_length)
 ```
 
 **Boundaries:**
@@ -311,11 +291,12 @@ for event in page.events:
 - Applies to artifact directories from **exec** and **session_send** turns.
 - `session_abort` cancels an in-flight turn; `session_list` enumerates local session records
   read-only (optionally filtered by role).
-- Local read API only — no websocket, long-poll server, or IM delivery (see roadmap §5 non-approvals).
+- Local read API only — no websocket, long-poll server, or IM delivery (see
+  [`docs/roadmap/current-status.md` §5](docs/roadmap/current-status.md#5-current-explicit-non-approvals)).
 - Schema detail: [`docs/design/result-event-schema.md`](docs/design/result-event-schema.md) §4.
 
-**Schema stability:** `0.1.2` is an alpha release; pin the version in production integrations and
-read [`docs/design/result-event-schema.md`](docs/design/result-event-schema.md) for `result.json`
+**Schema stability:** Public API and result schemas may evolve; read
+[`docs/design/result-event-schema.md`](docs/design/result-event-schema.md) for `result.json`
 fields.
 
 ## Environment requirements
@@ -363,11 +344,10 @@ python3 -m pytest -q
 
 ## Publishing
 
-**Current release:** [`0.1.2` on PyPI](https://pypi.org/project/agent-run-supervisor/0.1.2/) and
-[GitHub Releases](https://github.com/jovijovi/agent-run-supervisor/releases/tag/v0.1.2), published
-via tag-triggered GitHub Actions Trusted Publishing (no API tokens in the repo).
+Releases are published to PyPI and GitHub via tag-triggered GitHub Actions Trusted Publishing
+(no API tokens in the repo).
 
-**Future releases** (maintainers):
+**Release process** (maintainers):
 
 ```bash
 make verify              # or ./scripts/verify_local.sh
@@ -384,8 +364,8 @@ Each GitHub Release for tag `v*` uploads `dist/*.tar.gz`, `dist/*.whl`, and
 `dist/SHA256SUMS`. Verify a wheel locally:
 
 ```bash
-curl -LO https://github.com/jovijovi/agent-run-supervisor/releases/download/v0.1.2/SHA256SUMS
-curl -LO https://github.com/jovijovi/agent-run-supervisor/releases/download/v0.1.2/agent_run_supervisor-0.1.2-py3-none-any.whl
+curl -LO https://github.com/jovijovi/agent-run-supervisor/releases/download/vX.Y.Z/SHA256SUMS
+curl -LO https://github.com/jovijovi/agent-run-supervisor/releases/download/vX.Y.Z/agent_run_supervisor-X.Y.Z-py3-none-any.whl
 sha256sum -c SHA256SUMS --ignore-missing
 ```
 
@@ -398,7 +378,7 @@ make release-test                 # verify + upload to TestPyPI
 
 pip install --index-url https://test.pypi.org/simple/ \
             --extra-index-url https://pypi.org/simple/ \
-            agent-run-supervisor==0.1.2
+            agent-run-supervisor
 agent-run-supervisor doctor
 ```
 
@@ -437,8 +417,8 @@ High-level direction only — full phase status, acceptance, and non-approvals l
   the generic local caller boundary, and a local/offline Hermes caller + offline Feishu
   view-model adapter are merged.
 - **Done — release engineering (P3).** uv dev workflow, `make verify` / `verify_local.sh`, CI
-  alignment, [`0.1.2` on PyPI](https://pypi.org/project/agent-run-supervisor/0.1.2/), GitHub Release
-  `SHA256SUMS` provenance, and tag-triggered Trusted Publishing via `release.yml`.
+  alignment, PyPI publish, GitHub Release `SHA256SUMS` provenance, and tag-triggered Trusted
+  Publishing via `release.yml`.
 - **Backlog — deeper hardening (not started).** `npx` strict-offline enforcement, stronger
   redaction/DLP plus a caller allowlist, and a lock-release audit trail are tracked as backlog
   only. Any live/platform integration (real Feishu/IM delivery, Sachima, Gateway lifecycle,
@@ -447,14 +427,4 @@ High-level direction only — full phase status, acceptance, and non-approvals l
 ## License
 
 © the `agent-run-supervisor` authors. Released under the **[MIT](https://opensource.org/license/mit)**
-license (`license = "MIT"` and [`LICENSE`](LICENSE)). **Alpha release** `0.1.2` is on
-[PyPI](https://pypi.org/project/agent-run-supervisor/0.1.2/); public API and result schemas may
-still change before stable `1.0.0`.
-
-<p align="center">
-  <img src="docs/assets/branding/logo-mark.png" alt="agent-run-supervisor logo mark" width="72" height="72">
-  <br>
-  <sub><b>agent-run-supervisor</b> — a supervisor, not a business judge.</sub>
-  <br>
-  <sub><a href="README.zh-CN.md">简体中文 README</a></sub>
-</p>
+license (`license = "MIT"` and [`LICENSE`](LICENSE)).
