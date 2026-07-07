@@ -40,7 +40,7 @@
   &nbsp;·&nbsp;
   <code>local-first</code>
   &nbsp;·&nbsp;
-  <code>status:&nbsp;0.1.0&nbsp;(alpha)</code>
+  <code>status:&nbsp;0.1.2&nbsp;(alpha)</code>
 </p>
 
 ---
@@ -87,8 +87,8 @@ production config writes, live/default-on behavior, `@all` fan-out, and agent-to
 
 ## Install and use
 
-**PyPI:** [`agent-run-supervisor==0.1.0`](https://pypi.org/project/agent-run-supervisor/0.1.0/) ·
-**Release notes:** [GitHub `v0.1.0`](https://github.com/jovijovi/agent-run-supervisor/releases/tag/v0.1.0)
+**PyPI:** [`agent-run-supervisor==0.1.2`](https://pypi.org/project/agent-run-supervisor/0.1.2/) ·
+**Release notes:** [GitHub `v0.1.2`](https://github.com/jovijovi/agent-run-supervisor/releases/tag/v0.1.2)
 
 ```bash
 pip install agent-run-supervisor
@@ -208,7 +208,7 @@ from importlib.metadata import version
 from agent_run_supervisor.caller import CallerInvocationSpec, invoke_caller
 from agent_run_supervisor.role import load_role
 
-print(version("agent-run-supervisor"))  # e.g. 0.1.0
+print(version("agent-run-supervisor"))  # e.g. 0.1.2
 
 role = load_role("reviewer.json")
 
@@ -314,7 +314,7 @@ for event in page.events:
 - Local read API only — no websocket, long-poll server, or IM delivery (see roadmap §5 non-approvals).
 - Schema detail: [`docs/design/result-event-schema.md`](docs/design/result-event-schema.md) §4.
 
-**Schema stability:** `0.1.0` is an alpha release; pin the version in production integrations and
+**Schema stability:** `0.1.2` is an alpha release; pin the version in production integrations and
 read [`docs/design/result-event-schema.md`](docs/design/result-event-schema.md) for `result.json`
 fields.
 
@@ -363,8 +363,8 @@ python3 -m pytest -q
 
 ## Publishing
 
-**Current release:** [`0.1.0` on PyPI](https://pypi.org/project/agent-run-supervisor/0.1.0/) and
-[GitHub Releases](https://github.com/jovijovi/agent-run-supervisor/releases/tag/v0.1.0), published
+**Current release:** [`0.1.2` on PyPI](https://pypi.org/project/agent-run-supervisor/0.1.2/) and
+[GitHub Releases](https://github.com/jovijovi/agent-run-supervisor/releases/tag/v0.1.2), published
 via tag-triggered GitHub Actions Trusted Publishing (no API tokens in the repo).
 
 **Future releases** (maintainers):
@@ -384,8 +384,8 @@ Each GitHub Release for tag `v*` uploads `dist/*.tar.gz`, `dist/*.whl`, and
 `dist/SHA256SUMS`. Verify a wheel locally:
 
 ```bash
-curl -LO https://github.com/jovijovi/agent-run-supervisor/releases/download/vX.Y.Z/SHA256SUMS
-curl -LO https://github.com/jovijovi/agent-run-supervisor/releases/download/vX.Y.Z/agent_run_supervisor-X.Y.Z-py3-none-any.whl
+curl -LO https://github.com/jovijovi/agent-run-supervisor/releases/download/v0.1.2/SHA256SUMS
+curl -LO https://github.com/jovijovi/agent-run-supervisor/releases/download/v0.1.2/agent_run_supervisor-0.1.2-py3-none-any.whl
 sha256sum -c SHA256SUMS --ignore-missing
 ```
 
@@ -398,7 +398,7 @@ make release-test                 # verify + upload to TestPyPI
 
 pip install --index-url https://test.pypi.org/simple/ \
             --extra-index-url https://pypi.org/simple/ \
-            agent-run-supervisor==0.1.0
+            agent-run-supervisor==0.1.2
 agent-run-supervisor doctor
 ```
 
@@ -437,8 +437,8 @@ High-level direction only — full phase status, acceptance, and non-approvals l
   the generic local caller boundary, and a local/offline Hermes caller + offline Feishu
   view-model adapter are merged.
 - **Done — release engineering (P3).** uv dev workflow, `make verify` / `verify_local.sh`, CI
-  alignment, `0.1.0` on [PyPI](https://pypi.org/project/agent-run-supervisor/0.1.0/), and
-  tag-triggered Trusted Publishing via `release.yml` (merged via PR #40).
+  alignment, [`0.1.2` on PyPI](https://pypi.org/project/agent-run-supervisor/0.1.2/), GitHub Release
+  `SHA256SUMS` provenance, and tag-triggered Trusted Publishing via `release.yml`.
 - **Backlog — deeper hardening (not started).** `npx` strict-offline enforcement, stronger
   redaction/DLP plus a caller allowlist, and a lock-release audit trail are tracked as backlog
   only. Any live/platform integration (real Feishu/IM delivery, Sachima, Gateway lifecycle,
@@ -447,8 +447,8 @@ High-level direction only — full phase status, acceptance, and non-approvals l
 ## License
 
 © the `agent-run-supervisor` authors. Released under the **[MIT](https://opensource.org/license/mit)**
-license (`license = "MIT"` and [`LICENSE`](LICENSE)). **Alpha release** `0.1.0` is on
-[PyPI](https://pypi.org/project/agent-run-supervisor/0.1.0/); public API and result schemas may
+license (`license = "MIT"` and [`LICENSE`](LICENSE)). **Alpha release** `0.1.2` is on
+[PyPI](https://pypi.org/project/agent-run-supervisor/0.1.2/); public API and result schemas may
 still change before stable `1.0.0`.
 
 <p align="center">
