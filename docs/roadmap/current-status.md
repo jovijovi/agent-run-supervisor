@@ -377,18 +377,23 @@ Checklist:
   stdlib-only).
 - [x] Add `scripts/verify_local.sh` as the single local gate entry mirroring §6 and CI.
 - [x] Add `scripts/smoke_installed_wheel.sh` for reusable installed-wheel smoke.
-- [x] Migrate `.github/workflows/verify.yml` to uv (`astral-sh/setup-uv@v5`, Python 3.11/3.12 matrix,
+- [x] Migrate `.github/workflows/verify.yml` to uv (`astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3`
+  immutable SHA pin, Python 3.11/3.12/3.13/3.14 matrix on `verify` + `coverage` jobs,
   `concurrency` cancel-in-progress).
 - [x] Bump `pyproject.toml` to `0.1.0`; add `CHANGELOG.md`.
 - [x] Add `.github/workflows/release.yml` (tag `v*`, OIDC Trusted Publishing, environment `pypi`).
 - [x] Update README Development + Publishing sections; governance docs and plan
   `docs/plans/2026-07-06-p3-engineering-basics.md`.
 - [x] README Library usage sections (EN/ZH) with `invoke_caller` examples.
+- [x] Codecov coverage job (`pytest --cov --cov-branch --cov-report=xml` +
+  `codecov/codecov-action@v6`); README CI/Codecov/PyPI badges (PR #43).
+- [x] CI Actions upgraded: `actions/checkout@v6`, `actions/setup-python@v6` (PR #44).
 
 Acceptance:
 
 - `uv sync --extra dev --extra release` + `./scripts/verify_local.sh` pass locally.
-- CI `Verify` workflow uses uv and `./scripts/verify_local.sh` on Python 3.11 and 3.12.
+- CI `Verify` workflow runs `./scripts/verify_local.sh` on Python **3.11, 3.12, 3.13, 3.14**.
+- CI `coverage` job uploads to Codecov per matrix version with `CODECOV_TOKEN`.
 - `release.yml` publishes via Trusted Publishing; no secrets in repo.
 - `pip install agent-run-supervisor==0.1.0` works from PyPI; `agent-run-supervisor doctor` passes
   after install.
@@ -396,7 +401,26 @@ Acceptance:
 Status: **Closed on `main`.** First public release [`0.1.0`](https://pypi.org/project/agent-run-supervisor/0.1.0/)
 published via tag [`v0.1.0`](https://github.com/jovijovi/agent-run-supervisor/releases/tag/v0.1.0)
 (GitHub Actions Trusted Publishing, 2026-07-06). Engineering merged via PR #40 (`288eeb3`); doc sync
-for library usage and publish status in follow-up PR. All §5 non-approvals remain in force.
+for library usage and publish status in follow-up PR. CI matrix + Codecov merged via PR #43/#44.
+All §5 non-approvals remain in force.
+
+### Live event streaming (PR1 + PR2) — Closed
+
+Closure record only — **not** a new product phase. Implements local live supervision artifacts
+and a read-only cursor API; does **not** approve Sachima/platform live progress delivery (PR3).
+
+- **PR1 (Done):** incremental stdout parsing during exec and session-send; live
+  `acpx-stdout.ndjson`, `normalized-events.jsonl`, and `progress.json`; `result.json` unchanged.
+  Evidence: `src/agent_run_supervisor/live_stream.py`, `tests/test_live_event_stream.py`,
+  `docs/design/result-event-schema.md` §4.1; plan archived at
+  `docs/plans/2026-07-05-live-event-streaming.md`.
+- **PR2 (Done):** local seq-cursored event fetch and progress polling via
+  `hermes_caller.events` (`read_event_page`, `load_progress`); evidence:
+  `tests/hermes_caller/test_event_cursor.py`, schema §4.2.
+- **PR3 (Not approved):** Sachima live progress integration — requires separate explicit product
+  approval; §5 non-approvals unchanged.
+
+Status: **Closed on `main` pre-`v0.1.0`.** No Gateway/IM/delivery behavior implied.
 
 ### Phase B — ARS evidence hardening (support for the external Sachima controlled-local-execution PRD)
 
