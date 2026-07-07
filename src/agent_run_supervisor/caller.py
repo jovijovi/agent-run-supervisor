@@ -31,6 +31,8 @@ SESSION_CREATE_MODE = "session_create"
 SESSION_SEND_MODE = "session_send"
 SESSION_STATUS_MODE = "session_status"
 SESSION_CLOSE_MODE = "session_close"
+SESSION_ABORT_MODE = "session_abort"
+SESSION_LIST_MODE = "session_list"
 
 SUPPORTED_MODES = {
     EXEC_MODE,
@@ -39,14 +41,18 @@ SUPPORTED_MODES = {
     SESSION_SEND_MODE,
     SESSION_STATUS_MODE,
     SESSION_CLOSE_MODE,
+    SESSION_ABORT_MODE,
+    SESSION_LIST_MODE,
 }
 PROMPT_REQUIRED_MODES = {EXEC_MODE, EXEC_DRY_RUN_MODE, SESSION_SEND_MODE}
-SESSION_MODES = {
+SESSION_ID_REQUIRED_MODES = {
     SESSION_CREATE_MODE,
     SESSION_SEND_MODE,
     SESSION_STATUS_MODE,
     SESSION_CLOSE_MODE,
+    SESSION_ABORT_MODE,
 }
+SESSION_MODES = SESSION_ID_REQUIRED_MODES | {SESSION_LIST_MODE}
 
 
 class CallerInvocationError(ValueError):
@@ -117,6 +123,20 @@ def invoke_caller(
         return _from_run_like(mode=spec.mode, outcome=outcome)
 
     active_runtime = session_runtime or SessionRuntime(sessions_dir=_sessions_dir(spec))
+
+    if spec.mode == SESSION_LIST_MODE:
+        listed = active_runtime.list_sessions(role=role)
+        sessions_dir = _sessions_dir(spec)
+        return CallerResult(
+            mode=spec.mode,
+            supervisor_status=None,
+            result=dict(listed.result),
+            artifact_dir=str(sessions_dir),
+            run_dir=None,
+            session_dir=None,
+            business_verdict=None,
+        )
+
     session_id = _required_session_id(spec)
 
     if spec.mode == SESSION_CREATE_MODE:
@@ -149,6 +169,13 @@ def invoke_caller(
     if spec.mode == SESSION_CLOSE_MODE:
         closed = active_runtime.close(role=role, session_id=session_id, cwd=cwd)
         return _from_session_close(spec.mode, closed, _session_dir(active_runtime, spec, session_id))
+    if spec.mode == SESSION_ABORT_MODE:
+        aborted = active_runtime.abort(role=role, session_id=session_id, cwd=cwd)
+        return _from_session_management(
+            spec.mode,
+            aborted.result,
+            session_dir=_session_dir(active_runtime, spec, session_id),
+        )
 
     raise CallerInvocationError(f"unsupported mode {spec.mode!r}")
 
@@ -161,7 +188,7 @@ def _validate_spec(spec: CallerInvocationSpec) -> None:
         raise CallerInvocationError("exactly one role source is required: role or role_file")
     if spec.mode in PROMPT_REQUIRED_MODES and not _has_text(spec.prompt):
         raise CallerInvocationError(f"mode {spec.mode!r} requires a non-empty prompt")
-    if spec.mode in SESSION_MODES and not _has_text(spec.session_id):
+    if spec.mode in SESSION_ID_REQUIRED_MODES and not _has_text(spec.session_id):
         raise CallerInvocationError(f"mode {spec.mode!r} requires a non-empty session_id")
     if spec.session_name is not None:
         if spec.mode != SESSION_CREATE_MODE:

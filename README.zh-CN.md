@@ -255,7 +255,7 @@ print(turn.session_dir)
 ```
 
 支持的模式：`exec`、`exec_dry_run`、`session_create`、`session_send`、`session_status`、
-`session_close`。
+`session_close`、`session_abort`、`session_list`。
 
 **更低层接口**（进阶）：`SupervisorRunner`、`SessionRuntime`、`parse_acpx_stdout_bytes`。
 测试中可注入假 subprocess 执行器 —— 见 [`tests/test_caller.py`](tests/test_caller.py)。
@@ -300,8 +300,7 @@ for event in page.events:
 **边界说明：**
 
 - 适用于 **exec** 与 **session_send** 产生的 run/turn 工件目录。
-- `invoke_caller` **不**暴露 `session abort` / `session list` —— 请用 CLI 或更低层
-  `SessionRuntime`。
+- `session_abort` 取消进行中的 turn；`session_list` 只读枚举本地 session 记录（可按 role 过滤）。
 - 仅本地只读 API —— 无 websocket、long-poll 服务或 IM 投递（见 roadmap §5 非批准项）。
 - Schema 细节：[`docs/design/result-event-schema.md`](docs/design/result-event-schema.md) §4。
 
