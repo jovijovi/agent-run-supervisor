@@ -121,3 +121,28 @@ def test_incremental_halts_after_first_bad_record_like_batch() -> None:
     assert state.result.protocol_error is True
     assert state.result.final_message == ""
     assert [event["type"] for event in state.result.events] == ["run_started"]
+
+
+def test_feed_acpx_bytes_tolerates_crlf_line_endings() -> None:
+    state = IncrementalParseState()
+    payload = b'{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}\r\n'
+
+    events = feed_acpx_bytes(state, payload)
+
+    assert [event["type"] for event in events] == ["run_started"]
+
+
+def test_finish_acpx_bytes_on_empty_buffer_returns_nothing() -> None:
+    state = IncrementalParseState()
+
+    assert finish_acpx_bytes(state) == []
+
+
+def test_consume_acpx_line_ignores_blank_lines_and_stopped_state() -> None:
+    state = IncrementalParseState()
+    feed_acpx_bytes(state, b"not-json\n")
+
+    assert consume_acpx_line(state, b"   ") == []
+    assert consume_acpx_line(
+        state, b'{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}'
+    ) == []

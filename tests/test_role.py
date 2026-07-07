@@ -226,3 +226,60 @@ def test_load_role_defaults_redaction_to_safe_values() -> None:
     assert role.redaction.redact_stderr is True
     assert role.redaction.redact_env is True
     assert role.redaction.redact_metadata is True
+
+
+@pytest.mark.parametrize(
+    ("mutator", "needle"),
+    [
+        (lambda s: s.update({"role_id": ""}), "role_id"),
+        (lambda s: s["permissions"].update({"read": "yes"}), "read"),
+        (lambda s: s.update({"runner": "not-a-mapping"}), "runner"),
+        (lambda s: s["runner"].update({"type": "docker"}), "type"),
+        (lambda s: s["runner"].update({"acpx_version": "0.9.0"}), "acpx_version"),
+        (lambda s: s["runner"].update({"acpx_binary": ""}), "acpx_binary"),
+        (lambda s: s["runner"].update({"model": 123}), "model"),
+        (lambda s: s.update({"workspace": []}), "workspace"),
+        (lambda s: s["workspace"].update({"allowed_roots": []}), "allowed_roots"),
+        (lambda s: s["workspace"].update({"allowed_roots": [""]}), "allowed_roots"),
+        (
+            lambda s: s["workspace"].update({"allowed_roots_security_boundary": "yes"}),
+            "allowed_roots_security_boundary",
+        ),
+        (lambda s: s.update({"permissions": []}), "permissions"),
+        (lambda s: s.update({"session": []}), "session"),
+        (lambda s: s.update({"limits": "bad"}), "limits"),
+        (lambda s: s.update({"prompt": "bad"}), "prompt"),
+        (lambda s: s.update({"redaction": "bad"}), "redaction"),
+        (lambda s: s.update({"display_name": 123}), "display_name"),
+    ],
+)
+def test_load_role_rejects_invalid_nested_shapes(mutator, needle: str) -> None:
+    spec = copy.deepcopy(VALID_ROLE)
+    mutator(spec)
+
+    with pytest.raises(RoleValidationError) as excinfo:
+        load_role(spec)
+    assert needle in str(excinfo.value)
+
+
+def test_load_role_rejects_non_string_prompt_fields() -> None:
+    spec = copy.deepcopy(VALID_ROLE)
+    spec["prompt"] = {"role_instruction": 1, "output_contract": "ok"}
+
+    with pytest.raises(RoleValidationError) as excinfo:
+        load_role(spec)
+    assert "role_instruction" in str(excinfo.value)
+
+
+def test_load_role_rejects_non_boolean_redaction_flag() -> None:
+    spec = copy.deepcopy(VALID_ROLE)
+    spec["redaction"] = {"suppress_reads": "yes"}
+
+    with pytest.raises(RoleValidationError) as excinfo:
+        load_role(spec)
+    assert "suppress_reads" in str(excinfo.value)
+
+
+def test_load_role_rejects_non_mapping_top_level() -> None:
+    with pytest.raises(RoleValidationError):
+        load_role([])
