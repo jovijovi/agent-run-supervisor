@@ -24,7 +24,7 @@
   &nbsp;·&nbsp;
   <code>MIT</code>
   &nbsp;·&nbsp;
-  <code>状态：0.1.0</code>
+  <code>状态：0.1.0（alpha）</code>
 </p>
 
 ---
@@ -66,19 +66,25 @@
 
 ## 安装与使用
 
+**PyPI：** [`agent-run-supervisor==0.1.0`](https://pypi.org/project/agent-run-supervisor/0.1.0/) ·
+**发布说明：** [GitHub `v0.1.0`](https://github.com/jovijovi/agent-run-supervisor/releases/tag/v0.1.0)
+
 ```bash
 pip install agent-run-supervisor
 ```
 
 或从源码检出运行（见 [开发](#开发)）。
 
+### CLI
+
 ```bash
 # 校验一个 AgentRoleSpec（JSON）并打印其稳定的 role hash
 agent-run-supervisor validate-role <role-file>.json
 
-# 将观测到的 acpx stdout 流经解析器回放（确定性，不启动任何 AGENT）
-agent-run-supervisor replay \
-  fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjson
+# 将观测到的 acpx stdout 回放（确定性，不启动任何 AGENT）
+# 源码检出：可使用仓库 fixtures（见下方说明）。
+# PyPI 安装：传入自有 .ndjson 路径，或使用 `doctor` 做内置 fixture 回放。
+agent-run-supervisor replay <events.ndjson>
 
 # 探测本地就绪状态（只读，绝不启动 AGENT）
 agent-run-supervisor doctor
@@ -110,6 +116,11 @@ agent-run-supervisor session list
 # 规划或执行本地工件的保留/清理（默认 dry-run；--apply 才真正删除）
 agent-run-supervisor cleanup
 ```
+
+> **Fixture 回放路径：** `fixtures/acpx-0.12.0/...` 仅存在于 **git 仓库** 中。
+> PyPI wheel 仅捆绑 `doctor` 冒烟所需的最小 fixture，不含完整 fixture 树。
+> 在检出目录中可运行：
+> `agent-run-supervisor replay fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjson`
 
 未安装时从源码检出运行，将 `agent-run-supervisor` 替换为
 `PYTHONPATH=src python3 -m agent_run_supervisor`。
@@ -150,6 +161,94 @@ Codex ACP 模型名要使用 ACP session 广告出来的精确 ID，例如 `gpt-
 记录、脱敏的 `management/` 摘要，以及每次 send 一个脱敏的 `turns/<turn_id>/` 目录）。`cleanup`
 命令会规划并（仅在 `--apply` 时）删除过期的运行/会话工件，删除范围被限制在解析出的
 `.agent-run-supervisor` 根目录内，且绝不触碰处于打开/活动锁定状态的会话。
+
+## 库用法（Library usage）
+
+本包既是 **Python 库** 也是 CLI。程序化集成时，优先使用通用本地调用方边界
+（[`caller.py`](src/agent_run_supervisor/caller.py)，设计细节见
+[`docs/design/technical-solution.md`](docs/design/technical-solution.md) §3.10）。
+
+**安装：**
+
+```bash
+pip install agent-run-supervisor
+```
+
+**推荐 API：** `invoke_caller` + `CallerInvocationSpec`。监督层返回由监督层拥有的状态与脱敏工件；
+`business_verdict` 始终为 `null` —— 业务成败由调用方解释。
+
+```python
+from importlib.metadata import version
+
+from agent_run_supervisor.caller import CallerInvocationSpec, invoke_caller
+from agent_run_supervisor.role import load_role
+
+print(version("agent-run-supervisor"))  # 例如 0.1.0
+
+role = load_role("reviewer.json")
+
+# 一次性 exec（非 dry-run 时会启动真实本地 AGENT）
+result = invoke_caller(
+    CallerInvocationSpec(
+        mode="exec",
+        role=role,
+        prompt="用 plain language 总结 diff。",
+        cwd="/path/to/repo",
+    )
+)
+print(result.supervisor_status)  # 例如 "completed"
+print(result.result)             # result.json 载荷（dict）
+print(result.run_dir)            # 脱敏工件目录
+assert result.business_verdict is None
+
+# 仅 dry-run 编译/预览 —— 无子进程、无 AGENT
+preview = invoke_caller(
+    CallerInvocationSpec(
+        mode="exec_dry_run",
+        role=role,
+        prompt="仅预览。",
+        cwd="/path/to/repo",
+    )
+)
+print(preview.artifact_dir)
+```
+
+**持久会话**（角色须使用 `strategy: persistent`）：
+
+```python
+session_id = "my-local-session"
+
+invoke_caller(
+    CallerInvocationSpec(
+        mode="session_create",
+        role=role,
+        session_id=session_id,
+        cwd="/path/to/repo",
+    )
+)
+turn = invoke_caller(
+    CallerInvocationSpec(
+        mode="session_send",
+        role=role,
+        session_id=session_id,
+        prompt="接续上一轮。",
+        cwd="/path/to/repo",
+    )
+)
+print(turn.session_dir)
+```
+
+支持的模式：`exec`、`exec_dry_run`、`session_create`、`session_send`、`session_status`、
+`session_close`。
+
+**更低层接口**（进阶）：`SupervisorRunner`、`SessionRuntime`、`parse_acpx_stdout_bytes`。
+测试中可注入假 subprocess 执行器 —— 见 [`tests/test_caller.py`](tests/test_caller.py)。
+
+**参考调用方：** [`hermes_caller`](src/agent_run_supervisor/hermes_caller/) 展示带调用方 verdict
+与视图模型的文档检查集成（仅本地/离线）。
+
+**Schema 稳定性：** `0.1.0` 为 alpha 版本；生产集成请 pin 版本，并阅读
+[`docs/design/result-event-schema.md`](docs/design/result-event-schema.md) 了解 `result.json` 字段。
 
 ## 环境要求
 
@@ -196,7 +295,11 @@ python3 -m pytest -q
 
 ## 发布
 
-**正式 PyPI** —— 由 git tag 触发 GitHub Actions Trusted Publishing（仓库内不放 API token）：
+**当前版本：** [`0.1.0` 已发布至 PyPI](https://pypi.org/project/agent-run-supervisor/0.1.0/) 与
+[GitHub Releases](https://github.com/jovijovi/agent-run-supervisor/releases/tag/v0.1.0)，由 tag
+触发的 GitHub Actions Trusted Publishing 完成（仓库内无 API token）。
+
+**后续发布**（维护者）：
 
 ```bash
 make verify              # 或 ./scripts/verify_local.sh
@@ -204,6 +307,10 @@ make verify              # 或 ./scripts/verify_local.sh
 make release-tag         # 打印 git tag vX.Y.Z && git push 命令
 agent-run-supervisor doctor   # PyPI 安装后验证
 ```
+
+Trusted Publishing 使用 workflow [`release.yml`](.github/workflows/release.yml) 与 GitHub
+environment `pypi`。操作清单见
+[`docs/plans/2026-07-06-p3-engineering-basics.md`](docs/plans/2026-07-06-p3-engineering-basics.md)。
 
 **TestPyPI 试发**（本地用环境变量传 token，切勿提交到 git）：
 
@@ -217,9 +324,6 @@ pip install --index-url https://test.pypi.org/simple/ \
             agent-run-supervisor==0.1.0
 agent-run-supervisor doctor
 ```
-
-维护者须在首次正式 tag 推送前，于 PyPI 配置 Trusted Publishing（workflow `release.yml`、environment
-`pypi`）。操作清单见 `docs/plans/2026-07-06-p3-engineering-basics.md`。
 
 ## 质量与测试指标
 
@@ -252,6 +356,9 @@ uv sync --extra dev --extra release
 - **已完成 —— 加固 + 本地调用方集成。** 完整只读 doctor 探针集、受限的工件保留/清理、有文档的
   结果/事件 schema、进程存活性崩溃恢复、通用本地调用方边界，以及本地/离线 Hermes 调用方 +
   离线 Feishu 视图模型适配器均已合并。
+- **已完成 —— 发布工程（P3）。** uv 开发工作流、`make verify` / `verify_local.sh`、CI 对齐、
+  [PyPI `0.1.0`](https://pypi.org/project/agent-run-supervisor/0.1.0/) 与 tag 触发的 Trusted
+  Publishing（`release.yml`，经 PR #40 合并）。
 - **待办 —— 更深层加固（尚未开始）。** `npx` 严格离线约束、更强的脱敏/DLP 与调用方白名单，以及
   锁释放审计轨迹，仅作为待办记录。任何实时/平台集成（真实 Feishu/IM 投递、Sachima、Gateway
   生命周期、公网入口）仍不在范围内，须经单独批准。
@@ -259,7 +366,8 @@ uv sync --extra dev --extra release
 ## 许可证
 
 © `agent-run-supervisor` 作者。以 **[MIT](https://opensource.org/license/mit)** 许可证发布
-（`pyproject.toml` 中 `license = "MIT"`，并包含 [`LICENSE`](LICENSE)）。当前版本 `0.1.0`；接口与结果 schema
+（`pyproject.toml` 中 `license = "MIT"`，并包含 [`LICENSE`](LICENSE)）。**Alpha 版本**
+`0.1.0` 已发布至 [PyPI](https://pypi.org/project/agent-run-supervisor/0.1.0/)；接口与结果 schema
 在稳定 `1.0.0` 之前仍可能变动。
 
 <p align="center">

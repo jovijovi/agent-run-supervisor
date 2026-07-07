@@ -24,7 +24,7 @@
   &nbsp;·&nbsp;
   <code>MIT</code>
   &nbsp;·&nbsp;
-  <code>status:&nbsp;0.1.0</code>
+  <code>status:&nbsp;0.1.0&nbsp;(alpha)</code>
 </p>
 
 ---
@@ -71,19 +71,25 @@ production config writes, live/default-on behavior, `@all` fan-out, and agent-to
 
 ## Install and use
 
+**PyPI:** [`agent-run-supervisor==0.1.0`](https://pypi.org/project/agent-run-supervisor/0.1.0/) ·
+**Release notes:** [GitHub `v0.1.0`](https://github.com/jovijovi/agent-run-supervisor/releases/tag/v0.1.0)
+
 ```bash
 pip install agent-run-supervisor
 ```
 
 Or install from a source checkout (see [Development](#development)).
 
+### CLI
+
 ```bash
 # Validate an AgentRoleSpec (JSON) and print its stable role hash
 agent-run-supervisor validate-role <role-file>.json
 
-# Replay an observed acpx stdout stream through the parser (deterministic, launches no AGENT)
-agent-run-supervisor replay \
-  fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjson
+# Replay an observed acpx stdout stream (deterministic, launches no AGENT)
+# Source checkout: use repo fixtures (see note below).
+# PyPI install: pass your own .ndjson path, or use `doctor` for built-in fixture replay.
+agent-run-supervisor replay <events.ndjson>
 
 # Probe local readiness (read-only, never launches an AGENT)
 agent-run-supervisor doctor
@@ -116,6 +122,11 @@ agent-run-supervisor session list
 # Plan or apply local artifact retention/cleanup (dry-run by default; --apply deletes)
 agent-run-supervisor cleanup
 ```
+
+> **Fixture replay paths:** `fixtures/acpx-0.12.0/...` exist in the **git repository** only.
+> The PyPI wheel bundles a minimal fixture for `doctor` smoke, not the full fixture tree.
+> From a checkout you can run:
+> `agent-run-supervisor replay fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjson`
 
 From a source checkout without installing, prefix commands with `PYTHONPATH=src python3 -m agent_run_supervisor` instead of `agent-run-supervisor`.
 
@@ -158,6 +169,96 @@ generated policy, observed stdout (NDJSON), normalized events, stderr, `result.j
 and one redacted `turns/<turn_id>/` directory per send). The `cleanup` command plans and (only
 with `--apply`) deletes aged run/session artifacts, confined to the resolved
 `.agent-run-supervisor` root and never touching open/live-locked sessions.
+
+## Library usage
+
+The package is a **Python library** as well as a CLI. For programmatic integration, prefer the
+generic local caller boundary ([`caller.py`](src/agent_run_supervisor/caller.py), design detail in
+[`docs/design/technical-solution.md`](docs/design/technical-solution.md) §3.10).
+
+**Install:**
+
+```bash
+pip install agent-run-supervisor
+```
+
+**Recommended API:** `invoke_caller` + `CallerInvocationSpec`. The supervisor returns a
+supervisor-owned status and redacted artifacts; `business_verdict` is always `null` — your
+application interprets success/failure.
+
+```python
+from importlib.metadata import version
+
+from agent_run_supervisor.caller import CallerInvocationSpec, invoke_caller
+from agent_run_supervisor.role import load_role
+
+print(version("agent-run-supervisor"))  # e.g. 0.1.0
+
+role = load_role("reviewer.json")
+
+# One-shot exec (launches a real local AGENT when not dry-run)
+result = invoke_caller(
+    CallerInvocationSpec(
+        mode="exec",
+        role=role,
+        prompt="Summarize the diff in plain language.",
+        cwd="/path/to/repo",
+    )
+)
+print(result.supervisor_status)  # e.g. "completed"
+print(result.result)             # result.json payload (dict)
+print(result.run_dir)            # redacted artifact directory
+assert result.business_verdict is None
+
+# Dry-run compile/preview only — no subprocess, no AGENT
+preview = invoke_caller(
+    CallerInvocationSpec(
+        mode="exec_dry_run",
+        role=role,
+        prompt="Preview only.",
+        cwd="/path/to/repo",
+    )
+)
+print(preview.artifact_dir)
+```
+
+**Persistent session** (role must use `strategy: persistent`):
+
+```python
+session_id = "my-local-session"
+
+invoke_caller(
+    CallerInvocationSpec(
+        mode="session_create",
+        role=role,
+        session_id=session_id,
+        cwd="/path/to/repo",
+    )
+)
+turn = invoke_caller(
+    CallerInvocationSpec(
+        mode="session_send",
+        role=role,
+        session_id=session_id,
+        prompt="Continue from the previous turn.",
+        cwd="/path/to/repo",
+    )
+)
+print(turn.session_dir)
+```
+
+Supported modes: `exec`, `exec_dry_run`, `session_create`, `session_send`, `session_status`,
+`session_close`.
+
+**Lower-level surfaces** (advanced): `SupervisorRunner`, `SessionRuntime`, `parse_acpx_stdout_bytes`.
+Inject a fake subprocess executor in tests — see [`tests/test_caller.py`](tests/test_caller.py).
+
+**Reference caller:** [`hermes_caller`](src/agent_run_supervisor/hermes_caller/) shows a concrete
+document-check integration with caller-owned verdicts and view-models (local/offline only).
+
+**Schema stability:** `0.1.0` is an alpha release; pin the version in production integrations and
+read [`docs/design/result-event-schema.md`](docs/design/result-event-schema.md) for `result.json`
+fields.
 
 ## Environment requirements
 
@@ -204,8 +305,11 @@ python3 -m pytest -q
 
 ## Publishing
 
-**Production PyPI** — tag-triggered via GitHub Actions Trusted Publishing (no API tokens in the
-repo):
+**Current release:** [`0.1.0` on PyPI](https://pypi.org/project/agent-run-supervisor/0.1.0/) and
+[GitHub Releases](https://github.com/jovijovi/agent-run-supervisor/releases/tag/v0.1.0), published
+via tag-triggered GitHub Actions Trusted Publishing (no API tokens in the repo).
+
+**Future releases** (maintainers):
 
 ```bash
 make verify              # or ./scripts/verify_local.sh
@@ -213,6 +317,10 @@ make verify              # or ./scripts/verify_local.sh
 make release-tag         # prints git tag vX.Y.Z && git push commands
 agent-run-supervisor doctor   # after pip install from PyPI
 ```
+
+Trusted Publishing uses workflow [`release.yml`](.github/workflows/release.yml) and GitHub
+environment `pypi`. See [`docs/plans/2026-07-06-p3-engineering-basics.md`](docs/plans/2026-07-06-p3-engineering-basics.md)
+for the operator checklist.
 
 **TestPyPI dry-run** (local upload with API token in env — never commit tokens):
 
@@ -226,10 +334,6 @@ pip install --index-url https://test.pypi.org/simple/ \
             agent-run-supervisor==0.1.0
 agent-run-supervisor doctor
 ```
-
-Maintainers must configure PyPI Trusted Publishing for workflow `release.yml` and environment
-`pypi` before the first production tag push. See `docs/plans/2026-07-06-p3-engineering-basics.md`
-for the operator checklist.
 
 ## Quality and test indicators
 
@@ -265,6 +369,9 @@ High-level direction only — full phase status, acceptance, and non-approvals l
   artifact retention/cleanup, a documented result/event schema, process-liveness crash recovery,
   the generic local caller boundary, and a local/offline Hermes caller + offline Feishu
   view-model adapter are merged.
+- **Done — release engineering (P3).** uv dev workflow, `make verify` / `verify_local.sh`, CI
+  alignment, `0.1.0` on [PyPI](https://pypi.org/project/agent-run-supervisor/0.1.0/), and
+  tag-triggered Trusted Publishing via `release.yml` (merged via PR #40).
 - **Backlog — deeper hardening (not started).** `npx` strict-offline enforcement, stronger
   redaction/DLP plus a caller allowlist, and a lock-release audit trail are tracked as backlog
   only. Any live/platform integration (real Feishu/IM delivery, Sachima, Gateway lifecycle,
@@ -273,8 +380,9 @@ High-level direction only — full phase status, acceptance, and non-approvals l
 ## License
 
 © the `agent-run-supervisor` authors. Released under the **[MIT](https://opensource.org/license/mit)**
-license (`license = "MIT"` and [`LICENSE`](LICENSE)). Pre-release software
-(`0.1.0`); surfaces and result schemas may still change before a stable `1.0.0`.
+license (`license = "MIT"` and [`LICENSE`](LICENSE)). **Alpha release** `0.1.0` is on
+[PyPI](https://pypi.org/project/agent-run-supervisor/0.1.0/); public API and result schemas may
+still change before stable `1.0.0`.
 
 <p align="center">
   <img src="docs/assets/branding/logo-mark.png" alt="agent-run-supervisor logo mark" width="72" height="72">
