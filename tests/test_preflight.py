@@ -8,8 +8,11 @@ from typing import Any
 import pytest
 
 from agent_run_supervisor import policy as policy_module
+from agent_run_supervisor import preflight as preflight_module
 from agent_run_supervisor.preflight import (
     ProbeRun,
+    discover_acpx_binary,
+    discover_node_binary,
     probe_acpx,
     probe_adapter,
     probe_node,
@@ -382,3 +385,158 @@ def test_probe_session_readiness_surfaces_injected_expired_lock(
     assert rows["sess-x"]["lease_expired"] is True
     # The probe is read-only: the injected lock is still present afterwards.
     assert (sessions_dir / "sess-x" / "lock.json").exists()
+
+
+def test_default_runner_invokes_subprocess(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class Completed:
+        returncode = 0
+        stdout = "v1.0.0\n"
+        stderr = ""
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return Completed()
+
+    monkeypatch.setattr(preflight_module.subprocess, "run", fake_run)
+
+    outcome = preflight_module._default_runner(["node", "--version"])
+
+    assert captured["argv"] == ["node", "--version"]
+    assert outcome.returncode == 0
+    assert outcome.stdout == "v1.0.0\n"
+
+
+def test_discover_binaries_use_shutil_which(monkeypatch) -> None:
+    monkeypatch.setattr(preflight_module.shutil, "which", lambda name: f"/usr/bin/{name}")
+    assert discover_node_binary() == "/usr/bin/node"
+    assert discover_acpx_binary() == "/usr/bin/acpx"
+
+
+def test_version_tuple_treats_non_numeric_parts_as_zero() -> None:
+    assert preflight_module._version_tuple("22.a.0") == (22, 0, 0)
+
+
+def test_parse_node_version_rejects_empty_and_non_numeric_segments() -> None:
+    assert preflight_module._parse_node_version("") is None
+    assert preflight_module._parse_node_version("   \n") is None
+    assert preflight_module._parse_node_version("22.x.0\n") is None
+
+
+def test_parse_acpx_version_handles_prefix_and_malformed_tokens() -> None:
+    assert preflight_module._parse_acpx_version("") is None
+    assert preflight_module._parse_acpx_version("acpx v0.12.0\n") == "0.12.0"
+    assert preflight_module._parse_acpx_version("acpx not-a-version\n") is None
+    assert preflight_module._parse_acpx_version("0.12.x\n") is None
+
+
+def test_probe_node_oserror_is_unavailable_not_raising() -> None:
+    result = probe_node(runner=_raising_runner(OSError("permission denied")))
+
+    assert result["available"] is False
+    assert result["ok"] is False
+    assert "OSError" in result["error_detail"]
+
+
+def test_probe_acpx_oserror_and_nonzero_exit() -> None:
+    os_err = probe_acpx(runner=_raising_runner(OSError("fail")))
+    assert os_err["available"] is False
+    assert "OSError" in os_err["error_detail"]
+
+    nonzero = probe_acpx(runner=_runner(2, stdout="", stderr="broken"))
+    assert nonzero["available"] is False
+    assert "exited with code 2" in nonzero["error_detail"]
+
+
+def test_probe_npx_explicit_binary_missing_path(valid_role_dict) -> None:
+    role = _role(
+        valid_role_dict,
+        runner={**valid_role_dict["runner"], "acpx_binary": "/definitely/missing/acpx"},
+    )
+
+    result = probe_npx(role)
+
+    assert result["fetch_risk"] is False
+    assert result["ok"] is False
+    assert "not found" in result["error_detail"].lower()
+
+
+def test_probe_npx_timeout_oserror_and_nonzero(valid_role_dict) -> None:
+    role = _role(valid_role_dict)
+
+    timeout = probe_npx(
+        role,
+        runner=_raising_runner(subprocess.TimeoutExpired(cmd="npx", timeout=1.0)),
+    )
+    assert timeout["npx_available"] is False
+    assert "timed out" in timeout["error_detail"].lower()
+
+    os_err = probe_npx(role, runner=_raising_runner(OSError("npx blocked")))
+    assert os_err["npx_available"] is False
+    assert "OSError" in os_err["error_detail"]
+
+    nonzero = probe_npx(role, runner=_runner(127, stderr="missing"))
+    assert nonzero["npx_available"] is False
+    assert nonzero["ok"] is False
+    assert "exited with code 127" in nonzero["error_detail"]
+
+
+def test_probe_redaction_fail_closed_on_internal_error(monkeypatch) -> None:
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("redaction probe failed")
+
+    monkeypatch.setattr("agent_run_supervisor.preflight._redaction.redact_text", _boom)
+
+    result = probe_redaction()
+
+    assert result["ok"] is False
+    assert "RuntimeError" in result["error_detail"]
+
+
+def test_probe_redaction_reports_leaked_samples(monkeypatch) -> None:
+    def _noop(text):
+        return text, []
+
+    monkeypatch.setattr("agent_run_supervisor.preflight._redaction.redact_text", _noop)
+    monkeypatch.setattr("agent_run_supervisor.preflight._redaction.redact_env", lambda env: (env, []))
+    monkeypatch.setattr(
+        "agent_run_supervisor.preflight._redaction.redact_argv",
+        lambda argv: (argv, []),
+    )
+
+    result = probe_redaction()
+
+    assert result["ok"] is False
+    assert result["leaked"]
+
+
+def test_probe_session_readiness_fail_closed_on_store_error(tmp_path, monkeypatch) -> None:
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+
+    def _boom(self, **_kwargs):
+        raise RuntimeError("stale lock scan failed")
+
+    monkeypatch.setattr(SessionStore, "detect_stale_locks", _boom)
+
+    result = probe_session_readiness(sessions_dir=sessions_dir)
+
+    assert result["ok"] is False
+    assert "RuntimeError" in result["error_detail"]
+
+
+def test_probe_npx_explicit_binary_resolves_existing_path(valid_role_dict, tmp_path) -> None:
+    acpx_path = tmp_path / "acpx"
+    acpx_path.write_text("#!/bin/sh\n", encoding="utf-8")
+    role = _role(
+        valid_role_dict,
+        runner={**valid_role_dict["runner"], "acpx_binary": str(acpx_path)},
+    )
+
+    result = probe_npx(role)
+
+    assert result["fetch_risk"] is False
+    assert result["ok"] is True
+    assert result["error_detail"] is None
