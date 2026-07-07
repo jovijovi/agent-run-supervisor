@@ -292,7 +292,7 @@ for event in page.records:
 - `session_abort` cancels an in-flight turn; `session_list` enumerates local session records
   read-only (optionally filtered by role).
 - Local read API only — no websocket, long-poll server, or IM delivery (see
-  [`docs/roadmap/current-status.md` §5](docs/roadmap/current-status.md#5-current-explicit-non-approvals)).
+  [`docs/roadmap/non-approvals.md`](docs/roadmap/non-approvals.md)).
 - Schema detail: [`docs/design/result-event-schema.md`](docs/design/result-event-schema.md) §4.
 
 **Schema stability:** Public API and result schemas may evolve; read
@@ -332,7 +332,7 @@ uv sync --extra dev --extra release
 ```
 
 `make verify` / `./scripts/verify_local.sh` is the single local gate entry — it mirrors CI and
-[`docs/roadmap/current-status.md`](docs/roadmap/current-status.md) §6 (tests, doctor/replay smoke,
+[`docs/roadmap/verification.md`](docs/roadmap/verification.md) (tests, doctor/replay smoke,
 docs index/drift, static safety scan, build/twine check, and installed-wheel smoke).
 
 **pip fallback** (without uv):
@@ -357,7 +357,7 @@ agent-run-supervisor doctor   # after pip install from PyPI
 ```
 
 Trusted Publishing uses workflow [`release.yml`](.github/workflows/release.yml) and GitHub
-environment `pypi`. See [`docs/plans/2026-07-06-p3-engineering-basics.md`](docs/plans/2026-07-06-p3-engineering-basics.md)
+environment `pypi`. See [`docs/plans/archive/2026-07-06-p3-engineering-basics.md`](docs/plans/archive/2026-07-06-p3-engineering-basics.md)
 for the operator checklist.
 
 Each GitHub Release for tag `v*` uploads `dist/*.tar.gz`, `dist/*.whl`, and

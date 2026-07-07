@@ -3,8 +3,12 @@ title: "P2 Release Engineering"
 status: archived
 created_at: 2026-06-01
 last_validated_at: 2026-06-01T21:58:00+0800
-archived_at: 2026-06-01T21:58:00+0800
+archived_at: 2026-07-07
 ---
+> **Archived plan（冷区）：** 非 active 上下文。Roadmap 章节迁移见
+> [`docs/roadmap/MIGRATION.md`](../roadmap/MIGRATION.md)。
+> 验收摘要见对应 [`docs/roadmap/archive/phases/`](../roadmap/archive/phases/) 条目。
+
 # P2 Release Engineering
 
 ## Goal

@@ -148,7 +148,7 @@ def test_compile_command_uses_role_default_cwd_when_not_overridden() -> None:
 # Pinned-binary + adapter golden tests supporting the upcoming Sachima
 # controlled-local-execution work (PRD FR-3/FR-4/FR-13, NFR-2; design packet
 # [B1]). Static compiler evidence only: no acpx/npx is launched and no real
-# fixture is captured. See docs/plans/2026-06-12-phase-b-ars-evidence-hardening.md.
+# fixture is captured. See docs/plans/archive/2026-06-12-phase-b-ars-evidence-hardening.md.
 
 
 @pytest.mark.parametrize("adapter_agent", ["codex", "claude"])

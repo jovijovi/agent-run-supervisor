@@ -3,8 +3,12 @@ title: "H1 Operational Hardening Plan"
 status: archived
 created_at: 2026-06-01
 last_validated_at: 2026-06-01T00:00:00+0800
-archived_at: 2026-06-03T18:14:07+0800
+archived_at: 2026-07-07
 ---
+> **Archived plan（冷区）：** 非 active 上下文。Roadmap 章节迁移见
+> [`docs/roadmap/MIGRATION.md`](../roadmap/MIGRATION.md)。
+> 验收摘要见对应 [`docs/roadmap/archive/phases/`](../roadmap/archive/phases/) 条目。
+
 # H1 Operational Hardening Plan
 
 > **Scope banner.** H1 implements the `H1 — Operational hardening` phase from
@@ -102,7 +106,7 @@ included here only in its safe, local, detection-first form.
 
 ## 4. Explicit non-approvals (unchanged by this plan)
 
-From PRD §6 and `current-status.md` §5 — none of these are introduced, implied, or enabled:
+From PRD §6 and `non-approvals.md` — none of these are introduced, implied, or enabled:
 
 - Sachima behavior integration; real AGENT automatic replies; public ingress; real IM
   delivery; Gateway restart/reload/replace; production config writes; live/default-on
@@ -525,7 +529,7 @@ Docs (authority + generated, updated after code/tests green):
   `docs/design/technical-solution.md`, `docs/roadmap/features.md`,
   `docs/roadmap/current-status.md`.
 - `docs/INDEX.md`, `docs/lessons/_drift_report.md` — **generated**; via tools only.
-- `docs/plans/2026-06-01-h1-operational-hardening.md` — this file.
+- `docs/plans/archive/2026-06-01-h1-operational-hardening.md` — this file.
 
 ## 12. PR / scope strategy
 

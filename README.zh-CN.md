@@ -281,7 +281,7 @@ for event in page.records:
 - 适用于 **exec** 与 **session_send** 产生的 run/turn 工件目录。
 - `session_abort` 取消进行中的 turn；`session_list` 只读枚举本地 session 记录（可按 role 过滤）。
 - 仅本地只读 API —— 无 websocket、long-poll 服务或 IM 投递（见
-  [`docs/roadmap/current-status.md` §5](docs/roadmap/current-status.md#5-current-explicit-non-approvals) 非批准项）。
+  [`docs/roadmap/non-approvals.md`](docs/roadmap/non-approvals.md) 非批准项）。
 - Schema 细节：[`docs/design/result-event-schema.md`](docs/design/result-event-schema.md) §4。
 
 **Schema 稳定性：** 公开 API 与结果 schema 可能演进；请阅读
@@ -320,7 +320,7 @@ uv sync --extra dev --extra release
 ```
 
 `make verify` / `./scripts/verify_local.sh` 是单一本地关卡入口 —— 与 CI 及
-[`docs/roadmap/current-status.md`](docs/roadmap/current-status.md) §6 对齐（测试、doctor/replay
+[`docs/roadmap/verification.md`](docs/roadmap/verification.md) 对齐（测试、doctor/replay
 冒烟、文档索引/漂移、静态安全扫描、build/twine 检查与已安装 wheel 冒烟）。
 
 **pip 回退**（无 uv 时）：
@@ -345,7 +345,7 @@ agent-run-supervisor doctor   # PyPI 安装后验证
 
 Trusted Publishing 使用 workflow [`release.yml`](.github/workflows/release.yml) 与 GitHub
 environment `pypi`。操作清单见
-[`docs/plans/2026-07-06-p3-engineering-basics.md`](docs/plans/2026-07-06-p3-engineering-basics.md)。
+[`docs/plans/archive/2026-07-06-p3-engineering-basics.md`](docs/plans/archive/2026-07-06-p3-engineering-basics.md)。
 
 每个 tag `v*` 的 GitHub Release 会上传 `dist/*.tar.gz`、`dist/*.whl` 与
 `dist/SHA256SUMS`。本地校验 wheel：

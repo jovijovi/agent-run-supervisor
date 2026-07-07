@@ -3,8 +3,12 @@ title: "S1d Persistent Session Lifecycle Completion Plan"
 status: archived
 created_at: 2026-05-31
 last_validated_at: 2026-05-31T00:00:00+0800
-archived_at: 2026-06-03T18:14:07+0800
+archived_at: 2026-07-07
 ---
+> **Archived plan（冷区）：** 非 active 上下文。Roadmap 章节迁移见
+> [`docs/roadmap/MIGRATION.md`](../roadmap/MIGRATION.md)。
+> 验收摘要见对应 [`docs/roadmap/archive/phases/`](../roadmap/archive/phases/) 条目。
+
 # S1d Persistent Session Lifecycle Completion Plan
 
 > **Scope banner.** S1d continues `S1 — Persistent session support` after S1a/S1b/S1c. It closes the next local lifecycle tails for persistent sessions: fixture-proven close, abort/cancel, list/history/read-tail style management surfaces, local state transitions, CLI/library commands, redacted management evidence, and lifecycle tests. It stays strictly local CLI/library. It does **not** approve Sachima/Hermes/Gateway integration, public ingress, real IM delivery, production config writes, automatic replies, `@all`, or agent-to-agent routing.
@@ -113,7 +117,7 @@ Tests:
 
 Docs:
 
-- `docs/plans/2026-05-31-s1d-session-lifecycle-completion.md` (this file)
+- `docs/plans/archive/2026-05-31-s1d-session-lifecycle-completion.md` (this file)
 - `docs/product/prd.md`
 - `docs/design/architecture.md`
 - `docs/design/technical-solution.md`

@@ -3,8 +3,12 @@ title: "S1c Persistent Session Runtime MVP Plan"
 status: archived
 created_at: 2026-05-31
 last_validated_at: 2026-05-31T00:00:00+0800
-archived_at: 2026-06-03T18:14:07+0800
+archived_at: 2026-07-07
 ---
+> **Archived plan（冷区）：** 非 active 上下文。Roadmap 章节迁移见
+> [`docs/roadmap/MIGRATION.md`](../roadmap/MIGRATION.md)。
+> 验收摘要见对应 [`docs/roadmap/archive/phases/`](../roadmap/archive/phases/) 条目。
+
 # S1c Persistent Session Runtime MVP Plan
 
 > **Scope banner.** S1c connects S1a's fixture-proven `acpx@0.10.0` persistent-session
@@ -111,7 +115,7 @@ Tests:
 
 Docs:
 
-- `docs/plans/2026-05-31-s1c-session-runtime-mvp.md` (this file)
+- `docs/plans/archive/2026-05-31-s1c-session-runtime-mvp.md` (this file)
 - `docs/product/prd.md`
 - `docs/design/architecture.md`
 - `docs/design/technical-solution.md`

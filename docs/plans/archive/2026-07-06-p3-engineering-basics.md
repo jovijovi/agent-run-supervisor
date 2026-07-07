@@ -3,8 +3,12 @@ title: "P3 Engineering Basics (uv + verify + PyPI)"
 status: archived
 created_at: 2026-07-06
 last_validated_at: 2026-07-07T09:55:00+0800
-archived_at: 2026-07-07T09:55:00+0800
+archived_at: 2026-07-07
 ---
+> **Archived plan（冷区）：** 非 active 上下文。Roadmap 章节迁移见
+> [`docs/roadmap/MIGRATION.md`](../roadmap/MIGRATION.md)。
+> 验收摘要见对应 [`docs/roadmap/archive/phases/`](../roadmap/archive/phases/) 条目。
+
 # P3 Engineering Basics (uv + verify + PyPI)
 
 ## Completion note
@@ -31,7 +35,7 @@ usage sections and syncs roadmap publish status.
 ### P3a — Local dev and verify scripts
 
 - [x] Commit-track `uv.lock` (reproducible dev deps; runtime stays stdlib-only).
-- [x] Add `scripts/verify_local.sh` — single gate entry mirroring `current-status.md` §6 and CI.
+- [x] Add `scripts/verify_local.sh` — single gate entry mirroring `verification.md` and CI.
 - [x] Add `scripts/smoke_installed_wheel.sh` — reusable installed-wheel smoke from CI.
 - [x] Update `README.md` / `README.zh-CN.md` with Development section (uv primary, pip fallback).
 

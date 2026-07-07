@@ -3,8 +3,12 @@ title: "I1 Local Caller Thin Integration Plan"
 status: archived
 created_at: 2026-06-01
 last_validated_at: 2026-06-01T00:00:00+0800
-archived_at: 2026-06-03T18:14:07+0800
+archived_at: 2026-07-07
 ---
+> **Archived plan（冷区）：** 非 active 上下文。Roadmap 章节迁移见
+> [`docs/roadmap/MIGRATION.md`](../roadmap/MIGRATION.md)。
+> 验收摘要见对应 [`docs/roadmap/archive/phases/`](../roadmap/archive/phases/) 条目。
+
 # I1 Local Caller Thin Integration Plan
 
 > **Scope banner.** This is the I1 design and implementation plan for a generic,
@@ -148,7 +152,7 @@ Expected no changes:
 - [ ] Update `docs/product/prd.md`, `docs/design/technical-solution.md`,
   `docs/roadmap/features.md`, and `docs/roadmap/current-status.md` to say H1 is merged on
   `main` via PR #19 at `484ae23`, with main CI success per user-provided evidence.
-- [ ] Keep historical plan wording in `docs/plans/2026-06-01-h1-operational-hardening.md`
+- [ ] Keep historical plan wording in `docs/plans/archive/2026-06-01-h1-operational-hardening.md`
   unless it is actively cited as current state.
 - [ ] Run `python tools/build_docs_index.py --write` and
   `python tools/docs_drift_signal.py --write` only during the future implementation/docs PR.

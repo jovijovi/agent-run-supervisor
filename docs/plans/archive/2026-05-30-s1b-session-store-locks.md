@@ -3,8 +3,12 @@ title: "S1b Session Store and Lock Foundation Plan"
 status: archived
 created_at: 2026-05-30
 last_validated_at: 2026-05-30T00:00:00+0800
-archived_at: 2026-06-03T18:14:07+0800
+archived_at: 2026-07-07
 ---
+> **Archived plan（冷区）：** 非 active 上下文。Roadmap 章节迁移见
+> [`docs/roadmap/MIGRATION.md`](../roadmap/MIGRATION.md)。
+> 验收摘要见对应 [`docs/roadmap/archive/phases/`](../roadmap/archive/phases/) 条目。
+
 # S1b Session Store and Lock Foundation Plan
 
 > **Scope banner.** S1b implements the local persistent-session **foundation**: role
@@ -125,7 +129,7 @@ Tests:
 
 Docs:
 
-- `docs/plans/2026-05-30-s1b-session-store-locks.md` (this file)
+- `docs/plans/archive/2026-05-30-s1b-session-store-locks.md` (this file)
 - `docs/roadmap/current-status.md`
 - `docs/roadmap/features.md`
 - `docs/design/architecture.md`

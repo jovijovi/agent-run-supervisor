@@ -2,7 +2,7 @@
 title: "AI-assisted development flow"
 status: active
 created_at: 2026-05-28
-last_validated_at: 2026-05-29T18:25:40+0800
+last_validated_at: 2026-07-07T15:30:00+0800
 ---
 # AI-assisted development flow
 
@@ -17,12 +17,20 @@ Documentation development and management come before code development: the docum
 The authority chain is:
 
 ```text
-PRD -> design documents -> roadmap/current-status + feature tracker -> approved phase implementation plan (docs/plans/) -> code
+PRD -> design -> features + living board -> docs/plans/active/ -> code
 ```
 
-Concrete task/phase implementation plans live under `docs/plans/`; `docs/roadmap/`
-owns roadmap, status, and feature tracking, not task-level execution plans. See
-`docs/plans/README.md`.
+| Layer | Path |
+|---|---|
+| Living board | `docs/roadmap/current-status.md` |
+| Features | `docs/roadmap/features.md` |
+| Non-approvals | `docs/roadmap/non-approvals.md` |
+| Verification | `docs/roadmap/verification.md` |
+| Active plans | `docs/plans/active/` |
+| Closed phase archive | `docs/roadmap/archive/phases/` |
+| Closed plans | `docs/plans/archive/` |
+
+**Agent context:** read the board, features, and `docs/plans/active/` only. Do not default-load archive directories.
 
 Required preflight for roadmap, phase-gate, implementation, PR, CI, review, merge, or next-phase-readiness work:
 
@@ -34,7 +42,7 @@ Required preflight for roadmap, phase-gate, implementation, PR, CI, review, merg
 6. `docs/roadmap/current-status.md`
 7. this file
 
-The pre-realignment `docs/plans/` and `docs/dev_log/` artifacts were retired and cleared and remain non-authoritative; do not use historical plan/dev-log artifacts as source-of-truth. The `docs/plans/` directory is now the home for fresh, approved implementation plans named `YYYY-MM-DD-<task-slug>.md` (see `docs/plans/README.md`).
+Path migration map: `docs/roadmap/MIGRATION.md`. Plan layout: `docs/plans/README.md`.
 
 ## Branch model
 
@@ -69,26 +77,20 @@ Rules:
 
 1. **Preflight** — read the document hierarchy above and state whether the requested work matches current roadmap/status.
 2. **Scope** — confirm whether the task is documentation, design, implementation, review, or cleanup.
-3. **Plan** — for non-trivial implementation, derive a phase implementation plan from PRD/design/roadmap. The plan must not redefine product goals.
+3. **Plan** — for non-trivial implementation, create a plan in `docs/plans/active/`. The plan must not redefine product goals.
 4. **Implement** — use narrow commits and TDD for behavior changes.
-5. **Update authority docs** — update PRD/design/feature tracker/roadmap when the product, design, completion state, or acceptance evidence changes.
-6. **Verify** — run local gates and scans.
-7. **Review** — Claude Code may be main worker; Codex CLI is primary reviewer; Hermes verifies and arbitrates with evidence.
-8. **PR and merge** — push branch, open PR, wait for CI, merge only when green, then verify `main` from a clean checkout/worktree.
+5. **Update authority docs** — update board/features/archive when completion state changes; `git mv` plan to archive when merged.
+6. **Verify** — run `./scripts/verify_local.sh` (see `docs/roadmap/verification.md`).
+7. **Review** — see Review requirements below.
+8. **PR and merge** — push branch, open PR, wait for CI, merge only when green.
 
 ## Implementation plan rule
 
-A phase implementation plan is an execution artifact created only after PRD/design/roadmap target is clear. It lives under `docs/plans/` and is named `docs/plans/YYYY-MM-DD-<task-slug>.md`. It must include:
+Active plans live at `docs/plans/active/YYYY-MM-DD-<task-slug>.md`. On merge, move to `docs/plans/archive/` with `status: archived`.
 
-- context and exact target from PRD/design/roadmap;
-- checklist of implementation goals;
-- acceptance criteria;
-- files likely to change;
-- verification gates;
-- risks/open questions;
-- rollback strategy.
+A plan must include: context/target, checklist, acceptance, files likely to change, verification gates, risks, rollback.
 
-A plan must not redefine product goals, expand product scope, or imply new live/runtime approvals. Keep task-level execution plans in `docs/plans/`, not in `docs/roadmap/`, which owns roadmap/status/feature tracking. The pre-realignment plans were cleared because they no longer represent the current authority chain; future plans must be fresh and trace back to `docs/roadmap/current-status.md`. See `docs/plans/README.md`.
+A plan must not redefine product goals or imply new live/runtime approvals. Trace back to `docs/roadmap/current-status.md`.
 
 ## Commit conventions
 
@@ -107,24 +109,27 @@ Never include secrets, tokens, cookies, raw environment values, real webhook val
 
 ## Verification gates
 
-Run these before PR or merge unless the task clearly explains why a gate is irrelevant:
+Canonical entry: [`scripts/verify_local.sh`](../../scripts/verify_local.sh) and
+[`docs/roadmap/verification.md`](roadmap/verification.md).
+
+Quick smoke (when full verify is too heavy for a tiny doc-only change):
 
 ```bash
 python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0
 python3 -m pytest -q
 python3 -m compileall -q src scripts tests
-PYTHONPATH=src python3 -m agent_run_supervisor doctor
-PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjson
-python tools/build_docs_index.py --check
-python tools/docs_drift_signal.py --check
+python3 tools/build_docs_index.py --check
+python3 tools/docs_drift_signal.py --check
+python3 tools/check_roadmap_governance.py
 git diff --check
 ```
 
-Secret/static safety gates:
+## Review requirements
 
-- Run a secret-shaped scan over added/changed text before commit.
-- Run static dangerous-pattern scans for new subprocess/network/config-write surfaces when relevant.
-- Use `[REDACTED]` placeholders for sensitive examples.
+- Claude Code: main worker for implementation/debugging/design work unless explicitly deviating.
+- Codex CLI: primary reviewer.
+- Hermes: scope control, verification, gates, and evidence arbitration.
+- Reviewers must check PRD/design/feature/roadmap alignment, not only whether tests pass.
 
 ## PR requirements
 
@@ -136,18 +141,18 @@ Every non-trivial PR should include:
 - test plan with commands and results;
 - review evidence;
 - secret-safety statement;
-- boundary statement for explicit non-approvals.
+- boundary statement for explicit non-approvals (`docs/roadmap/non-approvals.md`).
 
 Target `main` unless a future roadmap explicitly introduces another integration trunk.
 
 ## Anti-patterns
 
 - Starting code work before PRD/design/roadmap alignment.
-- Treating historical plan/dev-log files as authority.
-- Putting task-level implementation plans in `docs/roadmap/` instead of `docs/plans/`.
+- Loading `docs/plans/archive/` or `docs/roadmap/archive/` as default context.
+- Putting task-level implementation plans in `docs/roadmap/` instead of `docs/plans/active/`.
+- Appending merge history to the living board.
 - Letting exec-first engineering sequence shrink PRD or design scope.
 - Treating `allowed_roots` as an OS sandbox.
 - Treating runner completion as business PASS.
-- Letting dry-run/preview docs imply real AGENT auto-replies, public ingress, delivery, or Gateway operations.
 - Broad `git add -A` without inspecting the diff.
 - Committing runtime outputs, prompt material, raw stderr with secrets, `.env`, or token files.

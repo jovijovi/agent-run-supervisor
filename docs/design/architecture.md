@@ -15,9 +15,8 @@ last_validated_at: 2026-05-29T18:25:40+0800
 > - For *module-level* technical detail (per-file responsibilities, data models),
 >   read its companion `docs/design/technical-solution.md`.
 > - For *product requirements*, read `docs/product/prd.md`.
-> - For *phase/closure status and acceptance*, read `docs/roadmap/current-status.md`
->   and `docs/roadmap/features.md`. Where this document marks something "implemented",
->   it means the code path exists; **phase acceptance/closure remains roadmap-owned.**
+> - For *phase/closure status and acceptance*, read `docs/roadmap/current-status.md`,
+>   `docs/roadmap/archive/phases/`, and `docs/roadmap/features.md`.
 
 ---
 
@@ -574,7 +573,7 @@ flowchart TB
 
 ### 6.2 What the architecture does **not** claim or do
 
-These are repository-wide non-approvals (PRD §6, `current-status.md` §5). No diagram or
+These are repository-wide non-approvals (PRD §6, `non-approvals.md`). No diagram or
 prose here may be read as introducing any of them:
 
 | Not approved / not claimed | Honest statement |
@@ -639,7 +638,7 @@ touches the architecture.
 
 ### 8.1 Roadmap-owned tails and parked boundaries
 
-These dispositions are tracked in `docs/roadmap/current-status.md` §4 and are **not** re-decided here:
+These dispositions are tracked in [`docs/roadmap/current-status.md#open-tails`](roadmap/current-status.md#open-tails) and are **not** re-decided here:
 
 - `ARS-CRASH-RECOVERY` — closed by K1 on `main` via PR #22 (`0ad531e`):
   process-owned lock metadata, fail-safe `alive`/`crashed`/`unknown` classification,
@@ -647,7 +646,7 @@ These dispositions are tracked in `docs/roadmap/current-status.md` §4 and are *
 - `ARS-SANDBOX-BOUNDARY` — parked; any real OS sandbox is a separate phase.
 - `ARS-CALLER-INTEGRATION` — I1 covers the generic local library boundary; L1 captures the
   concrete caller design (Hermes) on top of that boundary in
-  `docs/plans/2026-06-01-l1-concrete-caller-integration-design.md`. The L2 implementation
+  `docs/plans/archive/2026-06-01-l1-concrete-caller-integration-design.md`. The L2 implementation
   merged via PR #27 (`eb7912e`) adds the local/offline caller-side package `src/agent_run_supervisor/hermes_caller/`
   with `tests/hermes_caller/`: caller-owned verdicts, normalized-event progress/result
   view-models, an escaped offline Feishu payload dict, and exec + persistent-session orchestration
@@ -664,6 +663,8 @@ These dispositions are tracked in `docs/roadmap/current-status.md` §4 and are *
 - Product requirements: `docs/product/prd.md`
 - Module-level technical detail: `docs/design/technical-solution.md`
 - Feature completion: `docs/roadmap/features.md`
-- Roadmap, phases, acceptance, non-approvals: `docs/roadmap/current-status.md`
+- Living board: `docs/roadmap/current-status.md`
+- Non-approvals: `docs/roadmap/non-approvals.md`
+- Closed phase archive: `docs/roadmap/archive/phases/`
 - Development flow and gates: `docs/AI_FLOW.md`
 - Generated documentation index: `docs/INDEX.md`

@@ -3,7 +3,13 @@ title: "Codex acpx Smoke Helper and Docs Plan"
 status: active
 created_at: 2026-06-14
 last_validated_at: 2026-06-14T00:00:00+0800
+status: archived
+archived_at: 2026-07-07
 ---
+> **Archived plan（冷区）：** 非 active 上下文。Roadmap 章节迁移见
+> [`docs/roadmap/MIGRATION.md`](../roadmap/MIGRATION.md)。
+> 验收摘要见对应 [`docs/roadmap/archive/phases/`](../roadmap/archive/phases/) 条目。
+
 # Codex acpx Smoke Helper and Docs Plan
 
 > **Scope banner.** This task adds a reproducible local smoke helper and user-facing docs for the existing `agent-run-supervisor` Codex/acpx path. It does **not** change `AgentRoleSpec`, runtime policy semantics, parser behavior, session lifecycle semantics, Sachima integration, Gateway/IM behavior, public ingress, production config, automatic replies, or agent-to-agent routing. Real smoke execution remains an explicit local operator action.

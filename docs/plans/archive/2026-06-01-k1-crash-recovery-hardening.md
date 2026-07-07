@@ -3,8 +3,12 @@ title: "K1 Crash Recovery Hardening Plan"
 status: archived
 created_at: 2026-06-01
 last_validated_at: 2026-06-01T00:00:00+0800
-archived_at: 2026-06-03T18:14:07+0800
+archived_at: 2026-07-07
 ---
+> **Archived plan（冷区）：** 非 active 上下文。Roadmap 章节迁移见
+> [`docs/roadmap/MIGRATION.md`](../roadmap/MIGRATION.md)。
+> 验收摘要见对应 [`docs/roadmap/archive/phases/`](../roadmap/archive/phases/) 条目。
+
 # K1 Crash Recovery Hardening Plan
 
 > **Scope banner.** K1 implements the carried roadmap tail `ARS-CRASH-RECOVERY`
@@ -106,7 +110,7 @@ into the lease, preventing an untracked AGENT from continuing.
 
 ## 4. Explicit non-approvals (unchanged by this plan)
 
-From PRD §6 and `current-status.md` §5 — none of these are introduced, implied, or
+From PRD §6 and `non-approvals.md` — none of these are introduced, implied, or
 enabled: Sachima behavior integration; real AGENT automatic replies; public
 ingress; real IM delivery; Gateway restart/reload/replace; production config
 writes; live/default-on behavior; worker auto-routing; participant
@@ -457,7 +461,7 @@ Docs (authority + generated, updated after code/tests green):
   `docs/product/prd.md`, `docs/roadmap/features.md`,
   `docs/roadmap/current-status.md`.
 - `docs/INDEX.md`, `docs/lessons/_drift_report.md` — **generated**; via tools only.
-- `docs/plans/2026-06-01-k1-crash-recovery-hardening.md` — this file.
+- `docs/plans/archive/2026-06-01-k1-crash-recovery-hardening.md` — this file.
 
 ## 12. PR / scope strategy
 

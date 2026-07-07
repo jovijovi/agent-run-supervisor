@@ -2,8 +2,12 @@
 title: "S1 Persistent Session Closure Acceptance Plan"
 status: archived
 created_at: 2026-05-31
-archived_at: 2026-06-03T18:14:07+0800
+archived_at: 2026-07-07
 ---
+> **Archived plan（冷区）：** 非 active 上下文。Roadmap 章节迁移见
+> [`docs/roadmap/MIGRATION.md`](../roadmap/MIGRATION.md)。
+> 验收摘要见对应 [`docs/roadmap/archive/phases/`](../roadmap/archive/phases/) 条目。
+
 # S1 Persistent Session Closure Acceptance Plan
 
 ## Goal

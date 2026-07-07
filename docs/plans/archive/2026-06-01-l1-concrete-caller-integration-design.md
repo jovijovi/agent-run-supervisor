@@ -3,8 +3,12 @@ title: "L1 Concrete Caller Integration Design"
 status: archived
 created_at: 2026-06-01
 last_validated_at: 2026-06-01T22:50:20+0800
-archived_at: 2026-06-03T18:14:07+0800
+archived_at: 2026-07-07
 ---
+> **Archived plan（冷区）：** 非 active 上下文。Roadmap 章节迁移见
+> [`docs/roadmap/MIGRATION.md`](../roadmap/MIGRATION.md)。
+> 验收摘要见对应 [`docs/roadmap/archive/phases/`](../roadmap/archive/phases/) 条目。
+
 # L1 Concrete Caller Integration Design
 
 > **Scope banner — design-only.** This is the **L1 design document** for a *concrete*
@@ -14,7 +18,7 @@ archived_at: 2026-06-03T18:14:07+0800
 > document-check** task is a **scenario / presentation target only**: there is **no** real
 > Feishu API, **no** IM delivery, **no** platform ingress, and **no** Gateway/Sachima live
 > behavior anywhere in this design. All standing non-approvals
-> (`docs/roadmap/current-status.md` §5) remain in force. Connecting Hermes to Sachima for
+> (`docs/roadmap/non-approvals.md`) remain in force. Connecting Hermes to Sachima for
 > real debugging/testing is a **separate, later, explicitly-approved phase**; L1 defines the
 > seam but does not cross it.
 
@@ -62,7 +66,7 @@ Read in authority order; this design is **derivative** of all of them.
 - Roadmap/status: `docs/roadmap/current-status.md` — §3 (I1), §4 (`ARS-CALLER-INTEGRATION`),
   §5 (non-approvals).
 - Workflow & plan rules: `docs/AI_FLOW.md`, `docs/plans/README.md`.
-- I1 boundary plan: `docs/plans/2026-06-01-i1-local-caller-thin-integration.md`.
+- I1 boundary plan: `docs/plans/archive/2026-06-01-i1-local-caller-thin-integration.md`.
 
 ## 3. Scope
 
@@ -98,7 +102,7 @@ Explicitly **out of scope** for L1 (and unchanged from current non-approvals):
 
 ## 4. Non-goals / non-approvals
 
-L1 inherits **every** non-approval in `docs/roadmap/current-status.md` §5 and PRD §6
+L1 inherits **every** non-approval in `docs/roadmap/non-approvals.md` and PRD §6
 verbatim and adds nothing live. In particular, authoring this design does **not** approve or
 imply:
 
