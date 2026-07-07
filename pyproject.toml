@@ -26,9 +26,10 @@ dependencies = []
 Homepage = "https://github.com/jovijovi/agent-run-supervisor"
 Repository = "https://github.com/jovijovi/agent-run-supervisor"
 Issues = "https://github.com/jovijovi/agent-run-supervisor/issues"
+PyPI = "https://pypi.org/project/agent-run-supervisor/"
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<10"]
+dev = ["pytest>=8,<10", "pytest-cov>=5,<7"]
 release = ["build>=1,<2", "twine>=5,<7"]
 
 [project.scripts]
@@ -46,3 +47,14 @@ agent_run_supervisor = ["fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjs
 testpaths = ["tests"]
 addopts = "-q"
 pythonpath = ["src", "."]
+
+[tool.coverage.run]
+source = ["agent_run_supervisor"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+]
