@@ -291,3 +291,106 @@ def test_summarize_refuses_empty_output() -> None:
 def test_summarize_refuses_json_array() -> None:
     with pytest.raises(ManagementParseError):
         summarize_management_json(b'["not", "an", "object"]')
+
+
+def test_parser_handles_thought_chunk_and_tool_events() -> None:
+    payload = b"\n".join(
+        [
+            b'{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}',
+            b'{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_thought_chunk"}}}',
+            b'{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"t1","kind":"read"}}}',
+            b'{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed"}}}',
+            b'{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"available_commands_update"}}}',
+        ]
+    ) + b"\n"
+
+    result = parse_acpx_stdout_bytes(payload)
+    event_types = [event["type"] for event in result.events]
+
+    assert "agent_thought_delta" in event_types
+    assert "tool_started" in event_types
+    assert "tool_completed" in event_types
+    assert "available_commands_updated" in event_types
+
+
+def test_parser_flags_missing_session_update_fields() -> None:
+    payload = (
+        b'{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}\n'
+        b'{"jsonrpc":"2.0","method":"session/update","params":null}\n'
+        b'{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s"}}\n'
+        b'{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":123}}}\n'
+    )
+
+    result = parse_acpx_stdout_bytes(payload)
+
+    assert result.protocol_error is True
+    assert any("params" in reason for reason in result.protocol_error_reasons)
+    assert any("update mapping" in reason for reason in result.protocol_error_reasons)
+    assert any("non-string sessionUpdate" in reason for reason in result.protocol_error_reasons)
+
+
+def test_parser_records_unknown_rpc_method_with_key_summary() -> None:
+    payload = (
+        b'{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}\n'
+        b'{"jsonrpc":"2.0","method":"future/method","params":{"nested":{"list":[1,2]}}}\n'
+    )
+
+    result = parse_acpx_stdout_bytes(payload)
+    unknown = [event for event in result.events if event["type"] == "unknown_update"]
+
+    assert unknown
+    assert unknown[0]["update_type"] == "future/method"
+    assert "nested.list" in unknown[0]["key_summary"]
+
+
+def test_parser_run_completed_with_non_dict_result() -> None:
+    payload = b'{"jsonrpc":"2.0","id":1,"result":"done"}\n'
+
+    result = parse_acpx_stdout_bytes(payload)
+
+    assert [event["type"] for event in result.events] == ["rpc_result"]
+
+
+def test_parser_skips_blank_lines_in_stream() -> None:
+    payload = b'\n\n{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}\n\n'
+
+    result = parse_acpx_stdout_bytes(payload)
+
+    assert result.protocol_error is False
+    assert [event["type"] for event in result.events] == ["run_started"]
+
+
+def test_parser_permission_response_ignores_non_dict_outcomes() -> None:
+    payload = b"\n".join(
+        [
+            b'{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}',
+            b'{"jsonrpc":"2.0","id":1,"result":"not-a-mapping"}',
+            b'{"jsonrpc":"2.0","id":2,"result":{"outcome":"missing"}}',
+        ]
+    ) + b"\n"
+
+    result = parse_acpx_stdout_bytes(payload)
+
+    assert result.permission_denied_count == 0
+    assert "permission_denied" not in [event["type"] for event in result.events]
+
+
+def test_summarize_management_unknown_kind_for_unrecognized_object() -> None:
+    summary = summarize_management_json(b'{"unexpected": true}')
+
+    assert summary["kind"] == "unknown"
+
+
+def test_summarize_management_utf8_decode_error() -> None:
+    with pytest.raises(ManagementParseError) as excinfo:
+        summarize_management_json(b"\xff\xfe")
+
+    assert "UTF-8" in str(excinfo.value)
+
+
+def test_summarize_management_error_without_dict_payload() -> None:
+    summary = summarize_management_json(b'{"error": "plain-string"}')
+
+    assert summary["kind"] == "error"
+    assert summary["code"] is None
+    assert summary["acpx_code"] is None
