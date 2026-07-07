@@ -383,16 +383,20 @@ Checklist:
 - [x] Add `.github/workflows/release.yml` (tag `v*`, OIDC Trusted Publishing, environment `pypi`).
 - [x] Update README Development + Publishing sections; governance docs and plan
   `docs/plans/2026-07-06-p3-engineering-basics.md`.
+- [x] README Library usage sections (EN/ZH) with `invoke_caller` examples.
 
 Acceptance:
 
 - `uv sync --extra dev --extra release` + `./scripts/verify_local.sh` pass locally.
 - CI `Verify` workflow uses uv and `./scripts/verify_local.sh` on Python 3.11 and 3.12.
-- `release.yml` ready for maintainer Trusted Publisher setup; no secrets in repo.
-- First live `pip install agent-run-supervisor==0.1.0` awaits operator tag push (`v0.1.0`).
+- `release.yml` publishes via Trusted Publishing; no secrets in repo.
+- `pip install agent-run-supervisor==0.1.0` works from PyPI; `agent-run-supervisor doctor` passes
+  after install.
 
-Status: **Implementation complete; first PyPI publish pending operator Trusted Publisher config and
-tag push.** All §5 non-approvals remain in force.
+Status: **Closed on `main`.** First public release [`0.1.0`](https://pypi.org/project/agent-run-supervisor/0.1.0/)
+published via tag [`v0.1.0`](https://github.com/jovijovi/agent-run-supervisor/releases/tag/v0.1.0)
+(GitHub Actions Trusted Publishing, 2026-07-06). Engineering merged via PR #40 (`288eeb3`); doc sync
+for library usage and publish status in follow-up PR. All §5 non-approvals remain in force.
 
 ### Phase B — ARS evidence hardening (support for the external Sachima controlled-local-execution PRD)
 

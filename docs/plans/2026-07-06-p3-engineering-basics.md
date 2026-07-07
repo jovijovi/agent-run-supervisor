@@ -1,10 +1,18 @@
 ---
 title: "P3 Engineering Basics (uv + verify + PyPI)"
-status: active
+status: archived
 created_at: 2026-07-06
-last_validated_at: 2026-07-06T16:00:00+0800
+last_validated_at: 2026-07-07T09:55:00+0800
+archived_at: 2026-07-07T09:55:00+0800
 ---
 # P3 Engineering Basics (uv + verify + PyPI)
+
+## Completion note
+
+P3 engineering checklist is **closed**. First public release [`0.1.0`](https://pypi.org/project/agent-run-supervisor/0.1.0/)
+published via GitHub tag [`v0.1.0`](https://github.com/jovijovi/agent-run-supervisor/releases/tag/v0.1.0)
+and Trusted Publishing workflow `release.yml` (2026-07-06). Follow-up doc PR adds README Library
+usage sections and syncs roadmap publish status.
 
 ## Context and target
 
@@ -82,14 +90,22 @@ uv sync --extra dev --extra release
 
 ## Operator checklist (manual, out of repo)
 
-Before pushing `v0.1.0`:
+**Completed for `0.1.0` (2026-07-06):**
 
-1. Register PyPI project `agent-run-supervisor` (if not already).
-2. Configure Trusted Publishing: Owner `jovijovi`, Repo `agent-run-supervisor`, Workflow
+1. PyPI project `agent-run-supervisor` registered.
+2. Trusted Publishing configured: Owner `jovijovi`, Repo `agent-run-supervisor`, Workflow
    `release.yml`, Environment `pypi`.
-3. (Optional) Configure TestPyPI Trusted Publisher for a dry-run first.
-4. Create GitHub Environment `pypi` with optional approval gate for maintainers.
-5. After tag push succeeds: `pip install agent-run-supervisor==0.1.0` + `agent-run-supervisor doctor`.
+3. GitHub Environment `pypi` configured.
+4. Tag `v0.1.0` pushed; `pip install agent-run-supervisor==0.1.0` + `agent-run-supervisor doctor`
+   verified.
+
+**For future releases (`0.1.x` / `0.2.0` / …):**
+
+1. `make verify` (or `./scripts/verify_local.sh`).
+2. Bump version in `pyproject.toml` + `CHANGELOG.md`; merge to `main`.
+3. `make release-tag` → push tag `vX.Y.Z`.
+4. After workflow succeeds: `pip install agent-run-supervisor==X.Y.Z` + `agent-run-supervisor doctor`.
+5. (Optional) TestPyPI dry-run via `make release-test` before production tag.
 
 **Forbidden:** `.pypirc`, API tokens, or secrets committed to git.
 
@@ -106,5 +122,6 @@ Rollback: yank PyPI version; revert `release.yml`; keep or hotfix version as `0.
 
 ## Open questions
 
-- First publish may use TestPyPI before production PyPI — operator choice at tag time.
+- ~~First publish may use TestPyPI before production PyPI — operator choice at tag time.~~ Resolved:
+  production PyPI `0.1.0` published 2026-07-06.
 - ruff/mypy/pre-commit deferred to a future P3b+ plan.

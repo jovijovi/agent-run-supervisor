@@ -4,9 +4,8 @@
 
 Total: 27 documents tracked across 2 statuses.
 
-## Active (14)
+## Active (13)
 
-- [P3 Engineering Basics (uv + verify + PyPI)](plans/2026-07-06-p3-engineering-basics.md) — created 2026-07-06
 - [Live event streaming core (PR1)](plans/2026-07-05-live-event-streaming.md) — created 2026-07-05
 - [Codex acpx Smoke Helper and Docs Plan](plans/2026-06-14-codex-acpx-smoke-helper.md) — created 2026-06-14
 - [Phase B — ARS Evidence Hardening Plan](plans/2026-06-12-phase-b-ars-evidence-hardening.md) — created 2026-06-12
@@ -21,8 +20,9 @@ Total: 27 documents tracked across 2 statuses.
 - [Roadmap governance](roadmap/README.md) — created 2026-05-28
 - [agent-run-supervisor Roadmap Current Status](roadmap/current-status.md) — created 2026-05-28
 
-## Archived (13)
+## Archived (14)
 
+- [P3 Engineering Basics (uv + verify + PyPI)](plans/2026-07-06-p3-engineering-basics.md) — created 2026-07-06
 - [H1 Operational Hardening Plan](plans/2026-06-01-h1-operational-hardening.md) — created 2026-06-01
 - [I1 Local Caller Thin Integration Plan](plans/2026-06-01-i1-local-caller-thin-integration.md) — created 2026-06-01
 - [K1 Crash Recovery Hardening Plan](plans/2026-06-01-k1-crash-recovery-hardening.md) — created 2026-06-01
