@@ -29,6 +29,17 @@ def test_module_imports() -> None:
     assert hasattr(agent_run_supervisor, "__version__")
 
 
+def test_module_version_matches_pyproject() -> None:
+    import tomllib
+
+    import agent_run_supervisor
+
+    pyproject = REPO_ROOT / "pyproject.toml"
+    with pyproject.open("rb") as handle:
+        data = tomllib.load(handle)
+    assert agent_run_supervisor.__version__ == data["project"]["version"]
+
+
 def test_cli_help_lists_subcommands() -> None:
     completed = _run_cli("--help")
 
