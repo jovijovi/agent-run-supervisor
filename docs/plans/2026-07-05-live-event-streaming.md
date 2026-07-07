@@ -1,10 +1,17 @@
 ---
 title: "Live event streaming core (PR1)"
-status: active
+status: archived
 created_at: 2026-07-05
-last_validated_at: 2026-07-05T00:00:00+0800
+last_validated_at: 2026-07-07T11:30:00+0800
+archived_at: 2026-07-07T11:30:00+0800
 ---
 # Live event streaming core — PR1
+
+## Completion note
+
+**PR1 and PR2 are closed on `main` (pre-`v0.1.0`).** PR1 live stream core and PR2 local cursor/progress
+API (`hermes_caller.events`) are implemented and evidenced in tests/schema. **PR3 (Sachima live progress
+integration) is not approved** and remains out of scope; §5 non-approvals unchanged.
 
 Concrete, task-level implementation plan. Derives from `docs/product/prd.md`,
 `docs/design/architecture.md`, `docs/design/technical-solution.md`,
@@ -98,19 +105,20 @@ Explicit non-goals / non-approvals (unchanged from
 
 ## 5. Implementation checklist
 
-- [ ] `parser.py`: `IncrementalParseState`, `consume_acpx_line`, `feed`,
+- [x] `parser.py`: `IncrementalParseState`, `consume_acpx_line`, `feed`,
   `finish`; refactor batch parse to share `_consume_parsed_line`; keep
   `parse_acpx_stdout_bytes` backward compatible.
-- [ ] `event_store.py`: `RunHandle.append_text` for appending redacted raw NDJSON
+- [x] `event_store.py`: `RunHandle.append_text` for appending redacted raw NDJSON
   lines at `0600`.
-- [ ] `live_stream.py`: `LiveEventSink` (redact+append raw line, incremental
+- [x] `live_stream.py`: `LiveEventSink` (redact+append raw line, incremental
   parse, seq-stamped normalized events, `progress.json`).
-- [ ] `runner.py`: `execute_subprocess` reader-thread live sink + full buffer;
+- [x] `runner.py`: `execute_subprocess` reader-thread live sink + full buffer;
   `SubprocessExecutor` Protocol gains `stdout_sink`; `run()` wires a sink;
   `_finalize_prepared_outcome` dedupes live vs batch and finalizes progress.
-- [ ] `session_runtime.py`: `_run` gains `stdout_sink`; `_run_turn` wires a live
+- [x] `session_runtime.py`: `_run` gains `stdout_sink`; `_run_turn` wires a live
   sink and dedupes finalization.
-- [ ] Tests: RED-first live tests (see §7).
+- [x] Tests: RED-first live tests (see §7).
+- [x] PR2: `hermes_caller/events.py` cursor/progress read API + tests (local-only).
 
 ## 6. Files likely to change
 
@@ -144,9 +152,9 @@ GREEN gates:
 uv run --no-project --with pytest python -m pytest -q tests/test_runner_exec.py tests/test_session_runtime.py tests/test_live_event_stream.py
 uv run --no-project --with pytest python -m pytest -q
 python3 -m compileall -q src scripts tests
-python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.10.0
+python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0
 PYTHONPATH=src python3 -m agent_run_supervisor doctor
-PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.10.0/success-codex-sentinel/stdout.ndjson
+PYTHONPATH=src python3 -m agent_run_supervisor replay fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjson
 python tools/build_docs_index.py --check
 python tools/docs_drift_signal.py --check
 git diff --check
