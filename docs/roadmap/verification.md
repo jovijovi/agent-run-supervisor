@@ -2,7 +2,7 @@
 title: "Verification gates for implementation PRs"
 status: active
 created_at: 2026-05-28
-last_validated_at: 2026-07-07T15:30:00+0800
+last_validated_at: 2026-07-07T16:45:00+0800
 ---
 
 # Verification gates for implementation PRs
@@ -27,6 +27,7 @@ uv run agent-run-supervisor replay fixtures/acpx-0.12.0/success-codex-sentinel/s
 uv run python tools/build_docs_index.py --check
 uv run python tools/docs_drift_signal.py --check
 uv run python tools/static_safety_scan.py
+uv run python tools/check_version_sync.py
 uv run python tools/check_roadmap_governance.py
 uv run python -m build
 uv run python -m twine check dist/*

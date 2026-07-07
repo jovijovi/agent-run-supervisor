@@ -350,8 +350,10 @@ Releases are published to PyPI and GitHub via tag-triggered GitHub Actions Trust
 **Release process** (maintainers):
 
 ```bash
+make bump VERSION=X.Y.Z   # sync pyproject.toml, __init__.py, uv.lock, CHANGELOG stub
+# edit CHANGELOG [X.Y.Z] section content
 make verify              # or ./scripts/verify_local.sh
-# bump version in pyproject.toml + CHANGELOG.md, merge to main
+# merge bump PR to main
 make release-tag         # prints git tag vX.Y.Z && git push commands
 agent-run-supervisor doctor   # after pip install from PyPI
 ```

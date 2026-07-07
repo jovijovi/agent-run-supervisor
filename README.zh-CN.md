@@ -337,8 +337,10 @@ python3 -m pytest -q
 **发布流程**（维护者）：
 
 ```bash
+make bump VERSION=X.Y.Z   # 同步 pyproject.toml、__init__.py、uv.lock、CHANGELOG 占位节
+# 编辑 CHANGELOG [X.Y.Z] 条目内容
 make verify              # 或 ./scripts/verify_local.sh
-# 在 pyproject.toml 与 CHANGELOG.md 中 bump 版本，合并到 main
+# 将 bump PR 合并到 main
 make release-tag         # 打印 git tag vX.Y.Z && git push 命令
 agent-run-supervisor doctor   # PyPI 安装后验证
 ```

@@ -96,6 +96,9 @@ Use `[REDACTED]` in docs and examples when referring to sensitive values. Keep r
 - Use `PYTHONPATH=src python3 -m agent_run_supervisor ...` for local CLI smoke unless the package has been installed in the active environment.
 - Use `python tools/build_docs_index.py --write` after docs changes and never hand-edit `docs/INDEX.md`.
 - Use `python tools/docs_drift_signal.py --write` after governed docs changes.
+- Before a release: `make bump VERSION=X.Y.Z` (or `uv run python tools/bump_version.py X.Y.Z`) to sync
+  `pyproject.toml`, `src/agent_run_supervisor/__init__.py`, `uv.lock`, and a CHANGELOG stub; then edit
+  CHANGELOG and run `make verify` (includes `tools/check_version_sync.py`).
 
 ## Knowledge document validation
 

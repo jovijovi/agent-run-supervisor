@@ -33,6 +33,12 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev --extra release
 
+      - name: Verify tag matches pyproject version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION="$(grep '^version' pyproject.toml | sed -n 's/version = "\(.*\)"/\1/p')"
+          test "$TAG" = "$VERSION"
+
       - name: Run verify gates
         run: ./scripts/verify_local.sh
 

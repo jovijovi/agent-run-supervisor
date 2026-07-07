@@ -39,6 +39,9 @@ uv run python tools/docs_drift_signal.py --check
 echo "==> Static safety scan"
 uv run python tools/static_safety_scan.py
 
+echo "==> Check version sync"
+uv run python tools/check_version_sync.py
+
 echo "==> Build package and check metadata"
 rm -rf dist build src/agent_run_supervisor.egg-info
 uv run python -m build
