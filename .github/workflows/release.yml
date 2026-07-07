@@ -39,13 +39,13 @@ jobs:
       - name: Build package
         run: uv run python -m build
 
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
       - name: Generate SHA256 checksums
         run: |
           cd dist
           sha256sum *.tar.gz *.whl > SHA256SUMS
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
 
       - name: Upload GitHub Release assets
         uses: softprops/action-gh-release@v2
