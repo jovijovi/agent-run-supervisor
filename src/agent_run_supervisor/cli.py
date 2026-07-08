@@ -128,7 +128,15 @@ def _add_session_parser(subparsers: argparse._SubParsersAction) -> None:
 
     send = session_sub.add_parser("send", help="Send one prompt turn to a session.")
     _add_common(send)
-    send.add_argument("--prompt-file", required=True, help="Path to prompt text file.")
+    prompt_source = send.add_mutually_exclusive_group(required=True)
+    prompt_source.add_argument("--prompt-file", help="Path to prompt text file.")
+    prompt_source.add_argument(
+        "--goal-file",
+        help=(
+            "Path to goal text; validated and composed as a '/goal <text>' "
+            "slash prompt turn."
+        ),
+    )
 
     status = session_sub.add_parser("status", help="Query a session's status/show record.")
     _add_common(status)

@@ -8,6 +8,7 @@ import pytest
 from agent_run_supervisor.parser import (
     ManagementParseError,
     ParseResult,
+    has_observed_effect,
     parse_acpx_stdout,
     parse_acpx_stdout_bytes,
     summarize_management_json,
@@ -394,3 +395,94 @@ def test_summarize_management_error_without_dict_payload() -> None:
     assert summary["kind"] == "error"
     assert summary["code"] is None
     assert summary["acpx_code"] is None
+
+
+# --- S2 observed-effect helper ---------------------------------------------
+#
+# ``has_observed_effect`` is the parser-side signal behind the fail-closed
+# ``no_op`` classification: an exit-0 stream that produced no agent output and
+# no tool activity must never be reported as a successful run/turn.
+
+
+def _bookkeeping_only_stream() -> bytes:
+    """A clean exit-0-shaped stream with run bookkeeping but zero effect.
+
+    This mirrors the observed `/goal …` incident turn: initialize, prompt
+    accepted, commands/usage updates, ``stopReason`` — yet no agent message
+    text and no tool activity.
+    """
+    return b"\n".join(
+        [
+            b'{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}',
+            b'{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{}}',
+            b'{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"available_commands_update","availableCommands":[]}}}',
+            b'{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"usage_update","totalTokens":12}}}',
+            b'{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}',
+        ]
+    ) + b"\n"
+
+
+def test_bookkeeping_only_stream_has_no_observed_effect() -> None:
+    result = parse_acpx_stdout_bytes(_bookkeeping_only_stream())
+
+    # The stream is protocol-clean and even reports run_completed …
+    assert result.protocol_error is False
+    assert "run_completed" in [event["type"] for event in result.events]
+    # … but nothing was actually produced: no output, no tools.
+    assert has_observed_effect(result) is False
+
+
+def test_agent_message_counts_as_observed_effect() -> None:
+    result = parse_acpx_stdout_bytes(_read("success-codex-sentinel"))
+
+    assert result.final_message == "CODEX_ACPX_OK"
+    assert has_observed_effect(result) is True
+
+
+def test_tool_activity_counts_as_observed_effect_without_message() -> None:
+    payload = b"\n".join(
+        [
+            b'{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}',
+            b'{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"call-1","kind":"edit"}}}',
+            b'{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}',
+        ]
+    ) + b"\n"
+
+    result = parse_acpx_stdout_bytes(payload)
+
+    assert result.final_message == ""
+    assert has_observed_effect(result) is True
+
+
+def test_whitespace_only_message_is_not_observed_effect() -> None:
+    payload = b"\n".join(
+        [
+            b'{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}',
+            b'{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":" \\n\\t"}}}}',
+            b'{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}',
+        ]
+    ) + b"\n"
+
+    result = parse_acpx_stdout_bytes(payload)
+
+    assert has_observed_effect(result) is False
+
+
+def test_thought_only_stream_is_not_observed_effect() -> None:
+    payload = b"\n".join(
+        [
+            b'{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}',
+            b'{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"pondering"}}}}',
+            b'{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}',
+        ]
+    ) + b"\n"
+
+    result = parse_acpx_stdout_bytes(payload)
+
+    assert has_observed_effect(result) is False
+
+
+def test_empty_stream_has_no_observed_effect() -> None:
+    result = parse_acpx_stdout_bytes(b"")
+
+    assert has_observed_effect(result) is False

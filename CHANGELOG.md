@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Fail-closed `no_op` supervisor status: exit `0` with a protocol-clean stream but no
+  agent output and no tool activity (`parser.has_observed_effect`) is no longer reported
+  as `completed` (`error_code: NO_OP`, `retryable: false`). Applies to both exec runs and
+  persistent-session prompt turns.
+- `goal.py`: validated goal-turn composition (`compose_goal_prompt` → `/goal <text>`,
+  `is_slash_prompt`); session turn results carry the additive `prompt_kind` key
+  (`slash_command` | `text`).
+- CLI: `session send --goal-file <file>` composes and sends a validated `/goal` slash
+  prompt turn (mutually exclusive with `--prompt-file`).
+- Additive `observed_effect` result key (`true`/`false`/`null`): callers can verify a
+  `completed` run/turn actually produced output or tool activity (schema §1).
+- Goal-contract compilation (`goal.compile_goal_prompt`): adapters without a native
+  ACP `goal` command (all of them today — `NATIVE_GOAL_ADAPTERS` starts empty) get the
+  versioned `goal-contract/v1` plain-text template with a deterministic trailing
+  `GOAL_STATUS:` anchor for caller judge loops.
+- Session turns now persist `generated-policy.json` (audit symmetry with exec runs)
+  and report the additive `prompt_permission_mode` result key (`policy` | `deny_all`).
+- 0.1.3 hash-stability goldens: `role_hash`/`policy_hash` are pinned byte-identical to
+  the released 0.1.3 distribution, guarding the zero-migration session-binding
+  invariant.
+- `hermes_caller.derive_verdict` fails closed on a blank `final_message`: a completed
+  run that produced no findings text is `BLOCK`, never `PASS`.
+
+### Changed
+
+- Persistent-session prompt turns no longer hardcode `--deny-all`: roles granting
+  permission kinds compile the same role-derived `--permission-policy` JSON as the exec
+  path; roles granting no kinds keep the fixture-proven `--deny-all` fail-closed shape.
+
+### Notes
+
+- A live acpx fixture capture for the permissioned `prompt -s` shape is an operator
+  follow-up before the next release.
+
 ## [0.1.3] - 2026-07-07
 
 ### Added

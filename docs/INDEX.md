@@ -2,10 +2,11 @@
 
 # Documentation Index
 
-Total: 48 documents tracked across 2 statuses.
+Total: 49 documents tracked across 2 statuses.
 
-## Active (17)
+## Active (18)
 
+- [Permissioned session prompt turns, goal-turn compilation, no-op fail-closed classification](plans/active/2026-07-08-permissioned-session-goal-noop.md) — created 2026-07-08
 - [Version bump automation](plans/active/2026-07-07-version-bump-automation.md) — created 2026-07-07
 - [Active implementation plans](plans/active/README.md) — created 2026-07-07
 - [Archived implementation plans](plans/archive/README.md) — created 2026-07-07

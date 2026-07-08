@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_run_supervisor.event_store import EventStore
+from agent_run_supervisor.goal import GoalPromptError, compose_goal_prompt
 from agent_run_supervisor.parser import ParseResult, parse_acpx_stdout
 from agent_run_supervisor.policy import ExecStrategyError
 from agent_run_supervisor.preflight import (
@@ -259,10 +260,20 @@ def cmd_session(args: argparse.Namespace) -> int:
     runtime = SessionRuntime(sessions_dir=sessions_dir)
 
     if session_command == "send":
+        goal_file = getattr(args, "goal_file", None)
         try:
-            prompt = Path(args.prompt_file).read_text(encoding="utf-8")
+            if goal_file:
+                # Fail closed on unsafe goal text BEFORE any lease/acpx work.
+                prompt = compose_goal_prompt(
+                    Path(goal_file).read_text(encoding="utf-8")
+                )
+            else:
+                prompt = Path(args.prompt_file).read_text(encoding="utf-8")
         except OSError as exc:
             print(f"session input error: {exc}", file=sys.stderr)
+            return 1
+        except GoalPromptError as exc:
+            print(f"goal input error: {exc}", file=sys.stderr)
             return 1
 
     try:

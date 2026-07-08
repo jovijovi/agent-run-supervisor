@@ -2,7 +2,7 @@
 title: "agent-run-supervisor PRD"
 status: active
 created_at: 2026-05-29
-last_validated_at: 2026-05-29T13:44:07+0800
+last_validated_at: 2026-07-08T03:30:00+0800
 ---
 # agent-run-supervisor PRD
 
@@ -83,7 +83,7 @@ Checklist:
 - [x] Include role model when set.
 - [x] Persist redacted argv/policy artifacts for dry-run evidence.
 - [x] Ensure real exec path uses the same compiler as dry-run.
-- [x] Add session-mode command compilation once persistent-session command shapes are fixture-proven. *(S1c: create/ensure/show/status management commands and the fixture-proven `prompt -s` turn; prompt-turn tool permissions remain `--deny-all` until a later fixture-proven expansion.)*
+- [x] Add session-mode command compilation once persistent-session command shapes are fixture-proven. *(S1c: create/ensure/show/status management commands and the fixture-proven `prompt -s` turn. S2: prompt-turn permissions are role-derived — granted kinds compile the exec-path `--permission-policy` JSON, an all-deny role keeps the fixture-proven `--deny-all` shape; live permissioned-prompt fixture capture is an operator follow-up.)*
 
 Acceptance:
 

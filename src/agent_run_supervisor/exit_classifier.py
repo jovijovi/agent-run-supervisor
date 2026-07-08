@@ -6,6 +6,7 @@ from enum import Enum
 
 class AgentRunStatus(str, Enum):
     COMPLETED = "completed"
+    NO_OP = "no_op"
     RUNNER_ERROR = "runner_error"
     INVALID_INVOCATION = "invalid_invocation"
     TIMED_OUT = "timed_out"
@@ -19,6 +20,9 @@ class AgentRunStatus(str, Enum):
 
 _RETRYABLE_DEFAULT: dict[AgentRunStatus, bool] = {
     AgentRunStatus.COMPLETED: False,
+    # Fail closed and stay put: a deterministic no-op turn would likely no-op
+    # again; the caller must fix the prompt/permissions, not blind-retry.
+    AgentRunStatus.NO_OP: False,
     AgentRunStatus.RUNNER_ERROR: True,
     AgentRunStatus.INVALID_INVOCATION: False,
     AgentRunStatus.TIMED_OUT: True,
@@ -50,6 +54,9 @@ class ClassifierInput:
     protocol_error: bool = False
     supervisor_killed: bool = False
     supervisor_timed_out: bool = False
+    # True when the parsed stream shows no agent output and no tool activity
+    # (see ``parser.has_observed_effect``). Only consulted for exit 0.
+    no_observed_effect: bool = False
 
 
 @dataclass(frozen=True)
@@ -97,6 +104,17 @@ def classify_exit(input_: ClassifierInput) -> ClassifierOutput:
             retryable=_RETRYABLE_DEFAULT[status],
             origin=_resolve_origin(input_, "cli"),
             detail_code="PROTOCOL_ERROR",
+            notes=tuple(notes),
+        )
+
+    if base is AgentRunStatus.COMPLETED and input_.no_observed_effect:
+        status = AgentRunStatus.NO_OP
+        notes.append("exit 0 but no agent output or tool activity observed")
+        return ClassifierOutput(
+            status=status,
+            retryable=_RETRYABLE_DEFAULT[status],
+            origin=_resolve_origin(input_, "cli"),
+            detail_code="NO_OP",
             notes=tuple(notes),
         )
 

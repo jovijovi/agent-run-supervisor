@@ -108,6 +108,9 @@ agent-run-supervisor session create \
   --role <role-file>.json --session-id <id>
 agent-run-supervisor session send \
   --role <role-file>.json --session-id <id> --prompt-file <prompt>.txt
+# 或从 goal 文件组合一次经校验的目标设定 slash 轮次（`/goal <text>`）
+agent-run-supervisor session send \
+  --role <role-file>.json --session-id <id> --goal-file <goal>.txt
 agent-run-supervisor session status \
   --role <role-file>.json --session-id <id>
 agent-run-supervisor session close \

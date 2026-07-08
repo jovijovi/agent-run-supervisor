@@ -114,6 +114,9 @@ agent-run-supervisor session create \
   --role <role-file>.json --session-id <id>
 agent-run-supervisor session send \
   --role <role-file>.json --session-id <id> --prompt-file <prompt>.txt
+# Or compose a validated goal-setting slash turn (`/goal <text>`) from a goal file
+agent-run-supervisor session send \
+  --role <role-file>.json --session-id <id> --goal-file <goal>.txt
 agent-run-supervisor session status \
   --role <role-file>.json --session-id <id>
 agent-run-supervisor session close \

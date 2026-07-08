@@ -20,7 +20,11 @@ from agent_run_supervisor.exit_classifier import (
     ClassifierInput,
     classify_exit,
 )
-from agent_run_supervisor.parser import ParseResult, parse_acpx_stdout_bytes
+from agent_run_supervisor.parser import (
+    ParseResult,
+    has_observed_effect,
+    parse_acpx_stdout_bytes,
+)
 from agent_run_supervisor.policy import (
     compile_command,
     compile_permission_policy,
@@ -331,6 +335,7 @@ class SupervisorRunner:
             protocol_error=parse_result.protocol_error,
             supervisor_killed=subprocess_outcome.supervisor_killed,
             supervisor_timed_out=subprocess_outcome.supervisor_timed_out,
+            no_observed_effect=not has_observed_effect(parse_result),
         )
         classification = classify_exit(classifier_input)
 
@@ -353,6 +358,7 @@ class SupervisorRunner:
             truncated=parse_result.truncated,
             truncate_reason=parse_result.truncate_reason,
             run_dir=bundle.handle.run_dir,
+            observed_effect=has_observed_effect(parse_result),
         )
         result.update(_kill_metadata_payload(subprocess_outcome))
         if use_live_sink:

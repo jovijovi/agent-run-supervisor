@@ -19,7 +19,7 @@ from agent_run_supervisor.policy import (
     ensure_persistent_strategy,
     policy_hash,
 )
-from agent_run_supervisor.role import load_role
+from agent_run_supervisor.role import load_role, role_hash
 from tests.test_role import VALID_ROLE
 
 
@@ -219,8 +219,10 @@ def test_compile_permission_policy_does_not_include_terminal_in_kinds_list() -> 
 # These pin the fixture-proven acpx@0.12.0 persistent-session command grammar
 # (fixtures/acpx-0.12.0/session-*). Management commands carry only
 # ``--format json --json-strict --cwd`` plus a management tail; prompt turns
-# use the stricter S1a fixture-proven ``--deny-all`` block and end with
-# ``prompt -s <name> <prompt>``.
+# carry the shared turn authorization block and end with
+# ``prompt -s <name> <prompt>``. Since S2, prompt-turn permissions are
+# role-derived (``--permission-policy``); only a role granting no permission
+# kinds keeps the stricter S1a ``--deny-all`` shape.
 
 _MANAGEMENT_PREFIX = ["npx", "-y", "acpx@0.12.0", "--format", "json", "--json-strict"]
 
@@ -282,17 +284,54 @@ def test_compile_session_prompt_command_ends_with_prompt_tail() -> None:
     assert argv[-5:] == ["codex", "prompt", "-s", "nightly", "say hi"]
 
 
-def test_compile_session_prompt_command_uses_fixture_proven_deny_all_not_policy_json() -> None:
-    role = _persistent_role()
+def test_compile_session_prompt_command_uses_role_permission_policy() -> None:
+    # S2 regression: a persistent prompt turn must no longer hardcode
+    # --deny-all; the role's granted permission kinds drive the compiled
+    # --permission-policy JSON exactly like the exec path.
+    role = _persistent_role()  # VALID_ROLE grants read + search
     argv = compile_session_prompt_command(
         role, cwd="/tmp/work", session_name="nightly", prompt="say hi"
     )
 
-    # S1a only proved persistent prompt turns with --deny-all. The local
-    # session record remains role/policy-bound; prompt-turn tool permission
-    # expansion needs a later fixture-proven slice.
+    assert "--deny-all" not in argv
+    policy_index = argv.index("--permission-policy")
+    parsed = json.loads(argv[policy_index + 1])
+    assert parsed["defaultAction"] == "deny"
+    assert "read" in parsed["autoApprove"]
+    assert "search" in parsed["autoApprove"]
+    assert "execute" in parsed["autoDeny"]
+    nip_index = argv.index("--non-interactive-permissions")
+    assert argv[nip_index + 1] == "fail"
+
+
+def test_compile_session_prompt_command_keeps_deny_all_for_full_deny_role() -> None:
+    # S2 regression: a role granting NO permission kinds must keep the
+    # stricter S1a fixture-proven --deny-all shape and stay fail-closed.
+    all_deny = {kind: False for kind in VALID_ROLE["permissions"]}
+    role = _persistent_role(permissions=all_deny)
+    argv = compile_session_prompt_command(
+        role, cwd="/tmp/work", session_name="nightly", prompt="say hi"
+    )
+
     assert "--deny-all" in argv
     assert "--permission-policy" not in argv
+    nip_index = argv.index("--non-interactive-permissions")
+    assert argv[nip_index + 1] == "fail"
+
+
+def test_compile_session_prompt_command_terminal_only_role_still_denies_all() -> None:
+    # ``terminal`` is not an acpx permission kind (it only controls
+    # --no-terminal); a terminal-only role still grants no kinds → deny-all.
+    perms = {kind: False for kind in VALID_ROLE["permissions"]}
+    perms["terminal"] = True
+    role = _persistent_role(permissions=perms)
+    argv = compile_session_prompt_command(
+        role, cwd="/tmp/work", session_name="nightly", prompt="say hi"
+    )
+
+    assert "--deny-all" in argv
+    assert "--permission-policy" not in argv
+    assert "--no-terminal" not in argv
 
 
 def test_compile_session_prompt_command_shares_exec_automation_flags() -> None:
@@ -308,7 +347,7 @@ def test_compile_session_prompt_command_shares_exec_automation_flags() -> None:
         "--timeout",
         "--max-turns",
         "--cwd",
-        "--deny-all",
+        "--permission-policy",
         "--non-interactive-permissions",
         "--no-terminal",
     ):
@@ -456,3 +495,54 @@ def test_exec_compile_command_still_refuses_persistent_role() -> None:
     role = _persistent_role()
     with pytest.raises(ExecStrategyError):
         compile_command(role, cwd="/tmp/work", prompt="hello")
+
+
+# --- S2 hash-stability goldens (zero-migration invariant) -------------------
+#
+# Cross-checked on 2026-07-08 against the installed agent-run-supervisor==0.1.3
+# distribution (sachima .venv, dist-info verified): ``role_hash``,
+# ``policy_hash`` and the canonical policy JSON below are byte-identical
+# between 0.1.3 and this branch, so existing ``SessionRecord`` bindings
+# survive the S2 upgrade with zero migration. These goldens guard future
+# drift: adding ANY AgentRoleSpec field (even with a default) or touching the
+# ``compile_permission_policy`` serialization breaks all stored bindings — see
+# the S2 solution doc §1.2 role_hash trap and §5 hard invariants.
+
+_GOLDEN_013_ROLE_HASH = (
+    "sha256:1dd9ea20a0e266d4d34f5102f88baed70748c015e679c41170976a4e9fabb752"
+)
+_GOLDEN_013_POLICY_HASH = (
+    "sha256:5fd162e8c1fb9064d01f5721d1f181dc3d0a3e82129fa33b1a0234abcaae018d"
+)
+_GOLDEN_013_POLICY_JSON = (
+    '{"autoApprove":["read","search"],'
+    '"autoDeny":["delete","edit","execute","fetch","move","other","switch_mode"],'
+    '"defaultAction":"deny"}'
+)
+
+
+def test_role_hash_stable_against_0_1_3_golden() -> None:
+    role = load_role(VALID_ROLE)
+
+    assert role_hash(role) == _GOLDEN_013_ROLE_HASH
+
+
+def test_policy_hash_unchanged_by_prompt_flag_shape() -> None:
+    # The S2 prompt-flag change must never alter the compiled policy identity
+    # persisted in existing session records.
+    role = load_role(VALID_ROLE)
+
+    assert policy_hash(role) == _GOLDEN_013_POLICY_HASH
+    canonical = json.dumps(
+        compile_permission_policy(role), sort_keys=True, separators=(",", ":")
+    )
+    assert canonical == _GOLDEN_013_POLICY_JSON
+
+
+def test_policy_hash_identical_for_exec_and_persistent_strategy() -> None:
+    # policy_hash derives from permissions only; the session strategy flip and
+    # the S2 session flag shape must not enter the policy identity.
+    exec_role = load_role(VALID_ROLE)
+    persistent = _persistent_role()
+
+    assert policy_hash(exec_role) == policy_hash(persistent)

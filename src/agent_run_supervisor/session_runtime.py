@@ -51,15 +51,18 @@ from agent_run_supervisor.exit_classifier import (
     ClassifierInput,
     classify_exit,
 )
+from agent_run_supervisor.goal import is_slash_prompt
 from agent_run_supervisor.live_stream import LiveEventSink
 from agent_run_supervisor.parser import (
     ManagementParseError,
     ParseResult,
+    has_observed_effect,
     parse_acpx_stdout_bytes,
     summarize_management_json,
 )
 from agent_run_supervisor.process_liveness import LivenessProbe, identity_for_pid
 from agent_run_supervisor.policy import (
+    compile_permission_policy,
     compile_session_cancel_command,
     compile_session_close_command,
     compile_session_create_command,
@@ -606,6 +609,13 @@ class SessionRuntime:
         report.merge(prompt_report)
         handle.write_text("prompt.txt", redacted_prompt)
 
+        # Audit symmetry with the exec path: persist the compiled permission
+        # policy this turn actually ran under. The autoApprove-empty check
+        # mirrors _session_prompt_flags' deny-all short-circuit.
+        turn_policy = compile_permission_policy(role)
+        handle.write_json("generated-policy.json", turn_policy)
+        prompt_permission_mode = "policy" if turn_policy["autoApprove"] else "deny_all"
+
         argv = compile_session_prompt_command(
             role,
             cwd=str(workspace.effective_cwd),
@@ -659,6 +669,7 @@ class SessionRuntime:
                 protocol_error=parse_result.protocol_error,
                 supervisor_killed=outcome.supervisor_killed,
                 supervisor_timed_out=outcome.supervisor_timed_out,
+                no_observed_effect=not has_observed_effect(parse_result),
             )
         )
         redacted_final, final_report = redact_text(
@@ -680,9 +691,15 @@ class SessionRuntime:
             truncated=parse_result.truncated,
             truncate_reason=parse_result.truncate_reason,
             run_dir=turn_dir,
+            observed_effect=has_observed_effect(parse_result),
         )
         result["session_id"] = session_id
         result["turn_id"] = turn_id
+        # Additive turn keys (schema §2.1): whether the AGENT saw this prompt
+        # as a slash command (e.g. a composed ``/goal`` turn) or plain text,
+        # and which permission shape the turn was compiled with.
+        result["prompt_kind"] = "slash_command" if is_slash_prompt(prompt) else "text"
+        result["prompt_permission_mode"] = prompt_permission_mode
         result.update(_kill_metadata(outcome))
         if use_live_sink:
             live_sink.write_progress(classification.status.value)
