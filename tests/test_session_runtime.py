@@ -464,6 +464,49 @@ def test_send_records_text_prompt_kind_in_turn_result(
     assert outcome.result["prompt_kind"] == "text"
 
 
+def test_send_writes_generated_policy_artifact_and_policy_mode(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    # S2 audit symmetry (solution §2.1-4): the exec path persists
+    # generated-policy.json per run; session turns must carry the same
+    # per-turn evidence plus the compiled permission mode in the result.
+    role = _persistent_role(valid_role_dict, work_dir)  # read+search granted
+    fake = FakeExecutor([_outcome(_new_named()), _outcome(_turn1())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role)
+
+    outcome = runtime.send(
+        role=role, session_id="sess-a", prompt="contract turn 1", now=T1
+    )
+
+    policy_artifact = json.loads(
+        (outcome.turn_dir / "generated-policy.json").read_text(encoding="utf-8")
+    )
+    assert policy_artifact["defaultAction"] == "deny"
+    assert "read" in policy_artifact["autoApprove"]
+    assert outcome.result["prompt_permission_mode"] == "policy"
+
+
+def test_send_all_deny_role_reports_deny_all_permission_mode(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    all_deny = {kind: False for kind in valid_role_dict["permissions"]}
+    role = _persistent_role(valid_role_dict, work_dir, permissions=all_deny)
+    fake = FakeExecutor([_outcome(_new_named()), _outcome(_turn1())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role)
+
+    outcome = runtime.send(
+        role=role, session_id="sess-a", prompt="contract turn 1", now=T1
+    )
+
+    assert outcome.result["prompt_permission_mode"] == "deny_all"
+    policy_artifact = json.loads(
+        (outcome.turn_dir / "generated-policy.json").read_text(encoding="utf-8")
+    )
+    assert policy_artifact["autoApprove"] == []
+
+
 def test_send_refuses_binding_mismatch_before_executor_and_artifacts(
     valid_role_dict, work_dir, sessions_dir
 ) -> None:

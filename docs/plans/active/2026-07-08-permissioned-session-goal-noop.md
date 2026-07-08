@@ -61,15 +61,35 @@ last_validated_at: 2026-07-08T03:00:00+0800
 
 ## Acceptance (regression tests)
 
-- [ ] Persistent prompt turn for a role granting permissions compiles
+- [x] Persistent prompt turn for a role granting permissions compiles
   `--permission-policy` (role-derived) and not an unconditional `--deny-all`.
-- [ ] A role granting no permission kinds still compiles `--deny-all`
+- [x] A role granting no permission kinds still compiles `--deny-all`
   (fail-closed default preserved).
-- [ ] A `/goal`-style prompt turn with `exit 0` and no output/tool events is
+- [x] A `/goal`-style prompt turn with `exit 0` and no output/tool events is
   classified `no_op`, never `completed`.
-- [ ] Goal prompt composition refuses empty/slash-leading/control-poisoned goal
+- [x] Goal prompt composition refuses empty/slash-leading/control-poisoned goal
   text and always passes the prompt as a single argv element (no shell).
-- [ ] Exec runs with `exit 0` and no observed effect also classify `no_op`.
+- [x] Exec runs with `exit 0` and no observed effect also classify `no_op`.
+
+Gap-review additions (2026-07-08, after the architect solution doc became
+readable — all verified green with the full suite):
+
+- [x] `role_hash`/`policy_hash` golden tests pinned byte-identical to the
+  installed 0.1.3 distribution (zero-migration invariant, solution §5).
+- [x] Session turns persist `generated-policy.json` and report
+  `prompt_permission_mode` (solution §2.1-4).
+- [x] `derive_verdict` blocks `completed` with a blank `final_message`
+  (solution §2.3-3).
+- [x] `compile_goal_prompt` renders the `goal-contract/v1` text template with
+  the `GOAL_STATUS:` anchor; `NATIVE_GOAL_ADAPTERS` starts empty (solution
+  §2.2 policy layer).
+
+Deliberately deferred to later slices (solution items needing their own
+fixtures/approvals): `prompt_kind` invocation parameter + `SLASH_PROMPT_REFUSED`
+pre-spawn guard (solution PR-2), `available_commands` capture +
+`UNSUPPORTED_SLASH_COMMAND` detail (needs PR-0 claude capture),
+`NO_OP_COMMAND`/`NO_OP_TURN` detail split, Sachima E-3 write-approval slice,
+pin bump (post-release).
 
 ## Files likely to change
 

@@ -94,7 +94,13 @@ every send. The prompt stays a single argv element with no shell. S1d adds manag
 close/cancel compilers pinned to the S1a `session-close-named` and
 `session-cancel-no-active` fixtures. S2 also adds `goal.py` — fail-closed composition of
 goal-setting slash prompts (`compose_goal_prompt` → `/goal <text>`, `is_slash_prompt`
-detection recorded as the additive turn key `prompt_kind`).
+detection recorded as the additive turn key `prompt_kind`) plus adapter-aware goal
+compilation (`compile_goal_prompt`): adapters not registered in the (initially empty,
+fixture-gated) `NATIVE_GOAL_ADAPTERS` set get the versioned `goal-contract/v1`
+plain-text template with a trailing `GOAL_STATUS:` judge anchor instead of a literal
+slash turn. Session turns persist `generated-policy.json` and report
+`prompt_permission_mode` (`policy` | `deny_all`); `role_hash`/`policy_hash` are pinned
+byte-identical to the released 0.1.3 distribution (zero-migration invariant).
 
 ### 3.3 `workspace.py` — cwd and workspace gate
 

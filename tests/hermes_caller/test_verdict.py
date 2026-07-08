@@ -102,6 +102,23 @@ def test_supervisor_status_is_evidence_distinct_from_verdict(
     assert decision.supervisor_status != decision.verdict.value
 
 
+def test_verdict_blocks_completed_with_empty_final_message(
+    make_caller_result: Callable[..., CallerResult], run_result_pass: dict[str, Any]
+) -> None:
+    # S2 hardening (solution §2.3-3): "completed" with a blank final message
+    # must never be read as a clean PASS — silence is not a passing document
+    # check. This closes the empty-message PASS misjudgement independently of
+    # the upstream no_op classification (a tools-only silent turn still lands
+    # here).
+    payload = dict(run_result_pass)
+    payload["final_message"] = "  \n\t"
+
+    decision = derive_verdict(make_caller_result(payload))
+
+    assert decision.verdict is BusinessVerdict.BLOCK
+    assert decision.supervisor_status == "completed"
+
+
 def test_no_op_status_blocks_fail_closed(
     make_caller_result: Callable[..., CallerResult], run_result_pass: dict[str, Any]
 ) -> None:

@@ -79,6 +79,17 @@ def derive_verdict(result: CallerResult) -> VerdictDecision:
             supervisor_status=status,
         )
 
+    if not (final_message or "").strip():
+        # A blank message is not a clean bill of health: a completed check
+        # that produced no findings text gives us nothing to derive PASS from
+        # (e.g. a tools-only silent turn). Fail closed instead of promoting
+        # silence to success.
+        return VerdictDecision(
+            verdict=BusinessVerdict.BLOCK,
+            rationale="Completed but produced no output; a blank report cannot pass.",
+            supervisor_status=status,
+        )
+
     if _findings_look_clean(final_message):
         return VerdictDecision(
             verdict=BusinessVerdict.PASS,

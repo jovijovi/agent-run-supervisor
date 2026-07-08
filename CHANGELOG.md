@@ -20,6 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prompt turn (mutually exclusive with `--prompt-file`).
 - Additive `observed_effect` result key (`true`/`false`/`null`): callers can verify a
   `completed` run/turn actually produced output or tool activity (schema §1).
+- Goal-contract compilation (`goal.compile_goal_prompt`): adapters without a native
+  ACP `goal` command (all of them today — `NATIVE_GOAL_ADAPTERS` starts empty) get the
+  versioned `goal-contract/v1` plain-text template with a deterministic trailing
+  `GOAL_STATUS:` anchor for caller judge loops.
+- Session turns now persist `generated-policy.json` (audit symmetry with exec runs)
+  and report the additive `prompt_permission_mode` result key (`policy` | `deny_all`).
+- 0.1.3 hash-stability goldens: `role_hash`/`policy_hash` are pinned byte-identical to
+  the released 0.1.3 distribution, guarding the zero-migration session-binding
+  invariant.
+- `hermes_caller.derive_verdict` fails closed on a blank `final_message`: a completed
+  run that produced no findings text is `BLOCK`, never `PASS`.
 
 ### Changed
 

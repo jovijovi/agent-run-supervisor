@@ -88,6 +88,7 @@ persisting `sessions/<session_id>/turns/<turn_id>/result.json` and returning it:
 | `session_id` | `string` | Local session identifier. |
 | `turn_id` | `string` | Per-turn identifier (also the `run_id`). |
 | `prompt_kind` | `string` | `"slash_command"` when the AGENT would read the prompt as a slash command (e.g. a composed `/goal` turn), else `"text"` (additive since S2). |
+| `prompt_permission_mode` | `string` | `"policy"` when the turn compiled the role-derived `--permission-policy`, `"deny_all"` for an all-deny role (additive since S2; the compiled policy itself is persisted as the turn's `generated-policy.json`). |
 | `kill_reason` | `string` \| `null` | Watchdog/kill metadata: why the process was killed, if any. |
 | `kill_signal` | `number` \| `null` | Signal used to kill the process, if any. |
 | `grace_ms` | `number` | Watchdog grace window in milliseconds. |

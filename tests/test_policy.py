@@ -19,7 +19,7 @@ from agent_run_supervisor.policy import (
     ensure_persistent_strategy,
     policy_hash,
 )
-from agent_run_supervisor.role import load_role
+from agent_run_supervisor.role import load_role, role_hash
 from tests.test_role import VALID_ROLE
 
 
@@ -495,3 +495,54 @@ def test_exec_compile_command_still_refuses_persistent_role() -> None:
     role = _persistent_role()
     with pytest.raises(ExecStrategyError):
         compile_command(role, cwd="/tmp/work", prompt="hello")
+
+
+# --- S2 hash-stability goldens (zero-migration invariant) -------------------
+#
+# Cross-checked on 2026-07-08 against the installed agent-run-supervisor==0.1.3
+# distribution (sachima .venv, dist-info verified): ``role_hash``,
+# ``policy_hash`` and the canonical policy JSON below are byte-identical
+# between 0.1.3 and this branch, so existing ``SessionRecord`` bindings
+# survive the S2 upgrade with zero migration. These goldens guard future
+# drift: adding ANY AgentRoleSpec field (even with a default) or touching the
+# ``compile_permission_policy`` serialization breaks all stored bindings — see
+# the S2 solution doc §1.2 role_hash trap and §5 hard invariants.
+
+_GOLDEN_013_ROLE_HASH = (
+    "sha256:1dd9ea20a0e266d4d34f5102f88baed70748c015e679c41170976a4e9fabb752"
+)
+_GOLDEN_013_POLICY_HASH = (
+    "sha256:5fd162e8c1fb9064d01f5721d1f181dc3d0a3e82129fa33b1a0234abcaae018d"
+)
+_GOLDEN_013_POLICY_JSON = (
+    '{"autoApprove":["read","search"],'
+    '"autoDeny":["delete","edit","execute","fetch","move","other","switch_mode"],'
+    '"defaultAction":"deny"}'
+)
+
+
+def test_role_hash_stable_against_0_1_3_golden() -> None:
+    role = load_role(VALID_ROLE)
+
+    assert role_hash(role) == _GOLDEN_013_ROLE_HASH
+
+
+def test_policy_hash_unchanged_by_prompt_flag_shape() -> None:
+    # The S2 prompt-flag change must never alter the compiled policy identity
+    # persisted in existing session records.
+    role = load_role(VALID_ROLE)
+
+    assert policy_hash(role) == _GOLDEN_013_POLICY_HASH
+    canonical = json.dumps(
+        compile_permission_policy(role), sort_keys=True, separators=(",", ":")
+    )
+    assert canonical == _GOLDEN_013_POLICY_JSON
+
+
+def test_policy_hash_identical_for_exec_and_persistent_strategy() -> None:
+    # policy_hash derives from permissions only; the session strategy flip and
+    # the S2 session flag shape must not enter the policy identity.
+    exec_role = load_role(VALID_ROLE)
+    persistent = _persistent_role()
+
+    assert policy_hash(exec_role) == policy_hash(persistent)
