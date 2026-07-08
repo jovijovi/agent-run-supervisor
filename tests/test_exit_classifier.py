@@ -91,3 +91,80 @@ def test_classifier_output_marks_retryable_per_design_table() -> None:
     for status, expected_retryable in table.items():
         out = ClassifierOutput(status=status, retryable=expected_retryable, origin="cli")
         assert out.retryable is expected_retryable
+
+
+# --- S2 no-op fail-closed classification -----------------------------------
+#
+# Regression for the `/goal …` incident: acpx exited 0 with a protocol-clean
+# stream but produced no agent output and no tool events, and the run was
+# reported `completed`. Exit 0 without an observed effect must now classify
+# as the fail-closed `no_op`, never as success.
+
+
+def test_exit_zero_without_observed_effect_classifies_no_op() -> None:
+    result = classify_exit(ClassifierInput(exit_code=0, no_observed_effect=True))
+
+    assert result.status is AgentRunStatus.NO_OP
+    assert result.retryable is False
+    assert result.detail_code == "NO_OP"
+    assert result.status is not AgentRunStatus.COMPLETED
+
+
+def test_exit_zero_with_observed_effect_stays_completed() -> None:
+    result = classify_exit(ClassifierInput(exit_code=0, no_observed_effect=False))
+
+    assert result.status is AgentRunStatus.COMPLETED
+
+
+def test_protocol_error_takes_precedence_over_no_op() -> None:
+    result = classify_exit(
+        ClassifierInput(exit_code=0, protocol_error=True, no_observed_effect=True),
+    )
+
+    assert result.status is AgentRunStatus.PROTOCOL_ERROR
+
+
+def test_nonzero_exit_keeps_base_status_despite_no_observed_effect() -> None:
+    result = classify_exit(ClassifierInput(exit_code=5, no_observed_effect=True))
+
+    assert result.status is AgentRunStatus.PERMISSION_DENIED
+
+
+def test_supervisor_timeout_takes_precedence_over_no_op() -> None:
+    result = classify_exit(
+        ClassifierInput(
+            exit_code=3,
+            supervisor_timed_out=True,
+            supervisor_killed=True,
+            no_observed_effect=True,
+        ),
+    )
+
+    assert result.status is AgentRunStatus.TIMED_OUT
+    assert result.origin == "supervisor"
+
+
+def test_no_op_result_payload_carries_no_op_error_code() -> None:
+    from pathlib import Path
+
+    from agent_run_supervisor.result import build_result_payload
+
+    payload = build_result_payload(
+        run_id="turn_probe",
+        status=AgentRunStatus.NO_OP,
+        origin="cli",
+        detail_code="NO_OP",
+        retryable=False,
+        exit_code=0,
+        signal=None,
+        stop_reason="end_turn",
+        usage=None,
+        final_message="",
+        truncated=False,
+        truncate_reason=None,
+        run_dir=Path("/tmp/turn_probe"),
+    )
+
+    assert payload["status"] == "no_op"
+    assert payload["error_code"] == "NO_OP"
+    assert payload["retryable"] is False

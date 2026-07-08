@@ -147,6 +147,37 @@ def test_exec_run_classifies_nonzero_exit_and_protocol_error(
     assert malformed.result["error_code"] == "PROTOCOL_ERROR"
 
 
+def test_exec_run_exit_zero_without_observed_effect_classifies_no_op(
+    tmp_path: Path,
+    valid_role_dict: dict[str, Any],
+) -> None:
+    # S2 regression: exit 0 with a protocol-clean stream but no agent output
+    # and no tool events must classify as the fail-closed no_op, never as
+    # completed.
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    role = _role_with_workspace(valid_role_dict, work_dir)
+    silent = b"\n".join(
+        [
+            b'{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}',
+            b'{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}',
+        ]
+    ) + b"\n"
+    fake = RecordingExecutor(
+        SubprocessOutcome(exit_code=0, signal=None, stdout=silent, stderr=b"")
+    )
+    runner = SupervisorRunner(runs_dir=tmp_path / "runs", executor=fake, watchdog_grace_ms=250)
+
+    outcome = runner.run(
+        role=role, prompt="do nothing", cwd=None, env={"PATH": "/usr/bin"}
+    )
+
+    assert outcome.result["status"] == "no_op"
+    assert outcome.result["error_code"] == "NO_OP"
+    assert outcome.result["retryable"] is False
+    assert outcome.result["observed_effect"] is False
+
+
 def test_exec_run_classifies_interrupted_exit(
     tmp_path: Path,
     valid_role_dict: dict[str, Any],

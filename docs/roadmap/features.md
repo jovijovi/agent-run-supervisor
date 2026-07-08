@@ -2,7 +2,7 @@
 title: "Feature and Capability Tracker"
 status: active
 created_at: 2026-05-29
-last_validated_at: 2026-07-07T15:30:00+0800
+last_validated_at: 2026-07-08T03:30:00+0800
 ---
 # Feature and Capability Tracker
 
@@ -15,10 +15,10 @@ Status legend: **Done** · **Partial** · **Planned** · **Parked** · **Non-goa
 |---|---|---|---|---|---|
 | F-GOV-001 | Doc authority chain | Required | Done | `GOAL.md`, `prd.md`, board, PR #6 | Maintain chain |
 | F-ROLE-001 | AgentRoleSpec + role hash | Required | Done | `role.py`, `tests/test_role.py` | Schema maintenance |
-| F-POLICY-001 | acpx policy/argv compiler | Required | Partial | `policy.py`, `tests/test_policy.py` | Optional read-tail compilers |
+| F-POLICY-001 | acpx policy/argv compiler | Required | Partial | `policy.py`, `goal.py`, `tests/test_policy.py`, `tests/test_goal.py` | Read-tail compilers; live permissioned-prompt fixture |
 | F-WORKSPACE-001 | cwd / allowed-roots gate | Required | Done | `workspace.py`, `tests/test_workspace_gate.py` | OS sandbox parked |
 | F-PARSER-001 | acpx stdout/event parser | Required | Partial | `parser.py`, `tests/test_parser.py` | New schemas only |
-| F-STATUS-001 | Status / exit classification | Required | Partial | `exit_classifier.py`, schema §3 | Session detail if needed |
+| F-STATUS-001 | Status / exit classification | Required | Partial | `exit_classifier.py`, schema §3 (incl. `no_op`) | Session detail if needed |
 | F-STORE-001 | EventStore + redaction | Required | Partial | `event_store.py`, `session.py`, retention | Optional raw-capture FR-8 |
 | F-CLI-001 | `validate-role` | Required | Done | `commands.py`, CLI tests | Keep stable |
 | F-CLI-002 | `replay` | Required | Done | fixtures, CLI tests | Keep stable |

@@ -82,11 +82,16 @@ def _resolve_cwd(role: AgentRoleSpec, cwd: str | None) -> str:
     return cwd if cwd else role.workspace.default_cwd
 
 
-def _exec_turn_flags(role: AgentRoleSpec, resolved_cwd: str) -> list[str]:
-    """Authorization/automation flag block for one-shot exec runs."""
-    policy_json = json.dumps(
+def _permission_policy_json(role: AgentRoleSpec) -> str:
+    """Canonical JSON for the role-derived acpx ``--permission-policy`` value."""
+    return json.dumps(
         compile_permission_policy(role), sort_keys=True, separators=(",", ":")
     )
+
+
+def _exec_turn_flags(role: AgentRoleSpec, resolved_cwd: str) -> list[str]:
+    """Authorization/automation flag block for one-shot exec runs."""
+    policy_json = _permission_policy_json(role)
     flags = [
         "--format",
         "json",
@@ -111,13 +116,17 @@ def _exec_turn_flags(role: AgentRoleSpec, resolved_cwd: str) -> list[str]:
 
 
 def _session_prompt_flags(role: AgentRoleSpec, resolved_cwd: str) -> list[str]:
-    """Fixture-proven authorization/automation block for session prompt turns.
+    """Authorization/automation flag block for session prompt turns.
 
-    S1a now proves `acpx@0.12.0` persistent-session prompt turns with `--deny-all`,
-    not with the exec path's inline `--permission-policy` JSON. S1c therefore
-    stays on that stricter proven shape. The role/policy still binds the local
-    session record and is revalidated before every turn; expanding prompt-turn
-    tool permissions needs a later fixture-proven slice.
+    Since S2, prompt-turn permissions are role-derived: a role granting at
+    least one acpx permission kind compiles the same ``--permission-policy``
+    JSON as the exec path (the flag lives in the shared global flag family;
+    ``fixtures/acpx-0.12.0/permission-policy-deny-all-sentinel`` proves acpx
+    accepts it there). A role granting **no** kinds keeps the stricter S1a
+    fixture-proven ``--deny-all`` shape, so all-deny roles stay byte-identical
+    to the proven fail-closed command. Both shapes keep
+    ``--non-interactive-permissions fail`` so an unexpected permission prompt
+    fails the turn instead of hanging it.
     """
     flags = [
         "--format",
@@ -130,10 +139,13 @@ def _session_prompt_flags(role: AgentRoleSpec, resolved_cwd: str) -> list[str]:
         str(role.limits.max_turns),
         "--cwd",
         resolved_cwd,
-        "--deny-all",
-        "--non-interactive-permissions",
-        "fail",
     ]
+    policy = compile_permission_policy(role)
+    if policy["autoApprove"]:
+        flags.extend(["--permission-policy", _permission_policy_json(role)])
+    else:
+        flags.append("--deny-all")
+    flags.extend(["--non-interactive-permissions", "fail"])
     if not role.permissions.terminal:
         flags.append("--no-terminal")
     if role.runner.model:
@@ -272,10 +284,12 @@ def compile_session_prompt_command(
 ) -> list[str]:
     """``<adapter> prompt -s <session_name> <prompt>`` (one role-bound turn).
 
-    Uses the S1a fixture-proven persistent prompt block, including ``--deny-all``.
-    The local session record remains role/policy-bound and is revalidated before
-    each turn; expanding session prompt tool permissions requires fresh fixtures.
-    The prompt is always a single argv element; the compiler never uses a shell.
+    Carries the role-derived turn authorization block (see
+    :func:`_session_prompt_flags`): granted permission kinds compile to
+    ``--permission-policy``; an all-deny role keeps the S1a fixture-proven
+    ``--deny-all`` shape. The local session record remains role/policy-bound
+    and is revalidated before each turn. The prompt is always a single argv
+    element; the compiler never uses a shell.
     """
     ensure_persistent_strategy(role)
     name = _require_session_name(session_name)

@@ -51,10 +51,12 @@ from agent_run_supervisor.exit_classifier import (
     ClassifierInput,
     classify_exit,
 )
+from agent_run_supervisor.goal import is_slash_prompt
 from agent_run_supervisor.live_stream import LiveEventSink
 from agent_run_supervisor.parser import (
     ManagementParseError,
     ParseResult,
+    has_observed_effect,
     parse_acpx_stdout_bytes,
     summarize_management_json,
 )
@@ -659,6 +661,7 @@ class SessionRuntime:
                 protocol_error=parse_result.protocol_error,
                 supervisor_killed=outcome.supervisor_killed,
                 supervisor_timed_out=outcome.supervisor_timed_out,
+                no_observed_effect=not has_observed_effect(parse_result),
             )
         )
         redacted_final, final_report = redact_text(
@@ -680,9 +683,13 @@ class SessionRuntime:
             truncated=parse_result.truncated,
             truncate_reason=parse_result.truncate_reason,
             run_dir=turn_dir,
+            observed_effect=has_observed_effect(parse_result),
         )
         result["session_id"] = session_id
         result["turn_id"] = turn_id
+        # Additive turn key (schema §2.1): whether the AGENT saw this prompt
+        # as a slash command (e.g. a composed ``/goal`` turn) or plain text.
+        result["prompt_kind"] = "slash_command" if is_slash_prompt(prompt) else "text"
         result.update(_kill_metadata(outcome))
         if use_live_sink:
             live_sink.write_progress(classification.status.value)

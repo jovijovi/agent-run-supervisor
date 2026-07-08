@@ -88,8 +88,9 @@ def build_role(scratch_cwd: Path, *, acpx_timeout_seconds: int) -> dict[str, Any
 
     ``acpx_binary`` is ``null`` on purpose so the compiler uses the pinned
     ``npx -y acpx@<version>`` prefix. Permissions deny write/execute/terminal
-    (and everything beyond read/search); persistent prompt turns additionally
-    run under the fixture-proven ``--deny-all`` block.
+    (and everything beyond read/search); since S2 the prompt turn compiles the
+    role-derived ``--permission-policy`` (read/search auto-approve, default
+    deny) instead of the unconditional ``--deny-all`` block.
     """
     return {
         "schema_version": 1,

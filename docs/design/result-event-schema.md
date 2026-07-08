@@ -2,7 +2,7 @@
 title: "agent-run-supervisor Result / Event Schema"
 status: active
 created_at: 2026-06-01
-last_validated_at: 2026-07-05T00:00:00+0800
+last_validated_at: 2026-07-08T03:30:00+0800
 ---
 # agent-run-supervisor Result / Event Schema
 
@@ -58,6 +58,7 @@ key is always serialized (its value may still be `null`).
 | `final_message` | `string` | yes | Redacted concatenated agent message text (may be empty). |
 | `truncated` | `boolean` | yes | Whether stdout parsing was truncated at `max_output_bytes`. |
 | `truncate_reason` | `string` \| `null` | yes | Reason for truncation (e.g. `max_output_bytes`), or `null`. |
+| `observed_effect` | `boolean` \| `null` | yes | Whether the parsed stream showed agent output or tool activity (`parser.has_observed_effect`); `null` when nothing was parsed (e.g. dry run). Additive since S2. |
 | `run_dir` | `string` | yes | Absolute path to the run/turn artifact directory. |
 | `stderr_path` | `string` | yes | Run-dir-relative path to the redacted stderr log (default `stderr.log`). |
 | `raw_event_path` | `string` | yes | Run-dir-relative path to the redacted acpx stdout NDJSON (default `acpx-stdout.ndjson`). |
@@ -86,6 +87,7 @@ persisting `sessions/<session_id>/turns/<turn_id>/result.json` and returning it:
 |-----|------|---------|
 | `session_id` | `string` | Local session identifier. |
 | `turn_id` | `string` | Per-turn identifier (also the `run_id`). |
+| `prompt_kind` | `string` | `"slash_command"` when the AGENT would read the prompt as a slash command (e.g. a composed `/goal` turn), else `"text"` (additive since S2). |
 | `kill_reason` | `string` \| `null` | Watchdog/kill metadata: why the process was killed, if any. |
 | `kill_signal` | `number` \| `null` | Signal used to kill the process, if any. |
 | `grace_ms` | `number` | Watchdog grace window in milliseconds. |
@@ -159,11 +161,13 @@ public-ingress, delivery, or platform state fields.
 Supervisor status is owned by `exit_classifier.py` and is **never** the caller's
 business verdict.
 
-### 3.1 Status set (10)
+### 3.1 Status set (11)
 
-`completed`, `runner_error`, `invalid_invocation`, `timed_out`, `no_session`,
-`permission_denied`, `interrupted`, `protocol_error`, `infrastructure_error`,
-`policy_error` (`exit_classifier.AgentRunStatus`).
+`completed`, `no_op`, `runner_error`, `invalid_invocation`, `timed_out`,
+`no_session`, `permission_denied`, `interrupted`, `protocol_error`,
+`infrastructure_error`, `policy_error` (`exit_classifier.AgentRunStatus`).
+`no_op` is additive (S2); callers treating only `completed` as success remain
+correct and fail closed on it automatically.
 
 The base exit-code → status map, refined by acpx metadata and supervisor
 kill/timeout signals:
@@ -180,9 +184,11 @@ kill/timeout signals:
 | other / unknown | `infrastructure_error` |
 
 Honesty refinements: exit `0` with a `protocol_error` in stdout becomes
-`protocol_error`; a supervisor watchdog/kill becomes `timed_out` (on timeout) or
-`infrastructure_error`, with `origin = supervisor`; nonzero exits never become
-`completed`.
+`protocol_error`; exit `0` with **no observed effect** — no agent message text
+and no tool activity (`parser.has_observed_effect`) — becomes `no_op`
+(protocol errors and supervisor kills take precedence); a supervisor
+watchdog/kill becomes `timed_out` (on timeout) or `infrastructure_error`, with
+`origin = supervisor`; nonzero exits never become `completed`.
 
 ### 3.2 Error codes
 
@@ -192,6 +198,7 @@ Honesty refinements: exit `0` with a `protocol_error` in stdout becomes
 | `status` | `error_code` | `retryable` default |
 |----------|--------------|---------------------|
 | `completed` | `null` | `false` |
+| `no_op` | `NO_OP` | `false` |
 | `runner_error` | `RUNNER_ERROR` | `true` |
 | `invalid_invocation` | `INVALID_INVOCATION` | `false` |
 | `timed_out` | `TIMED_OUT` | `true` |

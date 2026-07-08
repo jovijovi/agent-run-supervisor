@@ -100,3 +100,20 @@ def test_supervisor_status_is_evidence_distinct_from_verdict(
     assert isinstance(decision.supervisor_status, str)
     assert isinstance(decision.verdict, BusinessVerdict)
     assert decision.supervisor_status != decision.verdict.value
+
+
+def test_no_op_status_blocks_fail_closed(
+    make_caller_result: Callable[..., CallerResult], run_result_pass: dict[str, Any]
+) -> None:
+    # S2 regression: an exit-0 no-op run/turn (no output, no tool events) must
+    # never derive a passing verdict — no_op is not, and must never join, the
+    # success-status set, even when the (empty) findings look clean.
+    payload = dict(run_result_pass)
+    payload["status"] = "no_op"
+    payload["error_code"] = "NO_OP"
+    payload["final_message"] = ""
+
+    decision = derive_verdict(make_caller_result(payload))
+
+    assert decision.verdict is BusinessVerdict.BLOCK
+    assert decision.supervisor_status == "no_op"

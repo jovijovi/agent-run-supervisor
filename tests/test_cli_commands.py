@@ -503,6 +503,87 @@ def test_session_send_cli_persists_turn_and_returns_final_message(
     assert list(turns_dir.iterdir()), "expected a persisted turn directory"
 
 
+def test_session_send_goal_file_composes_validated_goal_prompt(
+    run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], fixtures_root: Path
+) -> None:
+    # S2: `session send --goal-file` composes the fail-closed `/goal <text>`
+    # slash prompt turn instead of passing raw prompt text.
+    work = tmp_path / "work"
+    work.mkdir()
+    role_path = _persistent_role_file(tmp_path, valid_role_dict, work, _fake_acpx(tmp_path, fixtures_root))
+    sessions_dir = tmp_path / "sessions"
+    goal_path = tmp_path / "goal.txt"
+    goal_path.write_text("ship the S2 report", encoding="utf-8")
+
+    created = run_cli(
+        ["session", "create", "--role", str(role_path), "--session-id", "sess-a",
+         "--session-name", "nightly", "--sessions-dir", str(sessions_dir)]
+    )
+    assert created.returncode == 0, created.stderr
+
+    completed = run_cli(
+        ["session", "send", "--role", str(role_path), "--session-id", "sess-a",
+         "--goal-file", str(goal_path), "--sessions-dir", str(sessions_dir)]
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload["prompt_kind"] == "slash_command"
+    turn_dirs = list((sessions_dir / "sess-a" / "turns").iterdir())
+    assert len(turn_dirs) == 1
+    prompt_text = (turn_dirs[0] / "prompt.txt").read_text(encoding="utf-8")
+    assert prompt_text.startswith("/goal ship the S2 report")
+
+
+def test_session_send_rejects_prompt_file_and_goal_file_together(
+    run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], fixtures_root: Path
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    role_path = _persistent_role_file(tmp_path, valid_role_dict, work, _fake_acpx(tmp_path, fixtures_root))
+    sessions_dir = tmp_path / "sessions"
+    prompt_path = tmp_path / "prompt.txt"
+    prompt_path.write_text("hello", encoding="utf-8")
+    goal_path = tmp_path / "goal.txt"
+    goal_path.write_text("ship it", encoding="utf-8")
+
+    completed = run_cli(
+        ["session", "send", "--role", str(role_path), "--session-id", "sess-a",
+         "--prompt-file", str(prompt_path), "--goal-file", str(goal_path),
+         "--sessions-dir", str(sessions_dir)]
+    )
+
+    assert completed.returncode == 2
+    assert "not allowed with" in completed.stderr
+
+
+def test_session_send_goal_file_rejects_nested_slash_goal_text(
+    run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], fixtures_root: Path
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    role_path = _persistent_role_file(tmp_path, valid_role_dict, work, _fake_acpx(tmp_path, fixtures_root))
+    sessions_dir = tmp_path / "sessions"
+    goal_path = tmp_path / "goal.txt"
+    goal_path.write_text("/clear", encoding="utf-8")
+
+    created = run_cli(
+        ["session", "create", "--role", str(role_path), "--session-id", "sess-a",
+         "--session-name", "nightly", "--sessions-dir", str(sessions_dir)]
+    )
+    assert created.returncode == 0, created.stderr
+
+    completed = run_cli(
+        ["session", "send", "--role", str(role_path), "--session-id", "sess-a",
+         "--goal-file", str(goal_path), "--sessions-dir", str(sessions_dir)]
+    )
+
+    assert completed.returncode == 1
+    assert "goal" in completed.stderr.lower()
+    # Fail closed before any acpx launch: no turn artifacts were created.
+    assert not (sessions_dir / "sess-a" / "turns").exists()
+
+
 def test_session_status_cli_returns_safe_summary(
     run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], fixtures_root: Path
 ) -> None:

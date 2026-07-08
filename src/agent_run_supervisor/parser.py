@@ -34,6 +34,25 @@ class ParseResult:
     permission_denied_count: int = 0
 
 
+_EFFECT_EVENT_TYPES: frozenset[str] = frozenset(
+    {"tool_started", "tool_updated", "tool_completed"}
+)
+
+
+def has_observed_effect(result: ParseResult) -> bool:
+    """Whether the stream shows the AGENT actually produced anything.
+
+    True when the assembled agent message has non-whitespace text or any tool
+    activity was observed. Run bookkeeping alone (initialize, prompt echo,
+    thought chunks, usage/command updates, ``stopReason``) does not count: an
+    exit-0 stream without an observed effect is the fail-closed ``no_op``
+    signal, never a success.
+    """
+    if result.final_message.strip():
+        return True
+    return any(event.get("type") in _EFFECT_EVENT_TYPES for event in result.events)
+
+
 def _flag_protocol_error(result: ParseResult, reason: str) -> None:
     result.protocol_error = True
     result.protocol_error_reasons.append(reason)

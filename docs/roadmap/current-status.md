@@ -2,7 +2,7 @@
 title: "agent-run-supervisor Roadmap Current Status"
 status: active
 created_at: 2026-05-28
-last_validated_at: 2026-07-07T15:30:00+0800
+last_validated_at: 2026-07-08T03:30:00+0800
 ---
 # agent-run-supervisor Roadmap Current Status
 
@@ -10,9 +10,9 @@ last_validated_at: 2026-07-07T15:30:00+0800
 > Closed acceptance: [`archive/phases/`](archive/phases/) · Features: [`features.md`](features.md)
 
 ```text
-last_updated: 2026-07-07
+last_updated: 2026-07-08
 base_branch: main
-active_plan: none
+active_plan: docs/plans/active/2026-07-08-permissioned-session-goal-noop.md
 ```
 
 ## How to read this board
@@ -35,9 +35,9 @@ PRD -> design -> features.md + this board -> docs/plans/active/ -> code
 ## Snapshot {#snapshot}
 
 - **Product:** local one-shot exec and local persistent-session lifecycle are implemented and closed for local use.
-- **Current engineering stage:** backlog — deeper hardening only (not started).
-- **Next allowed implementation:** none until a new phase is explicitly approved on this board.
-- **Active plan:** none ([`docs/plans/active/`](../plans/active/) is empty).
+- **Current engineering stage:** S2 session permission / goal-turn / no-op hardening (operator-approved 2026-07-08, in progress).
+- **Next allowed implementation:** the S2 plan below; nothing else until approved on this board.
+- **Active plan:** [`docs/plans/active/2026-07-08-permissioned-session-goal-noop.md`](../plans/active/2026-07-08-permissioned-session-goal-noop.md).
 - **Release pointer:** see README / PyPI badge; this board does not track publish history.
 
 ## Phase index {#phase-index}
@@ -57,6 +57,7 @@ PRD -> design -> features.md + this board -> docs/plans/active/ -> code
 | P3 Engineering basics | Closed | [`archive/phases/p3-engineering-basics.md`](archive/phases/p3-engineering-basics.md) | F-RELEASE-001 |
 | Live event streaming | Closed | [`archive/phases/live-event-streaming.md`](archive/phases/live-event-streaming.md) | F-LIVE-STREAM-001, F-LIVE-EVENTS-001 |
 | Phase B ARS evidence | Closed | [`archive/phases/phase-b-ars-evidence.md`](archive/phases/phase-b-ars-evidence.md) | (evidence gate) |
+| **S2 session permission / goal / no-op hardening** | **In progress** | [`docs/plans/active/2026-07-08-permissioned-session-goal-noop.md`](../plans/active/2026-07-08-permissioned-session-goal-noop.md) | F-POLICY-001, F-STATUS-001, F-SESSION-001 |
 | **Backlog — deeper hardening** | **Open (not started)** | — | — |
 
 Backlog items (parked tails only): `npx` strict-offline, redaction/DLP + caller allowlist, lock-release audit trail. Any live/platform integration requires separate approval.
@@ -70,6 +71,7 @@ Backlog items (parked tails only): `npx` strict-offline, redaction/DLP + caller 
 | ARS-NPX-STRICT-OFFLINE | PARKED | Default `npx` fetch path when `acpx_binary` unset | No | Backlog |
 | ARS-REDACTION-DLP-HARDENING | PARKED | Stronger DLP / caller allowlist before real user data | No | Backlog |
 | ARS-LOCK-RELEASE-AUDIT | PARKED | Lock-release failures not yet structured audit evidence | No | Backlog |
+| ARS-SESSION-PROMPT-POLICY-FIXTURE | OPEN | Live acpx capture for the permissioned `prompt -s` (`--permission-policy`) shape | No | Operator follow-up (S2) |
 
 Closed tails: [`archive/tails.md`](archive/tails.md).
 

@@ -381,6 +381,89 @@ def test_send_releases_lease_on_protocol_error_output(
     assert (outcome.turn_dir / "result.json").exists()
 
 
+# --- S2 no-op fail-closed turns ---------------------------------------------
+
+
+def _noop_turn_stream() -> bytes:
+    """Exit-0-shaped prompt-turn stream with zero observed effect.
+
+    Mirrors the observed `/goal …` incident: protocol-clean bookkeeping
+    (initialize, prompt accepted, command/usage updates, ``stopReason``) but
+    no agent message text and no tool events.
+    """
+    return b"\n".join(
+        [
+            b'{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}',
+            b'{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{}}',
+            b'{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"available_commands_update","availableCommands":[]}}}',
+            b'{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"usage_update","totalTokens":7}}}',
+            b'{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}',
+        ]
+    ) + b"\n"
+
+
+def test_send_slash_goal_noop_turn_fails_closed_as_no_op(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    # S2 regression (incident): a `/goal …` slash prompt turn that exits 0
+    # without producing any output or tool activity must classify as the
+    # fail-closed ``no_op``, never as ``completed``.
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named()), _outcome(_noop_turn_stream())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role)
+
+    outcome = runtime.send(
+        role=role, session_id="sess-a", prompt="/goal ship the report", now=T1
+    )
+
+    assert outcome.result["status"] == "no_op"
+    assert outcome.result["error_code"] == "NO_OP"
+    assert outcome.result["retryable"] is False
+    assert outcome.result["observed_effect"] is False
+    # The slash prompt still travelled as one untouched argv element.
+    assert fake.calls[1]["argv"][-1] == "/goal ship the report"
+    # Turn artifacts persist and the lease is released like any other turn.
+    assert (outcome.turn_dir / "result.json").exists()
+    assert not (sessions_dir / "sess-a" / "lock.json").exists()
+
+
+def test_send_records_slash_prompt_kind_in_turn_result(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named()), _outcome(_turn1())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role)
+
+    outcome = runtime.send(
+        role=role, session_id="sess-a", prompt="/goal ship it", now=T1
+    )
+
+    assert outcome.result["prompt_kind"] == "slash_command"
+    # A turn with real agent output reports observed_effect=True.
+    assert outcome.result["observed_effect"] is True
+    persisted = json.loads(
+        (outcome.turn_dir / "result.json").read_text(encoding="utf-8")
+    )
+    assert persisted["prompt_kind"] == "slash_command"
+
+
+def test_send_records_text_prompt_kind_in_turn_result(
+    valid_role_dict, work_dir, sessions_dir
+) -> None:
+    role = _persistent_role(valid_role_dict, work_dir)
+    fake = FakeExecutor([_outcome(_new_named()), _outcome(_turn1())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    _create_and(runtime, role)
+
+    outcome = runtime.send(
+        role=role, session_id="sess-a", prompt="plain contract turn", now=T1
+    )
+
+    assert outcome.result["prompt_kind"] == "text"
+
+
 def test_send_refuses_binding_mismatch_before_executor_and_artifacts(
     valid_role_dict, work_dir, sessions_dir
 ) -> None:

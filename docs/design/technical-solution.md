@@ -2,7 +2,7 @@
 title: "agent-run-supervisor Technical Solution"
 status: active
 created_at: 2026-05-29
-last_validated_at: 2026-05-29T18:25:40+0800
+last_validated_at: 2026-07-08T03:30:00+0800
 ---
 # agent-run-supervisor Technical Solution
 
@@ -83,12 +83,18 @@ Current status: implemented for current dry-run and real exec paths. S1b adds a
 fail-closed guard so persistent-session roles cannot accidentally launch through the
 one-shot exec compiler. S1c adds the persistent-session command compilers and an
 `ensure_persistent_strategy` guard that mirrors the exec guard so persistent roles compile
-only through the session path. The prompt-turn compiler uses the S1a fixture-proven
-`--deny-all` prompt block (`prompt -s <name> <prompt>`), while the local record remains
-role/policy-bound and is revalidated before every send; expanding prompt-turn tool
-permissions requires a later fixture-proven slice. The prompt stays a single argv element
-with no shell. S1d adds management-only close/cancel compilers pinned to the S1a
-`session-close-named` and `session-cancel-no-active` fixtures.
+only through the session path. Since S2 the prompt-turn compiler
+(`prompt -s <name> <prompt>`) derives its permission block from the role: a role granting
+at least one permission kind compiles the same `--permission-policy` JSON as the exec path
+(the flag sits in the shared global flag family proven by
+`permission-policy-deny-all-sentinel`), while a role granting no kinds keeps the stricter
+S1a fixture-proven `--deny-all` shape; a live permissioned-prompt fixture capture remains
+an operator follow-up. The local record stays role/policy-bound and is revalidated before
+every send. The prompt stays a single argv element with no shell. S1d adds management-only
+close/cancel compilers pinned to the S1a `session-close-named` and
+`session-cancel-no-active` fixtures. S2 also adds `goal.py` — fail-closed composition of
+goal-setting slash prompts (`compose_goal_prompt` → `/goal <text>`, `is_slash_prompt`
+detection recorded as the additive turn key `prompt_kind`).
 
 ### 3.3 `workspace.py` — cwd and workspace gate
 
@@ -255,6 +261,7 @@ Current statuses:
 
 ```text
 completed
+no_op
 runner_error
 invalid_invocation
 timed_out
@@ -266,7 +273,12 @@ infrastructure_error
 policy_error
 ```
 
-Current status: implemented for current exit-code model; session lifecycle detail may need extensions.
+Current status: implemented for current exit-code model; session lifecycle detail may need
+extensions. S2 adds the fail-closed `no_op` status: exit 0 with a protocol-clean stream but
+no agent output and no tool activity (`parser.has_observed_effect`) classifies `no_op`
+(`retryable=false`), never `completed` — silent slash-prompt/goal turns can no longer be
+misread as success. Protocol errors and supervisor kills keep precedence; nonzero exits are
+unchanged.
 
 ### 3.9 `event_store.py` and `redaction.py` — artifact store
 

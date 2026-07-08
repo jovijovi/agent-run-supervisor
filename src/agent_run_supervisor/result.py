@@ -35,6 +35,7 @@ def build_result_payload(
     raw_event_path: str = "acpx-stdout.ndjson",
     redaction_report_path: str = "redaction-report.json",
     error_code: str | None = None,
+    observed_effect: bool | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "run_id": run_id,
@@ -51,6 +52,9 @@ def build_result_payload(
         "final_message": final_message,
         "truncated": truncated,
         "truncate_reason": truncate_reason,
+        # Whether the parsed stream showed real agent output/tool activity
+        # (parser.has_observed_effect); null when nothing was parsed (dry run).
+        "observed_effect": observed_effect,
         "run_dir": str(run_dir),
         "stderr_path": stderr_path,
         "raw_event_path": raw_event_path,
@@ -61,6 +65,7 @@ def build_result_payload(
 
 _ERROR_CODE_FOR_STATUS: dict[AgentRunStatus, str | None] = {
     AgentRunStatus.COMPLETED: None,
+    AgentRunStatus.NO_OP: "NO_OP",
     AgentRunStatus.RUNNER_ERROR: "RUNNER_ERROR",
     AgentRunStatus.INVALID_INVOCATION: "INVALID_INVOCATION",
     AgentRunStatus.TIMED_OUT: "TIMED_OUT",
