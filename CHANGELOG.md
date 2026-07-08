@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Changed
+
+### Notes
+
+## [0.1.4] - 2026-07-08
+
+### Added
+
 - Fail-closed `no_op` supervisor status: exit `0` with a protocol-clean stream but no
   agent output and no tool activity (`parser.has_observed_effect`) is no longer reported
   as `completed` (`error_code: NO_OP`, `retryable: false`). Applies to both exec runs and
