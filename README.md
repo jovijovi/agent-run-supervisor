@@ -303,6 +303,34 @@ for event in page.records:
 [`docs/design/result-event-schema.md`](docs/design/result-event-schema.md) for `result.json`
 fields.
 
+### Read-only session inspection (no subprocess)
+
+For liveness/health checks over an existing **persistent session**, use
+[`session_inspect`](src/agent_run_supervisor/session_inspect.py): it reads only local artifacts
+(the session record, the lease lock, turn artifacts) and never spawns acpx or an AGENT, so it is
+safe on a caller's hot polling path. `session_status` remains the acpx-side `status -s`
+management query; inspection is its non-spawning local complement.
+
+```python
+from agent_run_supervisor.session_inspect import inspect_session, list_turns
+
+inspection = inspect_session("/path/to/sessions", "nightly-review")
+print(inspection.exists, inspection.state)                # True "open"
+print(inspection.lease_held, inspection.holder_liveness)  # e.g. True "alive"
+print(inspection.latest_turn_status)                      # e.g. "completed" (None while in flight)
+if inspection.progress:
+    print(inspection.progress.state, inspection.progress.last_seq)
+
+for turn in list_turns("/path/to/sessions", "nightly-review"):
+    print(turn.turn_id, turn.status)  # turn.turn_dir is a caller-private path
+```
+
+- A missing session reports `exists=False`; corrupt/off-vocabulary artifacts degrade to
+  `None`/`unknown` — never fabricated health, never raw agent text.
+- Lease fields follow the store's stale-lock semantics: `lease_held` means a present,
+  not-provably-expired lease; `holder_liveness` is the crash-recovery classification;
+  `lease_recoverable` means TTL-expired or provably crashed.
+
 ## Environment requirements
 
 | Need | Requirement |

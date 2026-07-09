@@ -363,6 +363,33 @@ MVP (JSON stdout, 0/nonzero exit codes) over `SessionRuntime`; S1d adds
 confined, dry-run-first `cleanup` command. K1 changes session lock recovery internals only and
 adds no CLI command. I1 deliberately adds no CLI command.
 
+### 3.12 `session_inspect.py` — read-only caller session inspection
+
+A generic caller API over one persistent session's local on-disk state, for callers (e.g. an
+external orchestrator's liveness/health path) that must observe a session **without spawning
+anything** — `SessionRuntime.status` runs an acpx `status -s` management subprocess and is
+therefore unsuitable for a hot polling path.
+
+```python
+inspect_session(sessions_dir, session_id, *, liveness_probe=None, now=None) -> SessionInspection
+list_turns(sessions_dir, session_id) -> tuple[TurnInfo, ...]
+```
+
+- `SessionInspection` carries `session_id` / `exists` / `state` (`open`/`closed`/`None`) /
+  `lease_held` / `holder_liveness` (`alive`/`crashed`/`unknown`, K1 classification) /
+  `lease_recoverable` / `turn_count` / `latest_turn_id` / `latest_turn_status` (closed
+  `AgentRunStatus` vocabulary only) / `progress` (the latest turn's structural
+  `ProgressSnapshot`). No filesystem paths, no raw prompt/output text.
+- `TurnInfo` enumerates turns in stable turn-identity (creation) order; its `turn_dir` is a
+  **caller-private** path (same trust level as `SessionTurnOutcome.turn_dir`) for the caller's
+  own binding layer, never for public projections. Event bodies are never read.
+- Fail-closed degradation: a missing session is `exists=False`; a corrupt record / lock /
+  `result.json` / `progress.json` degrades the affected field to `None`/`unknown` — health is
+  never fabricated and off-vocabulary tokens are never echoed. Only an unsafe `session_id`
+  raises. Lease semantics mirror `SessionStore.detect_stale_locks` (same expiry boundary, same
+  crashed-holder reclamation rule, `reclaimable=false` locks never liveness-classified),
+  evaluated per session so one corrupt foreign session cannot break inspection.
+
 ## 4. Data models
 
 ### 4.1 AgentRoleSpec

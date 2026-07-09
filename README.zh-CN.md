@@ -291,6 +291,32 @@ for event in page.records:
 **Schema 稳定性：** 公开 API 与结果 schema 可能演进；请阅读
 [`docs/design/result-event-schema.md`](docs/design/result-event-schema.md) 了解 `result.json` 字段。
 
+### 只读会话巡检（零子进程）
+
+对**已存在的持久会话**做存活/健康检查时，请使用
+[`session_inspect`](src/agent_run_supervisor/session_inspect.py)：它只读取本地 artifacts
+（会话记录、租约锁、turn artifacts），绝不派生 acpx 或 AGENT 子进程，可安全用于调用方的
+热轮询路径。`session_status` 仍是走 acpx `status -s` 的管理查询；巡检是它的零派生本地补充。
+
+```python
+from agent_run_supervisor.session_inspect import inspect_session, list_turns
+
+inspection = inspect_session("/path/to/sessions", "nightly-review")
+print(inspection.exists, inspection.state)                # True "open"
+print(inspection.lease_held, inspection.holder_liveness)  # 例如 True "alive"
+print(inspection.latest_turn_status)                      # 例如 "completed"（进行中为 None）
+if inspection.progress:
+    print(inspection.progress.state, inspection.progress.last_seq)
+
+for turn in list_turns("/path/to/sessions", "nightly-review"):
+    print(turn.turn_id, turn.status)  # turn.turn_dir 是调用方私有路径
+```
+
+- 会话不存在时报告 `exists=False`；损坏/越词表的 artifacts 退化为 `None`/`unknown` ——
+  绝不虚构健康状态，绝不透出 raw agent 文本。
+- 租约字段沿用 store 的过期锁语义：`lease_held` 表示存在且未证明过期的租约；
+  `holder_liveness` 是崩溃恢复分类；`lease_recoverable` 表示 TTL 过期或已证明崩溃。
+
 ## 环境要求
 
 | 需求 | 要求 |

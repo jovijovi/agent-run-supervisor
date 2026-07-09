@@ -2,7 +2,7 @@
 title: "Feature and Capability Tracker"
 status: active
 created_at: 2026-05-29
-last_validated_at: 2026-07-08T03:30:00+0800
+last_validated_at: 2026-07-09T19:00:00+0800
 ---
 # Feature and Capability Tracker
 
@@ -31,6 +31,7 @@ Status legend: **Done** · **Partial** · **Planned** · **Parked** · **Non-goa
 | F-SMOKE-001 | Codex/acpx smoke helper | Useful | Done | `scripts/smoke_codex_acpx.py` | Operator-only |
 | F-LIVE-STREAM-001 | Live stream core | Required | Done | `live_stream.py`, schema §4.1 | No delivery |
 | F-LIVE-EVENTS-001 | Event cursor API | Useful | Done | `hermes_caller/events.py` | PR3 Sachima unapproved |
+| F-SESSION-INSPECT-001 | Read-only session inspection API | Useful | Done | `session_inspect.py`, `tests/test_session_inspect.py` | Release + caller pin bump |
 | F-RELEASE-001 | Release engineering | Required | Done | `verify_local.sh`, `release.yml` | See CHANGELOG / PyPI |
 | F-NONGOAL-001 | Public ingress / IM / Gateway | Non-goal | Non-goal | PRD §6 | Separate approval |
 
@@ -48,7 +49,7 @@ P3 → [`archive/phases/p3-engineering-basics.md`](archive/phases/p3-engineering
 | CLI | 5 | 0 | 0 | Includes session + cleanup |
 | Execution modes | 2 | 0 | 0 | Exec + sessions closed |
 | Smoke helpers | 1 | 0 | 0 | Operator-run only |
-| Live supervision | 2 | 0 | 0 | Local artifacts only |
+| Live supervision | 3 | 0 | 0 | Local artifacts only; incl. read-only inspection |
 | Packaging / release | 1 | 0 | 0 | uv + verify + PyPI workflow |
 
 ## Maintenance rule

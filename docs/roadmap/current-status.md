@@ -2,7 +2,7 @@
 title: "agent-run-supervisor Roadmap Current Status"
 status: active
 created_at: 2026-05-28
-last_validated_at: 2026-07-08T03:30:00+0800
+last_validated_at: 2026-07-09T19:00:00+0800
 ---
 # agent-run-supervisor Roadmap Current Status
 
@@ -10,7 +10,7 @@ last_validated_at: 2026-07-08T03:30:00+0800
 > Closed acceptance: [`archive/phases/`](archive/phases/) · Features: [`features.md`](features.md)
 
 ```text
-last_updated: 2026-07-08
+last_updated: 2026-07-09
 base_branch: main
 active_plan: docs/plans/active/2026-07-08-permissioned-session-goal-noop.md
 ```
@@ -36,6 +36,7 @@ PRD -> design -> features.md + this board -> docs/plans/active/ -> code
 
 - **Product:** local one-shot exec and local persistent-session lifecycle are implemented and closed for local use.
 - **Current engineering stage:** S2 session permission / goal-turn / no-op hardening (operator-approved 2026-07-08, in progress).
+- **Caller inspection API:** read-only `inspect_session` / `list_turns` (`session_inspect.py`) implemented with tests — the non-spawning session-liveness surface for external callers (F-SESSION-INSPECT-001); release/pin bump pending.
 - **Next allowed implementation:** the S2 plan below; nothing else until approved on this board.
 - **Active plan:** [`docs/plans/active/2026-07-08-permissioned-session-goal-noop.md`](../plans/active/2026-07-08-permissioned-session-goal-noop.md).
 - **Release pointer:** see README / PyPI badge; this board does not track publish history.
