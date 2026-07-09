@@ -15,6 +15,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Notes
 
+## [0.1.6] - 2026-07-09
+
+### Added
+
+- Read-only local session inspection API for caller hot paths:
+  `inspect_session(...)` summarizes a persisted session record, lease/liveness
+  state, latest turn, progress snapshot, and artifact paths without launching an
+  agent, mutating session state, or shelling out.
+- `list_turns(...)` returns ordered persisted turn summaries for a session,
+  including status, timestamps, result paths, observed-effect metadata, and
+  redacted final-message excerpts.
+- Regression coverage for corrupt/missing artifacts, turn ordering, raw-content
+  boundaries, lease/liveness classification, and no-subprocess execution.
+
+### Changed
+
+- README, README.zh-CN, technical solution, and roadmap docs now describe the
+  inspection API as the supported library seam for products such as Sachima that
+  need safe local progress/status reads instead of controller CLI glue.
+
+### Fixed
+
+- Release package metadata now advertises `0.1.6`, keeping `pyproject.toml`,
+  `src/agent_run_supervisor/__init__.py`, and `uv.lock` in sync before tag
+  publication.
+
+### Notes
+
+- This is an additive library/API release. It does not change the acpx transport
+  contract, does not add runtime dependencies, and does not start or control
+  external agents from the inspection path.
+
 ## [0.1.5] - 2026-07-09
 
 ### Fixed
@@ -143,6 +175,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - acpx `0.12.0` contract fixtures, validator, and deterministic replay.
 - `scripts/verify_local.sh` local gate entry and GitHub Actions Trusted Publishing release workflow.
 
+[0.1.6]: https://github.com/jovijovi/agent-run-supervisor/releases/tag/v0.1.6
+[0.1.5]: https://github.com/jovijovi/agent-run-supervisor/releases/tag/v0.1.5
+[0.1.4]: https://github.com/jovijovi/agent-run-supervisor/releases/tag/v0.1.4
+[0.1.3]: https://github.com/jovijovi/agent-run-supervisor/releases/tag/v0.1.3
 [0.1.2]: https://github.com/jovijovi/agent-run-supervisor/releases/tag/v0.1.2
 [0.1.1]: https://github.com/jovijovi/agent-run-supervisor/releases/tag/v0.1.1
 [0.1.0]: https://github.com/jovijovi/agent-run-supervisor/releases/tag/v0.1.0
