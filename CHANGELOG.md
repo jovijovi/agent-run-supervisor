@@ -7,11 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+### Fixed
 
-### Changed
+- `session send --goal-file` now compiles the goal through
+  `goal.compile_goal_prompt` instead of composing a literal `/goal <text>` slash
+  turn. On the codex ACP surface (`acpx@0.12.0`) the literal slash turn was
+  answered with `Unknown command "/goal"` — a transport-completed no-op that
+  still reported `status=completed`. Non-native adapters (all of them today) now
+  receive the `goal-contract/v1` text template (`prompt_kind: "text"`); a literal
+  slash turn would only be sent for adapters explicitly registered in
+  `NATIVE_GOAL_ADAPTERS` (fixture-gated, currently empty). Goal-text validation
+  semantics are unchanged (empty/nested-slash/control characters still fail
+  closed before any lease/acpx work).
 
 ### Notes
+
+- Follow-up (not addressed here): classifying an `Unknown command "<x>"` agent
+  reply as non-success requires the `available_commands` capture +
+  `UNSUPPORTED_SLASH_COMMAND` slice already registered as deferred in
+  `docs/plans/active/2026-07-08-permissioned-session-goal-noop.md`; text-matching
+  the reply would be brittle across adapters.
 
 ## [0.1.4] - 2026-07-08
 
