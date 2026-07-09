@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_run_supervisor.event_store import EventStore
-from agent_run_supervisor.goal import GoalPromptError, compose_goal_prompt
+from agent_run_supervisor.goal import GoalPromptError, GoalSpec, compile_goal_prompt
 from agent_run_supervisor.parser import ParseResult, parse_acpx_stdout
 from agent_run_supervisor.policy import ExecStrategyError
 from agent_run_supervisor.preflight import (
@@ -264,9 +264,18 @@ def cmd_session(args: argparse.Namespace) -> int:
         try:
             if goal_file:
                 # Fail closed on unsafe goal text BEFORE any lease/acpx work.
-                prompt = compose_goal_prompt(
-                    Path(goal_file).read_text(encoding="utf-8")
+                # Compile the goal onto what the role's adapter can actually
+                # execute: adapters without a fixture-proven native ACP `goal`
+                # command (all of them today) get the goal-contract/v1 text
+                # template — a literal "/goal" slash turn is a proven
+                # transport-completed no-op on the codex ACP surface.
+                compiled = compile_goal_prompt(
+                    role,
+                    GoalSpec(
+                        goal_text=Path(goal_file).read_text(encoding="utf-8")
+                    ),
                 )
+                prompt = compiled.prompt
             else:
                 prompt = Path(args.prompt_file).read_text(encoding="utf-8")
         except OSError as exc:

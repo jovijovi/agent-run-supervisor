@@ -133,8 +133,9 @@ def _add_session_parser(subparsers: argparse._SubParsersAction) -> None:
     prompt_source.add_argument(
         "--goal-file",
         help=(
-            "Path to goal text; validated and composed as a '/goal <text>' "
-            "slash prompt turn."
+            "Path to goal text; validated and compiled into the adapter-"
+            "appropriate goal turn (the goal-contract/v1 text template unless "
+            "the adapter natively supports a /goal command)."
         ),
     )
 

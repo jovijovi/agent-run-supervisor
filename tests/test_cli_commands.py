@@ -503,11 +503,15 @@ def test_session_send_cli_persists_turn_and_returns_final_message(
     assert list(turns_dir.iterdir()), "expected a persisted turn directory"
 
 
-def test_session_send_goal_file_composes_validated_goal_prompt(
+def test_session_send_goal_file_compiles_goal_contract_for_non_native_adapter(
     run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], fixtures_root: Path
 ) -> None:
-    # S2: `session send --goal-file` composes the fail-closed `/goal <text>`
-    # slash prompt turn instead of passing raw prompt text.
+    # Regression (2026-07-09 codex retest): `--goal-file` used to compose a
+    # literal `/goal <text>` slash turn, which the codex ACP surface answers
+    # with `Unknown command "/goal"` — a transport-completed no-op. The CLI
+    # must compile the goal through `compile_goal_prompt`, which renders the
+    # goal-contract/v1 text template for every adapter not registered as
+    # natively supporting a `/goal` command (all of them today).
     work = tmp_path / "work"
     work.mkdir()
     role_path = _persistent_role_file(tmp_path, valid_role_dict, work, _fake_acpx(tmp_path, fixtures_root))
@@ -528,11 +532,17 @@ def test_session_send_goal_file_composes_validated_goal_prompt(
 
     assert completed.returncode == 0, completed.stderr
     payload = json.loads(completed.stdout)
-    assert payload["prompt_kind"] == "slash_command"
+    # The compiled goal turn is plain text for non-native adapters …
+    assert payload["prompt_kind"] == "text"
+    # … and the permission shape stays role-governed, untouched by --goal-file.
+    assert payload["prompt_permission_mode"] == "policy"
     turn_dirs = list((sessions_dir / "sess-a" / "turns").iterdir())
     assert len(turn_dirs) == 1
     prompt_text = (turn_dirs[0] / "prompt.txt").read_text(encoding="utf-8")
-    assert prompt_text.startswith("/goal ship the S2 report")
+    assert prompt_text.startswith("[goal-contract/v1]")
+    assert not prompt_text.startswith("/goal")
+    assert "ship the S2 report" in prompt_text
+    assert "GOAL_STATUS: DONE" in prompt_text
 
 
 def test_session_send_rejects_prompt_file_and_goal_file_together(

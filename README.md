@@ -114,7 +114,8 @@ agent-run-supervisor session create \
   --role <role-file>.json --session-id <id>
 agent-run-supervisor session send \
   --role <role-file>.json --session-id <id> --prompt-file <prompt>.txt
-# Or compose a validated goal-setting slash turn (`/goal <text>`) from a goal file
+# Or compile a validated goal turn from a goal file: adapters without a native
+# ACP `/goal` command (all of them today) receive the goal-contract/v1 text template
 agent-run-supervisor session send \
   --role <role-file>.json --session-id <id> --goal-file <goal>.txt
 agent-run-supervisor session status \

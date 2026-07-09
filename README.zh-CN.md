@@ -108,7 +108,8 @@ agent-run-supervisor session create \
   --role <role-file>.json --session-id <id>
 agent-run-supervisor session send \
   --role <role-file>.json --session-id <id> --prompt-file <prompt>.txt
-# 或从 goal 文件组合一次经校验的目标设定 slash 轮次（`/goal <text>`）
+# 或从 goal 文件编译一次经校验的目标轮次：适配器若无原生 ACP `/goal` 命令
+# （目前全部如此），将收到 goal-contract/v1 纯文本目标契约模板
 agent-run-supervisor session send \
   --role <role-file>.json --session-id <id> --goal-file <goal>.txt
 agent-run-supervisor session status \
