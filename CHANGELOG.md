@@ -15,6 +15,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Notes
 
+## [0.1.7] - 2026-07-16
+
+### Added
+
+- Role-bound native ACPX MCP configuration injection. A role may bind an
+  absolute JSON MCP config path; ARS validates and fingerprints that binding,
+  then compiles it as the ACPX `--mcp-config` argument for the run/session.
+
+### Changed
+
+- Persistent-session binding now includes the MCP configuration identity, so a
+  changed bound config fails closed rather than being silently reused.
+
+### Fixed
+
+- Existing roles with no MCP configuration retain their prior serialized role
+  shape and hash, avoiding an unnecessary migration for already persisted
+  sessions.
+
+### Notes
+
+- This release does not start MCP services or expand a role's permissions. The
+  bound configuration is a local, role-owned input and remains subject to the
+  existing permission and workspace policy.
+
 ## [0.1.6] - 2026-07-09
 
 ### Added
