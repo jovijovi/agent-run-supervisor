@@ -53,6 +53,7 @@ from agent_run_supervisor.exit_classifier import (
 )
 from agent_run_supervisor.goal import is_slash_prompt
 from agent_run_supervisor.live_stream import LiveEventSink
+from agent_run_supervisor.mcp_config import resolve_mcp_config
 from agent_run_supervisor.parser import (
     ManagementParseError,
     ParseResult,
@@ -203,6 +204,10 @@ class SessionRuntime:
         # Fail closed before spawning acpx if the local record already exists
         # (also validates the session id is a safe path component).
         self._refuse_existing(session_id)
+        # Verify the role's declared MCP config (canonical path + content SHA)
+        # BEFORE spawning the management command; the binding captured here is
+        # what every later lifecycle operation revalidates against.
+        mcp_binding = resolve_mcp_config(role)
 
         effective_name = session_name or session_id
         argv = compile_session_create_command(
@@ -223,6 +228,7 @@ class SessionRuntime:
             workspace_result=workspace,
             acpx_session_id=acpx_session_id if isinstance(acpx_session_id, str) else None,
             session_name=effective_name,
+            mcp_binding=mcp_binding,
             now=now,
         )
         self._write_management_artifact(session_id, "create.json", summary)

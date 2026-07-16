@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Mapping
 
 SCHEMA_VERSION = 1
@@ -32,6 +33,11 @@ class AgentRunnerSpec:
     acpx_binary: str | None
     adapter_agent: str
     model: str | None
+    # Optional absolute path to a JSON MCP config with a top-level
+    # ``mcpServers`` array, compiled to a native acpx ``--mcp-config`` flag.
+    # Omitted from serialization when unset so pre-feature roles keep a
+    # byte-identical role_hash (see ``role_to_dict``).
+    mcp_config: str | None = None
 
 
 @dataclass(frozen=True)
@@ -151,12 +157,22 @@ def _runner(raw: Mapping[str, Any]) -> AgentRunnerSpec:
     model = raw.get("model")
     if model is not None and (not isinstance(model, str) or not model):
         raise RoleValidationError(f"{where}: model must be null or non-empty string")
+    mcp_config = raw.get("mcp_config")
+    if mcp_config is not None and (
+        not isinstance(mcp_config, str)
+        or not mcp_config
+        or not Path(mcp_config).is_absolute()
+    ):
+        raise RoleValidationError(
+            f"{where}: mcp_config must be null or an absolute path to a JSON config",
+        )
     return AgentRunnerSpec(
         type=runner_type,
         acpx_version=acpx_version,
         acpx_binary=acpx_binary,
         adapter_agent=adapter_agent,
         model=model,
+        mcp_config=mcp_config,
     )
 
 
@@ -319,6 +335,11 @@ def load_role(mapping: Mapping[str, Any]) -> AgentRoleSpec:
 def role_to_dict(role: AgentRoleSpec) -> dict:
     data = asdict(role)
     data["workspace"]["allowed_roots"] = list(role.workspace.allowed_roots)
+    # Zero-migration invariant: omit the optional mcp_config binding when
+    # unset so pre-feature roles keep a byte-identical serialization and
+    # role_hash (existing SessionRecord bindings survive without migration).
+    if role.runner.mcp_config is None:
+        del data["runner"]["mcp_config"]
     return data
 
 

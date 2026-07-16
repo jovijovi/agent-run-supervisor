@@ -20,6 +20,7 @@ from agent_run_supervisor.exit_classifier import (
     ClassifierInput,
     classify_exit,
 )
+from agent_run_supervisor.mcp_config import resolve_mcp_config
 from agent_run_supervisor.parser import (
     ParseResult,
     has_observed_effect,
@@ -241,6 +242,10 @@ class SupervisorRunner:
     ) -> RunOutcome:
         ensure_exec_strategy(role)
         workspace = validate_effective_cwd(role, cwd)
+        # Verify the role's declared MCP config immediately before spawn: the
+        # exec path fails closed (no artifacts, no launch) unless the declared
+        # file is an absolute JSON config with a top-level mcpServers array.
+        resolve_mcp_config(role)
         env_map = dict(env) if env is not None else dict(os.environ)
         bundle = self._prepare_artifacts(
             role=role,

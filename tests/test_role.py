@@ -9,6 +9,7 @@ from agent_run_supervisor.role import (
     RoleValidationError,
     load_role,
     role_hash,
+    role_to_dict,
 )
 
 
@@ -283,3 +284,67 @@ def test_load_role_rejects_non_boolean_redaction_flag() -> None:
 def test_load_role_rejects_non_mapping_top_level() -> None:
     with pytest.raises(RoleValidationError):
         load_role([])
+
+
+# --- optional runner.mcp_config binding (native --mcp-config support) --------
+
+
+def test_load_role_defaults_mcp_config_to_none() -> None:
+    role = load_role(copy.deepcopy(VALID_ROLE))
+
+    assert role.runner.mcp_config is None
+
+
+def test_load_role_accepts_absolute_mcp_config() -> None:
+    spec = copy.deepcopy(VALID_ROLE)
+    spec["runner"] = {**spec["runner"], "mcp_config": "/abs/path/mcp.json"}
+
+    role = load_role(spec)
+
+    assert role.runner.mcp_config == "/abs/path/mcp.json"
+
+
+def test_load_role_accepts_explicit_null_mcp_config() -> None:
+    spec = copy.deepcopy(VALID_ROLE)
+    spec["runner"] = {**spec["runner"], "mcp_config": None}
+
+    role = load_role(spec)
+
+    assert role.runner.mcp_config is None
+
+
+@pytest.mark.parametrize("bad", ["relative/mcp.json", "", 123, ["/abs/mcp.json"]])
+def test_load_role_rejects_non_absolute_or_non_string_mcp_config(bad) -> None:
+    spec = copy.deepcopy(VALID_ROLE)
+    spec["runner"] = {**spec["runner"], "mcp_config": bad}
+
+    with pytest.raises(RoleValidationError) as excinfo:
+        load_role(spec)
+    assert "mcp_config" in str(excinfo.value)
+
+
+def test_role_to_dict_omits_mcp_config_when_unset() -> None:
+    # Zero-migration invariant: pre-feature roles must keep their serialized
+    # shape (and therefore role_hash) byte-identical, so the optional field is
+    # omitted — not emitted as null — when unset.
+    role = load_role(copy.deepcopy(VALID_ROLE))
+
+    assert "mcp_config" not in role_to_dict(role)["runner"]
+
+
+def test_role_to_dict_includes_mcp_config_when_set() -> None:
+    spec = copy.deepcopy(VALID_ROLE)
+    spec["runner"] = {**spec["runner"], "mcp_config": "/abs/path/mcp.json"}
+    role = load_role(spec)
+
+    assert role_to_dict(role)["runner"]["mcp_config"] == "/abs/path/mcp.json"
+
+
+def test_role_hash_changes_when_mcp_config_set() -> None:
+    # The declared mcp_config participates in the role identity, so gaining or
+    # losing it drifts role_hash (session bindings then fail closed).
+    base = load_role(copy.deepcopy(VALID_ROLE))
+    spec = copy.deepcopy(VALID_ROLE)
+    spec["runner"] = {**spec["runner"], "mcp_config": "/abs/path/mcp.json"}
+
+    assert role_hash(base) != role_hash(load_role(spec))

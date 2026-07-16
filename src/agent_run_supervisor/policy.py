@@ -72,10 +72,21 @@ def compile_permission_policy(role: AgentRoleSpec) -> dict:
 
 
 def _acpx_prefix(role: AgentRoleSpec) -> list[str]:
-    """Pinned acpx invocation prefix: explicit binary, else pinned ``npx`` fetch."""
+    """Pinned acpx invocation prefix: explicit binary, else pinned ``npx`` fetch.
+
+    A role-declared MCP config rides immediately after the prefix, before
+    every other global flag, on ALL compiled commands (exec, prompt turns,
+    and session management) — preflight-proven: acpx@0.12.0 accepts a global
+    ``--mcp-config`` with exit 0 across exec/new/ensure/show/status/cancel/
+    close, and a real ARS Claude probe succeeded via the parameter.
+    """
     if role.runner.acpx_binary:
-        return [role.runner.acpx_binary]
-    return ["npx", "-y", f"acpx@{role.runner.acpx_version}"]
+        argv = [role.runner.acpx_binary]
+    else:
+        argv = ["npx", "-y", f"acpx@{role.runner.acpx_version}"]
+    if role.runner.mcp_config:
+        argv.extend(["--mcp-config", role.runner.mcp_config])
+    return argv
 
 
 def _resolve_cwd(role: AgentRoleSpec, cwd: str | None) -> str:

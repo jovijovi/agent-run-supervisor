@@ -10,6 +10,7 @@ from typing import Any
 
 from agent_run_supervisor.event_store import EventStore
 from agent_run_supervisor.goal import GoalPromptError, GoalSpec, compile_goal_prompt
+from agent_run_supervisor.mcp_config import McpConfigError
 from agent_run_supervisor.parser import ParseResult, parse_acpx_stdout
 from agent_run_supervisor.policy import ExecStrategyError
 from agent_run_supervisor.preflight import (
@@ -208,6 +209,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     except WorkspaceValidationError as exc:
         print(f"workspace validation error: {exc}", file=sys.stderr)
         return 1
+    except McpConfigError as exc:
+        print(f"mcp config error: {exc}", file=sys.stderr)
+        return 1
     _print_json(outcome.result)
     return 0 if outcome.result["status"] == "completed" else 1
 
@@ -333,6 +337,9 @@ def cmd_session(args: argparse.Namespace) -> int:
         return 1
     except WorkspaceValidationError as exc:
         print(f"workspace validation error: {exc}", file=sys.stderr)
+        return 1
+    except McpConfigError as exc:
+        print(f"mcp config error: {exc}", file=sys.stderr)
         return 1
     except SessionRuntimeError as exc:
         print(f"session runtime error: {exc}", file=sys.stderr)

@@ -10,6 +10,7 @@ fixtures as the proven command/stream contract.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import stat
@@ -20,6 +21,7 @@ from typing import Any, Callable, Mapping
 
 import pytest
 
+from agent_run_supervisor.mcp_config import McpConfigError
 from agent_run_supervisor.policy import ExecStrategyError
 from agent_run_supervisor.process_liveness import LivenessProbe, ProcessIdentity
 from agent_run_supervisor.role import load_role
@@ -1259,3 +1261,102 @@ def test_reclaim_crashed_disabled_restores_ttl_only_blocking(
 
     assert len(fake.calls) == 1
     assert not (sessions_dir / "sess-a" / "turns").exists()
+
+
+# --- mcp_config role binding (native --mcp-config) --------------------------
+
+
+def _write_mcp(path: Path, servers: list) -> None:
+    path.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+
+
+def _mcp_persistent_role(valid_role_dict, work_dir: Path, config: Path):
+    return _persistent_role(
+        valid_role_dict,
+        work_dir,
+        runner={
+            **valid_role_dict["runner"],
+            "acpx_binary": None,
+            "mcp_config": str(config),
+        },
+    )
+
+
+def test_create_session_binds_mcp_config_and_flags_management_argv(
+    valid_role_dict, work_dir, sessions_dir, tmp_path
+) -> None:
+    config = tmp_path / "mcp.json"
+    _write_mcp(config, [])
+    role = _mcp_persistent_role(valid_role_dict, work_dir, config)
+    fake = FakeExecutor([_outcome(_new_named())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+
+    runtime.create_session(role=role, session_id="sess-mcp", now=T0)
+
+    argv = fake.calls[0]["argv"]
+    assert argv[:3] == ["npx", "-y", "acpx@0.12.0"]
+    assert argv[3:5] == ["--mcp-config", str(config)]
+
+    data = json.loads(
+        (sessions_dir / "sess-mcp" / "session.json").read_text(encoding="utf-8")
+    )
+    assert data["mcp_config_path"] == os.path.realpath(config)
+    assert (
+        data["mcp_config_sha256"]
+        == "sha256:" + hashlib.sha256(config.read_bytes()).hexdigest()
+    )
+
+
+def test_create_session_fails_closed_before_spawn_on_bad_mcp_config(
+    valid_role_dict, work_dir, sessions_dir, tmp_path
+) -> None:
+    role = _mcp_persistent_role(valid_role_dict, work_dir, tmp_path / "absent.json")
+    fake = FakeExecutor([])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+
+    with pytest.raises(McpConfigError):
+        runtime.create_session(role=role, session_id="sess-mcp", now=T0)
+
+    assert fake.calls == []
+    assert not (sessions_dir / "sess-mcp").exists()
+
+
+def test_send_carries_mcp_config_flag_on_prompt_turn(
+    valid_role_dict, work_dir, sessions_dir, tmp_path
+) -> None:
+    config = tmp_path / "mcp.json"
+    _write_mcp(config, [])
+    role = _mcp_persistent_role(valid_role_dict, work_dir, config)
+    fake = FakeExecutor([_outcome(_new_named()), _outcome(_turn1())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    runtime.create_session(
+        role=role, session_id="sess-mcp", session_name="nightly", now=T0
+    )
+
+    turn = runtime.send(role=role, session_id="sess-mcp", prompt="hello", now=T1)
+
+    assert turn.result["status"] == "completed"
+    argv = fake.calls[1]["argv"]
+    assert argv[:3] == ["npx", "-y", "acpx@0.12.0"]
+    assert argv[3:5] == ["--mcp-config", str(config)]
+
+
+def test_send_rechecks_mcp_content_drift_before_spawn(
+    valid_role_dict, work_dir, sessions_dir, tmp_path
+) -> None:
+    config = tmp_path / "mcp.json"
+    _write_mcp(config, [])
+    role = _mcp_persistent_role(valid_role_dict, work_dir, config)
+    fake = FakeExecutor([_outcome(_new_named())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    runtime.create_session(role=role, session_id="sess-mcp", now=T0)
+
+    # Same path, new content: the pre-spawn recheck must fail closed on the
+    # content SHA before any prompt subprocess is launched.
+    _write_mcp(config, [{"name": "drifted"}])
+
+    with pytest.raises(SessionBindingError) as excinfo:
+        runtime.send(role=role, session_id="sess-mcp", prompt="hello", now=T1)
+
+    assert "mcp_config_sha256" in str(excinfo.value)
+    assert len(fake.calls) == 1  # the create management call only; no turn spawn

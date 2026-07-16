@@ -546,3 +546,76 @@ def test_policy_hash_identical_for_exec_and_persistent_strategy() -> None:
     persistent = _persistent_role()
 
     assert policy_hash(exec_role) == policy_hash(persistent)
+
+
+# --- native role-bound --mcp-config insertion --------------------------------
+#
+# Preflight-proven: acpx@0.12.0 accepts a global ``--mcp-config`` (exit 0) for
+# exec and for sessions new/ensure/show, status, cancel, and close. The flag is
+# inserted immediately after the acpx invocation prefix, before every other
+# global flag, on ALL compiled commands.
+
+_MCP_CONFIG_PATH = "/abs/path/mcp.json"
+
+
+def _mcp_exec_role():
+    spec = copy.deepcopy(VALID_ROLE)
+    spec["runner"] = {**spec["runner"], "mcp_config": _MCP_CONFIG_PATH}
+    return load_role(spec)
+
+
+def _mcp_persistent_role():
+    spec = copy.deepcopy(VALID_ROLE)
+    spec["session"] = {"strategy": "persistent"}
+    spec["runner"] = {
+        **spec["runner"],
+        "acpx_binary": None,
+        "mcp_config": _MCP_CONFIG_PATH,
+    }
+    return load_role(spec)
+
+
+def _all_session_commands(role) -> list[list[str]]:
+    return [
+        compile_session_create_command(role, cwd="/tmp/work", session_name="s"),
+        compile_session_ensure_command(role, cwd="/tmp/work", session_name="s"),
+        compile_session_show_command(role, cwd="/tmp/work", session_name="s"),
+        compile_session_status_command(role, cwd="/tmp/work", session_name="s"),
+        compile_session_cancel_command(role, cwd="/tmp/work", session_name="s"),
+        compile_session_close_command(role, cwd="/tmp/work", session_name="s"),
+        compile_session_prompt_command(
+            role, cwd="/tmp/work", session_name="s", prompt="hi"
+        ),
+    ]
+
+
+def test_compile_command_inserts_mcp_config_after_prefix_before_global_flags() -> None:
+    role = _mcp_exec_role()  # VALID_ROLE pins acpx_binary, so the prefix is 1 element
+    argv = compile_command(role, cwd="/tmp/work", prompt="hello")
+
+    assert argv[0] == "/usr/bin/acpx"
+    assert argv[1:3] == ["--mcp-config", _MCP_CONFIG_PATH]
+    assert argv[3] == "--format"
+
+
+def test_compile_command_omits_mcp_config_when_unset() -> None:
+    role = load_role(VALID_ROLE)
+    argv = compile_command(role, cwd="/tmp/work", prompt="hello")
+
+    assert "--mcp-config" not in argv
+
+
+def test_session_commands_insert_mcp_config_between_prefix_and_global_flags() -> None:
+    role = _mcp_persistent_role()
+
+    for argv in _all_session_commands(role):
+        assert argv[:3] == ["npx", "-y", "acpx@0.12.0"]
+        assert argv[3:5] == ["--mcp-config", _MCP_CONFIG_PATH]
+        assert argv[5] == "--format"
+
+
+def test_session_commands_omit_mcp_config_when_unset() -> None:
+    role = _persistent_role()
+
+    for argv in _all_session_commands(role):
+        assert "--mcp-config" not in argv

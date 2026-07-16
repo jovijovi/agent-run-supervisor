@@ -6,6 +6,9 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
+import pytest
+
+from agent_run_supervisor.mcp_config import McpConfigError
 from agent_run_supervisor.role import load_role
 from agent_run_supervisor.runner import (
     SupervisorRunner,
@@ -841,3 +844,66 @@ def test_execute_with_optional_stdout_sink_non_inspectable_executor(
     )
 
     assert outcome.exit_code == 0
+
+
+# --- mcp_config role binding (native --mcp-config) --------------------------
+
+
+def _mcp_exec_role(valid_role_dict: dict[str, Any], work_dir: Path, config: Path) -> Any:
+    payload = dict(valid_role_dict)
+    payload["workspace"] = dict(valid_role_dict["workspace"])
+    payload["workspace"]["default_cwd"] = str(work_dir)
+    payload["workspace"]["allowed_roots"] = [str(work_dir)]
+    payload["runner"] = dict(valid_role_dict["runner"])
+    payload["runner"]["acpx_binary"] = str(work_dir / "fake-acpx")
+    payload["runner"]["mcp_config"] = str(config)
+    return load_role(payload)
+
+
+def test_exec_run_inserts_mcp_config_after_binary_prefix(
+    tmp_path: Path,
+    valid_role_dict: dict[str, Any],
+    fixtures_root: Path,
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    config = tmp_path / "mcp.json"
+    config.write_text(json.dumps({"mcpServers": []}), encoding="utf-8")
+    role = _mcp_exec_role(valid_role_dict, work_dir, config)
+    fake = RecordingExecutor(
+        SubprocessOutcome(
+            exit_code=0,
+            signal=None,
+            stdout=_success_stdout(fixtures_root),
+            stderr=b"",
+        )
+    )
+    runner = SupervisorRunner(runs_dir=tmp_path / "runs", executor=fake, watchdog_grace_ms=250)
+
+    outcome = runner.run(
+        role=role, prompt="mcp smoke", cwd=None, env={"PATH": "/usr/bin"}
+    )
+
+    assert outcome.result["status"] == "completed"
+    argv = fake.calls[0]["argv"]
+    assert argv[0] == str(work_dir / "fake-acpx")
+    assert argv[1:3] == ["--mcp-config", str(config)]
+    assert argv[3] == "--format"
+
+
+def test_exec_run_fails_closed_before_spawn_on_bad_mcp_config(
+    tmp_path: Path,
+    valid_role_dict: dict[str, Any],
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    role = _mcp_exec_role(valid_role_dict, work_dir, tmp_path / "absent.json")
+    fake = RecordingExecutor(
+        SubprocessOutcome(exit_code=0, signal=None, stdout=b"", stderr=b"")
+    )
+    runner = SupervisorRunner(runs_dir=tmp_path / "runs", executor=fake, watchdog_grace_ms=250)
+
+    with pytest.raises(McpConfigError):
+        runner.run(role=role, prompt="mcp smoke", cwd=None, env={"PATH": "/usr/bin"})
+
+    assert fake.calls == []

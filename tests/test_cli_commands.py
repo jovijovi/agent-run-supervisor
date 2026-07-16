@@ -978,3 +978,34 @@ def test_cleanup_cli_rejects_removed_include_open_flag(run_cli, tmp_path: Path) 
     # The flag was removed for H1; argparse refuses it as an unknown option.
     assert completed.returncode == 2
     assert "include-open" in (completed.stdout + completed.stderr).lower()
+
+
+def test_run_refuses_bad_mcp_config_before_launch(
+    run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], prompt_file: Path
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    role_payload = copy.deepcopy(valid_role_dict)
+    role_payload["workspace"]["default_cwd"] = str(work)
+    role_payload["workspace"]["allowed_roots"] = [str(work)]
+    role_payload["runner"]["mcp_config"] = str(tmp_path / "absent-mcp.json")
+    role_path = tmp_path / "role.json"
+    role_path.write_text(json.dumps(role_payload), encoding="utf-8")
+    runs_dir = tmp_path / "runs"
+
+    completed = run_cli(
+        [
+            "run",
+            "--role",
+            str(role_path),
+            "--prompt-file",
+            str(prompt_file),
+            "--runs-dir",
+            str(runs_dir),
+        ]
+    )
+
+    assert completed.returncode == 1
+    assert "mcp config error" in completed.stderr
+    # Fails closed before launch: no run artifacts are created.
+    assert not runs_dir.exists() or not any(runs_dir.iterdir())

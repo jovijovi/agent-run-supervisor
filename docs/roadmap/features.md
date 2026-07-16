@@ -32,6 +32,7 @@ Status legend: **Done** · **Partial** · **Planned** · **Parked** · **Non-goa
 | F-LIVE-STREAM-001 | Live stream core | Required | Done | `live_stream.py`, schema §4.1 | No delivery |
 | F-LIVE-EVENTS-001 | Event cursor API | Useful | Done | `hermes_caller/events.py` | PR3 Sachima unapproved |
 | F-SESSION-INSPECT-001 | Read-only session inspection API | Useful | Done | `session_inspect.py`, `tests/test_session_inspect.py` | Release + caller pin bump |
+| F-MCP-CONFIG-001 | Native role-bound acpx `--mcp-config` | Approved | Done | `mcp_config.py`, `tests/test_mcp_config.py`, policy/session/runtime mcp tests | Branch merge; release notes |
 | F-RELEASE-001 | Release engineering | Required | Done | `verify_local.sh`, `release.yml` | See CHANGELOG / PyPI |
 | F-NONGOAL-001 | Public ingress / IM / Gateway | Non-goal | Non-goal | PRD §6 | Separate approval |
 

@@ -73,6 +73,15 @@ Responsibilities:
   - denied permissions -> `autoDeny`;
   - default action -> deny.
 - Build acpx argv as a list, never a shell string.
+- Insert an optional role-bound `--mcp-config <runner.mcp_config>` immediately after the
+  acpx invocation prefix, before every other global flag, on exec and all
+  persistent-session commands (preflight-proven accepted with exit 0 by acpx@0.12.0 for
+  exec/new/ensure/show/status/cancel/close). The declared file must be an absolute JSON
+  config with a top-level `mcpServers` array; `mcp_config.py` binds it by canonical path
+  plus content SHA-256 into session records, and binding gain/loss/path/SHA drift
+  (including same-path content drift) fails closed on recheck before spawn. The optional
+  role field is omitted from serialization when unset, so pre-feature roles and records
+  keep byte-identical hashes/shapes. Diagnostics never embed config content.
 - Apply automation flags such as JSON output, strict parsing, read suppression, timeout, max turns, cwd, generated policy, non-interactive permission failure, optional model, and terminal disabling.
 - Compile mode-specific command tails for exec and persistent-session operations.
 - Compile fixture-proven persistent-session commands:
