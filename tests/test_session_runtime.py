@@ -1295,7 +1295,7 @@ def test_create_session_binds_mcp_config_and_flags_management_argv(
 
     argv = fake.calls[0]["argv"]
     assert argv[:3] == ["npx", "-y", "acpx@0.12.0"]
-    assert argv[3:5] == ["--mcp-config", str(config)]
+    assert argv[3:5] == ["--mcp-config", os.path.realpath(config)]
 
     data = json.loads(
         (sessions_dir / "sess-mcp" / "session.json").read_text(encoding="utf-8")
@@ -1338,7 +1338,76 @@ def test_send_carries_mcp_config_flag_on_prompt_turn(
     assert turn.result["status"] == "completed"
     argv = fake.calls[1]["argv"]
     assert argv[:3] == ["npx", "-y", "acpx@0.12.0"]
-    assert argv[3:5] == ["--mcp-config", str(config)]
+    assert argv[3:5] == ["--mcp-config", os.path.realpath(config)]
+
+
+def test_session_lifecycle_compiles_canonical_mcp_target_not_declared_symlink(
+    valid_role_dict, work_dir, sessions_dir, tmp_path
+) -> None:
+    # Symlink-swap TOCTOU regression: every spawned lifecycle argv (management
+    # AND prompt turn) must consume the verified canonical target, so replacing
+    # the declared symlink after validation cannot redirect what acpx reads.
+    real = tmp_path / "real-mcp.json"
+    _write_mcp(real, [])
+    link = tmp_path / "declared-mcp.json"
+    link.symlink_to(real)
+    role = _mcp_persistent_role(valid_role_dict, work_dir, link)
+    fake = FakeExecutor(
+        [
+            _outcome(_new_named()),
+            _outcome(_turn1()),
+            _outcome(_status_alive()),
+            _outcome(_close_named()),
+        ]
+    )
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+
+    runtime.create_session(
+        role=role, session_id="sess-mcp", session_name="nightly", now=T0
+    )
+    runtime.send(role=role, session_id="sess-mcp", prompt="hello", now=T1)
+    runtime.status(role=role, session_id="sess-mcp")
+    runtime.close(role=role, session_id="sess-mcp", now=T1)
+
+    assert len(fake.calls) == 4
+    canonical = os.path.realpath(real)
+    for call in fake.calls:
+        argv = call["argv"]
+        assert argv[3:5] == ["--mcp-config", canonical]
+        assert str(link) not in argv
+
+    # The persisted binding matches what every argv consumed.
+    data = json.loads(
+        (sessions_dir / "sess-mcp" / "session.json").read_text(encoding="utf-8")
+    )
+    assert data["mcp_config_path"] == canonical
+
+
+def test_send_fails_closed_when_declared_symlink_retargeted(
+    valid_role_dict, work_dir, sessions_dir, tmp_path
+) -> None:
+    # Retargeting the declared symlink to a different (even validly-shaped)
+    # config must fail the pre-spawn binding revalidation: canonical path (and
+    # content SHA) no longer match the recorded binding.
+    real = tmp_path / "real-mcp.json"
+    _write_mcp(real, [])
+    link = tmp_path / "declared-mcp.json"
+    link.symlink_to(real)
+    role = _mcp_persistent_role(valid_role_dict, work_dir, link)
+    fake = FakeExecutor([_outcome(_new_named())])
+    runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
+    runtime.create_session(role=role, session_id="sess-mcp", now=T0)
+
+    swapped = tmp_path / "swapped-mcp.json"
+    _write_mcp(swapped, [{"name": "attacker"}])
+    link.unlink()
+    link.symlink_to(swapped)
+
+    with pytest.raises(SessionBindingError) as excinfo:
+        runtime.send(role=role, session_id="sess-mcp", prompt="hello", now=T1)
+
+    assert "mcp_config_path" in str(excinfo.value)
+    assert len(fake.calls) == 1  # the create management call only; no turn spawn
 
 
 def test_send_rechecks_mcp_content_drift_before_spawn(

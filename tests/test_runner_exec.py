@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -887,8 +888,43 @@ def test_exec_run_inserts_mcp_config_after_binary_prefix(
     assert outcome.result["status"] == "completed"
     argv = fake.calls[0]["argv"]
     assert argv[0] == str(work_dir / "fake-acpx")
-    assert argv[1:3] == ["--mcp-config", str(config)]
+    assert argv[1:3] == ["--mcp-config", os.path.realpath(config)]
     assert argv[3] == "--format"
+
+
+def test_exec_run_compiles_canonical_mcp_target_not_declared_symlink(
+    tmp_path: Path,
+    valid_role_dict: dict[str, Any],
+    fixtures_root: Path,
+) -> None:
+    # Symlink-swap TOCTOU regression: the spawned argv must consume the
+    # verified canonical target captured by resolve_mcp_config, so replacing
+    # the declared symlink after validation cannot redirect what acpx reads.
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    real = tmp_path / "real-mcp.json"
+    real.write_text(json.dumps({"mcpServers": []}), encoding="utf-8")
+    link = tmp_path / "declared-mcp.json"
+    link.symlink_to(real)
+    role = _mcp_exec_role(valid_role_dict, work_dir, link)
+    fake = RecordingExecutor(
+        SubprocessOutcome(
+            exit_code=0,
+            signal=None,
+            stdout=_success_stdout(fixtures_root),
+            stderr=b"",
+        )
+    )
+    runner = SupervisorRunner(runs_dir=tmp_path / "runs", executor=fake, watchdog_grace_ms=250)
+
+    outcome = runner.run(
+        role=role, prompt="mcp smoke", cwd=None, env={"PATH": "/usr/bin"}
+    )
+
+    assert outcome.result["status"] == "completed"
+    argv = fake.calls[0]["argv"]
+    assert argv[1:3] == ["--mcp-config", os.path.realpath(real)]
+    assert str(link) not in argv
 
 
 def test_exec_run_fails_closed_before_spawn_on_bad_mcp_config(

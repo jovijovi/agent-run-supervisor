@@ -302,7 +302,7 @@ class SessionStore:
         *,
         role: AgentRoleSpec,
         workspace_result: WorkspaceValidationResult,
-    ) -> None:
+    ) -> McpConfigBinding | None:
         """Refuse to proceed unless ``record`` still matches the live role.
 
         Checks role hash, policy hash, workspace hash, acpx version, adapter,
@@ -311,7 +311,11 @@ class SessionStore:
 
         The mcp_config check re-reads the declared config file, so callers
         that re-validate under their lease/lifecycle guard also recheck for
-        same-path content drift immediately before spawning acpx.
+        same-path content drift immediately before spawning acpx. On success
+        it returns the freshly verified :class:`McpConfigBinding` (``None``
+        for unbound roles); callers must compile the spawned argv from this
+        binding's canonical path so a declared symlink swapped after
+        validation can never redirect what acpx reads.
         """
         mismatches: list[str] = []
         if record.role_hash != role_hash(role):
@@ -324,21 +328,26 @@ class SessionStore:
             mismatches.append("acpx_version")
         if record.adapter_agent != role.runner.adapter_agent:
             mismatches.append("adapter_agent")
-        mismatches.extend(self._mcp_binding_mismatches(record, role))
+        mcp_mismatches, mcp_binding = self._mcp_binding_state(record, role)
+        mismatches.extend(mcp_mismatches)
         if mismatches:
             raise SessionBindingError(
                 f"session {record.session_id!r} binding mismatch: "
                 f"{', '.join(mismatches)} differ from the current role",
             )
+        return mcp_binding
 
     @staticmethod
-    def _mcp_binding_mismatches(record: SessionRecord, role: AgentRoleSpec) -> list[str]:
+    def _mcp_binding_state(
+        record: SessionRecord, role: AgentRoleSpec
+    ) -> tuple[list[str], McpConfigBinding | None]:
         """Compare the record's persisted mcp_config binding against the live role.
 
         Fails closed on binding gain/loss, canonical-path change, and content
         SHA drift (same path, different bytes — invisible to ``role_hash``).
         A declared config that can no longer be verified is itself a binding
         failure. Diagnostics carry mismatch names only, never config content.
+        Returns the mismatch names plus the freshly verified binding.
         """
         try:
             current = resolve_mcp_config(role)
@@ -348,15 +357,15 @@ class SessionStore:
                 f"verified: {exc}",
             ) from exc
         if record.mcp_config_path is None and record.mcp_config_sha256 is None:
-            return ["mcp_config_gained"] if current is not None else []
+            return (["mcp_config_gained"] if current is not None else [], current)
         if current is None:
-            return ["mcp_config_lost"]
+            return (["mcp_config_lost"], None)
         mismatches: list[str] = []
         if record.mcp_config_path != current.path:
             mismatches.append("mcp_config_path")
         if record.mcp_config_sha256 != current.sha256:
             mismatches.append("mcp_config_sha256")
-        return mismatches
+        return (mismatches, current)
 
     # -- stale-lock detection (W4, read-only) -----------------------------
 

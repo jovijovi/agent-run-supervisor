@@ -1137,6 +1137,38 @@ def test_validate_binding_accepts_matching_mcp_config(
     store.validate_binding(record, role=role, workspace_result=workspace)
 
 
+def test_validate_binding_returns_verified_binding_for_compilation(
+    store, role, workspace, valid_role_dict, work_dir, tmp_path
+) -> None:
+    # Callers compile the spawned argv from the binding validate_binding just
+    # verified (canonical path + content SHA), so the consumed path can never
+    # be the raw declared one. Unbound roles verify to None.
+    unbound = store.create_session(
+        session_id="sess-unbound", role=role, workspace_result=workspace, now=T0
+    )
+    assert store.validate_binding(unbound, role=role, workspace_result=workspace) is None
+
+    config = tmp_path / "mcp.json"
+    _write_mcp(config, [])
+    bound_role = _mcp_role(valid_role_dict, work_dir, config)
+    bound_workspace = validate_effective_cwd(bound_role, override=None)
+    record = store.create_session(
+        session_id="sess-bound",
+        role=bound_role,
+        workspace_result=bound_workspace,
+        mcp_binding=resolve_mcp_config(bound_role),
+        now=T0,
+    )
+
+    binding = store.validate_binding(
+        record, role=bound_role, workspace_result=bound_workspace
+    )
+
+    assert binding is not None
+    assert binding.path == record.mcp_config_path
+    assert binding.sha256 == record.mcp_config_sha256
+
+
 def test_validate_binding_refuses_mcp_config_gain(
     store, role, workspace, valid_role_dict, work_dir, tmp_path
 ) -> None:

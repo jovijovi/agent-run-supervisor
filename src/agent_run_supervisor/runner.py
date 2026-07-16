@@ -20,7 +20,7 @@ from agent_run_supervisor.exit_classifier import (
     ClassifierInput,
     classify_exit,
 )
-from agent_run_supervisor.mcp_config import resolve_mcp_config
+from agent_run_supervisor.mcp_config import McpConfigBinding, resolve_mcp_config
 from agent_run_supervisor.parser import (
     ParseResult,
     has_observed_effect,
@@ -129,12 +129,15 @@ class SupervisorRunner:
         env: Mapping[str, str] | None,
         dry_run: bool,
         workspace: WorkspaceValidationResult,
+        mcp_binding: McpConfigBinding | None = None,
     ) -> _ArtifactBundle:
         run_id = _generate_run_id()
         handle = self.store.create_run(run_id)
 
         resolved_cwd_str = str(workspace.effective_cwd)
-        argv = compile_command(role, cwd=resolved_cwd_str, prompt=prompt)
+        argv = compile_command(
+            role, cwd=resolved_cwd_str, prompt=prompt, mcp_binding=mcp_binding
+        )
         policy = compile_permission_policy(role)
         report = RedactionReport()
 
@@ -244,8 +247,10 @@ class SupervisorRunner:
         workspace = validate_effective_cwd(role, cwd)
         # Verify the role's declared MCP config immediately before spawn: the
         # exec path fails closed (no artifacts, no launch) unless the declared
-        # file is an absolute JSON config with a top-level mcpServers array.
-        resolve_mcp_config(role)
+        # file is an absolute regular JSON config with a top-level mcpServers
+        # array. The verified canonical binding is what the compiled argv
+        # consumes — never the raw declared path (symlink-swap TOCTOU).
+        mcp_binding = resolve_mcp_config(role)
         env_map = dict(env) if env is not None else dict(os.environ)
         bundle = self._prepare_artifacts(
             role=role,
@@ -254,6 +259,7 @@ class SupervisorRunner:
             env=env_map,
             dry_run=False,
             workspace=workspace,
+            mcp_binding=mcp_binding,
         )
         live_sink = LiveEventSink(bundle.handle, bundle.redaction_report, max_output_bytes=role.limits.max_output_bytes)
         subprocess_outcome = execute_with_optional_stdout_sink(

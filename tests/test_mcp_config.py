@@ -11,6 +11,7 @@ import copy
 import hashlib
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +80,78 @@ def test_resolve_sha_tracks_same_path_content_drift(tmp_path, valid_role_dict) -
 
     assert before.path == after.path
     assert before.sha256 != after.sha256
+
+
+# --- non-regular file rejection (fail closed, never open/block) --------------
+#
+# A declared FIFO must never block validation: ``open()`` on a reader-less FIFO
+# hangs forever, so resolution must reject non-regular file types before any
+# blocking open. Each probe runs on a watchdog thread so a regression that
+# blocks fails the test in bounded time instead of hanging the suite.
+
+_RESOLVE_BOUND_SECONDS = 5.0
+
+
+def _resolve_bounded(role) -> dict[str, Any]:
+    outcome: dict[str, Any] = {}
+
+    def _target() -> None:
+        try:
+            outcome["binding"] = resolve_mcp_config(role)
+        except BaseException as exc:  # noqa: BLE001 - capture for assertion
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=_target, daemon=True)
+    worker.start()
+    worker.join(_RESOLVE_BOUND_SECONDS)
+    if worker.is_alive():
+        pytest.fail(
+            "resolve_mcp_config blocked on a non-regular file instead of "
+            "failing closed"
+        )
+    return outcome
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires POSIX FIFOs")
+def test_resolve_rejects_fifo_without_blocking(tmp_path, valid_role_dict) -> None:
+    fifo = tmp_path / "mcp.fifo"
+    os.mkfifo(fifo)
+    role = _role(valid_role_dict, str(fifo))
+
+    outcome = _resolve_bounded(role)
+
+    error = outcome.get("error")
+    assert isinstance(error, McpConfigError)
+    assert "regular file" in str(error)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires POSIX FIFOs")
+def test_resolve_rejects_symlink_to_fifo_without_blocking(
+    tmp_path, valid_role_dict
+) -> None:
+    fifo = tmp_path / "real.fifo"
+    os.mkfifo(fifo)
+    link = tmp_path / "mcp.json"
+    link.symlink_to(fifo)
+    role = _role(valid_role_dict, str(link))
+
+    outcome = _resolve_bounded(role)
+
+    error = outcome.get("error")
+    assert isinstance(error, McpConfigError)
+    assert "regular file" in str(error)
+
+
+def test_resolve_rejects_directory_as_non_regular(tmp_path, valid_role_dict) -> None:
+    config_dir = tmp_path / "mcp-config-dir"
+    config_dir.mkdir()
+    role = _role(valid_role_dict, str(config_dir))
+
+    outcome = _resolve_bounded(role)
+
+    error = outcome.get("error")
+    assert isinstance(error, McpConfigError)
+    assert "regular file" in str(error)
 
 
 def test_resolve_fails_closed_on_missing_file(tmp_path, valid_role_dict) -> None:
