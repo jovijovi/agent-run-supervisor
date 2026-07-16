@@ -53,6 +53,7 @@ from agent_run_supervisor.exit_classifier import (
 )
 from agent_run_supervisor.goal import is_slash_prompt
 from agent_run_supervisor.live_stream import LiveEventSink
+from agent_run_supervisor.mcp_config import McpConfigBinding, resolve_mcp_config
 from agent_run_supervisor.parser import (
     ManagementParseError,
     ParseResult,
@@ -203,10 +204,17 @@ class SessionRuntime:
         # Fail closed before spawning acpx if the local record already exists
         # (also validates the session id is a safe path component).
         self._refuse_existing(session_id)
+        # Verify the role's declared MCP config (canonical path + content SHA)
+        # BEFORE spawning the management command; the binding captured here is
+        # what every later lifecycle operation revalidates against.
+        mcp_binding = resolve_mcp_config(role)
 
         effective_name = session_name or session_id
         argv = compile_session_create_command(
-            role, cwd=str(workspace.effective_cwd), session_name=effective_name
+            role,
+            cwd=str(workspace.effective_cwd),
+            session_name=effective_name,
+            mcp_binding=mcp_binding,
         )
         outcome = self._run(argv=argv, role=role, workspace=workspace, env=env)
         summary = self._require_management_summary(
@@ -223,6 +231,7 @@ class SessionRuntime:
             workspace_result=workspace,
             acpx_session_id=acpx_session_id if isinstance(acpx_session_id, str) else None,
             session_name=effective_name,
+            mcp_binding=mcp_binding,
             now=now,
         )
         self._write_management_artifact(session_id, "create.json", summary)
@@ -283,7 +292,12 @@ class SessionRuntime:
             # acquired lease to close the pre-lease TOCTOU window where a close
             # could complete after the first ensure_open but before this send's lock.
             self.store.ensure_open(locked_record)
-            self.store.validate_binding(locked_record, role=role, workspace_result=workspace)
+            # The under-lease revalidation returns the freshly verified
+            # canonical mcp binding; the prompt argv compiles from it so a
+            # declared symlink swapped after this check cannot redirect acpx.
+            mcp_binding = self.store.validate_binding(
+                locked_record, role=role, workspace_result=workspace
+            )
             prompt_session_name = locked_record.session_name or session_id
             return self._run_turn(
                 role=role,
@@ -293,6 +307,7 @@ class SessionRuntime:
                 prompt_session_name=prompt_session_name,
                 env=env,
                 lock_token=lock.token,
+                mcp_binding=mcp_binding,
             )
         finally:
             self._release_quietly(session_id, lock.token)
@@ -310,11 +325,16 @@ class SessionRuntime:
         ensure_persistent_strategy(role)
         record = self.store.open_session(session_id)
         workspace = validate_effective_cwd(role, cwd)
-        self.store.validate_binding(record, role=role, workspace_result=workspace)
+        mcp_binding = self.store.validate_binding(
+            record, role=role, workspace_result=workspace
+        )
 
         show_name = record.session_name or session_id
         argv = compile_session_status_command(
-            role, cwd=str(workspace.effective_cwd), session_name=show_name
+            role,
+            cwd=str(workspace.effective_cwd),
+            session_name=show_name,
+            mcp_binding=mcp_binding,
         )
         outcome = self._run(argv=argv, role=role, workspace=workspace, env=env)
         summary = self._require_management_summary(
@@ -359,7 +379,9 @@ class SessionRuntime:
         with self.store.lifecycle_guard(session_id):
             locked_record = self.store.open_session(session_id)
             self.store.ensure_open(locked_record)
-            self.store.validate_binding(locked_record, role=role, workspace_result=workspace)
+            mcp_binding = self.store.validate_binding(
+                locked_record, role=role, workspace_result=workspace
+            )
             close_name = locked_record.session_name or session_id
             lease_seconds = role.session.lease_seconds or DEFAULT_SESSION_LEASE_SECONDS
             lock = self.store.acquire_lock(
@@ -373,7 +395,10 @@ class SessionRuntime:
             )
             try:
                 argv = compile_session_close_command(
-                    role, cwd=str(workspace.effective_cwd), session_name=close_name
+                    role,
+                    cwd=str(workspace.effective_cwd),
+                    session_name=close_name,
+                    mcp_binding=mcp_binding,
                 )
                 outcome = self._run(
                     argv=argv,
@@ -432,10 +457,15 @@ class SessionRuntime:
         with self.store.lifecycle_guard(session_id):
             locked_record = self.store.open_session(session_id)
             self.store.ensure_open(locked_record)
-            self.store.validate_binding(locked_record, role=role, workspace_result=workspace)
+            mcp_binding = self.store.validate_binding(
+                locked_record, role=role, workspace_result=workspace
+            )
             cancel_name = locked_record.session_name or session_id
             argv = compile_session_cancel_command(
-                role, cwd=str(workspace.effective_cwd), session_name=cancel_name
+                role,
+                cwd=str(workspace.effective_cwd),
+                session_name=cancel_name,
+                mcp_binding=mcp_binding,
             )
             outcome = self._run(argv=argv, role=role, workspace=workspace, env=env)
             summary = self._require_management_summary(
@@ -597,6 +627,7 @@ class SessionRuntime:
         prompt_session_name: str,
         env: Mapping[str, str] | None,
         lock_token: str,
+        mcp_binding: McpConfigBinding | None = None,
     ) -> SessionTurnOutcome:
         turn_id = _generate_turn_id()
         secure_mkdir(self.sessions_dir / session_id / TURNS_DIR)
@@ -621,6 +652,7 @@ class SessionRuntime:
             cwd=str(workspace.effective_cwd),
             session_name=prompt_session_name,
             prompt=prompt,
+            mcp_binding=mcp_binding,
         )
         live_sink = LiveEventSink(handle, report, max_output_bytes=role.limits.max_output_bytes)
         outcome = self._run(

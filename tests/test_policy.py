@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+from pathlib import Path
 
 import pytest
 
+from agent_run_supervisor.mcp_config import McpConfigError, resolve_mcp_config
 from agent_run_supervisor.policy import (
     ExecStrategyError,
     compile_command,
@@ -546,3 +549,148 @@ def test_policy_hash_identical_for_exec_and_persistent_strategy() -> None:
     persistent = _persistent_role()
 
     assert policy_hash(exec_role) == policy_hash(persistent)
+
+
+# --- native role-bound --mcp-config insertion --------------------------------
+#
+# Preflight-proven: acpx@0.12.0 accepts a global ``--mcp-config`` (exit 0) for
+# exec and for sessions new/ensure/show, status, cancel, and close. The flag is
+# inserted immediately after the acpx invocation prefix, before every other
+# global flag, on ALL compiled commands, and it always carries the VERIFIED
+# canonical config path — never the raw declared path. Compiling the declared
+# path re-opens the symlink-swap TOCTOU: a symlink replaced after validation
+# would make acpx read a different config than the recorded binding.
+
+
+def _write_mcp_config(path: Path) -> None:
+    path.write_text(json.dumps({"mcpServers": []}), encoding="utf-8")
+
+
+def _mcp_exec_role(config: Path):
+    spec = copy.deepcopy(VALID_ROLE)
+    spec["runner"] = {**spec["runner"], "mcp_config": str(config)}
+    return load_role(spec)
+
+
+def _mcp_persistent_role(config: Path):
+    spec = copy.deepcopy(VALID_ROLE)
+    spec["session"] = {"strategy": "persistent"}
+    spec["runner"] = {
+        **spec["runner"],
+        "acpx_binary": None,
+        "mcp_config": str(config),
+    }
+    return load_role(spec)
+
+
+def _all_session_commands(role) -> list[list[str]]:
+    return [
+        compile_session_create_command(role, cwd="/tmp/work", session_name="s"),
+        compile_session_ensure_command(role, cwd="/tmp/work", session_name="s"),
+        compile_session_show_command(role, cwd="/tmp/work", session_name="s"),
+        compile_session_status_command(role, cwd="/tmp/work", session_name="s"),
+        compile_session_cancel_command(role, cwd="/tmp/work", session_name="s"),
+        compile_session_close_command(role, cwd="/tmp/work", session_name="s"),
+        compile_session_prompt_command(
+            role, cwd="/tmp/work", session_name="s", prompt="hi"
+        ),
+    ]
+
+
+def test_compile_command_inserts_mcp_config_after_prefix_before_global_flags(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "mcp.json"
+    _write_mcp_config(config)
+    role = _mcp_exec_role(config)  # VALID_ROLE pins acpx_binary: 1-element prefix
+    argv = compile_command(role, cwd="/tmp/work", prompt="hello")
+
+    assert argv[0] == "/usr/bin/acpx"
+    assert argv[1:3] == ["--mcp-config", os.path.realpath(config)]
+    assert argv[3] == "--format"
+
+
+def test_compile_command_omits_mcp_config_when_unset() -> None:
+    role = load_role(VALID_ROLE)
+    argv = compile_command(role, cwd="/tmp/work", prompt="hello")
+
+    assert "--mcp-config" not in argv
+
+
+def test_session_commands_insert_mcp_config_between_prefix_and_global_flags(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "mcp.json"
+    _write_mcp_config(config)
+    role = _mcp_persistent_role(config)
+
+    for argv in _all_session_commands(role):
+        assert argv[:3] == ["npx", "-y", "acpx@0.12.0"]
+        assert argv[3:5] == ["--mcp-config", os.path.realpath(config)]
+        assert argv[5] == "--format"
+
+
+def test_session_commands_omit_mcp_config_when_unset() -> None:
+    role = _persistent_role()
+
+    for argv in _all_session_commands(role):
+        assert "--mcp-config" not in argv
+
+
+# --- symlink-swap TOCTOU regression: argv must carry the canonical path ------
+
+
+def test_compile_command_uses_canonical_target_not_declared_symlink(
+    tmp_path: Path,
+) -> None:
+    real = tmp_path / "real-mcp.json"
+    _write_mcp_config(real)
+    link = tmp_path / "declared-mcp.json"
+    link.symlink_to(real)
+    role = _mcp_exec_role(link)
+
+    argv = compile_command(role, cwd="/tmp/work", prompt="hello")
+
+    # The compiled argv must consume the verified canonical target so a
+    # post-validation symlink swap cannot redirect what acpx reads.
+    assert argv[1:3] == ["--mcp-config", os.path.realpath(real)]
+    assert str(link) not in argv
+
+
+def test_all_session_commands_use_canonical_target_not_declared_symlink(
+    tmp_path: Path,
+) -> None:
+    real = tmp_path / "real-mcp.json"
+    _write_mcp_config(real)
+    link = tmp_path / "declared-mcp.json"
+    link.symlink_to(real)
+    role = _mcp_persistent_role(link)
+
+    for argv in _all_session_commands(role):
+        assert argv[3:5] == ["--mcp-config", os.path.realpath(real)]
+        assert str(link) not in argv
+
+
+def test_compile_command_consumes_supplied_verified_binding(tmp_path: Path) -> None:
+    config = tmp_path / "mcp.json"
+    _write_mcp_config(config)
+    role = _mcp_exec_role(config)
+    binding = resolve_mcp_config(role)
+    # Deleting the file afterwards proves the compiler consumes the verified
+    # binding it was handed instead of silently re-reading the declared path.
+    config.unlink()
+
+    argv = compile_command(role, cwd="/tmp/work", prompt="hello", mcp_binding=binding)
+
+    assert argv[1:3] == ["--mcp-config", binding.path]
+
+
+def test_compile_command_fails_closed_when_declared_config_unverifiable(
+    tmp_path: Path,
+) -> None:
+    role = _mcp_exec_role(tmp_path / "absent-mcp.json")
+
+    # Without a pre-verified binding the compiler must fail closed rather than
+    # ever emitting an unverified declared path into argv.
+    with pytest.raises(McpConfigError):
+        compile_command(role, cwd="/tmp/work", prompt="hello")

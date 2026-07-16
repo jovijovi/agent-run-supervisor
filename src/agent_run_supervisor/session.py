@@ -27,6 +27,11 @@ from agent_run_supervisor.event_store import (
     secure_mkdir,
 )
 from agent_run_supervisor import process_liveness as _liveness
+from agent_run_supervisor.mcp_config import (
+    McpConfigBinding,
+    McpConfigError,
+    resolve_mcp_config,
+)
 from agent_run_supervisor.policy import policy_hash
 from agent_run_supervisor.role import (
     DEFAULT_SESSION_LEASE_SECONDS,
@@ -103,6 +108,11 @@ class SessionRecord:
     updated_at: str
     acpx_session_id: str | None = None
     session_name: str | None = None
+    # Optional native --mcp-config binding: canonical config path + content
+    # SHA captured at create time. Omitted from session.json when unset so
+    # pre-feature records keep their exact serialized shape.
+    mcp_config_path: str | None = None
+    mcp_config_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -171,6 +181,7 @@ class SessionStore:
         workspace_result: WorkspaceValidationResult,
         acpx_session_id: str | None = None,
         session_name: str | None = None,
+        mcp_binding: McpConfigBinding | None = None,
         now: _dt.datetime | None = None,
     ) -> SessionRecord:
         session_dir = self._session_dir(session_id)
@@ -198,11 +209,15 @@ class SessionStore:
             updated_at=moment,
             acpx_session_id=acpx_session_id,
             session_name=session_name,
+            mcp_config_path=mcp_binding.path if mcp_binding is not None else None,
+            mcp_config_sha256=mcp_binding.sha256 if mcp_binding is not None else None,
         )
 
         secure_mkdir(session_dir)
         try:
-            exclusive_create_bytes(session_dir / SESSION_JSON, _json_bytes(asdict(record)))
+            exclusive_create_bytes(
+                session_dir / SESSION_JSON, _json_bytes(_record_to_dict(record))
+            )
         except FileExistsError as exc:
             raise SessionExistsError(f"session {session_id!r} already exists") from exc
         return record
@@ -276,7 +291,7 @@ class SessionStore:
                 )
             moment = _ensure_aware(now or _utc_now()).isoformat()
             closed = replace(record, state=STATE_CLOSED, updated_at=moment)
-            atomic_write_json(session_dir / SESSION_JSON, asdict(closed))
+            atomic_write_json(session_dir / SESSION_JSON, _record_to_dict(closed))
             return closed
 
     # -- binding gate -----------------------------------------------------
@@ -287,12 +302,20 @@ class SessionStore:
         *,
         role: AgentRoleSpec,
         workspace_result: WorkspaceValidationResult,
-    ) -> None:
+    ) -> McpConfigBinding | None:
         """Refuse to proceed unless ``record`` still matches the live role.
 
-        Checks role hash, policy hash, workspace hash, acpx version, and adapter
-        before any caller mutates the session. Raises ``SessionBindingError`` on
-        the first mismatch.
+        Checks role hash, policy hash, workspace hash, acpx version, adapter,
+        and the optional mcp_config binding before any caller mutates the
+        session. Raises ``SessionBindingError`` on the first mismatch.
+
+        The mcp_config check re-reads the declared config file, so callers
+        that re-validate under their lease/lifecycle guard also recheck for
+        same-path content drift immediately before spawning acpx. On success
+        it returns the freshly verified :class:`McpConfigBinding` (``None``
+        for unbound roles); callers must compile the spawned argv from this
+        binding's canonical path so a declared symlink swapped after
+        validation can never redirect what acpx reads.
         """
         mismatches: list[str] = []
         if record.role_hash != role_hash(role):
@@ -305,11 +328,44 @@ class SessionStore:
             mismatches.append("acpx_version")
         if record.adapter_agent != role.runner.adapter_agent:
             mismatches.append("adapter_agent")
+        mcp_mismatches, mcp_binding = self._mcp_binding_state(record, role)
+        mismatches.extend(mcp_mismatches)
         if mismatches:
             raise SessionBindingError(
                 f"session {record.session_id!r} binding mismatch: "
                 f"{', '.join(mismatches)} differ from the current role",
             )
+        return mcp_binding
+
+    @staticmethod
+    def _mcp_binding_state(
+        record: SessionRecord, role: AgentRoleSpec
+    ) -> tuple[list[str], McpConfigBinding | None]:
+        """Compare the record's persisted mcp_config binding against the live role.
+
+        Fails closed on binding gain/loss, canonical-path change, and content
+        SHA drift (same path, different bytes — invisible to ``role_hash``).
+        A declared config that can no longer be verified is itself a binding
+        failure. Diagnostics carry mismatch names only, never config content.
+        Returns the mismatch names plus the freshly verified binding.
+        """
+        try:
+            current = resolve_mcp_config(role)
+        except McpConfigError as exc:
+            raise SessionBindingError(
+                f"session {record.session_id!r} mcp_config binding cannot be "
+                f"verified: {exc}",
+            ) from exc
+        if record.mcp_config_path is None and record.mcp_config_sha256 is None:
+            return (["mcp_config_gained"] if current is not None else [], current)
+        if current is None:
+            return (["mcp_config_lost"], None)
+        mismatches: list[str] = []
+        if record.mcp_config_path != current.path:
+            mismatches.append("mcp_config_path")
+        if record.mcp_config_sha256 != current.sha256:
+            mismatches.append("mcp_config_sha256")
+        return (mismatches, current)
 
     # -- stale-lock detection (W4, read-only) -----------------------------
 
@@ -541,6 +597,19 @@ class SessionStore:
 
 def _json_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, sort_keys=True, indent=2).encode("utf-8")
+
+
+def _record_to_dict(record: SessionRecord) -> dict[str, Any]:
+    """Serialize a record, omitting the optional mcp_config binding when unset.
+
+    Zero-migration shape: records for roles without mcp_config keep the exact
+    pre-feature ``session.json`` key set.
+    """
+    data = asdict(record)
+    if record.mcp_config_path is None and record.mcp_config_sha256 is None:
+        del data["mcp_config_path"]
+        del data["mcp_config_sha256"]
+    return data
 
 
 @contextmanager

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 
+from agent_run_supervisor.mcp_config import McpConfigBinding, resolve_mcp_config
 from agent_run_supervisor.role import AgentRoleSpec
 
 
@@ -71,11 +72,34 @@ def compile_permission_policy(role: AgentRoleSpec) -> dict:
     }
 
 
-def _acpx_prefix(role: AgentRoleSpec) -> list[str]:
-    """Pinned acpx invocation prefix: explicit binary, else pinned ``npx`` fetch."""
+def _acpx_prefix(
+    role: AgentRoleSpec, mcp_binding: McpConfigBinding | None
+) -> list[str]:
+    """Pinned acpx invocation prefix: explicit binary, else pinned ``npx`` fetch.
+
+    A role-declared MCP config rides immediately after the prefix, before
+    every other global flag, on ALL compiled commands (exec, prompt turns,
+    and session management) — preflight-proven: acpx@0.12.0 accepts a global
+    ``--mcp-config`` with exit 0 across exec/new/ensure/show/status/cancel/
+    close, and a real ARS Claude probe succeeded via the parameter.
+
+    The flag always carries the VERIFIED canonical config path from a
+    :class:`McpConfigBinding`, never the raw declared path: compiling the
+    declared path re-opens the symlink-swap TOCTOU where a symlink replaced
+    after validation makes acpx read a different config than the recorded
+    binding. Callers that already revalidated pass their binding in; when no
+    binding is supplied the declared config is resolved (fail-closed) here so
+    an unverified path can never enter argv.
+    """
     if role.runner.acpx_binary:
-        return [role.runner.acpx_binary]
-    return ["npx", "-y", f"acpx@{role.runner.acpx_version}"]
+        argv = [role.runner.acpx_binary]
+    else:
+        argv = ["npx", "-y", f"acpx@{role.runner.acpx_version}"]
+    if role.runner.mcp_config:
+        if mcp_binding is None:
+            mcp_binding = resolve_mcp_config(role)
+        argv.extend(["--mcp-config", mcp_binding.path])
+    return argv
 
 
 def _resolve_cwd(role: AgentRoleSpec, cwd: str | None) -> str:
@@ -174,9 +198,10 @@ def compile_command(
     role: AgentRoleSpec,
     cwd: str | None,
     prompt: str,
+    mcp_binding: McpConfigBinding | None = None,
 ) -> list[str]:
     ensure_exec_strategy(role)
-    argv = _acpx_prefix(role)
+    argv = _acpx_prefix(role, mcp_binding)
     argv.extend(_exec_turn_flags(role, _resolve_cwd(role, cwd)))
     argv.extend([role.runner.adapter_agent, "exec", prompt])
     return argv
@@ -186,11 +211,12 @@ def compile_session_create_command(
     role: AgentRoleSpec,
     cwd: str | None,
     session_name: str,
+    mcp_binding: McpConfigBinding | None = None,
 ) -> list[str]:
     """``<adapter> sessions new --name <session_name>`` (creates a named session)."""
     ensure_persistent_strategy(role)
     name = _require_session_name(session_name)
-    argv = _acpx_prefix(role)
+    argv = _acpx_prefix(role, mcp_binding)
     argv.extend(_management_flags(_resolve_cwd(role, cwd)))
     argv.extend([role.runner.adapter_agent, "sessions", "new", "--name", name])
     return argv
@@ -200,11 +226,12 @@ def compile_session_ensure_command(
     role: AgentRoleSpec,
     cwd: str | None,
     session_name: str,
+    mcp_binding: McpConfigBinding | None = None,
 ) -> list[str]:
     """``<adapter> sessions ensure --name <session_name>`` (idempotent open)."""
     ensure_persistent_strategy(role)
     name = _require_session_name(session_name)
-    argv = _acpx_prefix(role)
+    argv = _acpx_prefix(role, mcp_binding)
     argv.extend(_management_flags(_resolve_cwd(role, cwd)))
     argv.extend([role.runner.adapter_agent, "sessions", "ensure", "--name", name])
     return argv
@@ -214,11 +241,12 @@ def compile_session_show_command(
     role: AgentRoleSpec,
     cwd: str | None,
     session_name: str,
+    mcp_binding: McpConfigBinding | None = None,
 ) -> list[str]:
     """``<adapter> sessions show <session_name>`` (durable session record query)."""
     ensure_persistent_strategy(role)
     name = _require_session_name(session_name)
-    argv = _acpx_prefix(role)
+    argv = _acpx_prefix(role, mcp_binding)
     argv.extend(_management_flags(_resolve_cwd(role, cwd)))
     argv.extend([role.runner.adapter_agent, "sessions", "show", name])
     return argv
@@ -228,11 +256,12 @@ def compile_session_status_command(
     role: AgentRoleSpec,
     cwd: str | None,
     session_name: str,
+    mcp_binding: McpConfigBinding | None = None,
 ) -> list[str]:
     """``<adapter> status -s <session_name>`` (live status snapshot query)."""
     ensure_persistent_strategy(role)
     name = _require_session_name(session_name)
-    argv = _acpx_prefix(role)
+    argv = _acpx_prefix(role, mcp_binding)
     argv.extend(_management_flags(_resolve_cwd(role, cwd)))
     argv.extend([role.runner.adapter_agent, "status", "-s", name])
     return argv
@@ -242,6 +271,7 @@ def compile_session_close_command(
     role: AgentRoleSpec,
     cwd: str | None,
     session_name: str,
+    mcp_binding: McpConfigBinding | None = None,
 ) -> list[str]:
     """``<adapter> sessions close <session_name>`` (terminal session close).
 
@@ -251,7 +281,7 @@ def compile_session_close_command(
     """
     ensure_persistent_strategy(role)
     name = _require_session_name(session_name)
-    argv = _acpx_prefix(role)
+    argv = _acpx_prefix(role, mcp_binding)
     argv.extend(_management_flags(_resolve_cwd(role, cwd)))
     argv.extend([role.runner.adapter_agent, "sessions", "close", name])
     return argv
@@ -261,6 +291,7 @@ def compile_session_cancel_command(
     role: AgentRoleSpec,
     cwd: str | None,
     session_name: str,
+    mcp_binding: McpConfigBinding | None = None,
 ) -> list[str]:
     """``<adapter> cancel -s <session_name>`` (cooperative cancel of active work).
 
@@ -270,7 +301,7 @@ def compile_session_cancel_command(
     """
     ensure_persistent_strategy(role)
     name = _require_session_name(session_name)
-    argv = _acpx_prefix(role)
+    argv = _acpx_prefix(role, mcp_binding)
     argv.extend(_management_flags(_resolve_cwd(role, cwd)))
     argv.extend([role.runner.adapter_agent, "cancel", "-s", name])
     return argv
@@ -281,6 +312,7 @@ def compile_session_prompt_command(
     cwd: str | None,
     session_name: str,
     prompt: str,
+    mcp_binding: McpConfigBinding | None = None,
 ) -> list[str]:
     """``<adapter> prompt -s <session_name> <prompt>`` (one role-bound turn).
 
@@ -293,7 +325,7 @@ def compile_session_prompt_command(
     """
     ensure_persistent_strategy(role)
     name = _require_session_name(session_name)
-    argv = _acpx_prefix(role)
+    argv = _acpx_prefix(role, mcp_binding)
     argv.extend(_session_prompt_flags(role, _resolve_cwd(role, cwd)))
     argv.extend([role.runner.adapter_agent, "prompt", "-s", name, prompt])
     return argv

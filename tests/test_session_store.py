@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from agent_run_supervisor.mcp_config import McpConfigBinding, resolve_mcp_config
 from agent_run_supervisor.policy import policy_hash
 from agent_run_supervisor.process_liveness import LivenessProbe, ProcessIdentity
 from agent_run_supervisor.role import AgentRoleSpec, load_role, role_hash
@@ -1046,3 +1047,226 @@ def test_detect_stale_locks_crashed_path_is_read_only(tmp_path, role, workspace)
     # Detection of a crashed holder never removes/rewrites the lock or record.
     assert lock_path.exists()
     assert lock_path.read_text(encoding="utf-8") == before
+
+
+# --- mcp_config binding persistence + validation (native --mcp-config) -----
+
+
+def _write_mcp(path: Path, servers: list) -> None:
+    path.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+
+
+def _mcp_role(
+    valid_role_dict: dict[str, Any], work: Path, config: Path
+) -> AgentRoleSpec:
+    runner = {**valid_role_dict["runner"], "mcp_config": str(config)}
+    return _role_at(valid_role_dict, work, runner=runner)
+
+
+def test_create_session_persists_mcp_binding_fields(store, role, workspace) -> None:
+    binding = McpConfigBinding(path="/abs/mcp.json", sha256="sha256:" + "0" * 64)
+    store.create_session(
+        session_id="sess-mcp",
+        role=role,
+        workspace_result=workspace,
+        mcp_binding=binding,
+        now=T0,
+    )
+
+    data = json.loads(
+        (store.base_dir / "sess-mcp" / "session.json").read_text(encoding="utf-8")
+    )
+    assert data["mcp_config_path"] == "/abs/mcp.json"
+    assert data["mcp_config_sha256"] == "sha256:" + "0" * 64
+    record = store.open_session("sess-mcp")
+    assert record.mcp_config_path == "/abs/mcp.json"
+    assert record.mcp_config_sha256 == "sha256:" + "0" * 64
+
+
+def test_create_session_omits_mcp_fields_when_unbound(store, role, workspace) -> None:
+    # Zero-migration invariant: records for roles without mcp_config keep the
+    # pre-feature session.json shape (fields omitted, not written as null).
+    store.create_session(
+        session_id="sess-plain", role=role, workspace_result=workspace, now=T0
+    )
+
+    data = json.loads(
+        (store.base_dir / "sess-plain" / "session.json").read_text(encoding="utf-8")
+    )
+    assert "mcp_config_path" not in data
+    assert "mcp_config_sha256" not in data
+    record = store.open_session("sess-plain")
+    assert record.mcp_config_path is None
+    assert record.mcp_config_sha256 is None
+
+
+def test_pre_feature_record_without_mcp_keys_remains_compatible(
+    store, role, workspace
+) -> None:
+    store.create_session(
+        session_id="sess-old", role=role, workspace_result=workspace, now=T0
+    )
+    path = store.base_dir / "sess-old" / "session.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.pop("mcp_config_path", None)
+    data.pop("mcp_config_sha256", None)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    record = store.open_session("sess-old")
+
+    assert record.mcp_config_path is None
+    assert record.mcp_config_sha256 is None
+    store.validate_binding(record, role=role, workspace_result=workspace)
+
+
+def test_validate_binding_accepts_matching_mcp_config(
+    store, valid_role_dict, work_dir, tmp_path
+) -> None:
+    config = tmp_path / "mcp.json"
+    _write_mcp(config, [])
+    role = _mcp_role(valid_role_dict, work_dir, config)
+    workspace = validate_effective_cwd(role, override=None)
+    record = store.create_session(
+        session_id="sess-ok",
+        role=role,
+        workspace_result=workspace,
+        mcp_binding=resolve_mcp_config(role),
+        now=T0,
+    )
+
+    store.validate_binding(record, role=role, workspace_result=workspace)
+
+
+def test_validate_binding_returns_verified_binding_for_compilation(
+    store, role, workspace, valid_role_dict, work_dir, tmp_path
+) -> None:
+    # Callers compile the spawned argv from the binding validate_binding just
+    # verified (canonical path + content SHA), so the consumed path can never
+    # be the raw declared one. Unbound roles verify to None.
+    unbound = store.create_session(
+        session_id="sess-unbound", role=role, workspace_result=workspace, now=T0
+    )
+    assert store.validate_binding(unbound, role=role, workspace_result=workspace) is None
+
+    config = tmp_path / "mcp.json"
+    _write_mcp(config, [])
+    bound_role = _mcp_role(valid_role_dict, work_dir, config)
+    bound_workspace = validate_effective_cwd(bound_role, override=None)
+    record = store.create_session(
+        session_id="sess-bound",
+        role=bound_role,
+        workspace_result=bound_workspace,
+        mcp_binding=resolve_mcp_config(bound_role),
+        now=T0,
+    )
+
+    binding = store.validate_binding(
+        record, role=bound_role, workspace_result=bound_workspace
+    )
+
+    assert binding is not None
+    assert binding.path == record.mcp_config_path
+    assert binding.sha256 == record.mcp_config_sha256
+
+
+def test_validate_binding_refuses_mcp_config_gain(
+    store, role, workspace, valid_role_dict, work_dir, tmp_path
+) -> None:
+    record = store.create_session(
+        session_id="sess-gain", role=role, workspace_result=workspace, now=T0
+    )
+    config = tmp_path / "mcp.json"
+    _write_mcp(config, [])
+    gained = _mcp_role(valid_role_dict, work_dir, config)
+
+    with pytest.raises(SessionBindingError) as excinfo:
+        store.validate_binding(record, role=gained, workspace_result=workspace)
+    assert "mcp_config_gained" in str(excinfo.value)
+
+
+def test_validate_binding_refuses_mcp_config_loss(
+    store, role, workspace, valid_role_dict, work_dir, tmp_path
+) -> None:
+    config = tmp_path / "mcp.json"
+    _write_mcp(config, [])
+    bound_role = _mcp_role(valid_role_dict, work_dir, config)
+    record = store.create_session(
+        session_id="sess-loss",
+        role=bound_role,
+        workspace_result=workspace,
+        mcp_binding=resolve_mcp_config(bound_role),
+        now=T0,
+    )
+
+    with pytest.raises(SessionBindingError) as excinfo:
+        store.validate_binding(record, role=role, workspace_result=workspace)
+    assert "mcp_config_lost" in str(excinfo.value)
+
+
+def test_validate_binding_refuses_mcp_config_path_change(
+    store, valid_role_dict, work_dir, tmp_path
+) -> None:
+    config_a = tmp_path / "mcp-a.json"
+    config_b = tmp_path / "mcp-b.json"
+    _write_mcp(config_a, [])
+    _write_mcp(config_b, [])  # same content: isolates the path mismatch
+    role_a = _mcp_role(valid_role_dict, work_dir, config_a)
+    role_b = _mcp_role(valid_role_dict, work_dir, config_b)
+    workspace = validate_effective_cwd(role_a, override=None)
+    record = store.create_session(
+        session_id="sess-path",
+        role=role_a,
+        workspace_result=workspace,
+        mcp_binding=resolve_mcp_config(role_a),
+        now=T0,
+    )
+
+    with pytest.raises(SessionBindingError) as excinfo:
+        store.validate_binding(record, role=role_b, workspace_result=workspace)
+    assert "mcp_config_path" in str(excinfo.value)
+
+
+def test_validate_binding_refuses_same_path_content_drift(
+    store, valid_role_dict, work_dir, tmp_path
+) -> None:
+    # Same role, same declared path, changed file content: role_hash cannot see
+    # this drift — only the persisted content SHA catches it.
+    config = tmp_path / "mcp.json"
+    _write_mcp(config, [])
+    role = _mcp_role(valid_role_dict, work_dir, config)
+    workspace = validate_effective_cwd(role, override=None)
+    record = store.create_session(
+        session_id="sess-drift",
+        role=role,
+        workspace_result=workspace,
+        mcp_binding=resolve_mcp_config(role),
+        now=T0,
+    )
+
+    _write_mcp(config, [{"name": "drifted"}])
+
+    with pytest.raises(SessionBindingError) as excinfo:
+        store.validate_binding(record, role=role, workspace_result=workspace)
+    assert "mcp_config_sha256" in str(excinfo.value)
+    assert "role_hash" not in str(excinfo.value)
+
+
+def test_validate_binding_fails_closed_when_mcp_config_unreadable(
+    store, valid_role_dict, work_dir, tmp_path
+) -> None:
+    config = tmp_path / "mcp.json"
+    _write_mcp(config, [])
+    role = _mcp_role(valid_role_dict, work_dir, config)
+    workspace = validate_effective_cwd(role, override=None)
+    record = store.create_session(
+        session_id="sess-gone",
+        role=role,
+        workspace_result=workspace,
+        mcp_binding=resolve_mcp_config(role),
+        now=T0,
+    )
+
+    config.unlink()
+
+    with pytest.raises(SessionBindingError):
+        store.validate_binding(record, role=role, workspace_result=workspace)
