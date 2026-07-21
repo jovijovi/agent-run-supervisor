@@ -2,7 +2,7 @@
 title: "agent-run-supervisor Roadmap Current Status"
 status: active
 created_at: 2026-05-28
-last_validated_at: 2026-07-21T14:52:29+0800
+last_validated_at: 2026-07-21T20:30:00+0800
 ---
 # agent-run-supervisor Roadmap Current Status
 
@@ -35,9 +35,9 @@ PRD -> design -> features.md + this board -> docs/plans/active/ -> code
 ## Snapshot {#snapshot}
 
 - **Product:** local one-shot exec and local persistent-session lifecycle are implemented and closed for local use; v0.1.7 is the current released line.
-- **Current engineering stage:** S2 session permission / goal-turn / no-op hardening is Closed (released in v0.1.7); the vNext Stage 0/1 native-ACP plan is now the active execution artifact (docs-governance activation only).
+- **Current engineering stage:** S2 session permission / goal-turn / no-op hardening is Closed (released in v0.1.7); the vNext Stage 0/1 native-ACP plan is the active execution artifact (docs-governance activation only). The 2026-07-21 G2 authority refresh aligned GOAL/PRD/architecture/technical-solution with the settled vNext Rev3 target (`ars-core` + local `arsd` Native ACP vertical) as an approved documentation target — no implementation.
 - **Caller inspection API:** read-only `inspect_session` / `list_turns` (`session_inspect.py`) shipped in v0.1.6 (F-SESSION-INSPECT-001) — the supported non-spawning local status/progress read surface for external callers.
-- **Next allowed implementation:** only slice C0 (this docs-governance activation) is authorized and completed by this change. Stage 0/1 slices C1–C10 — the `agent-client-protocol` dependency change and all native-ACP source and tests — remain unauthorized and require separate explicit operator approval before any code execution.
+- **Next allowed implementation:** the completed, authorized changes are slice C0 (docs-governance activation) and the G2 authority-document refresh (2026-07-21) — both documentation-only. Stage 0/1 slices C1–C10 — the `agent-client-protocol` dependency change and all native-ACP source and tests — remain unauthorized and require separate explicit operator approval before any code execution. `arsd`/Stage 2, service/cgroup deployment, release, and Sachima integration remain unimplemented and unauthorized.
 - **Active plan:** [`docs/plans/active/2026-07-21-vnext-stage01-native-acp.md`](../plans/active/2026-07-21-vnext-stage01-native-acp.md).
 - **Release pointer:** see README / PyPI badge; this board does not track publish history.
 
@@ -59,7 +59,8 @@ PRD -> design -> features.md + this board -> docs/plans/active/ -> code
 | Live event streaming | Closed | [`archive/phases/live-event-streaming.md`](archive/phases/live-event-streaming.md) | F-LIVE-STREAM-001, F-LIVE-EVENTS-001 |
 | Phase B ARS evidence | Closed | [`archive/phases/phase-b-ars-evidence.md`](archive/phases/phase-b-ars-evidence.md) | (evidence gate) |
 | S2 session permission / goal / no-op hardening | Closed | [`archive/phases/s2-permissioned-session.md`](archive/phases/s2-permissioned-session.md) | F-POLICY-001, F-STATUS-001, F-SESSION-001 |
-| **vNext Stage 0/1 — Native ACP vertical** | **Planned (C0 docs active; C1–C10 need approval)** | [`docs/plans/active/2026-07-21-vnext-stage01-native-acp.md`](../plans/active/2026-07-21-vnext-stage01-native-acp.md) | — |
+| **vNext Stage 0/1 — Native ACP vertical** | **Planned (C0 + G2 authority docs done; C1–C10 need approval)** | [`docs/plans/active/2026-07-21-vnext-stage01-native-acp.md`](../plans/active/2026-07-21-vnext-stage01-native-acp.md) | F-NATIVE-ACP-001 |
+| **vNext Stage 2 — `arsd` production ingress** | **Planned (unauthorized; no active plan)** | — (target: [`prd.md` §8](../product/prd.md), [`architecture.md` §9](../design/architecture.md)) | F-ARSD-001 |
 | **Backlog — deeper hardening** | **Open (not started)** | — | — |
 
 Backlog items (parked tails only): `npx` strict-offline, redaction/DLP + caller allowlist, lock-release audit trail. Any live/platform integration requires separate approval.

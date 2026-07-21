@@ -2,6 +2,7 @@
 title: "ARS vNext Stage 0 + Stage 1 development plan — Native ACP vertical (pre-arsd)"
 status: active
 created_at: 2026-07-21
+last_validated_at: 2026-07-21T20:30:00+0800
 ---
 
 # ARS vNext Stage 0 + Stage 1 development plan — Native ACP vertical (pre-arsd)
@@ -24,13 +25,13 @@ All `file:line` references below were verified by direct read at commit 2b09994.
 
 ## 0. Preflight position statement (CLAUDE.md / AI_FLOW preflight)
 
-- **Product position.** Local one-shot exec and local persistent-session lifecycles are implemented and closed (board snapshot, `docs/roadmap/current-status.md:37`). v0.1.7 is released; runtime is stdlib-only with zero `[project.dependencies]` (`pyproject.toml:26`). The product is currently described as "not a daemon" (`GOAL.md:9`).
+- **Product position.** Local one-shot exec and local persistent-session lifecycles are implemented and closed (board snapshot, `docs/roadmap/current-status.md:37`). v0.1.7 is released; runtime is stdlib-only with zero `[project.dependencies]` (`pyproject.toml:26`). Since the 2026-07-21 G2 authority refresh, `GOAL.md`/PRD record that the released product contains no daemon while the settled vNext target (`ars-core` + thin local `arsd` over a Unix domain socket) is an approved documentation target.
 - **Phase target.** ARS vNext per Rev3: a Native ACP vertical (SDK `agent-client-protocol==0.11.0`, OpenCode 1.18.4, Kimi K3/`max`) built additively beside the unchanged acpx legacy paths. This plan covers Stage 0 (consuming dependency lock gate) and Stage 1 (Native vertical through ars-core, B-grade evidence). arsd/Stage 2 is out of scope except for preserved seams.
 - **Open tails / authority conflicts (planned explicitly, not silently resolved).**
-  1. `GOAL.md` "not a daemon" vs the chair-confirmed arsd production ingress: this is a **documentation-revision authorization** question (gate G2), chair-gated, required before/with arsd source (Stage 2). Stage 0/1 contains **no** arsd code and **no** GOAL/PRD edits, so G2 does not block this plan — it blocks Stage 2.
-  2. `docs/roadmap/current-status.md:15` still names `2026-07-08-permissioned-session-goal-noop.md` as the active plan although its work is merged and released in v0.1.7. Treated as **stale next-work authority**: this plan includes one explicit docs-governance slice (C0) to close the board state and activate this plan. C0 is named in the approval package; it is not performed without that approval.
+  1. ~~`GOAL.md` "not a daemon" vs the chair-confirmed arsd production ingress~~ — **resolved.** G2 authority alignment is completed by the 2026-07-21 authority-document refresh on this branch: GOAL/PRD/architecture/technical-solution now record the settled arsd/cgroup production form as an approved documentation target while preserving the v0.1.7 implemented reality. Implementation gates remain separate — G2's docs component grants no source, dependency, service, or deployment authorization (those stay with G1/§8 and Stage-2 approvals).
+  2. ~~`docs/roadmap/current-status.md` named `2026-07-08-permissioned-session-goal-noop.md` as the active plan although its work was merged and released in v0.1.7~~ — **resolved.** Slice C0 was approved and executed on this branch (2026-07-21): the stale plan is archived, the S2 board state is closed, and the board's `active_plan:` now points at this plan. C0 is a completed docs prerequisite and is not re-executed (§8).
   3. Standing non-approvals (`docs/roadmap/non-approvals.md`) all remain: no Sachima behavior integration, no real automatic replies, no public ingress, no IM delivery, no Gateway lifecycle, no production config writes, no live/default-on behavior, no worker auto-routing, no `@all`, no agent-to-agent routing, no treating `allowed_roots` as a sandbox, no per-run human approval as default authorization.
-- **Is the requested task allowed?** Producing this plan is read-only and allowed. Executing it is **not yet allowed**: the board must be activated by slice C0 under the approval sentence in §8, and the dependency change requires the same explicit approval (G1). Nothing in this document authorizes edits by itself.
+- **Is the requested task allowed?** Producing this plan was read-only and allowed, and the documentation prerequisites are complete: C0 (board activation) and the 2026-07-21 G2 authority alignment are done on this branch. Executing the implementation is **not yet allowed**: slices C1–C10 — including the `agent-client-protocol` dependency change (G1) — require the explicit §8 item 1 approval. Nothing in this document authorizes edits by itself.
 
 ---
 
@@ -57,7 +58,7 @@ Implement, on a dedicated worktree branch off fresh `origin/main`, the Rev3 Stag
 - Real B-grade smokes passed against real OpenCode 1.18.4: (a) S1-equivalent read-only run with exact k3/`max` readback and empty-workspace pre/post assertions; (b) nonce-recall continuity across two Runs on one external session via `session/load` (context-token continuity — the zero-prompt cross-process probe proved transport/load only and does **not** satisfy this); (c) at least one real model-ID switch **and** one effort switch with exact readbacks. Missing prerequisites are escalated, never silently downgraded.
 - acpx-unchanged proof: `git diff main...HEAD -- src/agent_run_supervisor/runner.py src/agent_run_supervisor/parser.py src/agent_run_supervisor/policy.py src/agent_run_supervisor/session_runtime.py` is empty; legacy tests unmodified and green; byte-identical serialization golden for pre-existing session records passes.
 - Store-isolation proof green: the C6 L1 isolation suite (`tests/native_acp/test_native_store_isolation.py`) and the C8 L2 seeded-legacy vertical pass — Native operations bind exclusively to `.agent-run-supervisor/native-runs/` and `.agent-run-supervisor/native-sessions/` through the `native_acp/storage.py` seam; same-ID legacy/Native sessions and runs coexist without collision; pre-seeded legacy `sessions/`/`runs/` bytes and directory listings are unchanged (poisoned legacy records provably unread); the structural call-site guard passes.
-- Explicitly **not** part of done: PR creation/merge, release/tag/PyPI, CHANGELOG release sections, G2 GOAL/PRD revision, any arsd code, any service/deployment change, any Sachima change.
+- Explicitly **not** part of done: PR creation/merge, release/tag/PyPI, CHANGELOG release sections, any arsd code, any service/deployment change, any Sachima change. (The G2 GOAL/PRD authority alignment was completed separately by the 2026-07-21 docs refresh; it is a docs deliverable, not a C1–C10 code deliverable.)
 
 ### 1.3 Hard constraints
 
@@ -89,10 +90,12 @@ git rev-parse origin/main
 #    If different: STOP. Re-run the G4 fresh-check against the new HEAD, report the
 #    delta (files/symbols this plan touches), and get re-confirmation before proceeding.
 
-# 2. Dedicated worktree + branch (AI_FLOW branch model: feat/ prefix)
-git worktree add /home/ecs-user/workspace/hermes/worktrees/agent-run-supervisor/feat-native-acp-stage01 \
-    -b feat/native-acp-stage01 origin/main
+# 2. Existing dedicated worktree + branch (AI_FLOW branch model: feat/ prefix)
+#    Already created from the v0.1.7 baseline for the completed C0/G2 docs work.
+#    Reuse it — do not re-create it or re-run `git worktree add`; if it is missing
+#    or not on feat/native-acp-stage01, STOP and report.
 cd /home/ecs-user/workspace/hermes/worktrees/agent-run-supervisor/feat-native-acp-stage01
+git rev-parse --abbrev-ref HEAD       # must print: feat/native-acp-stage01
 
 # 3. Clean guard
 git status --porcelain        # must be empty
@@ -119,7 +122,7 @@ grep -rn "AgentRunStatus" src tests --include='*.py' -l
 grep -rn "SessionRecord\|validate_binding" src --include='*.py' -l
 ```
 
-DoR is complete when: worktree exists on `feat/native-acp-stage01` at fresh `origin/main`; status clean; CodeGraph worktree-local and healthy; baseline suite/compileall/lock-check green with the baseline count recorded; G4 greps match this plan — including the explicit-base-dir constructor surfaces of `SessionStore` and `EventStore` on which the C6 storage seam relies — (or the delta is reported and re-confirmed).
+DoR is complete when: the existing worktree is on `feat/native-acp-stage01` (v0.1.7 baseline plus the completed C0/G2 docs commits) and the step-1 fresh-remote check passed; status clean; CodeGraph worktree-local and healthy; baseline suite/compileall/lock-check green with the baseline count recorded; G4 greps match this plan — including the explicit-base-dir constructor surfaces of `SessionStore` and `EventStore` on which the C6 storage seam relies — (or the delta is reported and re-confirmed).
 
 ---
 
@@ -127,7 +130,7 @@ DoR is complete when: worktree exists on `feat/native-acp-stage01` at fresh `ori
 
 ### Slice C0 — docs-governance: close stale board state, activate this plan
 
-*The approved resolution of authority conflict #2 (§0). Docs-only; no runtime change.*
+*The approved resolution of authority conflict #2 (§0). Docs-only; no runtime change. **Completed 2026-07-21** on this branch; kept as the historical slice record and not re-executed (§8).*
 
 - **Inspect:** `docs/roadmap/current-status.md` (snapshot `:37-42`, phase index `:61`, `active_plan:` `:15`), `docs/plans/active/2026-07-08-permissioned-session-goal-noop.md` (all acceptance boxes checked), `docs/plans/README.md`, `tools/check_roadmap_governance.py` (read to learn its exact enforcement before editing).
 - **Change:**
@@ -316,7 +319,7 @@ C2/C3/C4 are mutually independent and may be developed in any order after C1; C6
 
 ## 5. Gates G3–G8: order, evidence, stop/escalate
 
-Execution order: **G4 → (Stage-0 SDK contract) → G5 → G7(L2 halves: C3, C5) → G8(L1/L2: C2, C6, C8, C9) → G3 precheck → G6 → G7/G8 real completion (C10)**. G1 (authorization) precedes everything and is satisfied only by §8; G2 gates Stage 2, not this plan.
+Execution order: **G4 → (Stage-0 SDK contract) → G5 → G7(L2 halves: C3, C5) → G8(L1/L2: C2, C6, C8, C9) → G3 precheck → G6 → G7/G8 real completion (C10)**. G1 (authorization) precedes everything and is satisfied only by §8. G2's documentation component is completed by the 2026-07-21 authority refresh; Stage-2 arsd source work still requires its own approvals (G1/§8 item 4).
 
 | Gate | Where it runs | Pass evidence | On failure |
 |---|---|---|---|
@@ -377,13 +380,15 @@ Additional gates layered on top:
 
 Approvals are separate and non-transitive. Exact sentences:
 
-1. **Stage 0/1 execution (this plan) — the next user approval sentence:**
-   > I approve execution of ARS_VNEXT_STAGE01_DEVELOPMENT_PLAN.md (2026-07-21-vnext-stage01-native-acp): create worktree `feat-native-acp-stage01` with branch `feat/native-acp-stage01` from fresh `origin/main`; add the `agent-client-protocol==0.11.0` `native` extra with lock/Makefile/CI sync; commit slices C0–C10 including the C0 docs-governance board/plan updates; and run the opt-in real OpenCode 1.18.4 B-grade smokes. This approval covers no PR/merge, no release/tag/PyPI, no GOAL/PRD revision, no arsd or Stage-2 code, no service enablement or deployment, and no Sachima changes.
-2. **G2 formal docs repair (separate, chair):**
-   > I approve the G2 GOAL/PRD documentation revision recording the chair-confirmed arsd production ingress and crash-containment posture, to land before or together with the first arsd source work.
-3. **PR (separate, after Stage-1 done criteria are met):**
-   > I approve opening the PR for `feat/native-acp-stage01` to `main`.
-4. **Stage 2 (future, separate):** arsd implementation, caller-uid allowlist policy (G12), service/cgroup harness enablement — each requires its own approval; none is implied by items 1–3.
+Documentation prerequisites already completed on this branch and **not** to be re-executed: slice **C0** (docs-governance board/plan activation) and the **G2** authority-document alignment (GOAL/PRD/architecture/technical-solution recording the chair-confirmed arsd/Native ACP target as documentation authority). Neither granted implementation authorization.
+
+1. **Stage 0/1 local implementation (C1–C10) — the next user approval sentence:**
+   > I approve local implementation of slices C1–C10 of the vNext Stage 0/1 native-ACP plan (`docs/plans/active/2026-07-21-vnext-stage01-native-acp.md`) on the existing `feat/native-acp-stage01` worktree/branch, after the DoR fresh-head preflight in §2 passes. This authorizes: adding the `agent-client-protocol==0.11.0` `native` extra with `uv.lock`/`Makefile`/CI sync (C1), the C2–C9 additive Native ACP source and L1/L2 test suites, and the opt-in real OpenCode 1.18.4 B-grade smokes (C10) run from the operator's environment. C0 and G2 are already completed docs prerequisites and are not to be re-executed. This approval covers **no** push to origin, **no** PR #65 mutation or merge, **no** release/tag/PyPI publication, **no** arsd or Stage-2 code, **no** service/cgroup enablement or deployment, **no** caller-uid allowlist policy activation, and **no** Sachima/Gateway/IM/live behavior.
+2. **Push / PR #65 mutation (separate, after Stage-1 done criteria in §1.2 are met):**
+   > I approve pushing `feat/native-acp-stage01` to origin and updating PR #65 for review; merge remains a separate approval.
+3. **Merge (separate, after review):**
+   > I approve merging PR #65 (`feat/native-acp-stage01` → `main`).
+4. **Stage 2 and beyond (future, separate):** arsd implementation, caller-uid allowlist policy (G12), service/cgroup harness enablement, release/tag/PyPI publication, and any Sachima/Gateway/IM/live-behavior work each require their own explicit approval; none is implied by items 1–3.
 
 ---
 
@@ -405,7 +410,7 @@ Approvals are separate and non-transitive. Exact sentences:
 - Exact SDK symbol names — settled by C1 pins.
 - Native `result.json` detail-key reuse (e.g., `raw_event_path` value, `acpx_exit_code` naming for a native process exit) — settled inside C8 against `docs/design/result-event-schema.md`, keeping consumer-visible keys stable; recorded in the commit.
 - Switch-smoke model pair — settled at C10 by credential availability within the closed candidate list.
-- Chair-owned (unchanged from Rev3, none blocking this plan): G2 GOAL/PRD revision; G12 caller-uid allowlist (Stage 2); G1 approval sequencing.
+- Chair-owned (unchanged from Rev3, none blocking this plan): G12 caller-uid allowlist (Stage 2); G1 approval sequencing. (G2 GOAL/PRD revision: completed 2026-07-21 by the authority-document refresh.)
 
 ---
 

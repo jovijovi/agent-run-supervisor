@@ -2,11 +2,17 @@
 
 ## One-sentence product positioning
 
-`agent-run-supervisor` is a small, local-first Python library and dev CLI that supervises ACP/acpx-powered external AGENT runs, normalizes runner/protocol behavior into redacted auditable evidence, and keeps caller projects free from runner lifecycle chaos.
+`agent-run-supervisor` is an independent, local-first supervision system for external ACP AGENT runs: it binds already-approved execution inputs, supervises run/session/process/protocol lifecycle, and normalizes observed behavior into redacted auditable evidence, keeping caller projects free from runner lifecycle chaos.
 
 ## Product identity
 
-The project is an independent supervisor layer. It is not Sachima, not a Gateway plugin, not an IM adapter, and not a daemon.
+The project is an independent local supervision system. It is not Sachima, not a Gateway plugin, not an IM adapter, and not a business-authorization engine.
+
+Callers (Hermes / FlowWeaver / a human operator) own business authorization, risk decisions, operator approval, task admission, and final business meaning. `agent-run-supervisor` only authenticates local callers, binds already-approved resources, manages Run/Session/process/protocol/evidence lifecycle, and enforces immutable per-Run execution grants. It never widens a grant and is not a general RBAC system.
+
+### Current implemented surface (released, v0.1.7)
+
+The released product is a small local Python library and dev CLI that supervises acpx-powered exec and persistent-session runs. It contains no daemon.
 
 ```text
 Caller project / human operator
@@ -20,18 +26,40 @@ External AGENT
   -> Codex, Claude Code, or another ACP-capable worker/reviewer
 ```
 
+### Production target (settled architecture; documentation target, not yet implemented)
+
+The settled ARS vNext production form is a reusable `ars-core` plus a thin, unprivileged, local `arsd` daemon reached over a Unix domain socket. `arsd` is the sole production ingress and the single supervision authority for Native ACP runs: it directly owns Native ACP connections and Agent process trees, with no durable per-Run worker.
+
+```text
+Hermes / FlowWeaver / CLI
+  -> local Unix domain socket
+  -> arsd
+  -> ars-core / Native ACP Driver
+  -> external ACP Agent
+```
+
+Native ACP is additive beside the unchanged acpx legacy paths, and Native failure never falls back to acpx. Recording this target here is documentation authority only: `arsd`, Native ACP source (Stage 0/1), service/cgroup deployment, release, and any Sachima/Gateway integration remain unimplemented and each requires separate explicit authorization. Target requirements: `docs/product/prd.md` §8. Target architecture: `docs/design/architecture.md` §9.
+
 ## What this project owns
 
-- `AgentRoleSpec` as the durable role, policy, and authorization boundary.
+Current (implemented):
+
+- `AgentRoleSpec` as the durable role, policy, and authorization boundary for acpx runs.
 - acpx/ACP invocation compilation for supported execution modes.
 - Local runner/session lifecycle supervision.
 - Observed stdout/event parsing and status classification.
 - Redacted local artifacts and audit evidence.
 - Dev CLI and Python library surfaces for caller projects.
 
+Target (planned, per the settled vNext architecture):
+
+- Versioned `AgentProfile` launch/config descriptions and immutable per-Run `AgentRunSpec` execution grants.
+- Native ACP driver, supervised live process surface, and the `arsd` local Unix-socket ingress.
+- Session continuity across process-per-Run via external Agent session identity.
+
 ## What caller projects own
 
-- Product/business intent and final verdict interpretation.
+- Product/business intent, business authorization, risk decisions, operator approval, task admission, and final verdict interpretation.
 - User-facing rendering, progress display, delivery, and integration policy.
 - Any platform-specific behavior such as Sachima, IM, Gateway, or production deployment.
 
@@ -47,6 +75,7 @@ Read these in order for product, design, roadmap, and implementation work:
 6. Non-approvals: `docs/roadmap/non-approvals.md`
 7. Verification gates: `docs/roadmap/verification.md`
 8. Development workflow: `docs/AI_FLOW.md`
-9. Generated documentation index: `docs/INDEX.md`
+9. Active implementation plans: `docs/plans/active/` (board `active_plan:` pointer)
+10. Generated documentation index: `docs/INDEX.md`
 
 `GOAL.md` is intentionally stable. It defines product positioning and points to the living documents above; it is not a phase tracker.

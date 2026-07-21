@@ -2,7 +2,7 @@
 title: "agent-run-supervisor System Architecture"
 status: active
 created_at: 2026-05-29
-last_validated_at: 2026-05-29T18:25:40+0800
+last_validated_at: 2026-07-21T20:30:00+0800
 ---
 # agent-run-supervisor System Architecture
 
@@ -34,12 +34,16 @@ These markers describe **code reality**, not phase bookkeeping:
 |---|---|
 | ✅ | Implemented as a real code path in this repository. |
 | 🟡 | Partially implemented at the feature level: the core code paths exist and pass tests, but `docs/roadmap/features.md` still tracks acceptance tails. |
-| 🟦 | **Planned and product-required** (not a non-goal); not yet implemented. *(Currently unused — both execution modes are implemented.)* |
+| 🟦 | **Planned / approved target** (product-required or chair-settled architecture); not yet implemented. Used by the vNext Native ACP / arsd target (§9). |
 
 > The product is **two execution modes**: one-shot exec **and** persistent sessions.
 > This document never reduces the product to "exec-only". Both modes are **implemented for
 > local use** — the local persistent-session lifecycle (phase `S1`) is **closed** — and
 > persistent sessions are **not** a non-goal.
+>
+> The settled vNext target (§9) additionally records a Native ACP vertical and the `arsd`
+> production ingress as an **approved documentation target**: additive beside the
+> unchanged acpx paths, unimplemented, and separately gated for implementation.
 
 ### 0.2 Diagram color legend
 
@@ -657,11 +661,163 @@ These dispositions are tracked in [`docs/roadmap/current-status.md#open-tails`](
 
 ---
 
-## 9. Cross-references
+## 9. vNext target architecture — Native ACP vertical and arsd 🟦
+
+> **Status.** Everything in this section is the **settled vNext target architecture** —
+> chair-confirmed and recorded here as an approved documentation target. None of it is
+> implemented, released, production-accepted, or live. Implementation (Stage 0/1 slices
+> C1–C10, then Stage 2 arsd) is separately gated; see
+> `docs/plans/active/2026-07-21-vnext-stage01-native-acp.md` and
+> `docs/roadmap/current-status.md`. Requirements detail: PRD §8. Input provenance:
+> committee Rev3, sha256
+> `a088b208b9494b94a028d912127a373b1ae0831e31476e8695dbf3e26c2e4bc1`.
+
+### 9.1 Target topology
+
+`ars-core` is an extension of the existing `agent_run_supervisor` package (no fork).
+`arsd` is a thin, unprivileged, local daemon and the sole production ingress; direct
+`ars-core` embedding remains a test/dev path. There is no durable per-Run worker: `arsd`
+is the single supervision authority and directly owns Native ACP connections and Agent
+process trees.
+
+```text
+Hermes / FlowWeaver / CLI
+-> local Unix domain socket
+-> arsd
+-> ars-core / Native ACP Driver
+-> external ACP Agent
+```
+
+```mermaid
+flowchart TB
+    SVC["User-level service manager 🟦<br/>Restart=on-failure · KillMode=control-group equivalents<br/>owns daemon/cgroup liveness only — never Run/Session state"]
+
+    subgraph CG["One managed cgroup — arsd + all Agent descendants 🟦"]
+        ARSD["arsd 🟦<br/>Unix socket 0700/0600 · SO_PEERCRED caller auth ·<br/>admission freeze · startup reconciliation"]
+        RT["RunTask (per Run, in-process) 🟦<br/>coordinates process + wire + state"]
+        MP["ManagedProcess 🟦<br/>supervision owns PID/PGID/identity/<br/>timeout/signal/reap · bounded stderr"]
+        SDK["SDK ClientSideConnection 🟦<br/>exclusively owns the live stdin/stdout ACP wire"]
+        AG["External ACP Agent subprocess<br/>e.g. OpenCode"]
+    end
+
+    CALLERS["Hermes / FlowWeaver / trusted CLI<br/>business authorization · frozen execution_grant"]
+    STORE[("native-runs/ · native-sessions/ 🟦<br/>isolated from legacy runs/ · sessions/")]
+
+    SVC --> CG
+    CALLERS -->|"AgentRunRequest over local UDS"| ARSD
+    ARSD --> RT
+    RT --> MP
+    MP -.->|"spawns"| AG
+    RT --> SDK
+    SDK <-->|"ACP JSON-RPC — exclusive"| AG
+    RT --> STORE
+
+    classDef target fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a;
+    classDef caller fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e;
+    classDef agent fill:#fee2e2,stroke:#b91c1c,color:#7f1d1d;
+    classDef artifact fill:#f1f5f9,stroke:#475569,color:#1e293b;
+    class ARSD,RT,MP,SDK target;
+    class CALLERS,SVC caller;
+    class AG agent;
+    class STORE artifact;
+```
+
+The current v0.1.7 topology (§1) remains the implemented surface. The Native vertical is
+additive beside the unchanged acpx legacy paths, and **Native failure never falls back to
+acpx** — acpx is not a production dependency, driver, compatibility layer, or fallback
+for the Native vertical.
+
+### 9.2 Process-ownership triangle
+
+| Owner | Owns | Never owns |
+|---|---|---|
+| Supervision layer (`ManagedProcess`) | spawn, PID/PGID, `ProcessIdentity`, timeouts, SIGTERM → grace → SIGKILL group escalation, reap, bounded stderr | the ACP wire |
+| SDK connection | the live stdin/stdout JSON-RPC wire, exclusively | process identity, Run authority |
+| `RunTask` | Run/Session/Turn orchestration, markers, finalization | — |
+
+The existing completion-oriented `execute_subprocess` remains **legacy acpx-only** and is
+not reused for Native: it drains stdout itself and returns only after exit, which cannot
+coexist with SDK wire ownership.
+
+### 9.3 Admission and configuration fidelity
+
+Freeze order: resolve profile revision/snapshot/hash + config-schema hash +
+grant/role/workspace/MCP/credential-ref hashes → materialize `ResolvedLaunchSpec` → seal
+the immutable `AgentRunSpec`/`spec_hash` → spawn → observe `EffectiveRunState` (readback
+only; never written back). No command/argv/env/JSON passthrough. Before any prompt the
+exact sequence must hold:
+
+```text
+discovery -> set model -> rediscover -> set effort -> exact readback -> prompt
+```
+
+Any failure ⇒ zero Turn, no prompt, stable error. Model/effort are per-Run immutable;
+same-Session switching happens only between completed Runs via `session/load` on the
+unchanged external session id, with rollback proven by exact readback — otherwise the
+Session is quarantined. Changing Agent type requires a new ARS Session plus an explicit,
+caller-owned context handoff.
+
+### 9.4 State model, crash containment, and reconciliation
+
+- Run terminal set: `completed | failed | cancelled | timed_out | unknown` — all
+  irreversible. Session states include a persistent `quarantined`.
+- Double dispatch markers (`prompt-dispatch-started`, `prompt-accepted`) bound the
+  uncertainty window; the conservative boundary relies on `started` alone.
+- If a prompt may have been dispatched and no trustworthy terminal result exists:
+  `Run = unknown`, `Session = quarantined`, persistent `retryable = false`. Never
+  auto-retry, auto-replay, or resend; successor work is an independent new Run linked
+  via `retry_of_run_id` that never rewrites the original facts.
+- Reconciliation verdicts take precedence over ordinary exit classification; restart
+  performs reconciliation only.
+- Crash containment: `arsd` and all Agent descendants share one managed cgroup under a
+  user-level service manager (`Restart=on-failure` + `KillMode=control-group`
+  equivalents). An `arsd` crash terminates every descendant — no orphaned Agent can
+  keep mutating files. Graceful shutdown (`killpg`) and crash cleanup (cgroup) are two
+  distinct paths. No Run survives an `arsd` crash by design; the service manager owns
+  daemon/cgroup liveness only, never Run/Session/lease state.
+- The runtime ledger serves supervision, recovery, duplicate prevention, progress,
+  config, and result verification; it is not a second copy of Agent conversation
+  memory.
+
+### 9.5 Permission, storage, and evidence boundaries
+
+- Callers freeze the `execution_grant`; ARS enforces it default-deny and never widens
+  it. Mediation is cooperative-agent policy enforcement — **not** an OS sandbox — and
+  UDS auth / `allowed_roots` / process supervision are not filesystem/network/container
+  isolation.
+- Default-deny must be proven by deterministic tests **plus** a real denied-action
+  canary; a no-tool run with zero permission events proves nothing about deny.
+- Native stores live under isolated `native-runs/` and `native-sessions/` roots; legacy
+  `runs/`/`sessions/` are never read, rewritten, or migrated by Native paths. Storage
+  stays single-writer JSON/JSONL, `0700`/`0600`. The ARS run store is the
+  supervisor-level evidence authority, separate from any caller task log.
+- `workspace_hash` is a binding-config hash, not content integrity; real no-change
+  evidence uses a known-empty-workspace assertion or a bounded content
+  manifest/digest.
+- Evidence tiers: (A) pre-implementation compatibility probes — context only; (B)
+  Stage-1 direct-drive real-Agent smokes; (C) Stage-2 arsd production acceptance
+  (read-only success, denied-action canary, same-Session switch, crash containment,
+  robustness). Stage-2 acceptance is never claimed from Stage-1 evidence.
+
+### 9.6 Implemented vs target summary
+
+| Element | Status |
+|---|---|
+| acpx one-shot exec + persistent sessions, role/policy compilers, acpx parser | ✅ implemented (v0.1.7) |
+| `execute_subprocess` completion-oriented runner | ✅ implemented — stays acpx-legacy-only |
+| Shared stores/lease/liveness/redaction/event schema (reused by Native) | ✅ implemented |
+| `ManagedProcess` live surface, `native_acp/` modules, terminal `unknown`/`quarantined`, markers, switching | 🟦 target — Stage 0/1 (plan approved as docs; implementation unauthorized) |
+| `arsd` UDS ingress, reconciliation, cgroup service semantics, denied-action canary acceptance | 🟦 target — Stage 2 (unauthorized) |
+| Sachima `ArsdBackend` | Non-goal for this cut (future decision) |
+
+---
+
+## 10. Cross-references
 
 - Product positioning: `GOAL.md`
-- Product requirements: `docs/product/prd.md`
-- Module-level technical detail: `docs/design/technical-solution.md`
+- Product requirements: `docs/product/prd.md` (vNext target requirements: §8)
+- Module-level technical detail: `docs/design/technical-solution.md` (vNext modules: §9)
+- Active implementation plan: `docs/plans/active/2026-07-21-vnext-stage01-native-acp.md`
 - Feature completion: `docs/roadmap/features.md`
 - Living board: `docs/roadmap/current-status.md`
 - Non-approvals: `docs/roadmap/non-approvals.md`
