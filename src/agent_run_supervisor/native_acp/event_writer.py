@@ -71,6 +71,19 @@ class EventWriter:
                 "event queue stayed full past the producer timeout"
             ) from None
 
+    def emit_nowait(self, event: Mapping[str, Any]) -> None:
+        """Sync-context variant (SDK callback paths): a full queue is an
+        immediate controlled failure signal instead of a wait."""
+        if self._closed or self.overflowed:
+            raise EventWriterOverflow(
+                "event writer is closed or overflowed; the run must finalize"
+            )
+        try:
+            self._queue.put_nowait(dict(event))
+        except asyncio.QueueFull:
+            self.overflowed = True
+            raise EventWriterOverflow("event queue is full") from None
+
     async def close(self) -> None:
         """Flush queued events and stop the consumer."""
         if self._closed:

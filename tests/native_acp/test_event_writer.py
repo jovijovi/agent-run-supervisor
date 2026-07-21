@@ -125,3 +125,37 @@ def test_emit_after_close_is_refused() -> None:
             await writer.emit({"type": "usage_updated"})
 
     asyncio.run(case())
+
+
+def test_emit_nowait_from_sync_context_writes_in_order() -> None:
+    async def case() -> None:
+        handle = RecordingHandle()
+        writer = EventWriter(handle, max_event_bytes=65536)
+        await writer.start()
+        # Sync producers (SDK callback context) use the non-blocking variant.
+        writer.emit_nowait({"type": "run_started"})
+        writer.emit_nowait({"type": "usage_updated"})
+        await writer.close()
+        assert [record["type"] for _, record in handle.records] == [
+            "run_started",
+            "usage_updated",
+        ]
+
+    asyncio.run(case())
+
+
+def test_emit_nowait_full_queue_is_a_controlled_signal() -> None:
+    async def case() -> None:
+        handle = GatedHandle()
+        writer = EventWriter(handle, max_event_bytes=65536, queue_maxsize=1)
+        await writer.start()
+        try:
+            with pytest.raises(EventWriterOverflow):
+                for _ in range(10):
+                    writer.emit_nowait({"type": "usage_updated"})
+            assert writer.overflowed is True
+        finally:
+            handle.gate.set()
+            await writer.close()
+
+    asyncio.run(case())

@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable, Mapping
 
 from agent_run_supervisor.managed_process import ManagedProcess
 
@@ -59,6 +59,22 @@ class NativeAcpDriver:
         self._machine = machine
         self._connection: Any | None = None
         self._session_id: str | None = None
+        # Fired synchronously after the complete session/prompt frame has been
+        # written to the transport and drained (the SDK sender resolves each
+        # send only after write+drain) — the prompt-accepted boundary.
+        self._prompt_frame_hooks: list[Callable[[], None]] = []
+
+    def add_prompt_frame_hook(self, hook: Callable[[], None]) -> None:
+        self._prompt_frame_hooks.append(hook)
+
+    def _observe_stream(self, event: Any) -> None:
+        direction = getattr(event, "direction", None)
+        if getattr(direction, "name", "") != "OUTGOING":
+            return
+        message = getattr(event, "message", None) or {}
+        if message.get("method") == "session/prompt":
+            for hook in list(self._prompt_frame_hooks):
+                hook()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -67,7 +83,10 @@ class NativeAcpDriver:
         require_sdk()
         connection_module = importlib.import_module("acp.client.connection")
         self._connection = connection_module.ClientSideConnection(
-            self._client, proc.stdin, proc.stdout
+            self._client,
+            proc.stdin,
+            proc.stdout,
+            observers=[self._observe_stream],
         )
 
     async def close(self) -> None:
@@ -109,15 +128,22 @@ class NativeAcpDriver:
 
     # -- ACP sequence ------------------------------------------------------
 
-    async def initialize(self) -> InitializeSummary:
+    async def initialize(
+        self, *, client_capabilities: Mapping[str, Any] | None = None
+    ) -> InitializeSummary:
         connection = self._require_connection()
-        require_sdk()
+        sdk = require_sdk()
         protocol_version = getattr(
             importlib.import_module("acp.meta"), "PROTOCOL_VERSION", 1
         )
+        kwargs: dict[str, Any] = {}
+        if client_capabilities is not None:
+            kwargs["client_capabilities"] = sdk.schema.ClientCapabilities.model_validate(
+                dict(client_capabilities)
+            )
         response = await self._call(
             "initialize",
-            connection.initialize(protocol_version=protocol_version),
+            connection.initialize(protocol_version=protocol_version, **kwargs),
         )
         capabilities = _dump(response.agent_capabilities)
         load_session = bool(
