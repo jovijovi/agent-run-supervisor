@@ -1,32 +1,29 @@
 ---
-title: "Current explicit non-approvals"
+title: "ARS vNext Current Explicit Non-Approvals"
 status: active
-created_at: 2026-05-28
-last_validated_at: 2026-07-21T20:30:00+0800
+created_at: 2026-07-21
+last_validated_at: 2026-07-21
+supersedes: "docs/archive/pre-vnext-reset-2026-07-21/non-approvals.md"
 ---
+# ARS vNext Current Explicit Non-Approvals
 
-# Current explicit non-approvals
+The vNext authority reset is documentation-only. It does not approve:
 
-Current docs/code work does not approve:
+- Stage 0/1 C1–C10 source, dependency, lock, test, or CI implementation;
+- creation of an implementation branch/worktree before the active plan's explicit approval;
+- push, PR creation, merge, release tag, GitHub Release, PyPI publication, or CHANGELOG release work;
+- Stage 2 `arsd` source, UDS service enablement, caller UID policy activation, cgroup/service harness or deployment;
+- Sachima `ArsdBackend`, supervisor pin changes, Gateway/IM/Feishu behavior, delivery, automatic replies, or live/default-on wiring;
+- public ingress, TCP/root service, distributed scheduling, multi-tenant control plane, participant UI, `@all`, or agent-to-agent auto-routing;
+- arbitrary executable/command/argv/env/JSON/config/credential passthrough;
+- acpx as Native production driver, fallback, compatibility layer, or shared/imported Session store;
+- durable per-Run Worker, cross-`arsd` Run survival, generalized Session rebind, cross-AGENT Session reuse, or automatic prompt retry/replay/resume;
+- treating `allowed_roots`, UDS authentication, ACP mediation, workspace binding, or cgroup cleanup as an OS sandbox or hostile-process isolation;
+- a workspace content-digest service, filesystem watcher, broad RBAC/policy engine, or second conversation database inside ARS;
+- using any document under `docs/archive/`, `docs/plans/archive/`, or `docs/roadmap/archive/` as new-development authority or implicit approval.
 
-- Sachima behavior integration;
-- real AGENT automatic replies;
-- public ingress;
-- real IM delivery;
-- Gateway restart/reload/replace;
-- production config writes;
-- live/default-on behavior;
-- worker auto-routing;
-- participant persistence or management UI;
-- `@all` fanout;
-- agent-to-agent automatic routing;
-- trusted Markdown/HTML rendering;
-- treating `allowed_roots` as an OS/filesystem sandbox;
-- per-run human approval as the default authorization model;
-- vNext Stage 0/1 source implementation (slices C1–C10, including the `agent-client-protocol` dependency change);
-- `arsd` implementation, service/cgroup enablement, or any deployment (Stage 2);
-- Sachima `ArsdBackend` integration or supervisor pin changes.
+The released v0.1.7 acpx path may receive separately approved compatibility/security maintenance. Such
+maintenance does not reopen its archived requirements as the vNext product direction.
 
-Persistent sessions are **not** a non-goal; they are a product requirement now closed for the local lifecycle, originally sequenced after the exec runner implementation phase.
-
-The 2026-07-21 G2 authority refresh records the settled vNext arsd/Native ACP architecture in GOAL/PRD/design as an **approved documentation target only**; it grants none of the approvals above. Each implementation stage requires its own separate explicit operator approval.
+Every implementation, publication, production-enablement, and integration stage requires its own explicit
+operator approval. Approvals are narrow and non-transitive.

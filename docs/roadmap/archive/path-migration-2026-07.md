@@ -1,9 +1,14 @@
 ---
 title: "Roadmap and plans path migration"
-status: active
+status: archived
 created_at: 2026-07-07
 last_validated_at: 2026-07-07T15:30:00+0800
+archived_at: 2026-07-21
+deprecated_reason: "Historical path migration map; no longer living roadmap authority"
 ---
+> **Archived; not active development authority.** Retained for audit only. Do not execute this
+> plan or use it to select a branch, PR, baseline, scope, or acceptance gate.
+
 # Roadmap and plans path migration
 
 Map for bookmarks and historical references after the 2026-07 roadmap governance

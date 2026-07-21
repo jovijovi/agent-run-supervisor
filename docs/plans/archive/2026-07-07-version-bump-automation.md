@@ -1,9 +1,14 @@
 ---
 title: "Version bump automation"
-status: active
+status: archived
 created_at: 2026-07-07
 last_validated_at: 2026-07-07T16:45:00+0800
+archived_at: 2026-07-21
+deprecated_reason: "Completed release-tooling plan; retained for history"
 ---
+> **Archived; not active development authority.** Retained for audit only. Do not execute this
+> plan or use it to select a branch, PR, baseline, scope, or acceptance gate.
+
 # Version bump automation
 
 ## Context and target

@@ -2,7 +2,7 @@
 title: "Implementation plans directory"
 status: active
 created_at: 2026-05-29
-last_validated_at: 2026-07-07T15:30:00+0800
+last_validated_at: 2026-07-21
 ---
 # Implementation plans directory
 
@@ -69,5 +69,9 @@ Example: `docs/plans/active/2026-05-29-e1-one-shot-exec-runner.md`.
 
 ## Historical artifacts
 
-Pre-realignment `docs/plans/` and `docs/dev_log/` artifacts were retired during
-R0 (PR #6). Only plans tracing the current authority chain belong here.
+Everything under `docs/plans/archive/` is cold history. It may preserve completed checklists, superseded
+branches/PRs, baselines, and acceptance language, but none of those values are current. Archived plans
+cannot define new scope, select a branch, approve work, or override the vNext authority chain.
+
+Only the board-linked plan in `docs/plans/active/` is implementation context. It must start from live
+`origin/main` and use a new task branch/worktree.

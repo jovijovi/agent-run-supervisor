@@ -1,65 +1,40 @@
 ---
-title: "Feature and Capability Tracker"
+title: "ARS vNext Feature and Capability Tracker"
 status: active
-created_at: 2026-05-29
-last_validated_at: 2026-07-21T20:30:00+0800
+created_at: 2026-07-21
+last_validated_at: 2026-07-21
+supersedes: "docs/archive/pre-vnext-reset-2026-07-21/features.md"
 ---
-# Feature and Capability Tracker
+# ARS vNext Feature and Capability Tracker
 
-Unified feature/capability register. **Evidence** cells are short pointers only; detail lives in
-[`archive/phases/`](archive/phases/), tests, and [`docs/plans/archive/`](../plans/archive/).
+Only vNext direction and compatibility obligations live here. Detailed v0.1.7 feature closure is retained
+in the cold archive and Git history; it is not default development context.
 
-Status legend: **Done** · **Partial** · **Planned** · **Parked** · **Non-goal**
+Status legend: **Done** · **Planned** · **Parked** · **Non-goal**
 
-| ID | Feature / capability | Product | Impl | Evidence | Remaining |
+| ID | Capability | Product | Impl | Evidence / authority | Remaining |
 |---|---|---|---|---|---|
-| F-GOV-001 | Doc authority chain | Required | Done | `GOAL.md`, `prd.md`, board, PR #6 | Maintain chain |
-| F-ROLE-001 | AgentRoleSpec + role hash | Required | Done | `role.py`, `tests/test_role.py` | Schema maintenance |
-| F-POLICY-001 | acpx policy/argv compiler | Required | Partial | `policy.py`, `goal.py`, `tests/test_policy.py`, `tests/test_goal.py` | Read-tail compilers; live permissioned-prompt fixture |
-| F-WORKSPACE-001 | cwd / allowed-roots gate | Required | Done | `workspace.py`, `tests/test_workspace_gate.py` | OS sandbox parked |
-| F-PARSER-001 | acpx stdout/event parser | Required | Partial | `parser.py`, `tests/test_parser.py` | New schemas only |
-| F-STATUS-001 | Status / exit classification | Required | Partial | `exit_classifier.py`, schema §3 (incl. `no_op`) | Session detail if needed |
-| F-STORE-001 | EventStore + redaction | Required | Partial | `event_store.py`, `session.py`, retention | Optional raw-capture FR-8 |
-| F-CLI-001 | `validate-role` | Required | Done | `commands.py`, CLI tests | Keep stable |
-| F-CLI-002 | `replay` | Required | Done | fixtures, CLI tests | Keep stable |
-| F-CLI-003 | `doctor` | Required | Done | `preflight.py`, `tests/test_preflight.py` | Read-only probes |
-| F-RUN-001 | `run --no-real-run` | Useful | Done | dry-run tests | Keep or replace with evidence |
-| F-EXEC-001 | Real acpx exec | Required | Done | `runner.py`, `tests/test_runner_exec.py` | Local-only |
-| F-SESSION-001 | Persistent session lifecycle | Required | Done | `session_runtime.py`, S1 archive | Closed local lifecycle |
-| F-RETENTION-001 | Retention / cleanup | Required | Done | `retention.py`, `tests/test_retention.py` | K1 crash recovery done |
-| F-INTEGRATION-001 | Caller + Hermes (local) | Approved | Done | `caller.py`, `hermes_caller/` | Live platform parked |
-| F-SMOKE-001 | Codex/acpx smoke helper | Useful | Done | `scripts/smoke_codex_acpx.py` | Operator-only |
-| F-LIVE-STREAM-001 | Live stream core | Required | Done | `live_stream.py`, schema §4.1 | No delivery |
-| F-LIVE-EVENTS-001 | Event cursor API | Useful | Done | `hermes_caller/events.py` | PR3 Sachima unapproved |
-| F-SESSION-INSPECT-001 | Read-only session inspection API | Useful | Done | `session_inspect.py`, `tests/test_session_inspect.py` | Release + caller pin bump |
-| F-MCP-CONFIG-001 | Native role-bound acpx `--mcp-config` | Approved | Done | `mcp_config.py`, `tests/test_mcp_config.py`, policy/session/runtime mcp tests | Real MCP service/tool authz E2E |
-| F-RELEASE-001 | Release engineering | Required | Done | `verify_local.sh`, `release.yml` | See CHANGELOG / PyPI |
-| F-NATIVE-ACP-001 | Native ACP vertical (ars-core, Stage 0/1) | Required (vNext) | Planned | PRD §8, architecture §9, active plan | C1–C10 unauthorized; needs approval |
-| F-ARSD-001 | `arsd` local UDS production ingress (Stage 2) | Required (vNext target) | Planned | PRD §8.1, architecture §9 | Stage 2 unauthorized; after Stage 0/1 |
-| F-NONGOAL-001 | Public ingress / IM / Gateway | Non-goal | Non-goal | PRD §6 | Separate approval |
-
-Evidence archive links: S1 → [`archive/phases/s1-persistent-sessions.md`](archive/phases/s1-persistent-sessions.md);
-H1 → [`archive/phases/h1-operational-hardening.md`](archive/phases/h1-operational-hardening.md);
-P3 → [`archive/phases/p3-engineering-basics.md`](archive/phases/p3-engineering-basics.md).
+| F-LEGACY-COMPAT-001 | v0.1.7 acpx compatibility baseline | Compatibility | Done | released code; archived authority snapshot; result/event schema | maintenance only; no vNext direction |
+| F-VNEXT-ADMISSION-001 | AgentProfile → ResolvedLaunchSpec → immutable AgentRunSpec | Required | Planned | PRD R1; technical §§1–2; active plan C4 | C1/C4 authorization and implementation |
+| F-VNEXT-PROCESS-001 | ManagedProcess live stdio supervision | Required | Planned | PRD R2; architecture §2; active plan C3 | C3 implementation/evidence |
+| F-NATIVE-ACP-001 | Native ACP exact-config core through ars-core | Required | Planned | PRD R2–R3; technical §§4–5; active plan C1–C10 | Stage 0/1 unauthorized |
+| F-VNEXT-SESSION-001 | process-per-Run, session/load continuity, cross-Run switching | Required | Planned | PRD R4; architecture §4; active plan C6/C9/C10 | real continuity proof required |
+| F-VNEXT-STATE-001 | unknown/quarantined/retryable=false, markers, no replay | Required | Planned | PRD R5; architecture §§5–6; active plan C2/C8 | L1/L2 and real boundary evidence |
+| F-VNEXT-PERMISSION-001 | frozen grant, default-deny mediation, real canary | Required | Planned | PRD R7; architecture §7; active plan C7/C10 | Stage 1 bridge; Stage 2 real canary |
+| F-VNEXT-EVIDENCE-001 | isolated Native stores and bounded runtime ledger | Required | Planned | PRD R8–R9; technical §§7–8; active plan C6–C8 | storage/event implementation |
+| F-ARSD-001 | local UDS production ingress, ownership, reconciliation, cgroup containment | Required | Planned | PRD R6/R10; architecture §§1/6; technical §§1.3/9 | Stage 2 authorization, G12, S1–S5 |
+| F-SACHIMA-ARSD-001 | Sachima socket backend | Later integration | Parked | GOAL/PRD stage boundary | only after ARS production acceptance |
+| F-NONGOAL-001 | public/root/TCP/multi-tenant/business-orchestration surfaces | Non-goal | Non-goal | GOAL; PRD §6; non-approvals | separate product decision only |
 
 ## Completion roll-up
 
-| Area | Done | Partial | Planned | Parked | Note |
-|---|---:|---:|---:|---:|---|
-| Governance/docs | 1 | 0 | 0 | 0 | R0 closed |
-| Core role/policy/workspace | 2 | 1 | 0 | 0 | Policy partial for optional compilers |
-| Parser/status/store | 1 | 3 | 0 | 0 | Retention + sessions merged |
-| CLI | 5 | 0 | 0 | 0 | Includes session + cleanup |
-| Execution modes | 2 | 0 | 0 | 0 | Exec + sessions closed |
-| Smoke helpers | 1 | 0 | 0 | 0 | Operator-run only |
-| Live supervision | 3 | 0 | 0 | 0 | Local artifacts only; incl. read-only inspection |
-| Packaging / release | 1 | 0 | 0 | 0 | uv + verify + PyPI workflow |
-| vNext Native ACP / arsd | 0 | 0 | 2 | 0 | F-NATIVE-ACP-001 (Stage 0/1), F-ARSD-001 (Stage 2); documentation target only, implementation unauthorized |
+| Area | Done | Planned | Parked | Non-goal |
+|---|---:|---:|---:|---:|
+| Legacy compatibility baseline | 1 | 0 | 0 | 0 |
+| vNext Stage 0/1 | 0 | 7 | 0 | 0 |
+| vNext Stage 2 | 0 | 1 | 0 | 0 |
+| Later integration | 0 | 0 | 1 | 0 |
+| Explicit exclusions | 0 | 0 | 0 | 1 |
 
-## Maintenance rule
-
-Update when product requirement, implementation state, or acceptance changes.
-
-- **Evidence column:** max ~120 characters; use paths/tests + one archive/plan link.
-- **No** PR narratives, SHAs, or duplicate phase prose — link [`archive/phases/`](archive/phases/).
-- Do not bury completion in PR bodies or chat logs.
+Update this tracker only when requirements, implementation state, or acceptance evidence changes. Keep
+evidence cells short; details belong in active plans or cold phase archives.
