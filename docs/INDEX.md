@@ -2,11 +2,11 @@
 
 # Documentation Index
 
-Total: 49 documents tracked across 2 statuses.
+Total: 51 documents tracked across 2 statuses.
 
 ## Active (18)
 
-- [Permissioned session prompt turns, goal-turn compilation, no-op fail-closed classification](plans/active/2026-07-08-permissioned-session-goal-noop.md) — created 2026-07-08
+- [ARS vNext Stage 0 + Stage 1 development plan — Native ACP vertical (pre-arsd)](plans/active/2026-07-21-vnext-stage01-native-acp.md) — created 2026-07-21
 - [Version bump automation](plans/active/2026-07-07-version-bump-automation.md) — created 2026-07-07
 - [Active implementation plans](plans/active/README.md) — created 2026-07-07
 - [Archived implementation plans](plans/archive/README.md) — created 2026-07-07
@@ -25,8 +25,10 @@ Total: 49 documents tracked across 2 statuses.
 - [Current explicit non-approvals](roadmap/non-approvals.md) — created 2026-05-28
 - [Verification gates for implementation PRs](roadmap/verification.md) — created 2026-05-28
 
-## Archived (31)
+## Archived (33)
 
+- [S2 — Session permission / goal-turn / no-op hardening](roadmap/archive/phases/s2-permissioned-session.md) — created 2026-07-21
+- [Permissioned session prompt turns, goal-turn compilation, no-op fail-closed classification](plans/archive/2026-07-08-permissioned-session-goal-noop.md) — created 2026-07-08
 - [C0 — acpx contract fixtures and validator](roadmap/archive/phases/c0-acpx-fixtures.md) — created 2026-07-07
 - [E1 — One-shot exec runner completion](roadmap/archive/phases/e1-exec-runner.md) — created 2026-07-07
 - [F0 — Role/policy/parser/store foundation](roadmap/archive/phases/f0-foundation.md) — created 2026-07-07

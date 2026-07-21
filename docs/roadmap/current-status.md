@@ -2,7 +2,7 @@
 title: "agent-run-supervisor Roadmap Current Status"
 status: active
 created_at: 2026-05-28
-last_validated_at: 2026-07-09T19:00:00+0800
+last_validated_at: 2026-07-21T20:30:00+0800
 ---
 # agent-run-supervisor Roadmap Current Status
 
@@ -10,9 +10,9 @@ last_validated_at: 2026-07-09T19:00:00+0800
 > Closed acceptance: [`archive/phases/`](archive/phases/) · Features: [`features.md`](features.md)
 
 ```text
-last_updated: 2026-07-09
+last_updated: 2026-07-21
 base_branch: main
-active_plan: docs/plans/active/2026-07-08-permissioned-session-goal-noop.md
+active_plan: docs/plans/active/2026-07-21-vnext-stage01-native-acp.md
 ```
 
 ## How to read this board
@@ -34,11 +34,11 @@ PRD -> design -> features.md + this board -> docs/plans/active/ -> code
 
 ## Snapshot {#snapshot}
 
-- **Product:** local one-shot exec and local persistent-session lifecycle are implemented and closed for local use.
-- **Current engineering stage:** S2 session permission / goal-turn / no-op hardening (operator-approved 2026-07-08, in progress).
-- **Caller inspection API:** read-only `inspect_session` / `list_turns` (`session_inspect.py`) implemented with tests — the non-spawning session-liveness surface for external callers (F-SESSION-INSPECT-001); release/pin bump pending.
-- **Next allowed implementation:** the S2 plan below; nothing else until approved on this board.
-- **Active plan:** [`docs/plans/active/2026-07-08-permissioned-session-goal-noop.md`](../plans/active/2026-07-08-permissioned-session-goal-noop.md).
+- **Product:** local one-shot exec and local persistent-session lifecycle are implemented and closed for local use; v0.1.7 is the current released line.
+- **Current engineering stage:** S2 session permission / goal-turn / no-op hardening is Closed (released in v0.1.7); the vNext Stage 0/1 native-ACP plan is the active execution artifact (docs-governance activation only). The 2026-07-21 G2 authority refresh aligned GOAL/PRD/architecture/technical-solution with the settled vNext Rev3 target (`ars-core` + local `arsd` Native ACP vertical) as an approved documentation target — no implementation.
+- **Caller inspection API:** read-only `inspect_session` / `list_turns` (`session_inspect.py`) shipped in v0.1.6 (F-SESSION-INSPECT-001) — the supported non-spawning local status/progress read surface for external callers.
+- **Next allowed implementation:** the completed, authorized changes are slice C0 (docs-governance activation) and the G2 authority-document refresh (2026-07-21) — both documentation-only. Stage 0/1 slices C1–C10 — the `agent-client-protocol` dependency change and all native-ACP source and tests — remain unauthorized and require separate explicit operator approval before any code execution. `arsd`/Stage 2, service/cgroup deployment, release, and Sachima integration remain unimplemented and unauthorized.
+- **Active plan:** [`docs/plans/active/2026-07-21-vnext-stage01-native-acp.md`](../plans/active/2026-07-21-vnext-stage01-native-acp.md).
 - **Release pointer:** see README / PyPI badge; this board does not track publish history.
 
 ## Phase index {#phase-index}
@@ -58,7 +58,9 @@ PRD -> design -> features.md + this board -> docs/plans/active/ -> code
 | P3 Engineering basics | Closed | [`archive/phases/p3-engineering-basics.md`](archive/phases/p3-engineering-basics.md) | F-RELEASE-001 |
 | Live event streaming | Closed | [`archive/phases/live-event-streaming.md`](archive/phases/live-event-streaming.md) | F-LIVE-STREAM-001, F-LIVE-EVENTS-001 |
 | Phase B ARS evidence | Closed | [`archive/phases/phase-b-ars-evidence.md`](archive/phases/phase-b-ars-evidence.md) | (evidence gate) |
-| **S2 session permission / goal / no-op hardening** | **In progress** | [`docs/plans/active/2026-07-08-permissioned-session-goal-noop.md`](../plans/active/2026-07-08-permissioned-session-goal-noop.md) | F-POLICY-001, F-STATUS-001, F-SESSION-001 |
+| S2 session permission / goal / no-op hardening | Closed | [`archive/phases/s2-permissioned-session.md`](archive/phases/s2-permissioned-session.md) | F-POLICY-001, F-STATUS-001, F-SESSION-001 |
+| **vNext Stage 0/1 — Native ACP vertical** | **Planned (C0 + G2 authority docs done; C1–C10 need approval)** | [`docs/plans/active/2026-07-21-vnext-stage01-native-acp.md`](../plans/active/2026-07-21-vnext-stage01-native-acp.md) | F-NATIVE-ACP-001 |
+| **vNext Stage 2 — `arsd` production ingress** | **Planned (unauthorized; no active plan)** | — (target: [`prd.md` §8](../product/prd.md), [`architecture.md` §9](../design/architecture.md)) | F-ARSD-001 |
 | **Backlog — deeper hardening** | **Open (not started)** | — | — |
 
 Backlog items (parked tails only): `npx` strict-offline, redaction/DLP + caller allowlist, lock-release audit trail. Any live/platform integration requires separate approval.

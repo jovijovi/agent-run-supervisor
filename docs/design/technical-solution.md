@@ -2,7 +2,7 @@
 title: "agent-run-supervisor Technical Solution"
 status: active
 created_at: 2026-05-29
-last_validated_at: 2026-07-08T03:30:00+0800
+last_validated_at: 2026-07-21T20:30:00+0800
 ---
 # agent-run-supervisor Technical Solution
 
@@ -29,6 +29,10 @@ External AGENT
 
 The supervisor owns runner/session lifecycle and evidence. It does not own product meaning, IM delivery, Gateway lifecycle, or public routing.
 
+Sections §3–§8 describe the implemented v0.1.7 acpx product. §9 records the planned
+module-level design for the settled vNext Native ACP / arsd target (architecture §9,
+PRD §8) — a documentation target, not implementation authority.
+
 ## 2. Document authority
 
 The previous mixed V0.1a design file has been decomposed and retired. Its durable requirements now live in:
@@ -38,6 +42,12 @@ The previous mixed V0.1a design file has been decomposed and retired. Its durabl
 - Technical solution (module detail): this file
 - Feature completion matrix: `docs/roadmap/features.md`
 - Roadmap, phases, acceptance criteria: `docs/roadmap/current-status.md`
+
+vNext authority: the settled ARS vNext committee design (Rev3,
+`CLAUDE_PRODUCTION_VERTICAL_DESIGN_REV3.md`, sha256
+`a088b208b9494b94a028d912127a373b1ae0831e31476e8695dbf3e26c2e4bc1`) is incorporated into
+PRD §8, architecture §9, and §9 of this file; the repository documents carry the durable
+authority and the handoff hash remains provenance only.
 
 The previous V0.1c manual-approval design is deleted as stale history. Role-bound authorization remains the design direction.
 
@@ -565,3 +575,90 @@ merged via PR #27 (`eb7912e`) realizes the local/offline caller-side portion in 
 and `tests/hermes_caller/` without changing the generic I1 contract. It remains fake/local/offline:
 no real Feishu API, IM delivery, public ingress, Gateway lifecycle, Sachima behavior, automatic
 replies, live/default-on behavior, or trusted Markdown/HTML rendering.
+
+## 9. vNext module design — Native ACP vertical and arsd (planned)
+
+> **Status.** Planned module-level design for the settled vNext target (architecture §9,
+> PRD §8). Nothing below is implemented; Stage 0/1 (slices C1–C10) and Stage 2 (arsd)
+> each require separate authorization. Symbol names are provisional and are fresh-checked
+> against the implementation branch before code lands (active plan, gate G4). The acpx
+> modules in §3 stay unchanged legacy/current surfaces; Native additions are strictly
+> additive and never fall back to acpx.
+
+### 9.1 Shared-layer additions (additive, planned)
+
+- `managed_process.py` (or an equivalent shared module) — `spawn_managed_process(...) ->
+  ManagedProcess`: the supervised live-stdio surface. Supervision owns
+  spawn/PID/PGID/`ProcessIdentity`/timeout/signal-escalation/reap and bounded stderr
+  capture; `stdin`/`stdout` are handed exclusively to the SDK connection.
+  `execute_subprocess`/`SubprocessOutcome` stay byte-identical and acpx-only.
+- `exit_classifier.py` / `result.py` — carry the Native terminal vocabulary
+  `completed | failed | cancelled | timed_out | unknown` (additive enum extension, or a
+  Native-side superset enum plus lossless mapping if the consumer audit demands it);
+  `unknown` round-trips with persistent `retryable=false`; acpx classification provably
+  unchanged.
+- `session.py::SessionRecord` — additive omit-when-unset fields: `session_kind`, native
+  profile identity, external `agent_session_id`, owner, `last_effective_model/effort`
+  (mutable observations, not identity), and a persistent `quarantined` state with
+  reason/source. Native binding validation fails closed on profile/workspace/owner
+  mismatch or quarantine; model/effort deltas are legitimate switching input, not a
+  mismatch. Legacy acpx records serialize byte-identically.
+
+### 9.2 `native_acp/` package (Stage 1, planned)
+
+| Module | Responsibility |
+|---|---|
+| `spec.py` | `AgentRunRequest` (wire), frozen `AgentRunSpec`/`spec_hash`, controlled `ResolvedLaunchSpec` (fixed argv, env-allowlist slots, credential refs — never values), observation-only `EffectiveRunState` |
+| `profile.py` | typed versioned `AgentProfile`, closed code-registered `ProfileRegistry`; first profile: OpenCode 1.18.4 (literal `model=kimi-for-coding/k3`, `effort=max`, `requires_session_load`) |
+| `storage.py` | the store-isolation seam: the only constructors binding the `native-runs/` / `native-sessions/` roots; legacy `runs/`/`sessions/` are never read or written by Native code |
+| `driver.py` | `NativeAcpDriver` — ACP wire and protocol state machine only; never spawns |
+| `config_fidelity.py` | the exact-or-zero sequence machine, including the cross-Run switching and rollback branches |
+| `client.py` | SDK `Client` callback implementation (session updates, permission requests, fs) |
+| `permissions.py` | `PermissionBridge` — default-deny mediation mapped from the frozen `execution_grant`; every decision recorded as a `MediationEvent` |
+| `events.py` | `NativeAcpEventNormalizer` — ACP updates → the existing normalized-event schema (structural fields, `text_length`, never text bodies) |
+| `event_writer.py` | per-Run single writer: monotonic `seq`, bounded queue, byte caps with truncation markers preserving lifecycle/permission/error families |
+| `run_task.py` | per-Run coordinator: admission freeze → spawn → drive → double markers → finalization table → lease/quarantine handling; top-level exception guard |
+
+### 9.3 `arsd/` package (Stage 2 target, planned)
+
+`server.py` (asyncio Unix-socket accept loop, `SO_PEERCRED` caller auth, per-connection
+task isolation), `protocol.py` (JSON frames, mandatory `api_version`, unknown versions
+rejected), `handlers.py` (submit/status/events/cancel plus session operations;
+ownership-bound), `reconcile.py` (startup reconciliation — the only restart action),
+`client.py`, `__main__.py`. No TCP, no root. Production runs under user-service cgroup
+semantics (architecture §9.4).
+
+### 9.4 Native data and artifact model (target)
+
+```text
+.agent-run-supervisor/native-runs/<run_id>/
+  spec.json            # immutable AgentRunSpec, exclusive create
+  launch.json          # ResolvedLaunchSpec, no secrets
+  effective.json       # EffectiveRunState observations only
+  events.jsonl         # single writer, monotonic seq, bounded
+  result.json          # write-once atomic; unknown => retryable=false persisted
+  prompt-dispatch-started / prompt-accepted    # exclusive-create markers
+  normalized-events.jsonl · progress.json · redaction-report.json · stderr.log
+
+.agent-run-supervisor/native-sessions/<session_id>/
+  session.json         # stable identity + last_effective_* + state incl. quarantined
+  lock.json            # lease while held (reuses existing lease/liveness machinery)
+```
+
+Cardinality: Session 1:N Runs (strictly serial under lease); Run 1:0..1 Turn; true
+parallelism = multiple Sessions. Storage stays single-writer JSON/JSONL with
+`0700`/`0600` permissions; no SQLite. Native roots are fully isolated from the legacy
+`runs/` and `sessions/` layouts in §5.
+
+### 9.5 Test and evidence layers (target)
+
+- **L1** hermetic unit: freeze order and `spec_hash` stability, terminal-state
+  round-trip (`unknown` with persistent `retryable=false`), quarantine persistence,
+  marker/finalization branches, mediation decision table, bounded writers, store
+  isolation.
+- **L2** hermetic fault injection via an in-repo fake ACP agent subprocess speaking real
+  stdio JSON-RPC framing — never a driver mock, never production evidence.
+- **L3** real-Agent evidence: Stage-1 direct-drive B-grade smokes (exact readback,
+  `session/load` nonce continuity, at least one real model switch and one effort
+  switch); Stage-2 arsd production acceptance scenarios. Fakes structurally cannot
+  supply L3.

@@ -2,7 +2,7 @@
 title: "Feature and Capability Tracker"
 status: active
 created_at: 2026-05-29
-last_validated_at: 2026-07-09T19:00:00+0800
+last_validated_at: 2026-07-21T20:30:00+0800
 ---
 # Feature and Capability Tracker
 
@@ -32,8 +32,10 @@ Status legend: **Done** · **Partial** · **Planned** · **Parked** · **Non-goa
 | F-LIVE-STREAM-001 | Live stream core | Required | Done | `live_stream.py`, schema §4.1 | No delivery |
 | F-LIVE-EVENTS-001 | Event cursor API | Useful | Done | `hermes_caller/events.py` | PR3 Sachima unapproved |
 | F-SESSION-INSPECT-001 | Read-only session inspection API | Useful | Done | `session_inspect.py`, `tests/test_session_inspect.py` | Release + caller pin bump |
-| F-MCP-CONFIG-001 | Native role-bound acpx `--mcp-config` | Approved | Done | `mcp_config.py`, `tests/test_mcp_config.py`, policy/session/runtime mcp tests | Branch merge; release notes |
+| F-MCP-CONFIG-001 | Native role-bound acpx `--mcp-config` | Approved | Done | `mcp_config.py`, `tests/test_mcp_config.py`, policy/session/runtime mcp tests | Real MCP service/tool authz E2E |
 | F-RELEASE-001 | Release engineering | Required | Done | `verify_local.sh`, `release.yml` | See CHANGELOG / PyPI |
+| F-NATIVE-ACP-001 | Native ACP vertical (ars-core, Stage 0/1) | Required (vNext) | Planned | PRD §8, architecture §9, active plan | C1–C10 unauthorized; needs approval |
+| F-ARSD-001 | `arsd` local UDS production ingress (Stage 2) | Required (vNext target) | Planned | PRD §8.1, architecture §9 | Stage 2 unauthorized; after Stage 0/1 |
 | F-NONGOAL-001 | Public ingress / IM / Gateway | Non-goal | Non-goal | PRD §6 | Separate approval |
 
 Evidence archive links: S1 → [`archive/phases/s1-persistent-sessions.md`](archive/phases/s1-persistent-sessions.md);
@@ -42,16 +44,17 @@ P3 → [`archive/phases/p3-engineering-basics.md`](archive/phases/p3-engineering
 
 ## Completion roll-up
 
-| Area | Done | Partial | Parked | Note |
-|---|---:|---:|---:|---|
-| Governance/docs | 1 | 0 | 0 | R0 closed |
-| Core role/policy/workspace | 2 | 1 | 0 | Policy partial for optional compilers |
-| Parser/status/store | 1 | 3 | 0 | Retention + sessions merged |
-| CLI | 5 | 0 | 0 | Includes session + cleanup |
-| Execution modes | 2 | 0 | 0 | Exec + sessions closed |
-| Smoke helpers | 1 | 0 | 0 | Operator-run only |
-| Live supervision | 3 | 0 | 0 | Local artifacts only; incl. read-only inspection |
-| Packaging / release | 1 | 0 | 0 | uv + verify + PyPI workflow |
+| Area | Done | Partial | Planned | Parked | Note |
+|---|---:|---:|---:|---:|---|
+| Governance/docs | 1 | 0 | 0 | 0 | R0 closed |
+| Core role/policy/workspace | 2 | 1 | 0 | 0 | Policy partial for optional compilers |
+| Parser/status/store | 1 | 3 | 0 | 0 | Retention + sessions merged |
+| CLI | 5 | 0 | 0 | 0 | Includes session + cleanup |
+| Execution modes | 2 | 0 | 0 | 0 | Exec + sessions closed |
+| Smoke helpers | 1 | 0 | 0 | 0 | Operator-run only |
+| Live supervision | 3 | 0 | 0 | 0 | Local artifacts only; incl. read-only inspection |
+| Packaging / release | 1 | 0 | 0 | 0 | uv + verify + PyPI workflow |
+| vNext Native ACP / arsd | 0 | 0 | 2 | 0 | F-NATIVE-ACP-001 (Stage 0/1), F-ARSD-001 (Stage 2); documentation target only, implementation unauthorized |
 
 ## Maintenance rule
 
