@@ -75,6 +75,9 @@ _ERROR_CODE_FOR_STATUS: dict[AgentRunStatus, str | None] = {
     AgentRunStatus.PROTOCOL_ERROR: "PROTOCOL_ERROR",
     AgentRunStatus.INFRASTRUCTURE_ERROR: "INFRASTRUCTURE_ERROR",
     AgentRunStatus.POLICY_ERROR: "POLICY_ERROR",
+    AgentRunStatus.FAILED: "FAILED",
+    AgentRunStatus.CANCELLED: "CANCELLED",
+    AgentRunStatus.UNKNOWN: "UNKNOWN",
 }
 
 
