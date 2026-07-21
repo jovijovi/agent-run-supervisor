@@ -122,6 +122,15 @@ aliased model ID.
   - Pin symbols/types required by the current vNext technical solution: client-side connection class (expected `ClientSideConnection`), `Client` callback surface (session update, permission request, fs), initialize / session new / **session load** / session close / set-config / prompt / **cancel** entry points, config-option carriers (expected `NewSessionResponse.config_options`, `SetSessionConfigOptionResponse.config_options`, `ConfigOptionUpdate`), stop-reason vocabulary incl. `end_turn`.
   - Record the connection constructor's stream/I-O model (asyncio streams vs raw pipes) — this pins the C3 stream surface.
   - Where an actual name differs from the current vNext design's expectation but is semantically equivalent, the test pins the **actual** name and the same commit updates this plan's symbol table with a drift note; a semantic gap (e.g., no session-load API) is a Stage-0 stop (§5).
+  - **Symbol drift note (C1, verified against installed 0.11.0):** the actual config setter is
+    `ClientSideConnection.set_config_option` (design expectation `set_session_config_option`) and the
+    actual `Client` callback protocol lives at `acp.interfaces.Client` (design expectation
+    `acp.schema.Client`); both are semantically equivalent and the contract tests pin the actual names.
+    Verified surface: `acp.client.connection.ClientSideConnection` with `initialize / new_session /
+    load_session / set_config_option / prompt / cancel / close_session`; constructor takes
+    `input_stream`/`output_stream` and enforces asyncio `StreamWriter`/`StreamReader` at runtime;
+    callback surface `session_update / request_permission / read_text_file / write_text_file`;
+    config-option carriers and `end_turn` stop reason are as expected. No semantic gap.
 - **G5 audit (read-only; source-grounded consumer inventory, not a grep transcript):** searches (`grep -rn "AgentRunStatus"` plus at least one independent status-string-literal search, e.g. `grep -rn '"completed"\|"failed"\|_SUCCESS_STATUSES\|supervisor_status' src tests`, and CodeGraph cross-reference) are **discovery signals only — neither grep nor CodeGraph alone is claimed as proof of consumer completeness or correctness**. The audit reads each consumer and must cover, at minimum, these classes:
   - enum definitions/imports and enum-keyed mappings: `exit_classifier.py:7` (`AgentRunStatus`), `_RETRYABLE_DEFAULT:21`, `_BASE_STATUS_FOR_EXIT:37`, `result.py:66` (`_ERROR_CODE_FOR_STATUS` + `_default_error_code:81` — `.get` tolerant, returns `None` for unmapped members);
   - direct and indirect status **string** readers, literal comparisons, and success sets: `commands.py:216,310` (`result["status"] == "completed"` exit-code mapping — new members map to exit 1; semantically meaningful), `runner.py:229` (literal `"dry_run"` status written outside the enum), `parser.py:145,392` (acpx stream/tool status vocabulary — classify explicitly as a distinct vocabulary, not a Run status consumer), `hermes_caller/events.py:54` (event status passthrough);

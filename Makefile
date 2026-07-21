@@ -18,7 +18,7 @@ help:
 	@echo "Current version: $(VERSION)"
 
 sync:
-	uv sync --extra dev --extra release
+	uv sync --locked --extra dev --extra release --extra native
 
 verify: sync
 	./scripts/verify_local.sh
