@@ -741,6 +741,14 @@ class RunTask:
             detail_code = "RUN_EXCEPTION"
 
         if not ctx.effective_written:
+            # Record observed partial changes as evidence: the discovery
+            # snapshots gathered before a config failure are part of the
+            # effective observations.
+            if ctx.machine is not None and not ctx.effective.discovery_snapshots:
+                ctx.effective.discovery_snapshots = [
+                    {"label": label, "options": options}
+                    for label, options in ctx.machine.snapshots
+                ]
             try:
                 storage.write_once_json(
                     ctx.handle.run_dir / "effective.json", ctx.effective.to_dict()

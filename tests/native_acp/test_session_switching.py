@@ -286,6 +286,14 @@ def test_effort_missing_post_model_rolls_back_and_reopens(
     assert record.last_effective_model == "provider/base"
     events = (harness.root / "native-runs" / "run-0002" / "events.jsonl").read_text()
     assert "config_rollback_proven" in events
+    # Observed partial changes are recorded as evidence: the failure-path
+    # effective.json carries the discovery snapshots gathered before failing.
+    effective = json.loads(
+        (harness.root / "native-runs" / "run-0002" / "effective.json").read_text()
+    )
+    labels = [snapshot["label"] for snapshot in effective["discovery_snapshots"]]
+    assert "initial" in labels
+    assert "post_model" in labels
 
 
 def test_inexact_readback_rolls_back_and_reopens(
