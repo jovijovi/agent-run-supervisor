@@ -40,6 +40,14 @@ def test_pre_dispatch_failure_is_failed_and_session_stays_active() -> None:
     assert disposition == "active"
 
 
+def test_pre_dispatch_failure_with_unproven_rollback_quarantines() -> None:
+    # Architecture §5: session reusable on pre-dispatch failure only "unless
+    # rollback cannot be proven".
+    status, disposition = _finalize(dispatch_started=False, rollback_unproven=True)
+    assert status is AgentRunStatus.FAILED
+    assert disposition == "quarantined"
+
+
 def test_reliable_acp_terminal_completes() -> None:
     status, disposition = _finalize(dispatch_started=True, acp_stop_reason="end_turn")
     assert status is AgentRunStatus.COMPLETED

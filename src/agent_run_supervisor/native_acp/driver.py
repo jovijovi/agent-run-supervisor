@@ -177,37 +177,44 @@ class NativeAcpDriver:
         self._session_id = agent_session_id
         self._check_identity()
 
-    async def set_config_exact(self) -> tuple[str, str]:
+    async def set_config_exact(
+        self, machine: ConfigFidelityMachine | None = None
+    ) -> tuple[str, str]:
         """Run set model → consume full set → rediscover effort → set effort
-        → consume full set → exact readback. Zero prompt on any failure."""
+        → consume full set → exact readback. Zero prompt on any failure.
+
+        ``machine`` overrides the Run's machine for the rollback sequence;
+        the prompt gate always stays on the Run's own machine.
+        """
+        active = machine or self._machine
         connection = self._require_connection()
         session_id = self._require_session()
-        model_selector = self._machine.model_plan()
+        model_selector = active.model_plan()
         model_response = await self._call(
             "session/set_config_option(model)",
             connection.set_config_option(
                 config_id=model_selector,
                 session_id=session_id,
-                value=self._machine.requested_model,
+                value=active.requested_model,
             ),
         )
-        self._machine.record_post_model_options(
+        active.record_post_model_options(
             _dump_options(model_response.config_options)
         )
-        effort_selector = self._machine.effort_plan()
+        effort_selector = active.effort_plan()
         effort_response = await self._call(
             "session/set_config_option(effort)",
             connection.set_config_option(
                 config_id=effort_selector,
                 session_id=session_id,
-                value=self._machine.requested_effort,
+                value=active.requested_effort,
             ),
         )
-        self._machine.record_post_effort_options(
+        active.record_post_effort_options(
             _dump_options(effort_response.config_options)
         )
         self._check_identity()
-        return self._machine.require_ready()
+        return active.require_ready()
 
     async def prompt_once(self, text: str) -> PromptOutcome:
         connection = self._require_connection()

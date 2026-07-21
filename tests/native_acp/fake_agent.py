@@ -153,7 +153,11 @@ class FakeAgent:
             _error(request_id, -32603, "session load rejected by fake script")
             return
         if self.script.get("silent_new_on_load"):
+            # Model a silent recreation: updates start carrying a new external
+            # session id, emitted before the load response and before every
+            # config response so the client observes the identity change.
             self.update_session_id = "fake-recreated-session-2"
+            self._notify_update({"sessionUpdate": "session_info_update"})
         _result(request_id, {"configOptions": self._options_list()})
 
     def _on_set_config(self, request_id: Any, params: dict[str, Any]) -> None:
@@ -163,12 +167,23 @@ class FakeAgent:
             sys.exit(1)
         config_id = params.get("configId")
         value = params.get("value")
+        if value in self.script.get("reject_set_config_values", []):
+            _error(request_id, -32602, f"value rejected by fake script: {value}")
+            return
+        if self.update_session_id is not None:
+            self._notify_update({"sessionUpdate": "session_info_update"})
         readback = self.script.get("wrong_readback", {}).get(config_id, value)
-        if config_id == "model" and "post_model_options" in self.script:
-            self.options = {
-                option["id"]: dict(option)
-                for option in self.script["post_model_options"]
-            }
+        if config_id == "model":
+            by_value = self.script.get("post_model_options_by_value", {})
+            if value in by_value:
+                self.options = {
+                    option["id"]: dict(option) for option in by_value[value]
+                }
+            elif "post_model_options" in self.script:
+                self.options = {
+                    option["id"]: dict(option)
+                    for option in self.script["post_model_options"]
+                }
         if config_id in self.options:
             self.options[config_id]["currentValue"] = readback
         _result(request_id, {"configOptions": self._options_list()})

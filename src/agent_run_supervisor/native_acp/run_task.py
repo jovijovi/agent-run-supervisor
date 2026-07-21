@@ -81,6 +81,8 @@ class FinalizationObservations:
     observation_interrupted: bool = False
     escalated_kill_after_dispatch: bool = False
     permission_violation: bool = False
+    # A partial between-Run switch whose exact rollback could not be proven.
+    rollback_unproven: bool = False
 
 
 _COMPLETED_STOP_REASONS = frozenset(
@@ -104,7 +106,10 @@ def finalize_run_state(
     if obs.persisted_terminal_event is not None:
         return (_status_for_stop_reason(obs.persisted_terminal_event), "active")
     if not obs.dispatch_started:
-        return (AgentRunStatus.FAILED, "active")
+        # Reusable unless a partial switch could not be rolled back with
+        # exact readback proof.
+        disposition = "quarantined" if obs.rollback_unproven else "active"
+        return (AgentRunStatus.FAILED, disposition)
     if obs.acp_stop_reason is not None:
         if obs.permission_violation:
             return (AgentRunStatus.FAILED, "active")
@@ -156,10 +161,16 @@ class _RunContext:
     handle: Any = None
     session_id: str | None = None
     ephemeral: bool = False
+    reuse_load: bool = False
+    load_external_id: str | None = None
+    previous_pair: tuple[str | None, str | None] = (None, None)
+    rollback_unproven: bool = False
     lock: SessionLock | None = None
     proc: ManagedProcess | None = None
     writer: EventWriter | None = None
     bridge: PermissionBridge | None = None
+    client: NativeAcpClient | None = None
+    profile: Any = None
     driver: NativeAcpDriver | None = None
     machine: ConfigFidelityMachine | None = None
     effective: EffectiveRunState = field(default_factory=EffectiveRunState)
@@ -307,6 +318,8 @@ class RunTask:
             permission_handler=self._permission_handler(ctx),
             fs_read_handler=self._fs_read_handler(ctx),
         )
+        ctx.client = client
+        ctx.profile = profile
         ctx.machine = ConfigFidelityMachine(
             model_selector_id=profile.model_selector_id,
             effort_selector_id=profile.effort_selector_id,
@@ -324,8 +337,6 @@ class RunTask:
             raise _PreDispatchFailure(
                 "startup/config sequence timed out", "STARTUP_TIMEOUT"
             ) from None
-        except (ConfigFidelityError, NativeDriverError) as exc:
-            raise _PreDispatchFailure(str(exc), "CONFIG_FIDELITY") from exc
 
         await self._dispatch(ctx, limits.turn_timeout_seconds)
 
@@ -386,10 +397,13 @@ class RunTask:
                 namespace=spec.identity.namespace,
             )
             if record.agent_session_id is not None:
-                raise _PreDispatchFailure(
-                    "session reuse via session/load lands in C9; this Run "
-                    "targets an already-bound session",
-                    "SESSION_LOAD_UNAVAILABLE",
+                # Later Runs on a bound session use real session/load with
+                # the unchanged external ID (PRD R4).
+                ctx.reuse_load = True
+                ctx.load_external_id = record.agent_session_id
+                ctx.previous_pair = (
+                    record.last_effective_model,
+                    record.last_effective_effort,
                 )
         ctx.lock = self._session_store.acquire_lock(
             session_id,
@@ -401,26 +415,64 @@ class RunTask:
     async def _startup_sequence(self, ctx: _RunContext, spec, binding) -> None:
         driver = ctx.driver
         assert driver is not None and ctx.bridge is not None
-        self._emit(ctx, {"type": "run_started", "method": "initialize"})
-        await driver.open(ctx.proc)
-        summary = await driver.initialize(
-            client_capabilities=ctx.bridge.client_capabilities()
-        )
-        ctx.effective.agent_info = summary.agent_info
-        ctx.effective.protocol_version = summary.protocol_version
-        ctx.effective.capabilities = summary.capabilities
-        ctx.effective.load_session_advertised = summary.load_session_advertised
-
-        self._emit(ctx, {"type": "session_new_requested"})
-        external_id = await driver.new_session(cwd=binding.effective_cwd)
-        ctx.effective.agent_session_id = external_id
-        record = self._session_store.open_session(ctx.session_id)
-        if record.agent_session_id is None:
-            storage.bind_agent_session(
-                self._session_store, ctx.session_id, agent_session_id=external_id
+        try:
+            self._emit(ctx, {"type": "run_started", "method": "initialize"})
+            await driver.open(ctx.proc)
+            summary = await driver.initialize(
+                client_capabilities=ctx.bridge.client_capabilities()
             )
+            ctx.effective.agent_info = summary.agent_info
+            ctx.effective.protocol_version = summary.protocol_version
+            ctx.effective.capabilities = summary.capabilities
+            ctx.effective.load_session_advertised = summary.load_session_advertised
 
-        model, effort = await driver.set_config_exact()
+            if ctx.reuse_load:
+                if not summary.load_session_advertised:
+                    raise _PreDispatchFailure(
+                        "agent does not advertise loadSession; session reuse "
+                        "is unsatisfiable — escalate per G6",
+                        "LOAD_SESSION_UNADVERTISED",
+                    )
+                assert ctx.load_external_id is not None
+                self._emit(ctx, {"type": "session_load_requested"})
+                # Real session/load on the unchanged external ID; this path
+                # never calls session/new — silent re-creation is failure.
+                await driver.load_session(
+                    agent_session_id=ctx.load_external_id,
+                    cwd=binding.effective_cwd,
+                )
+                ctx.effective.agent_session_id = ctx.load_external_id
+            else:
+                self._emit(ctx, {"type": "session_new_requested"})
+                external_id = await driver.new_session(cwd=binding.effective_cwd)
+                ctx.effective.agent_session_id = external_id
+                record = self._session_store.open_session(ctx.session_id)
+                if record.agent_session_id is None:
+                    storage.bind_agent_session(
+                        self._session_store,
+                        ctx.session_id,
+                        agent_session_id=external_id,
+                    )
+
+            model, effort = await driver.set_config_exact()
+        except _PreDispatchFailure:
+            raise
+        except (ConfigFidelityError, NativeDriverError) as exc:
+            if ctx.client is not None and ctx.client.identity_violation:
+                raise _PreDispatchFailure(
+                    f"silent session recreation detected: "
+                    f"{ctx.client.identity_violation}",
+                    "SILENT_SESSION_RECREATION",
+                ) from exc
+            if ctx.reuse_load and ctx.machine is not None and (
+                ctx.machine.phase not in ("init", "initial_options")
+            ):
+                # A set may have been dispatched: partial switch. No prompt;
+                # roll back to the last exact-readback-proven pair or
+                # quarantine.
+                await self._rollback_after_partial_switch(ctx)
+            raise _PreDispatchFailure(str(exc), "CONFIG_FIDELITY") from exc
+
         ctx.effective.effective_model = model
         ctx.effective.effective_effort = effort
         assert ctx.machine is not None
@@ -436,6 +488,34 @@ class RunTask:
         )
         ctx.effective_written = True
         self._write_progress(ctx, "running")
+
+    async def _rollback_after_partial_switch(self, ctx: _RunContext) -> None:
+        self._emit(ctx, {"type": "config_rollback_started"})
+        previous_model, previous_effort = ctx.previous_pair
+        if not previous_model or not previous_effort:
+            ctx.rollback_unproven = True
+            self._emit(ctx, {"type": "config_rollback_failed"})
+            return
+        assert ctx.machine is not None and ctx.driver is not None
+        snapshots = ctx.machine.snapshots
+        latest_options = snapshots[-1][1] if snapshots else None
+        try:
+            rollback_machine = ConfigFidelityMachine(
+                model_selector_id=ctx.profile.model_selector_id,
+                effort_selector_id=ctx.profile.effort_selector_id,
+                requested_model=previous_model,
+                requested_effort=previous_effort,
+            )
+            rollback_machine.record_initial_options(latest_options)
+            # Rollback is itself exact-readback gated.
+            await ctx.driver.set_config_exact(machine=rollback_machine)
+            self._session_store.commit_last_effective(
+                ctx.session_id, model=previous_model, effort=previous_effort
+            )
+            self._emit(ctx, {"type": "config_rollback_proven"})
+        except Exception:
+            ctx.rollback_unproven = True
+            self._emit(ctx, {"type": "config_rollback_failed"})
 
     async def _dispatch(self, ctx: _RunContext, turn_timeout: float) -> None:
         driver = ctx.driver
@@ -628,6 +708,7 @@ class RunTask:
             permission_violation=(
                 ctx.bridge.turn_failed if ctx.bridge is not None else False
             ),
+            rollback_unproven=ctx.rollback_unproven,
         )
         status, disposition = finalize_run_state(observations)
         if status is None:
