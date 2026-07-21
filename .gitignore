@@ -383,3 +383,6 @@ cython_debug/
 outputs/
 .tmp/
 .agent-run-supervisor/
+
+# CodeGraph
+/.codegraph
