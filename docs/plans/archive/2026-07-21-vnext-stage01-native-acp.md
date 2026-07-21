@@ -1,9 +1,13 @@
 ---
 title: "ARS vNext Stage 0 + Stage 1 development plan — Native ACP vertical (pre-arsd)"
-status: active
+status: archived
 created_at: 2026-07-21
 last_validated_at: 2026-07-21T20:30:00+0800
+archived_at: 2026-07-21
+deprecated_reason: "Superseded after PR #65 squash merge and the vNext authority reset"
 ---
+> **Archived; not active development authority.** Retained for audit only. Do not execute this
+> plan or use it to select a branch, PR, baseline, scope, or acceptance gate.
 
 # ARS vNext Stage 0 + Stage 1 development plan — Native ACP vertical (pre-arsd)
 

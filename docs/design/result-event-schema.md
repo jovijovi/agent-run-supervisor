@@ -2,7 +2,7 @@
 title: "agent-run-supervisor Result / Event Schema"
 status: active
 created_at: 2026-06-01
-last_validated_at: 2026-07-08T03:30:00+0800
+last_validated_at: 2026-07-21
 ---
 # agent-run-supervisor Result / Event Schema
 
@@ -16,6 +16,12 @@ last_validated_at: 2026-07-08T03:30:00+0800
 > `preflight.py`, `retention.py`, `session.py`, `session_runtime.py`). It does
 > **not** redefine product goals, expand scope, grant any runtime/live approval,
 > or introduce a business verdict.
+>
+> **Compatibility baseline, not vNext product direction.** This document remains active because released
+> callers need an exact description of the v0.1.7 result/event shapes and vNext must preserve or evolve
+> them additively. New product scope, Native terminal semantics, module design, staging, and acceptance
+> come only from GOAL/PRD/vNext design/roadmap/active plan. Do not use this schema to restore archived
+> acpx requirements or to claim Native ACP is implemented.
 >
 > **Stability rule (read this first).** `business_verdict` is **always `null`**
 > and caller-owned — the supervisor never sets it. Schema evolution is

@@ -24,12 +24,14 @@ Documentation is the project soul and precedes code. For roadmap, design, implem
 
 Before changing files, state the current product position, feature/phase target, open tails, explicit non-approvals, and whether the requested task is allowed by the roadmap.
 
-The pre-realignment `docs/plans/` and `docs/dev_log/` artifacts were retired and cleared and remain non-authoritative. Do not treat historical plan/dev-log artifacts as source-of-truth.
+The vNext-only authority chain is the sole basis for new development. The former mixed v0.1.7/vNext
+authority snapshot, completed plans/phases, migration documents, and old branch/PR instructions are
+cold history under `docs/archive/`, `docs/plans/archive/`, and `docs/roadmap/archive/`. Never load them by
+default or use them to choose product scope, modules, branches, gates, acceptance, or approval.
 
 Concrete **active** implementation plans live under `docs/plans/active/` (see
-`docs/plans/README.md`). Completed plans live in `docs/plans/archive/` and are **not** default
-agent context. Closed phase acceptance: `docs/roadmap/archive/phases/`. Non-approvals:
-`docs/roadmap/non-approvals.md`.
+`docs/plans/README.md`). Non-approvals: `docs/roadmap/non-approvals.md`. The released v0.1.7 acpx code
+and `docs/design/result-event-schema.md` remain compatibility baselines only; they do not redefine vNext.
 
 ## Development workflow
 
@@ -38,11 +40,9 @@ Use short-lived task branches and isolated worktrees for AI-assisted work. Branc
 or other ad-hoc prefixes. Derive implementation plans from PRD/design/roadmap; a plan must not
 redefine product goals.
 
-Default role split unless explicitly changed:
-
-- Claude Code: main worker for implementation/debugging/design work.
-- Codex CLI: primary reviewer.
-- Hermes: scope control, verification, evidence, and arbitration.
+Task role/model assignment comes from the current user/controller authorization, not from archived plans
+or a repository-pinned AGENT. Preserve independent review for authority-bearing or implementation changes;
+Hermes owns scope control, deterministic verification, evidence arbitration, and side-effect authority.
 
 ### Post-implementation documentation sync
 
@@ -78,9 +78,14 @@ immediately after merge without an explicit request.
 
 ## Product boundaries
 
-The product requirement includes both acpx one-shot exec and persistent sessions. Engineering may implement exec first and sessions later, but PRD/DESIGN/GOAL must not describe the product as exec-only.
+The only new-development target is the vNext supervision architecture in GOAL/PRD/design: local `arsd`
+production ingress, ars-core/Native ACP, process-per-Run plus real Session load, immutable per-Run config,
+and fail-closed evidence/recovery. The v0.1.7 acpx modes remain compatibility-only and never become
+Native driver/fallback or a reason to restore archived product requirements.
 
-Do not infer Sachima integration, real AGENT auto-replies, public ingress, real delivery, Gateway lifecycle operations, production config writes, live/default-on behavior, `@all`, or agent-to-agent auto-routing from docs/governance changes.
+Do not infer Stage 0/1 implementation, Stage 2 `arsd`, service/cgroup enablement, release/publication,
+Sachima integration, real AGENT auto-replies, public ingress, delivery, Gateway lifecycle, production
+config writes, live/default-on behavior, `@all`, or agent-to-agent auto-routing from docs/governance changes.
 
 ## Secrets and credentials
 

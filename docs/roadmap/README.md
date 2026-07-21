@@ -1,40 +1,41 @@
 ---
-title: "Roadmap governance"
+title: "ARS vNext Roadmap Governance"
 status: active
-created_at: 2026-05-28
-last_validated_at: 2026-07-07T15:30:00+0800
+created_at: 2026-07-21
+last_validated_at: 2026-07-21
 ---
-# Roadmap governance
+# ARS vNext Roadmap Governance
 
-## Living documents (default context)
-
-| Document | Role |
-|---|---|
-| [`current-status.md`](current-status.md) | Living phase board — snapshot, phase index, open tails |
-| [`features.md`](features.md) | Feature/capability completion |
-| [`non-approvals.md`](non-approvals.md) | Explicit non-approvals |
-| [`verification.md`](verification.md) | Implementation PR verification gates |
-| [`../plans/active/`](../plans/active/) | In-progress implementation plans |
-
-## Cold archive (not default context)
+## Living documents — default context
 
 | Document | Role |
 |---|---|
-| [`archive/phases/`](archive/phases/) | Closed phase acceptance records |
-| [`archive/tails.md`](archive/tails.md) | Closed tail register |
-| [`../plans/archive/`](../plans/archive/) | Completed implementation plans |
+| [`current-status.md`](current-status.md) | vNext phase snapshot, active plan, open gates |
+| [`features.md`](features.md) | vNext capability completion plus one legacy-compatibility row |
+| [`non-approvals.md`](non-approvals.md) | explicit current non-approvals |
+| [`verification.md`](verification.md) | deterministic implementation/PR gates |
+| [`../plans/active/`](../plans/active/) | board-linked current executable plan |
 
-Use roadmap documents to answer:
+## Cold archive — never default context
 
-- which features are Done/Partial;
-- what engineering phase is current;
-- what the next allowed implementation request is;
-- what tails remain open;
+| Location | Role |
+|---|---|
+| [`../archive/pre-vnext-reset-2026-07-21/`](../archive/pre-vnext-reset-2026-07-21/README.md) | former mixed authority snapshot |
+| [`archive/phases/`](archive/phases/) | closed v0.1.x phase acceptance |
+| [`archive/tails.md`](archive/tails.md) | closed historical tail register |
+| [`archive/path-migration-2026-07.md`](archive/path-migration-2026-07.md) | historical path migration |
+| [`../plans/archive/`](../plans/archive/) | completed/superseded plans |
+
+Archived material is retained for audit, compatibility, and disputes only. It cannot define current
+scope, modules, branches, PRs, gates, acceptance, or authorization.
+
+Use living roadmap documents to answer:
+
+- which vNext capability/stage is current;
+- what the next separately approvable implementation scope is;
+- which proof/governance gates remain;
 - which non-approvals remain in force.
 
-Roadmap documents may sequence implementation; they must not shrink PRD/design requirements.
-
-Task-level execution plans belong in `docs/plans/active/` (see [`docs/plans/README.md`](../plans/README.md)).
-Do not use roadmap docs to imply live/runtime approval.
-
-Path migration: [`MIGRATION.md`](MIGRATION.md).
+Roadmap documents sequence implementation but never shrink GOAL/PRD/design. Task-level plans live only in
+`docs/plans/active/`. No roadmap/status wording grants source, runtime, live, publication, or integration
+authority.

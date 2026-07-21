@@ -2,7 +2,7 @@
 title: "AI-assisted development flow"
 status: active
 created_at: 2026-05-28
-last_validated_at: 2026-07-07T15:30:00+0800
+last_validated_at: 2026-07-21
 ---
 # AI-assisted development flow
 
@@ -30,7 +30,10 @@ PRD -> design -> features + living board -> docs/plans/active/ -> code
 | Closed phase archive | `docs/roadmap/archive/phases/` |
 | Closed plans | `docs/plans/archive/` |
 
-**Agent context:** read the board, features, and `docs/plans/active/` only. Do not default-load archive directories.
+**Agent context:** read the vNext authority chain, board, features, and the board-linked file in
+`docs/plans/active/` only. `docs/archive/`, `docs/plans/archive/`, and `docs/roadmap/archive/` are cold
+history: read them only for audit/dispute or when the user cites a path. Archived material cannot supply
+current scope, branches, PRs, gates, acceptance, or authorization.
 
 Required preflight for roadmap, phase-gate, implementation, PR, CI, review, merge, or next-phase-readiness work:
 
@@ -42,7 +45,8 @@ Required preflight for roadmap, phase-gate, implementation, PR, CI, review, merg
 6. `docs/roadmap/current-status.md`
 7. this file
 
-Path migration map: `docs/roadmap/MIGRATION.md`. Plan layout: `docs/plans/README.md`.
+Historical path migration is archived at `docs/roadmap/archive/path-migration-2026-07.md` and is not
+preflight context. Plan layout: `docs/plans/README.md`.
 
 ## Branch model
 
@@ -109,7 +113,7 @@ Never include secrets, tokens, cookies, raw environment values, real webhook val
 
 ## Verification gates
 
-Canonical entry: [`scripts/verify_local.sh`](../../scripts/verify_local.sh) and
+Canonical entry: [`scripts/verify_local.sh`](../scripts/verify_local.sh) and
 [`docs/roadmap/verification.md`](roadmap/verification.md).
 
 Quick smoke (when full verify is too heavy for a tiny doc-only change):
@@ -126,10 +130,10 @@ git diff --check
 
 ## Review requirements
 
-- Claude Code: main worker for implementation/debugging/design work unless explicitly deviating.
-- Codex CLI: primary reviewer.
-- Hermes: scope control, verification, gates, and evidence arbitration.
-- Reviewers must check PRD/design/feature/roadmap alignment, not only whether tests pass.
+- The user/controller assigns worker and model per task; repository history does not pin them.
+- Authority-bearing docs and implementation changes require an independent, fresh-context blocker review unless explicitly waived.
+- Hermes controls scope, deterministic gates, evidence arbitration, and all push/PR/merge/runtime side effects.
+- Reviewers check GOAL/PRD/design/feature/roadmap/active-plan alignment, not only whether tests pass.
 
 ## PR requirements
 

@@ -35,6 +35,12 @@
 
 ---
 
+> **Released vs. target.** The commands and APIs below describe the released **v0.1.7 acpx
+> compatibility surface**. New development follows the vNext authority chain in [`GOAL.md`](GOAL.md),
+> the [PRD](docs/product/prd.md), and [design](docs/design/architecture.md): unprivileged local `arsd`
+> UDS ingress → ars-core/Native ACP → registered external AGENT. That target is staged and **not yet
+> implemented or production-enabled**. Historical requirements/plans are retained only in cold archives.
+
 ## What it does
 
 Every project that drives an external AGENT through **ACP/acpx** re-implements the same
@@ -49,10 +55,11 @@ normalized events, classifies a **supervisor-owned status**, and writes **redact
 restrictive-permission local artifacts**. The caller gets auditable evidence — not a tangle of
 runner-lifecycle code.
 
-The product covers **two execution modes**, both implemented for local use: one-shot exec and a
-local persistent-session lifecycle (create/send/status/close/abort/list). It is deliberately
-**not** Sachima, a Gateway plugin, an IM adapter, or a
-daemon, and it never emits a business verdict (`business_verdict` is always `null`).
+The released v0.1.7 product covers **two local acpx execution modes**: one-shot exec and a local
+persistent-session lifecycle (create/send/status/close/abort/list). That released line contains no
+daemon. The separately staged vNext target adds a thin, unprivileged local `arsd` UDS host as the sole
+production ingress; it is not implemented yet. Neither line is Sachima, a Gateway plugin, or an IM
+adapter, and ARS never emits a business verdict (`business_verdict` is always `null`).
 
 ## How it works
 
@@ -179,9 +186,10 @@ with `--apply`) deletes aged run/session artifacts, confined to the resolved
 
 ## Library usage
 
-The package is a **Python library** as well as a CLI. For programmatic integration, prefer the
-generic local caller boundary ([`caller.py`](src/agent_run_supervisor/caller.py), design detail in
-[`docs/design/technical-solution.md`](docs/design/technical-solution.md) §3.10).
+The released package is a **Python library** as well as a CLI. For v0.1.7 programmatic integration,
+prefer the generic local caller boundary ([`caller.py`](src/agent_run_supervisor/caller.py)); the
+caller-stable payload contract is documented in
+[`docs/design/result-event-schema.md`](docs/design/result-event-schema.md).
 
 **Install:**
 
@@ -438,25 +446,24 @@ uv sync --extra dev --extra release
 
 ## Roadmap
 
-High-level direction only — full phase status, acceptance, and non-approvals live in
-[`docs/roadmap/current-status.md`](docs/roadmap/current-status.md) and
-[`docs/roadmap/features.md`](docs/roadmap/features.md).
+The released v0.1.7 surface and the vNext target are deliberately separate. Current authority, stage
+status, gates, and non-approvals live in [`docs/roadmap/current-status.md`](docs/roadmap/current-status.md),
+[`docs/roadmap/features.md`](docs/roadmap/features.md), and
+[`docs/roadmap/non-approvals.md`](docs/roadmap/non-approvals.md).
 
-- **Done — foundations + both execution modes.** Role/policy/parser/store foundation, real local
-  `acpx exec` supervision (role-bound, outer watchdog, kill metadata), and the local
-  persistent-session lifecycle (create/send/multi-turn-resume/status/close/abort/list, locks,
-  stale-lock recovery) are implemented and closed for local use.
-- **Done — hardening + local caller integration.** Full read-only doctor probe set, confined
-  artifact retention/cleanup, a documented result/event schema, process-liveness crash recovery,
-  the generic local caller boundary, and a local/offline Hermes caller + offline Feishu
-  view-model adapter are merged.
-- **Done — release engineering (P3).** uv dev workflow, `make verify` / `verify_local.sh`, CI
-  alignment, PyPI publish, GitHub Release `SHA256SUMS` provenance, and tag-triggered Trusted
-  Publishing via `release.yml`.
-- **Backlog — deeper hardening (not started).** `npx` strict-offline enforcement, stronger
-  redaction/DLP plus a caller allowlist, and a lock-release audit trail are tracked as backlog
-  only. Any live/platform integration (real Feishu/IM delivery, Sachima, Gateway lifecycle,
-  public ingress) stays out of scope and requires separate approval.
+- **Released compatibility baseline — v0.1.7.** Local acpx one-shot/persistent-session supervision,
+  redacted evidence, doctor/cleanup, caller wrapper, packaging, and release engineering are implemented.
+  They remain supported compatibility surfaces, not the architecture for new development.
+- **Planned — vNext Stage 0/1.** AgentProfile/immutable RunSpec, ManagedProcess, Native ACP exact config,
+  process-per-Run Session load/switching, isolated Native stores, fail-closed state, permissions, and
+  B-grade real OpenCode evidence. Source/dependency implementation requires separate approval; see the
+  [active plan](docs/plans/active/2026-07-21-vnext-stage01-native-acp-implementation.md).
+- **Planned — vNext Stage 2.** `arsd` UDS ingress, peer ownership, reconciliation, bounded operation,
+  real denied-action mediation, and cgroup crash containment. G12 caller-UID policy and all production
+  enablement require separate approval.
+- **Parked — Sachima integration.** A socket backend comes only after ARS production acceptance and a
+  separate integration authorization. Public ingress, IM/Gateway behavior, and business orchestration
+  remain out of ARS scope.
 
 ## License
 

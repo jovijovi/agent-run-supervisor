@@ -2,7 +2,7 @@
 title: "Roadmap phase archive"
 status: active
 created_at: 2026-07-07
-last_validated_at: 2026-07-07T15:30:00+0800
+last_validated_at: 2026-07-21
 ---
 
 # Roadmap phase archive
@@ -13,6 +13,7 @@ context — read the living board [`current-status.md`](../current-status.md) fi
 | Archive | Execution plans |
 |---|---|
 | [`phases/`](phases/) phase Goal/Checklist/Acceptance | [`docs/plans/archive/`](../../plans/archive/) checklists |
+| [`../../archive/pre-vnext-reset-2026-07-21/`](../../archive/pre-vnext-reset-2026-07-21/README.md) former authority | Audit/compatibility only; never new-development context |
 
 ## When to write here
 

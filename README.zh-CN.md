@@ -35,6 +35,12 @@
 
 ---
 
+> **已发布现状与目标必须分开。** 下方命令和 API 描述已发布的 **v0.1.7 acpx 兼容面**。
+> 新开发仅以 [`GOAL.md`](GOAL.md)、[PRD](docs/product/prd.md) 与
+> [架构设计](docs/design/architecture.md) 的 vNext 权威链为准：本地非特权 `arsd` UDS 入口
+> → ars-core/Native ACP → 注册的外部 AGENT。该目标按阶段推进，**尚未实现或启用生产运行**；
+> 历史需求和计划只在冷档案中留存。
+
 ## 它做什么
 
 每一个通过 **ACP/acpx** 驱动外部 AGENT 的项目，最终都会重复实现同一套底层管道：拉起并照看
@@ -46,10 +52,11 @@
 将观测输出解析为归一化事件、判定一个**由监督层拥有的状态**，并写出**脱敏、权限受限的本地工件**。
 调用方拿到的是可审计的证据 —— 而不是一团运行器生命周期代码。
 
-本产品包含**两种执行模式**，二者均已为本地使用实现：一次性 exec 与本地持久会话生命周期
-（创建/发送/状态/关闭/中止/列举）。它刻意**不是** Sachima、不是 Gateway
-插件、不是 IM 适配器，也不是常驻守护进程（daemon），并且永不给出业务结论（`business_verdict`
-始终为 `null`）。
+已发布的 v0.1.7 包含**两种本地 acpx 执行模式**：一次性 exec 与本地持久会话生命周期
+（创建/发送/状态/关闭/中止/列举）；该已发布版本没有 daemon。另行分阶段推进的 vNext 目标
+会增加一个薄的、本地非特权 `arsd` UDS 宿主，作为唯一生产入口，但目前尚未实现。两条线都
+不是 Sachima、Gateway 插件或 IM 适配器；ARS 也永不给出业务结论（`business_verdict` 始终为
+`null`）。
 
 ## 工作原理
 
@@ -171,9 +178,9 @@ Codex ACP 模型名要使用 ACP session 广告出来的精确 ID，例如 `gpt-
 
 ## 库用法（Library usage）
 
-本包既是 **Python 库** 也是 CLI。程序化集成时，优先使用通用本地调用方边界
-（[`caller.py`](src/agent_run_supervisor/caller.py)，设计细节见
-[`docs/design/technical-solution.md`](docs/design/technical-solution.md) §3.10）。
+已发布的包既是 **Python 库** 也是 CLI。针对 v0.1.7 的程序化集成，优先使用通用本地调用方
+边界（[`caller.py`](src/agent_run_supervisor/caller.py)）；调用方稳定的载荷契约见
+[`docs/design/result-event-schema.md`](docs/design/result-event-schema.md)。
 
 **安装：**
 
@@ -422,21 +429,20 @@ uv sync --extra dev --extra release
 
 ## 路线图
 
-仅高层方向 —— 完整的阶段状态、验收与非批准项见
-[`docs/roadmap/current-status.md`](docs/roadmap/current-status.md) 与
-[`docs/roadmap/features.md`](docs/roadmap/features.md)。
+已发布的 v0.1.7 与 vNext 目标严格分开。当前权威、阶段、门禁和非批准项见
+[`docs/roadmap/current-status.md`](docs/roadmap/current-status.md)、
+[`docs/roadmap/features.md`](docs/roadmap/features.md) 与
+[`docs/roadmap/non-approvals.md`](docs/roadmap/non-approvals.md)。
 
-- **已完成 —— 基础 + 两种执行模式。** 角色/策略/解析器/存储基础、真实的本地 `acpx exec` 监督
-  （角色绑定、外层看门狗、终止元数据），以及本地持久会话生命周期（创建/发送/多轮恢复/状态/
-  关闭/中止/列举、锁、过期锁恢复）均已实现，并就本地使用而言已收口。
-- **已完成 —— 加固 + 本地调用方集成。** 完整只读 doctor 探针集、受限的工件保留/清理、有文档的
-  结果/事件 schema、进程存活性崩溃恢复、通用本地调用方边界，以及本地/离线 Hermes 调用方 +
-  离线 Feishu 视图模型适配器均已合并。
-- **已完成 —— 发布工程（P3）。** uv 开发工作流、`make verify` / `verify_local.sh`、CI 对齐、
-  PyPI 发布、GitHub Release `SHA256SUMS` 溯源，以及 tag 触发的 Trusted Publishing（`release.yml`）。
-- **待办 —— 更深层加固（尚未开始）。** `npx` 严格离线约束、更强的脱敏/DLP 与调用方白名单，以及
-  锁释放审计轨迹，仅作为待办记录。任何实时/平台集成（真实 Feishu/IM 投递、Sachima、Gateway
-  生命周期、公网入口）仍不在范围内，须经单独批准。
+- **已发布兼容基线 —— v0.1.7。** 本地 acpx 一次性/持久会话监督、脱敏证据、doctor/cleanup、
+  调用方封装、打包与发布工程均已实现。它们继续作为兼容面维护，但不再定义新开发架构。
+- **计划中 —— vNext Stage 0/1。** AgentProfile/不可变 RunSpec、ManagedProcess、Native ACP 精确配置、
+  process-per-Run 的 Session load/切换、Native 存储隔离、失败关闭状态、权限桥与真实 OpenCode
+  B 级证据。源码/依赖实施需单独批准；见[当前 active plan](docs/plans/active/2026-07-21-vnext-stage01-native-acp-implementation.md)。
+- **计划中 —— vNext Stage 2。** `arsd` UDS 入口、peer/ownership、reconciliation、有界运行、真实
+  denied-action 权限证明与 cgroup 崩溃遏制。G12 caller-UID policy 和所有生产启用均需单独批准。
+- **暂存 —— Sachima 集成。** 仅在 ARS 通过生产验收且另获集成授权后实现 socket backend；公网
+  入口、IM/Gateway 行为与业务编排仍不属于 ARS。
 
 ## 许可证
 

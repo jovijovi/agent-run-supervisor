@@ -2,33 +2,36 @@
 
 # Documentation Index
 
-Total: 51 documents tracked across 2 statuses.
+Total: 60 documents tracked across 2 statuses.
 
-## Active (18)
+## Active (16)
 
-- [ARS vNext Stage 0 + Stage 1 development plan — Native ACP vertical (pre-arsd)](plans/active/2026-07-21-vnext-stage01-native-acp.md) — created 2026-07-21
-- [Version bump automation](plans/active/2026-07-07-version-bump-automation.md) — created 2026-07-07
+- [agent-run-supervisor vNext System Architecture](design/architecture.md) — created 2026-07-21
+- [agent-run-supervisor vNext Technical Solution](design/technical-solution.md) — created 2026-07-21
+- [ARS vNext Stage 0/1 implementation — Native ACP core](plans/active/2026-07-21-vnext-stage01-native-acp-implementation.md) — created 2026-07-21
+- [agent-run-supervisor vNext PRD](product/prd.md) — created 2026-07-21
+- [ARS vNext Roadmap Governance](roadmap/README.md) — created 2026-07-21
+- [ARS vNext Roadmap Current Status](roadmap/current-status.md) — created 2026-07-21
+- [ARS vNext Feature and Capability Tracker](roadmap/features.md) — created 2026-07-21
+- [ARS vNext Current Explicit Non-Approvals](roadmap/non-approvals.md) — created 2026-07-21
 - [Active implementation plans](plans/active/README.md) — created 2026-07-07
 - [Archived implementation plans](plans/archive/README.md) — created 2026-07-07
-- [Roadmap and plans path migration](roadmap/MIGRATION.md) — created 2026-07-07
 - [Roadmap phase archive](roadmap/archive/README.md) — created 2026-07-07
 - [agent-run-supervisor Result / Event Schema](design/result-event-schema.md) — created 2026-06-01
-- [agent-run-supervisor System Architecture](design/architecture.md) — created 2026-05-29
-- [agent-run-supervisor Technical Solution](design/technical-solution.md) — created 2026-05-29
 - [Implementation plans directory](plans/README.md) — created 2026-05-29
-- [agent-run-supervisor PRD](product/prd.md) — created 2026-05-29
-- [Feature and Capability Tracker](roadmap/features.md) — created 2026-05-29
 - [AI-assisted development flow](AI_FLOW.md) — created 2026-05-28
 - [Engineering practices](practices/README.md) — created 2026-05-28
-- [Roadmap governance](roadmap/README.md) — created 2026-05-28
-- [agent-run-supervisor Roadmap Current Status](roadmap/current-status.md) — created 2026-05-28
-- [Current explicit non-approvals](roadmap/non-approvals.md) — created 2026-05-28
 - [Verification gates for implementation PRs](roadmap/verification.md) — created 2026-05-28
 
-## Archived (33)
+## Archived (44)
 
+- [Pre-vNext-reset GOAL snapshot](archive/pre-vnext-reset-2026-07-21/GOAL.md) — created 2026-07-21
+- [Pre-vNext-reset authority archive](archive/pre-vnext-reset-2026-07-21/README.md) — created 2026-07-21
+- [ARS vNext Stage 0 + Stage 1 development plan — Native ACP vertical (pre-arsd)](plans/archive/2026-07-21-vnext-stage01-native-acp.md) — created 2026-07-21
 - [S2 — Session permission / goal-turn / no-op hardening](roadmap/archive/phases/s2-permissioned-session.md) — created 2026-07-21
 - [Permissioned session prompt turns, goal-turn compilation, no-op fail-closed classification](plans/archive/2026-07-08-permissioned-session-goal-noop.md) — created 2026-07-08
+- [Version bump automation](plans/archive/2026-07-07-version-bump-automation.md) — created 2026-07-07
+- [Roadmap and plans path migration](roadmap/archive/path-migration-2026-07.md) — created 2026-07-07
 - [C0 — acpx contract fixtures and validator](roadmap/archive/phases/c0-acpx-fixtures.md) — created 2026-07-07
 - [E1 — One-shot exec runner completion](roadmap/archive/phases/e1-exec-runner.md) — created 2026-07-07
 - [F0 — Role/policy/parser/store foundation](roadmap/archive/phases/f0-foundation.md) — created 2026-07-07
@@ -58,5 +61,11 @@ Total: 51 documents tracked across 2 statuses.
 - [S1d Persistent Session Lifecycle Completion Plan](plans/archive/2026-05-31-s1d-session-lifecycle-completion.md) — created 2026-05-31
 - [S1a Persistent-Session Contract Spike Plan](plans/archive/2026-05-30-s1a-session-contract-spike.md) — created 2026-05-30
 - [S1b Session Store and Lock Foundation Plan](plans/archive/2026-05-30-s1b-session-store-locks.md) — created 2026-05-30
+- [Pre-vNext-reset architecture snapshot](archive/pre-vnext-reset-2026-07-21/architecture.md) — created 2026-05-29
+- [Pre-vNext-reset feature tracker snapshot](archive/pre-vnext-reset-2026-07-21/features.md) — created 2026-05-29
+- [Pre-vNext-reset PRD snapshot](archive/pre-vnext-reset-2026-07-21/prd.md) — created 2026-05-29
+- [Pre-vNext-reset technical solution snapshot](archive/pre-vnext-reset-2026-07-21/technical-solution.md) — created 2026-05-29
 - [E1 One-shot Exec Runner Implementation Plan](plans/archive/2026-05-29-e1-one-shot-exec-runner.md) — created 2026-05-29
-- [Legacy V0.1a Migration and Conformance Matrix](roadmap/v0.1a-design-conformance.md) — created 2026-05-29
+- [Legacy V0.1a Migration and Conformance Matrix](roadmap/archive/v0.1a-design-conformance.md) — created 2026-05-29
+- [Pre-vNext-reset roadmap snapshot](archive/pre-vnext-reset-2026-07-21/current-status.md) — created 2026-05-28
+- [Pre-vNext-reset non-approvals snapshot](archive/pre-vnext-reset-2026-07-21/non-approvals.md) — created 2026-05-28
