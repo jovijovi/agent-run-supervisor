@@ -1,7 +1,8 @@
 ---
 title: "Permissioned session prompt turns, goal-turn compilation, no-op fail-closed classification"
-status: active
+status: archived
 created_at: 2026-07-08
+archived_at: 2026-07-21
 last_validated_at: 2026-07-08T03:00:00+0800
 ---
 # Permissioned session prompt turns, goal-turn compilation, no-op fail-closed classification
