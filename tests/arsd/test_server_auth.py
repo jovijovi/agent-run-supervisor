@@ -602,3 +602,209 @@ def test_probe_path_vanished_race_is_safe(
             await close(writer)
 
     run_async(scenario())
+
+
+# --- streaming Handler seam (blocker 3 repair) --------------------------------
+
+
+class _StreamResult:
+    """Minimal async stream with explicit aclose for server seam tests."""
+
+    def __init__(self, items, *, hang_after: int | None = None, fail_code=None):
+        self._items = list(items)
+        self._hang_after = hang_after
+        self._fail_code = fail_code
+        self._index = 0
+        self.closed = False
+        self._hang = asyncio.Event()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._fail_code is not None and self._index >= len(self._items):
+            raise protocol.ProtocolError(self._fail_code, "stream failed safely")
+        if self._index >= len(self._items):
+            raise StopAsyncIteration
+        if self._hang_after is not None and self._index == self._hang_after:
+            await self._hang.wait()
+        item = self._items[self._index]
+        self._index += 1
+        return item
+
+    async def aclose(self) -> None:
+        self.closed = True
+        self._hang.set()
+
+
+def test_streaming_handler_pushes_two_correlated_result_frames(sock_root: Path) -> None:
+    async def scenario() -> None:
+        path = sock_path(sock_root)
+        streams: list[_StreamResult] = []
+
+        async def handler(caller, request):
+            if request.op != "server_info":
+                return {"op": request.op}
+            stream = _StreamResult([{"part": 1}, {"part": 2}])
+            streams.append(stream)
+            return stream
+
+        srv = server.ArsdServer(
+            socket_path=path, policy=same_uid_policy(), handler=handler
+        )
+        await srv.start()
+        try:
+            reader, writer = await connect(path)
+            writer.write(protocol.encode_frame(info_frame("stream-1")))
+            await writer.drain()
+            first = protocol.decode_frame(await reader.readline())
+            second = protocol.decode_frame(await reader.readline())
+            assert first["request_id"] == "stream-1"
+            assert second["request_id"] == "stream-1"
+            assert first["result"] == {"part": 1}
+            assert second["result"] == {"part": 2}
+            await close(writer)
+        finally:
+            await srv.aclose()
+
+    run_async(scenario())
+
+
+def test_streaming_disconnect_closes_stream_not_handler_state(sock_root: Path) -> None:
+    async def scenario() -> None:
+        path = sock_path(sock_root)
+        streams: list[_StreamResult] = []
+        handler_alive = {"ok": True}
+
+        async def handler(caller, request):
+            if request.request_id == "disc-stream":
+                stream = _StreamResult([{"part": 1}, {"part": 2}], hang_after=1)
+                streams.append(stream)
+                return stream
+            return {"op": request.op, "still_serving": True}
+
+        srv = server.ArsdServer(
+            socket_path=path, policy=same_uid_policy(), handler=handler
+        )
+        await srv.start()
+        try:
+            reader, writer = await connect(path)
+            writer.write(protocol.encode_frame(info_frame("disc-stream")))
+            await writer.drain()
+            first = protocol.decode_frame(await reader.readline())
+            assert first["result"] == {"part": 1}
+            await close(writer)
+            # Disconnect finalizes only the stream.
+            for _ in range(50):
+                if streams and streams[0].closed:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                raise AssertionError("stream aclose was not invoked on disconnect")
+            assert handler_alive["ok"] is True
+            # Server still serves a later single-response request.
+            reader2, writer2 = await connect(path)
+            reply = await roundtrip(reader2, writer2, info_frame("after-disc"))
+            assert reply["request_id"] == "after-disc"
+            assert reply["result"]["still_serving"] is True
+            await close(writer2)
+        finally:
+            await srv.aclose()
+            assert streams[0].closed is True
+
+    run_async(scenario())
+
+
+def test_streaming_protocol_error_emits_safe_error_frame(sock_root: Path) -> None:
+    async def scenario() -> None:
+        path = sock_path(sock_root)
+
+        async def handler(caller, request):
+            return _StreamResult(
+                [{"part": 1}],
+                fail_code=protocol.EVENT_BACKLOG_EXCEEDED,
+            )
+
+        srv = server.ArsdServer(
+            socket_path=path, policy=same_uid_policy(), handler=handler
+        )
+        await srv.start()
+        try:
+            reader, writer = await connect(path)
+            writer.write(protocol.encode_frame(info_frame("err-stream")))
+            await writer.drain()
+            first = protocol.decode_frame(await reader.readline())
+            assert first["result"] == {"part": 1}
+            # Force a third __anext__ by making fail trigger after items — adjust
+            # stream to fail on second pull after yielding one.
+            err = protocol.decode_frame(await reader.readline())
+            assert err["request_id"] == "err-stream"
+            assert err["error"]["code"] == protocol.EVENT_BACKLOG_EXCEEDED
+            assert SECRET_SENTINEL not in err["error"]["message"]
+            await close(writer)
+        finally:
+            await srv.aclose()
+
+    run_async(scenario())
+
+
+def test_single_mapping_response_unchanged(sock_root: Path) -> None:
+    async def scenario() -> None:
+        path = sock_path(sock_root)
+        async with serving(path):
+            reader, writer = await connect(path)
+            reply = await roundtrip(reader, writer, info_frame("single-1"))
+            assert reply == {
+                "request_id": "single-1",
+                "result": {"op": "server_info"},
+            }
+            await close(writer)
+
+    run_async(scenario())
+
+
+def test_two_connection_streams_independent_on_peer_disconnect(
+    sock_root: Path,
+) -> None:
+    async def scenario() -> None:
+        path = sock_path(sock_root)
+        streams: dict[str, _StreamResult] = {}
+
+        async def handler(caller, request):
+            stream = _StreamResult(
+                [{"part": 1}, {"part": 2}], hang_after=1
+            )
+            streams[request.request_id] = stream
+            return stream
+
+        srv = server.ArsdServer(
+            socket_path=path, policy=same_uid_policy(), handler=handler
+        )
+        await srv.start()
+        try:
+            r1, w1 = await connect(path)
+            r2, w2 = await connect(path)
+            w1.write(protocol.encode_frame(info_frame("conn-a")))
+            w2.write(protocol.encode_frame(info_frame("conn-b")))
+            await w1.drain()
+            await w2.drain()
+            assert protocol.decode_frame(await r1.readline())["result"] == {"part": 1}
+            assert protocol.decode_frame(await r2.readline())["result"] == {"part": 1}
+            await close(w1)
+            for _ in range(50):
+                if streams["conn-a"].closed:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                raise AssertionError("conn-a stream not closed")
+            assert streams["conn-b"].closed is False
+            # Unblock conn-b and expect its second frame.
+            streams["conn-b"]._hang.set()
+            second = protocol.decode_frame(await r2.readline())
+            assert second["request_id"] == "conn-b"
+            assert second["result"] == {"part": 2}
+            await close(w2)
+        finally:
+            await srv.aclose()
+
+    run_async(scenario())

@@ -9,6 +9,7 @@ and error frames never carry caller payload text or secrets.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import errno
 import logging
@@ -17,7 +18,7 @@ import socket
 import stat
 import struct
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Union
 
 from ..event_store import secure_mkdir
 from . import protocol
@@ -112,9 +113,14 @@ class AuthenticatedCaller:
     peer_credentials: PeerCredentials
 
 
+HandlerResult = Union[Mapping[str, Any], AsyncIterator[Mapping[str, Any]]]
 Handler = Callable[
-    [AuthenticatedCaller, protocol.ParsedRequest], Awaitable[Mapping[str, Any]]
+    [AuthenticatedCaller, protocol.ParsedRequest], Awaitable[HandlerResult]
 ]
+
+
+def _is_stream_result(result: Any) -> bool:
+    return hasattr(result, "__aiter__") and not isinstance(result, Mapping)
 
 
 def probe_connect(path: str) -> None:
@@ -369,7 +375,6 @@ class ArsdServer:
                 parsed = protocol.parse_request(frame)
                 request_id = parsed.request_id
                 result = await self._handler(caller, parsed)
-                reply = protocol.build_result(parsed.request_id, result)
             except protocol.ProtocolError as err:
                 await self._send_error(writer, request_id, err.code, err.message)
                 continue
@@ -383,11 +388,85 @@ class ArsdServer:
                     writer, request_id, protocol.INTERNAL, "internal error"
                 )
                 return
+            if _is_stream_result(result):
+                keep_open = await self._emit_stream(
+                    reader, writer, request_id, result
+                )
+                if not keep_open:
+                    return
+                continue
             try:
+                reply = protocol.build_result(parsed.request_id, result)  # type: ignore[arg-type]
                 writer.write(protocol.encode_frame(reply))
                 await writer.drain()
             except (ConnectionError, OSError, RuntimeError):
                 return
+            except protocol.ProtocolError as err:
+                await self._send_error(writer, request_id, err.code, err.message)
+                continue
+
+    async def _emit_stream(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        request_id: str | None,
+        stream: Any,
+    ) -> bool:
+        """Push each yielded Mapping as its own result frame.
+
+        Returns False when the connection must close. Cancelling/closing the
+        stream never cancels a Run — only this subscription.
+        """
+        try:
+            aiter = stream.__aiter__()
+            while True:
+                next_item = asyncio.create_task(aiter.__anext__())
+                peer_eof = asyncio.create_task(reader.read(1))
+                done, _pending = await asyncio.wait(
+                    {next_item, peer_eof},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if peer_eof in done:
+                    next_item.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await next_item
+                    return False
+                peer_eof.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await peer_eof
+                try:
+                    item = next_item.result()
+                except StopAsyncIteration:
+                    return True
+                except protocol.ProtocolError as err:
+                    await self._send_error(writer, request_id, err.code, err.message)
+                    return True
+                except Exception as exc:
+                    _LOGGER.error(
+                        "arsd: stream handler failed (%s); closing connection",
+                        type(exc).__name__,
+                    )
+                    await self._send_error(
+                        writer, request_id, protocol.INTERNAL, "internal error"
+                    )
+                    return False
+                if not isinstance(item, Mapping):
+                    await self._send_error(
+                        writer, request_id, protocol.INTERNAL, "internal error"
+                    )
+                    return False
+                try:
+                    assert request_id is not None
+                    reply = protocol.build_result(request_id, item)
+                    writer.write(protocol.encode_frame(reply))
+                    await writer.drain()
+                except (ConnectionError, OSError, RuntimeError):
+                    return False
+        finally:
+            aclose = getattr(stream, "aclose", None)
+            if aclose is not None:
+                with contextlib.suppress(Exception):
+                    await aclose()
 
     async def _send_error(
         self,
