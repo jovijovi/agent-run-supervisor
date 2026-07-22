@@ -795,7 +795,7 @@ class ArsdHandlers:
         run_id: str,
     ) -> dict[str, Any]:
         run_dir = Path(self._event_store.base_dir) / run_id
-        resolved = self._resolve_durable(key, digest, run_id, run_dir)
+        resolved = await self._resolve_durable(key, digest, run_id, run_dir)
         if resolved is not None:
             return resolved
 
@@ -885,7 +885,7 @@ class ArsdHandlers:
             if not consumed:
                 await self.registry.release(reservation)
 
-    def _resolve_durable(
+    async def _resolve_durable(
         self,
         key: admission.AdmissionKey,
         digest: admission.RequestDigest,
@@ -924,12 +924,9 @@ class ArsdHandlers:
         registered = self.registry.is_registered(run_id)
         terminal = admission.inspect_terminal_result(run_dir, run_id=run_id)
         if terminal.kind is storage.NativeTerminalKind.INVALID:
-            _quarantine_bound_session(
-                self._session_store, run_id=run_id, submission=submission
-            )
-            raise protocol.ProtocolError(
-                protocol.SUBMISSION_INDETERMINATE,
-                _UNTRUSTED_TERMINAL_MESSAGE,
+            # Same containment path as status/cancel — never a weaker sync refuse.
+            await self._contain_invalid_terminal(
+                run_id=run_id, run_dir=run_dir, submission=submission
             )
         if registered or terminal.kind is storage.NativeTerminalKind.TRUSTED:
             return {
@@ -1140,11 +1137,17 @@ class ArsdHandlers:
         """Cancel/contain a live Run, fence+quarantine Session, then refuse."""
         del run_dir  # path retained for call-site clarity; quarantine uses session store
         if self.registry.is_registered(run_id):
-            await self.registry.cancel(run_id, wait_seconds=self._cancel_wait)
-            for _ in range(50):
-                if not self.registry.is_registered(run_id):
-                    break
-                await asyncio.sleep(0.01)
+            try:
+                await self.registry.cancel(run_id, wait_seconds=self._cancel_wait)
+                for _ in range(50):
+                    if not self.registry.is_registered(run_id):
+                        break
+                    await asyncio.sleep(0.01)
+            except Exception:
+                # Cancel/containment failure must not skip fence+refuse.
+                _LOGGER.exception(
+                    "arsd: containment cancel failed for untrusted terminal %s", run_id
+                )
         try:
             _quarantine_bound_session(
                 self._session_store, run_id=run_id, submission=submission

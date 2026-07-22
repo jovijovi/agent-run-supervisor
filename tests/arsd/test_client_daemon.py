@@ -518,6 +518,193 @@ def test_daemon_lease_acquired_before_reconcile_and_released_on_shutdown(
         assert order[:3] == ["lease", "reconcile", "listen"]
 
 
+# -- R8 B1 durable supervisor root + lease parent ------------------------------
+
+
+def test_r8_b1_durable_root_before_flock_reconcile_socket(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """durable_secure_mkdir(root) must precede flock, reconcile, and listen."""
+    from agent_run_supervisor.event_store import durable_secure_mkdir
+
+    path = sock_path(sock_root)
+    root = supervisor_root(sock_root)
+    order: list[str] = []
+    real_durable = durable_secure_mkdir
+    real_flock = arsd_main.fcntl.flock
+
+    def tracking_durable(target):
+        order.append(f"durable:{Path(target).name}")
+        return real_durable(target)
+
+    def tracking_flock(fd, op):
+        order.append("flock")
+        return real_flock(fd, op)
+
+    real_reconcile = arsd_main.reconcile.reconcile
+
+    def tracking_reconcile(supervisor_root_path):
+        order.append("reconcile")
+        return real_reconcile(supervisor_root_path)
+
+    real_start = server.ArsdServer.start
+
+    async def tracking_start(self):
+        order.append("listen")
+        return await real_start(self)
+
+    monkeypatch.setattr(arsd_main, "durable_secure_mkdir", tracking_durable)
+    monkeypatch.setattr(
+        "agent_run_supervisor.arsd.__main__.durable_secure_mkdir", tracking_durable
+    )
+    monkeypatch.setattr(arsd_main.fcntl, "flock", tracking_flock)
+    monkeypatch.setattr(arsd_main.reconcile, "reconcile", tracking_reconcile)
+    monkeypatch.setattr(server.ArsdServer, "start", tracking_start)
+
+    with running_daemon(path, root):
+        assert any(x.startswith("durable:") for x in order)
+        assert "flock" in order
+        assert "reconcile" in order
+        assert "listen" in order
+        root_idx = next(i for i, x in enumerate(order) if x.startswith("durable:"))
+        assert root_idx < order.index("flock")
+        assert order.index("flock") < order.index("reconcile")
+        assert order.index("reconcile") < order.index("listen")
+        assert stat.S_IMODE(root.stat().st_mode) == 0o700
+        assert (root / "arsd").is_dir()
+        assert stat.S_IMODE((root / "arsd").stat().st_mode) == 0o700
+        assert not (root / "arsd").is_symlink()
+
+
+def test_r8_b1_parent_fsync_failure_blocks_flock_reconcile_listen(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Parent-dir fsync failure during durable mkdir must abort before lease ops."""
+    path = sock_path(sock_root)
+    root = supervisor_root(sock_root)
+    parent = sock_root.resolve()
+    real_fsync = os.fsync
+    order: list[str] = []
+
+    def boom_parent(fd: int) -> None:
+        st = os.fstat(fd)
+        if (
+            parent.exists()
+            and stat.S_ISDIR(st.st_mode)
+            and st.st_ino == parent.stat().st_ino
+        ):
+            order.append("parent_fsync_boom")
+            raise OSError(5, "injected parent fsync failure")
+        return real_fsync(fd)
+
+    def boom_flock(*_a, **_k):
+        order.append("flock")
+        raise AssertionError("flock must not run after durable mkdir failure")
+
+    def boom_reconcile(_root):
+        order.append("reconcile")
+        raise AssertionError("reconcile must not run after durable mkdir failure")
+
+    monkeypatch.setattr(os, "fsync", boom_parent)
+    monkeypatch.setattr(arsd_main.fcntl, "flock", boom_flock)
+    monkeypatch.setattr(arsd_main.reconcile, "reconcile", boom_reconcile)
+
+    async def case():
+        with pytest.raises(arsd_main.DaemonStartupError) as err:
+            await arsd_main.serve_daemon(
+                socket_path=path,
+                supervisor_root=root,
+                policy=same_uid_policy(),
+                run_task_factory=CompletingFactory(),
+                install_signals=False,
+            )
+        message = str(err.value).lower()
+        assert "lease" in message or "prepare" in message or "daemon" in message
+        assert "injected" not in message
+        assert SECRET_SENTINEL not in message
+        assert "flock" not in order
+        assert "reconcile" not in order
+        assert not path.exists()
+
+    run_async(case())
+
+
+@pytest.mark.parametrize("kind", ("symlink_root", "file_root"))
+def test_r8_b1_supervisor_root_symlink_or_nondir_refused(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    path = sock_path(sock_root)
+    root = supervisor_root(sock_root)
+    target = sock_root / "evil-root-target"
+    target.mkdir(parents=True, exist_ok=True)
+    if kind == "symlink_root":
+        root.symlink_to(target)
+    else:
+        root.parent.mkdir(parents=True, exist_ok=True)
+        root.write_bytes(b"not-a-directory")
+
+    order: list[str] = []
+
+    def boom_reconcile(_root):
+        order.append("reconcile")
+        raise AssertionError("reconcile must not run for unsafe supervisor root")
+
+    monkeypatch.setattr(arsd_main.reconcile, "reconcile", boom_reconcile)
+
+    async def case():
+        with pytest.raises(arsd_main.DaemonStartupError) as err:
+            await arsd_main.serve_daemon(
+                socket_path=path,
+                supervisor_root=root,
+                policy=same_uid_policy(),
+                run_task_factory=CompletingFactory(),
+                install_signals=False,
+            )
+        message = str(err.value)
+        assert SECRET_SENTINEL not in message
+        assert str(target) not in message
+        assert "lease" in message.lower() or "prepare" in message.lower()
+        assert order == []
+        assert not path.exists()
+
+    run_async(case())
+
+
+def test_r8_b1_existing_root_corrected_to_0700(
+    sock_root: Path,
+) -> None:
+    path = sock_path(sock_root)
+    root = supervisor_root(sock_root)
+    root.mkdir(parents=True, exist_ok=True)
+    os.chmod(root, 0o755)
+    assert stat.S_IMODE(root.stat().st_mode) == 0o755
+
+    with running_daemon(path, root):
+        assert root.is_dir() and not root.is_symlink()
+        assert stat.S_IMODE(root.stat().st_mode) == 0o700
+        lock_dir = root / "arsd"
+        assert lock_dir.is_dir() and not lock_dir.is_symlink()
+        assert stat.S_IMODE(lock_dir.stat().st_mode) == 0o700
+
+
+def test_r8_b1_no_service_or_systemd_in_durable_lease_path(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Durable lease prep must not touch service/systemd surfaces."""
+    path = sock_path(sock_root)
+    root = supervisor_root(sock_root)
+    hits: list[str] = []
+
+    def boom_render(*_a, **_k):
+        hits.append("render_service_unit")
+        raise AssertionError("service unit render must not run in daemon start")
+
+    monkeypatch.setattr(arsd_main, "render_service_unit", boom_render)
+    with running_daemon(path, root):
+        assert path.exists()
+    assert hits == []
+
+
 def test_root_refusal_still_precedes_lease_and_reconcile(
     sock_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -632,12 +819,10 @@ def test_lease_dirfd_close_failure_after_acquire_releases_lock_fd(
 
     def tracking_open(path, flags, mode=0o777, *args, dir_fd=None, **kwargs):
         if dir_fd is None:
-            fd = real_open(path, flags, mode, *args, **kwargs)
-            # First O_DIRECTORY open is the lock directory.
-            if state["dir_fd"] is None and (flags & getattr(os, "O_DIRECTORY", 0)):
-                state["dir_fd"] = fd
-            return fd
+            return real_open(path, flags, mode, *args, **kwargs)
+        # Lease lock file is opened relative to the verified lock-dir fd.
         fd = real_open(path, flags, mode, *args, dir_fd=dir_fd, **kwargs)
+        state["dir_fd"] = dir_fd
         state["lock_fd"] = fd
         return fd
 
@@ -687,6 +872,7 @@ def test_lease_dirfd_close_failure_on_open_error_does_not_leak_or_raw_oserror(
     """Earlier acquire failure + dirfd close failure: no lock leak, sanitized error."""
     root = supervisor_root(sock_root)
     root.mkdir(parents=True, exist_ok=True)
+    lock_dir = (root / "arsd").resolve()
 
     real_open = arsd_main.os.open
     real_close = arsd_main.os.close
@@ -698,7 +884,17 @@ def test_lease_dirfd_close_failure_on_open_error_does_not_leak_or_raw_oserror(
             state["lock_opened"] = True
             raise OSError(5, "injected lock open failure")
         fd = real_open(path, flags, mode, *args, **kwargs)
-        if state["dir_fd"] is None and (flags & getattr(os, "O_DIRECTORY", 0)):
+        # Track the lease-parent fd from `_open_lock_dir_fd` (last O_DIRECTORY
+        # open of the lock dir after durable_secure_mkdir fsync opens).
+        try:
+            opened = Path(path).resolve()
+        except (TypeError, OSError, RuntimeError):
+            opened = None
+        if (
+            opened == lock_dir
+            and (flags & getattr(os, "O_DIRECTORY", 0))
+            and (flags & getattr(os, "O_NOFOLLOW", 0))
+        ):
             state["dir_fd"] = fd
         return fd
 

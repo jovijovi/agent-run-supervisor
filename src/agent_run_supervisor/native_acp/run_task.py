@@ -847,14 +847,52 @@ class RunTask:
     def _emergency_cleanup(self, ctx: _RunContext) -> None:
         """Sync-only last resort: kill the group, persist one conservative
         terminal fact if none exists, quarantine a dispatched-uncertain
-        session, and release the lease. Every step is independent except
-        required quarantine must precede result publication and lease release.
+        session, and release the lease only after a TRUSTED terminal exists.
+
+        INVALID/uncertain existing terminals must fence+quarantine and return
+        without lease release. Fence/quarantine failure also refuses release.
         """
         try:
             if ctx.proc is not None:
                 ctx.proc.kill_group(reason="emergency_finalize")
         except Exception:
             pass
+
+        existing = storage.NativeTerminalState(storage.NativeTerminalKind.ABSENT)
+        if ctx.handle is not None:
+            try:
+                existing = storage.read_native_terminal_result(
+                    ctx.handle.run_dir / "result.json", run_id=self._run_id
+                )
+            except Exception:
+                existing = storage.NativeTerminalState(
+                    storage.NativeTerminalKind.INVALID
+                )
+
+        if existing.kind is storage.NativeTerminalKind.INVALID:
+            if ctx.session_id is not None:
+                try:
+                    reason = "existing terminal evidence is untrusted"
+                    self._session_store.write_quarantine_pending(
+                        ctx.session_id, reason=reason, run_id=self._run_id
+                    )
+                    self._session_store.mark_quarantined(
+                        ctx.session_id, reason=reason, run_id=self._run_id
+                    )
+                except Exception:
+                    return
+            return
+
+        if existing.kind is storage.NativeTerminalKind.TRUSTED:
+            try:
+                if ctx.lock is not None and ctx.session_id is not None:
+                    self._session_store.release_lock(ctx.session_id, ctx.lock.token)
+                    ctx.lock = None
+            except Exception:
+                pass
+            return
+
+        # ABSENT: quarantine when dispatch is uncertain, then write one terminal.
         need_quarantine = (
             ctx.session_id is not None
             and ctx.dispatch_started
@@ -875,87 +913,107 @@ class RunTask:
             except Exception:
                 # Required quarantine failed: no terminal result, no lease release.
                 return
+        written_trusted = False
         try:
             if ctx.handle is not None:
-                existing = storage.read_native_terminal_result(
+                status = (
+                    AgentRunStatus.UNKNOWN
+                    if ctx.dispatch_started and ctx.stop_reason is None
+                    else AgentRunStatus.FAILED
+                )
+                payload = build_result_payload(
+                    run_id=self._run_id,
+                    status=status,
+                    origin="supervisor",
+                    detail_code="EMERGENCY_FINALIZE",
+                    retryable=_RETRYABLE_DEFAULT[status],
+                    exit_code=None,
+                    signal=None,
+                    stop_reason=ctx.stop_reason,
+                    usage=sanitize_usage(ctx.usage),
+                    final_message="",
+                    truncated=False,
+                    truncate_reason=None,
+                    run_dir=ctx.handle.run_dir,
+                    raw_event_path="events.jsonl",
+                )
+                if ctx.session_id is not None:
+                    payload["session_id"] = ctx.session_id
+                payload = enforce_native_result_ceiling(
+                    payload,
+                    run_id=self._run_id,
+                    run_dir=ctx.handle.run_dir,
+                    session_id=ctx.session_id,
+                )
+                storage.write_once_json(
+                    ctx.handle.run_dir / "result.json", payload
+                )
+                written = storage.read_native_terminal_result(
                     ctx.handle.run_dir / "result.json", run_id=self._run_id
                 )
-                if existing.kind is storage.NativeTerminalKind.ABSENT:
-                    status = (
-                        AgentRunStatus.UNKNOWN
-                        if ctx.dispatch_started and ctx.stop_reason is None
-                        else AgentRunStatus.FAILED
-                    )
-                    payload = build_result_payload(
-                        run_id=self._run_id,
-                        status=status,
-                        origin="supervisor",
-                        detail_code="EMERGENCY_FINALIZE",
-                        retryable=_RETRYABLE_DEFAULT[status],
-                        exit_code=None,
-                        signal=None,
-                        stop_reason=ctx.stop_reason,
-                        usage=sanitize_usage(ctx.usage),
-                        final_message="",
-                        truncated=False,
-                        truncate_reason=None,
-                        run_dir=ctx.handle.run_dir,
-                        raw_event_path="events.jsonl",
-                    )
-                    if ctx.session_id is not None:
-                        payload["session_id"] = ctx.session_id
-                    payload = enforce_native_result_ceiling(
-                        payload,
-                        run_id=self._run_id,
-                        run_dir=ctx.handle.run_dir,
-                        session_id=ctx.session_id,
-                    )
-                    storage.write_once_json(
-                        ctx.handle.run_dir / "result.json", payload
-                    )
+                written_trusted = (
+                    written.kind is storage.NativeTerminalKind.TRUSTED
+                )
         except Exception:
-            pass
+            written_trusted = False
+        if not written_trusted:
+            return
         try:
             if ctx.lock is not None and ctx.session_id is not None:
                 self._session_store.release_lock(ctx.session_id, ctx.lock.token)
+                ctx.lock = None
         except Exception:
             pass
 
     def _result_after_emergency(self, ctx: _RunContext) -> NativeRunResult:
+        """Return only a TRUSTED Native terminal; never raw/forged evidence."""
+        failed = NativeRunResult(
+            run_id=self._run_id,
+            status=AgentRunStatus.FAILED,
+            payload={
+                "run_id": self._run_id,
+                "status": "failed",
+                "error": "finalization timed out",
+            },
+            run_dir=getattr(ctx.handle, "run_dir", None),
+            session_id=ctx.session_id,
+            session_state=None,
+        )
+        if ctx.handle is None:
+            return failed
         try:
-            payload = ctx.handle.read_json("result.json")
+            state = storage.read_native_terminal_result(
+                ctx.handle.run_dir / "result.json", run_id=self._run_id
+            )
+        except Exception:
+            return failed
+        if (
+            state.kind is storage.NativeTerminalKind.TRUSTED
+            and state.payload is not None
+        ):
             return NativeRunResult(
                 run_id=self._run_id,
-                status=AgentRunStatus(payload["status"]),
-                payload=payload,
+                status=AgentRunStatus(state.payload["status"]),
+                payload=state.payload,
                 run_dir=ctx.handle.run_dir,
                 session_id=ctx.session_id,
                 session_state=self._session_state(ctx),
             )
-        except Exception:
-            return NativeRunResult(
-                run_id=self._run_id,
-                status=AgentRunStatus.FAILED,
-                payload={
-                    "run_id": self._run_id,
-                    "status": "failed",
-                    "error": "finalization timed out",
-                },
-                run_dir=getattr(ctx.handle, "run_dir", None),
-                session_id=ctx.session_id,
-                session_state=None,
-            )
+        return failed
 
     async def _finalize(self, ctx: _RunContext) -> NativeRunResult:
         try:
             return await self._finalize_inner(ctx)
         except asyncio.CancelledError:
             raise
-        except BaseException as exc:
+        except BaseException:
+            # Caller-visible in-memory failure only — never interpolate exception
+            # text, paths, secrets, or exception class names into the payload.
             payload = {
                 "run_id": self._run_id,
                 "status": "failed",
-                "error": f"finalization failed: {exc}",
+                "error": "finalization failed",
+                "detail_code": "FINALIZATION_FAILED",
             }
             return NativeRunResult(
                 run_id=self._run_id,
@@ -1010,7 +1068,26 @@ class RunTask:
         observations = self._observations(ctx)
         status, disposition = finalize_run_state(observations)
         if status is None:
-            payload = ctx.handle.read_json("result.json")
+            # Early-result branch: only a TRUSTED Native terminal may stand.
+            existing_state = storage.read_native_terminal_result(
+                ctx.handle.run_dir / "result.json", run_id=self._run_id
+            )
+            if (
+                existing_state.kind is not storage.NativeTerminalKind.TRUSTED
+                or existing_state.payload is None
+            ):
+                if ctx.session_id is not None:
+                    reason = "existing terminal evidence is untrusted"
+                    self._session_store.write_quarantine_pending(
+                        ctx.session_id, reason=reason, run_id=self._run_id
+                    )
+                    self._session_store.mark_quarantined(
+                        ctx.session_id, reason=reason, run_id=self._run_id
+                    )
+                raise RuntimeError(
+                    "untrusted existing terminal evidence; refusing release"
+                )
+            payload = existing_state.payload
             return NativeRunResult(
                 run_id=self._run_id,
                 status=AgentRunStatus(payload["status"]),
@@ -1119,15 +1196,17 @@ class RunTask:
             session_state = self._publish_terminal_with_disposition(
                 ctx, status=status, disposition=disposition, payload=payload
             )
-        except Exception as exc:
+        except Exception:
             ctx.disposition_failed = True
+            # In-memory refusal only — no durable terminal, no lease release.
             return NativeRunResult(
                 run_id=self._run_id,
                 status=AgentRunStatus.FAILED,
                 payload={
                     "run_id": self._run_id,
                     "status": "failed",
-                    "error": f"session disposition failed: {exc}",
+                    "error": "session disposition failed",
+                    "detail_code": "SESSION_DISPOSITION_FAILED",
                 },
                 run_dir=ctx.handle.run_dir,
                 session_id=ctx.session_id,

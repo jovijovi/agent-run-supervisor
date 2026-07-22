@@ -1820,3 +1820,159 @@ def test_r7_b2_quarantine_failure_still_refuses(
             await harness.aclose()
 
     run_async(case())
+
+
+# -- R8 B2 active invalid terminal on idempotent submit -----------------------
+
+
+def test_r8_b2_submit_registered_invalid_cancels_then_quarantines(
+    tmp_path: Path,
+) -> None:
+    async def case():
+        harness = Harness(tmp_path, mode="pending")
+        seed_session(harness.session_store, session_id="sess-arsd-1")
+        caller = caller_for(principal_a())
+        cancel_order: list[str] = []
+        real_cancel = harness.handlers.registry.cancel
+
+        async def tracking_cancel(run_id, wait_seconds=None):
+            cancel_order.append(f"cancel:{run_id}")
+            return await real_cancel(run_id, wait_seconds=wait_seconds)
+
+        harness.handlers.registry.cancel = tracking_cancel  # type: ignore[method-assign]
+        try:
+            first = await harness.submit(caller, "r8-inv-1")
+            run_id = first["run_id"]
+            assert harness.handlers.registry.is_registered(run_id)
+            await asyncio.sleep(0.05)
+            (harness.run_dir(run_id) / "result.json").write_bytes(b"[]")
+            err = await expect_code(
+                harness,
+                caller,
+                "submit",
+                "r8-inv-1",
+                protocol.INTERNAL,
+                submit_payload(),
+            )
+            assert "untrusted" in err.message.lower() or "corrupt" in err.message.lower()
+            assert cancel_order and cancel_order[0].startswith("cancel:")
+            for _ in range(100):
+                if not harness.handlers.registry.is_registered(run_id):
+                    break
+                await asyncio.sleep(0.01)
+            assert not harness.handlers.registry.is_registered(run_id)
+            assert (
+                harness.session_store.open_session("sess-arsd-1").state == "quarantined"
+            )
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_r8_b2_submit_invalid_cancel_failure_still_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def case():
+        harness = Harness(tmp_path, mode="pending")
+        seed_session(harness.session_store, session_id="sess-arsd-1")
+        caller = caller_for(principal_a())
+
+        async def boom_cancel(run_id, wait_seconds=None):
+            raise OSError("injected cancel failure")
+
+        try:
+            first = await harness.submit(caller, "r8-cf-1")
+            run_id = first["run_id"]
+            await asyncio.sleep(0.05)
+            (harness.run_dir(run_id) / "result.json").write_bytes(b"{not-json")
+            monkeypatch.setattr(harness.handlers.registry, "cancel", boom_cancel)
+            await expect_code(
+                harness,
+                caller,
+                "submit",
+                "r8-cf-1",
+                protocol.INTERNAL,
+                submit_payload(),
+            )
+            assert (
+                harness.session_store.open_session("sess-arsd-1").state == "quarantined"
+            )
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_r8_b2_submit_invalid_quarantine_failure_still_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_run_supervisor.session import SessionStore
+
+    async def case():
+        harness = Harness(tmp_path, mode="pending")
+        seed_session(harness.session_store, session_id="sess-arsd-1")
+        caller = caller_for(principal_a())
+
+        def boom(self, session_id, **kwargs):
+            raise OSError("injected quarantine failure")
+
+        monkeypatch.setattr(SessionStore, "mark_quarantined", boom)
+        try:
+            first = await harness.submit(caller, "r8-qf-1")
+            run_id = first["run_id"]
+            await asyncio.sleep(0.05)
+            (harness.run_dir(run_id) / "result.json").write_bytes(b"{")
+            await expect_code(
+                harness,
+                caller,
+                "submit",
+                "r8-qf-1",
+                protocol.INTERNAL,
+                submit_payload(),
+            )
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_r8_b2_trusted_and_absent_registered_idempotency_preserved(
+    tmp_path: Path,
+) -> None:
+    async def case():
+        # ABSENT + registered → accepted (same accepted_at).
+        harness = Harness(tmp_path, mode="pending")
+        seed_session(harness.session_store, session_id="sess-arsd-1")
+        caller = caller_for(principal_a())
+        try:
+            first = await harness.submit(caller, "r8-abs-1")
+            again = await harness.submit(caller, "r8-abs-1")
+            assert again["run_id"] == first["run_id"]
+            assert again["accepted_at"] == first["accepted_at"]
+            assert harness.handlers.registry.is_registered(first["run_id"])
+            assert not (harness.run_dir(first["run_id"]) / "result.json").exists()
+        finally:
+            await harness.aclose()
+
+        # TRUSTED terminal → accepted without re-dispatch.
+        harness = Harness(tmp_path / "trusted", mode="complete")
+        seed_session(harness.session_store, session_id="sess-arsd-1")
+        caller = caller_for(principal_a())
+        try:
+            first = await harness.submit(caller, "r8-tr-1")
+            task = harness.handlers.registry.task_for(first["run_id"])
+            await asyncio.wait({task})
+            assert not harness.handlers.registry.is_registered(first["run_id"])
+            again = await harness.submit(caller, "r8-tr-1")
+            assert again["run_id"] == first["run_id"]
+            assert again["accepted_at"] == first["accepted_at"]
+            assert len(harness.factory.calls) == 1
+            terminal = admission.inspect_terminal_result(
+                harness.run_dir(first["run_id"]), run_id=first["run_id"]
+            )
+            assert terminal.kind is storage.NativeTerminalKind.TRUSTED
+        finally:
+            await harness.aclose()
+
+    run_async(case())

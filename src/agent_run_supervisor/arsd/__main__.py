@@ -21,7 +21,12 @@ from agent_run_supervisor.arsd.server import (
     Principal,
 )
 from agent_run_supervisor.arsd.service_unit import ServiceUnitError, render_service_unit
-from agent_run_supervisor.event_store import DIR_MODE, FILE_MODE
+from agent_run_supervisor.event_store import (
+    DIR_MODE,
+    FILE_MODE,
+    EventStoreError,
+    durable_secure_mkdir,
+)
 from agent_run_supervisor.native_acp import storage
 
 _LOGGER = logging.getLogger("agent_run_supervisor.arsd")
@@ -62,14 +67,11 @@ class DaemonInstanceLease:
 
 
 def _open_lock_dir_fd(lock_dir: Path) -> int:
-    """Create-or-open ``lock_dir`` as a real non-symlink directory (0700)."""
-    try:
-        os.mkdir(lock_dir, DIR_MODE)
-    except FileExistsError:
-        pass
-    except OSError as exc:
-        raise DaemonStartupError("failed to prepare daemon instance lease") from exc
+    """Open ``lock_dir`` as a real non-symlink directory fd (0700).
 
+    Callers must already have published ``lock_dir`` via
+    :func:`durable_secure_mkdir` — this helper never creates directories.
+    """
     flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
         flags |= os.O_DIRECTORY
@@ -113,15 +115,22 @@ def _release_lock_fd(fd: int) -> None:
 
 
 def acquire_daemon_instance_lease(supervisor_root: Path | str) -> DaemonInstanceLease:
-    """Acquire the race-safe singleton lease for ``supervisor_root``."""
-    root = Path(supervisor_root)
-    try:
-        root.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise DaemonStartupError("failed to prepare daemon instance lease") from exc
+    """Acquire the race-safe singleton lease for ``supervisor_root``.
 
+    Publishes the supervisor root and lease-parent directory with
+    :func:`durable_secure_mkdir` (0700 + dir/parent fsync) before any flock,
+    reconcile, or socket setup. Symlink/non-dir/fsync failures sanitize and
+    abort — no unfynced lease directory is created.
+    """
+    root = Path(supervisor_root)
     lock_dir = root / _DAEMON_LOCK_DIRNAME
     lock_path = lock_dir / _DAEMON_LOCK_FILENAME
+    try:
+        durable_secure_mkdir(root)
+        durable_secure_mkdir(lock_dir)
+    except EventStoreError as exc:
+        raise DaemonStartupError("failed to prepare daemon instance lease") from exc
+
     dir_fd = _open_lock_dir_fd(lock_dir)
     fd = -1
     try:

@@ -1366,3 +1366,280 @@ def test_r7_b3_awaited_event_fsync_failure_skips_prompt(
     assert prompt_calls["n"] == 0
     assert "session/prompt" not in harness.methods_seen()
     assert result.status in {AgentRunStatus.FAILED, AgentRunStatus.UNKNOWN}
+
+
+# -- R8 B2 emergency finalize trusts only Native terminal reader --------------
+
+
+def test_r8_b2_emergency_invalid_forged_result_no_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """INVALID forged terminal: fence/quarantine, no lease release, no raw status."""
+    from agent_run_supervisor.native_acp.event_writer import EventWriter
+    from agent_run_supervisor.native_acp.run_task import _RunContext
+    from agent_run_supervisor.session import QUARANTINE_PENDING_JSON
+
+    script = dict(HAPPY_SCRIPT)
+    script["hang_prompt_until_cancel"] = True
+    harness = Harness(tmp_path, monkeypatch, script)
+    spawned = _recording_spawn(monkeypatch)
+    marker = harness.run_dir() / "prompt-dispatch-started"
+    forged = {
+        "run_id": "run-0001",
+        "status": "completed",
+        "retryable": False,
+        "malicious_secret": "LEAKCANARY-FORGED-STATUS",
+    }
+    captured: dict[str, object] = {}
+
+    async def case():
+        entered_close = asyncio.Event()
+
+        async def hanging_close(self) -> None:
+            entered_close.set()
+            await asyncio.sleep(3600)
+
+        monkeypatch.setattr(EventWriter, "close", hanging_close)
+        task_obj = harness.task()
+        real_finalize = task_obj._finalize
+
+        async def capture_and_hang(ctx):
+            captured["ctx"] = ctx
+            captured["task"] = task_obj
+            return await real_finalize(ctx)
+
+        monkeypatch.setattr(task_obj, "_finalize", capture_and_hang)
+        task = asyncio.ensure_future(task_obj.run())
+        await _wait_until(marker.exists, message="dispatch marker never appeared")
+        task.cancel()
+        await asyncio.wait_for(entered_close.wait(), 30)
+        ctx = captured["ctx"]
+        assert isinstance(ctx, _RunContext)
+        (ctx.handle.run_dir / "result.json").write_text(
+            json.dumps(forged), encoding="utf-8"
+        )
+        task_obj._emergency_cleanup(ctx)
+        result = task_obj._result_after_emergency(ctx)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 30)
+        return result
+
+    result = asyncio.run(case())
+    session_dir = harness.root / "native-sessions" / "sess-native-1"
+    record = harness.session_store().open_session("sess-native-1")
+    assert record.state == "quarantined" or (
+        session_dir / QUARANTINE_PENDING_JSON
+    ).is_file()
+    assert (session_dir / "lock.json").exists()
+    assert result.status is AgentRunStatus.FAILED
+    assert result.payload.get("status") == "failed"
+    assert result.payload.get("status") != "completed"
+    assert "malicious_secret" not in result.payload
+    assert "LEAKCANARY-FORGED-STATUS" not in json.dumps(result.payload)
+    assert "FORGED" not in json.dumps(result.payload)
+    _assert_pid_gone_sync(spawned[0].pid)
+
+
+def test_r8_b2_emergency_trusted_releases_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TRUSTED emergency-written terminal may release the Session lease once."""
+    from agent_run_supervisor.native_acp.event_writer import EventWriter
+    from agent_run_supervisor.native_acp.run_task import _RunContext
+
+    script = dict(HAPPY_SCRIPT)
+    script["hang_prompt_until_cancel"] = True
+    harness = Harness(tmp_path, monkeypatch, script)
+    spawned = _recording_spawn(monkeypatch)
+    marker = harness.run_dir() / "prompt-dispatch-started"
+    releases: list[str] = []
+    real_release = SessionStore.release_lock
+    captured: dict[str, object] = {}
+
+    def tracking_release(self, session_id, token):
+        releases.append(session_id)
+        return real_release(self, session_id, token)
+
+    monkeypatch.setattr(SessionStore, "release_lock", tracking_release)
+
+    async def case():
+        entered_close = asyncio.Event()
+
+        async def hanging_close(self) -> None:
+            entered_close.set()
+            await asyncio.sleep(3600)
+
+        monkeypatch.setattr(EventWriter, "close", hanging_close)
+        task_obj = harness.task()
+        real_finalize = task_obj._finalize
+
+        async def capture_and_hang(ctx):
+            captured["ctx"] = ctx
+            return await real_finalize(ctx)
+
+        monkeypatch.setattr(task_obj, "_finalize", capture_and_hang)
+        task = asyncio.ensure_future(task_obj.run())
+        await _wait_until(marker.exists, message="dispatch marker never appeared")
+        task.cancel()
+        await asyncio.wait_for(entered_close.wait(), 30)
+        ctx = captured["ctx"]
+        assert isinstance(ctx, _RunContext)
+        # ABSENT path: emergency writes TRUSTED unknown then releases once.
+        assert not (ctx.handle.run_dir / "result.json").exists()
+        task_obj._emergency_cleanup(ctx)
+        result = task_obj._result_after_emergency(ctx)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 30)
+        return result
+
+    result = asyncio.run(case())
+    assert result.status is AgentRunStatus.UNKNOWN
+    assert result.payload.get("detail_code") == "EMERGENCY_FINALIZE"
+    assert result.payload.get("status") == "unknown"
+    assert releases == ["sess-native-1"]
+    assert not (
+        harness.root / "native-sessions" / "sess-native-1" / "lock.json"
+    ).exists()
+    _assert_pid_gone_sync(spawned[0].pid)
+
+
+def test_r8_b2_emergency_quarantine_failure_keeps_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_run_supervisor.native_acp.event_writer import EventWriter
+    from agent_run_supervisor.native_acp.run_task import _RunContext
+
+    script = dict(HAPPY_SCRIPT)
+    script["hang_prompt_until_cancel"] = True
+    harness = Harness(tmp_path, monkeypatch, script)
+    spawned = _recording_spawn(monkeypatch)
+    marker = harness.run_dir() / "prompt-dispatch-started"
+    releases: list[str] = []
+    real_release = SessionStore.release_lock
+    captured: dict[str, object] = {}
+
+    def tracking_release(self, session_id, token):
+        releases.append(session_id)
+        return real_release(self, session_id, token)
+
+    def boom_mark(self, session_id, **kwargs):
+        raise OSError("injected quarantine failure")
+
+    monkeypatch.setattr(SessionStore, "release_lock", tracking_release)
+    monkeypatch.setattr(SessionStore, "mark_quarantined", boom_mark)
+
+    async def case():
+        entered_close = asyncio.Event()
+
+        async def hanging_close(self) -> None:
+            entered_close.set()
+            await asyncio.sleep(3600)
+
+        monkeypatch.setattr(EventWriter, "close", hanging_close)
+        task_obj = harness.task()
+        real_finalize = task_obj._finalize
+
+        async def capture_and_hang(ctx):
+            captured["ctx"] = ctx
+            return await real_finalize(ctx)
+
+        monkeypatch.setattr(task_obj, "_finalize", capture_and_hang)
+        task = asyncio.ensure_future(task_obj.run())
+        await _wait_until(marker.exists, message="dispatch marker never appeared")
+        task.cancel()
+        await asyncio.wait_for(entered_close.wait(), 30)
+        ctx = captured["ctx"]
+        assert isinstance(ctx, _RunContext)
+        (ctx.handle.run_dir / "result.json").write_text(
+            json.dumps(
+                {
+                    "run_id": "run-0001",
+                    "status": "completed",
+                    "retryable": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+        task_obj._emergency_cleanup(ctx)
+        result = task_obj._result_after_emergency(ctx)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 30)
+        return result
+
+    result = asyncio.run(case())
+    assert releases == []
+    assert (
+        harness.root / "native-sessions" / "sess-native-1" / "lock.json"
+    ).exists()
+    assert result.status is AgentRunStatus.FAILED
+    assert result.payload.get("status") == "failed"
+    _assert_pid_gone_sync(spawned[0].pid)
+
+
+# -- R8 residual: sanitized in-memory finalize failure payloads ---------------
+
+
+_CANARY_EXC = "LEAKCANARY-EXC-/tmp/secret-path-OSError"
+
+
+def test_r8_residual_finalize_failure_payload_omits_exception_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Outer `_finalize` catch returns fixed codes; never str(exc)/paths/secrets."""
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+
+    async def boom_inner(self, ctx):
+        raise RuntimeError(_CANARY_EXC)
+
+    monkeypatch.setattr(RunTask, "_finalize_inner", boom_inner)
+    result = _run(harness.task())
+    assert result.status is AgentRunStatus.FAILED
+    assert result.payload["status"] == "failed"
+    assert result.payload["error"] == "finalization failed"
+    assert result.payload["detail_code"] == "FINALIZATION_FAILED"
+    blob = json.dumps(result.payload)
+    assert _CANARY_EXC not in blob
+    assert "LEAKCANARY" not in blob
+    assert "/tmp/secret-path" not in blob
+    assert "RuntimeError" not in blob
+    assert "OSError" not in blob
+    # In-memory only — do not publish a durable false terminal from this path.
+    assert not (harness.run_dir() / "result.json").exists()
+
+
+def test_r8_residual_disposition_failure_payload_omits_exception_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Disposition failure returns fixed codes; no durable terminal; no release."""
+    from agent_run_supervisor.session import QUARANTINE_PENDING_JSON, SessionStore
+
+    script = dict(HAPPY_SCRIPT)
+    script["hang_prompt_until_cancel"] = True
+    harness = Harness(tmp_path, monkeypatch, script)
+
+    def boom_mark(self, session_id, **kwargs):
+        raise OSError(_CANARY_EXC)
+
+    monkeypatch.setattr(SessionStore, "mark_quarantined", boom_mark)
+    result = _run(
+        harness.task(
+            request=_request(limits=RunLimits(turn_timeout_seconds=0.3))
+        )
+    )
+    assert result.status is AgentRunStatus.FAILED
+    assert result.payload["status"] == "failed"
+    assert result.payload["error"] == "session disposition failed"
+    assert result.payload["detail_code"] == "SESSION_DISPOSITION_FAILED"
+    blob = json.dumps(result.payload)
+    assert _CANARY_EXC not in blob
+    assert "LEAKCANARY" not in blob
+    assert "/tmp/secret-path" not in blob
+    assert "OSError" not in blob
+    run_dir = harness.run_dir()
+    assert not (run_dir / "result.json").exists()
+    session_dir = harness.root / "native-sessions" / "sess-native-1"
+    assert (session_dir / QUARANTINE_PENDING_JSON).is_file()
+    assert (session_dir / "lock.json").is_file()
