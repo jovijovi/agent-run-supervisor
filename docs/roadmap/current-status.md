@@ -11,7 +11,7 @@ supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 
 ```text
 base_branch: main
-active_plan: docs/plans/active/2026-07-21-vnext-stage01-native-acp-implementation.md
+active_plan: none
 ```
 
 ## Authority chain
@@ -29,16 +29,17 @@ new work.
 
 - **Product target:** one local supervision plane: `trusted caller → arsd UDS → ars-core/Native ACP → registered external AGENT`.
 - **Released baseline:** v0.1.7 acpx behavior remains compatibility-only; it is not the new-development architecture.
-- **Stage 0/1 implementation:** complete as a locally verified candidate on the implementation branch.
-  C1–C10 landed with the full L1/L2 suites and real OpenCode 1.18.4 B-grade acceptance: exact
-  literal K3/max, real `session/load` historical-token continuity across process-per-Run, and the
-  chair-approved exact model-switch closure through the registered second model
-  `deepseek/deepseek-v4-pro` (profile revision 2 closed model pair). No Stage 0/1 implementation
-  blocker remains; sanitized acceptance evidence lives in the operator-held out-of-Git C10 records.
-- **Integration state:** the implemented Stage 0/1 work is complete locally; integration remains
-  pending under its separate approvals. Live pull-request/CI/merge truth belongs to GitHub, never
-  to this board.
-- **Production acceptance:** Stage 2 `arsd` plus G12 and real S1–S5; unimplemented and separately approved.
+- **Stage 0/1 — merged.** The Native ACP core (C1–C10) is merged into `main` and versioned in the
+  0.2.0 source candidate (CHANGELOG 0.2.0 section, synced version metadata). The L1/L2 suites and
+  real OpenCode 1.18.4 B-grade acceptance closed the stage: exact literal K3/max, real
+  `session/load` historical-token continuity across process-per-Run, and exact switching through
+  the registered second model (profile revision 2 closed model pair). Sanitized acceptance
+  evidence stays in the operator-held out-of-Git C10 records; closure detail:
+  [phase archive](archive/phases/vnext-stage01-native-acp.md).
+- **Production acceptance:** Stage 2 `arsd` plus G12 and real S1–S5; unimplemented and separately
+  approved. The 0.2.0 source line ships no `arsd`, Native service, or Native CLI production entry.
+- **Release/publication:** tag, GitHub Release, and PyPI publication of 0.2.0 are separately
+  approved operator actions and have not occurred.
 - **Later integration:** Sachima `ArsdBackend`; parked until ARS production acceptance.
 
 ## Phase board
@@ -46,17 +47,14 @@ new work.
 | Phase | State | Active authority | Authorization / exit |
 |---|---|---|---|
 | vNext authority reset | Documentation complete | GOAL/PRD/design/roadmap + cold archive | no implementation authority |
-| Stage 0/1 — Native ACP core | Implementation complete; integration pending | [active plan](../plans/active/2026-07-21-vnext-stage01-native-acp-implementation.md) | exit = separately approved push, pull-request review, and merge; the plan archives at merge |
+| Stage 0/1 — Native ACP core | Merged into `main`; closed | [archived plan](../plans/archive/2026-07-21-vnext-stage01-native-acp-implementation.md) · [phase archive](archive/phases/vnext-stage01-native-acp.md) | closed at merge; production claims only via Stage 2 |
 | Stage 2 — `arsd` production ingress | Planned; no active plan | PRD/architecture/technical solution | separate source + G12 + service/harness approval; S1–S5 |
 | Sachima integration | Parked | boundary only | after ARS production acceptance and separate approval |
 
 ## Open gates
 
-Stage 0/1 gates G1 and G3–G8 are closed for this candidate: explicit operator authorization,
-fresh-baseline start, the additive status-consumer decision with per-consumer pins, live wire and
-state proofs at L1/L2, and real B-grade acceptance (exact configuration, `loadSession` plus
-historical-token continuity, exact model/effort switching with rollback/quarantine). They re-open
-only if the candidate materially changes before merge.
+Stage 0/1 gates (G1, G3–G8) closed with the merged core; closure evidence is summarized in the
+[phase archive](archive/phases/vnext-stage01-native-acp.md). Stage 2 gates remain open:
 
 | Gate | Blocks | Required fact |
 |---|---|---|

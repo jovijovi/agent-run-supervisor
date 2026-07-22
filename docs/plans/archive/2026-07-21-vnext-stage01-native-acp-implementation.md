@@ -1,10 +1,15 @@
 ---
 title: "ARS vNext Stage 0/1 implementation — Native ACP core"
-status: active
+status: archived
 created_at: 2026-07-21
+archived_at: 2026-07-22
 last_validated_at: 2026-07-21
 supersedes: "docs/plans/archive/2026-07-21-vnext-stage01-native-acp.md"
 ---
+> **Archived 2026-07-22.** The Stage 0/1 work this plan drove is merged into `main` and versioned in
+> the 0.2.0 source line. Retained for audit only; embedded branches, baselines, gates, and approval
+> sentences are expired (see [`README.md`](README.md)).
+
 # ARS vNext Stage 0/1 implementation — Native ACP core
 
 > **Execution artifact, not authorization.** This plan derives only from the vNext-only GOAL/PRD/design

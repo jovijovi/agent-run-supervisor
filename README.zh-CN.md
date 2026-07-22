@@ -35,11 +35,12 @@
 
 ---
 
-> **已发布现状与目标必须分开。** 下方命令和 API 描述已发布的 **v0.1.7 acpx 兼容面**。
-> 新开发仅以 [`GOAL.md`](GOAL.md)、[PRD](docs/product/prd.md) 与
-> [架构设计](docs/design/architecture.md) 的 vNext 权威链为准：本地非特权 `arsd` UDS 入口
-> → ars-core/Native ACP → 注册的外部 AGENT。该目标按阶段推进，**尚未实现或启用生产运行**；
-> 历史需求和计划只在冷档案中留存。
+> **已发布现状与目标必须分开。** 下方命令和 API 描述 **v0.1.7 acpx 兼容面**，该兼容面在
+> 0.2.0 中保持不变。0.2.0 新增 **Stage 0/1 Native ACP 核心** —— 一个库级 ars-core 纵切，按
+> [`GOAL.md`](GOAL.md)、[PRD](docs/product/prd.md) 与[架构设计](docs/design/architecture.md)
+> 的 vNext 权威链构建：本地非特权 `arsd` UDS 入口 → ars-core/Native ACP → 注册的外部 AGENT。
+> `arsd` 入口属于 Stage 2，**尚未实现**：0.2.0 **没有 `arsd`、没有 Native 服务、也没有
+> Native CLI 生产入口**，未启用生产运行；历史需求和计划只在冷档案中留存。
 
 ## 它做什么
 
@@ -52,11 +53,15 @@
 将观测输出解析为归一化事件、判定一个**由监督层拥有的状态**，并写出**脱敏、权限受限的本地工件**。
 调用方拿到的是可审计的证据 —— 而不是一团运行器生命周期代码。
 
-已发布的 v0.1.7 包含**两种本地 acpx 执行模式**：一次性 exec 与本地持久会话生命周期
-（创建/发送/状态/关闭/中止/列举）；该已发布版本没有 daemon。另行分阶段推进的 vNext 目标
-会增加一个薄的、本地非特权 `arsd` UDS 宿主，作为唯一生产入口，但目前尚未实现。两条线都
-不是 Sachima、Gateway 插件或 IM 适配器；ARS 也永不给出业务结论（`business_verdict` 始终为
-`null`）。
+已发布的 acpx 兼容面包含**两种本地 acpx 执行模式**：一次性 exec 与本地持久会话生命周期
+（创建/发送/状态/关闭/中止/列举）；这条线没有 daemon。0.2.0 额外携带 **Stage 0/1 Native ACP
+核心**（`agent_run_supervisor.native_acp` 加 `managed_process`）：受监督的实时 stdio AGENT
+进程、冻结的 profile/spec 准入、精确否则归零的配置、`session/load` 连续性与跨 Run 的
+model/effort 切换、隔离的 `native-runs/`/`native-sessions/` 证据，以及失败关闭的
+`unknown/quarantined/retryable=false` 状态 —— 目前仅作为库/测试表面可用。另行分阶段推进的
+Stage 2 目标会增加一个薄的、本地非特权 `arsd` UDS 宿主，作为唯一生产入口，但目前尚未实现，
+因此 0.2.0 没有 Native 服务或 Native CLI 入口。两条线都不是 Sachima、Gateway 插件或 IM
+适配器；ARS 也永不给出业务结论（`business_verdict` 始终为 `null`）。
 
 ## 工作原理
 
@@ -330,6 +335,7 @@ for turn in list_turns("/path/to/sessions", "nightly-review"):
 |---|---|
 | 运行时 | **Python ≥ 3.11**，仅标准库 —— 零第三方运行时依赖。 |
 | 测试（可选） | `pytest >= 8, < 10`（`dev` 额外依赖）。 |
+| Native ACP 核心测试（可选） | `native` 额外依赖固定 `agent-client-protocol==0.11.0`，供 Stage 0/1 L1/L2 套件使用；真实 OpenCode 冒烟需显式开启（`ARS_NATIVE_SMOKE=1`），并要求已注册的 OpenCode 1.18.4 安装。 |
 | 真实 AGENT 运行 / 会话轮次 | 本地具备 **Node + acpx + 目标 AGENT CLI** —— 在不带 `--no-real-run` 的 `run`，以及真实的 `session create/send/status/close/abort` 轮次与管理命令时需要。Codex 冒烟 helper 还需要 `npx`，以及通过 `CODEX_PATH` 或 `PATH` 可用的 Codex CLI。 |
 | 不启动 AGENT 的命令 | `validate-role`、`replay`、`doctor`、`run --no-real-run`、`session list` 与 `cleanup`（dry-run）**无需** Node/acpx，且**不启动**任何 AGENT。 |
 
@@ -341,7 +347,7 @@ for turn in list_turns("/path/to/sessions", "nightly-review"):
 ```bash
 git clone https://github.com/jovijovi/agent-run-supervisor.git
 cd agent-run-supervisor
-make sync      # uv sync --extra dev --extra release
+make sync      # uv sync --locked --extra dev --extra release --extra native
 make verify    # 完整本地关卡（与 CI 一致）
 make build     # sdist/wheel + twine check
 make smoke     # build + 已安装 wheel 冒烟
@@ -352,7 +358,7 @@ make help      # 列出全部 target
 无 Make 时的等价命令：
 
 ```bash
-uv sync --extra dev --extra release
+uv sync --locked --extra dev --extra release --extra native
 ./scripts/verify_local.sh
 ```
 
@@ -360,10 +366,15 @@ uv sync --extra dev --extra release
 [`docs/roadmap/verification.md`](docs/roadmap/verification.md) 对齐（测试、doctor/replay
 冒烟、文档索引/漂移、静态安全扫描、build/twine 检查与已安装 wheel 冒烟）。
 
+完整套件在 L1/L2 层覆盖 Stage 0/1 Native ACP 核心（走密封的 fake agent；`native` 额外依赖
+固定 `agent-client-protocol==0.11.0`）。真实 OpenCode 1.18.4 冒烟绝不在 CI 中运行，需显式
+选择加入：`ARS_NATIVE_SMOKE=1 uv run pytest tests/native_acp/test_real_opencode_smoke.py -q`
+（需要已注册的 OpenCode 安装与凭据）。
+
 **pip 回退**（无 uv 时）：
 
 ```bash
-pip install -e '.[dev,release]'
+pip install -e '.[dev,release,native]'
 python3 -m pytest -q
 ```
 
@@ -423,7 +434,7 @@ agent-run-supervisor doctor
 | 安全工件 | 脱敏工件 · `business_verdict = null` · EventStore `0700`/`0600` 原子 NDJSON。 |
 
 ```bash
-uv sync --extra dev --extra release
+uv sync --locked --extra dev --extra release --extra native
 ./scripts/verify_local.sh
 ```
 
@@ -436,9 +447,10 @@ uv sync --extra dev --extra release
 
 - **已发布兼容基线 —— v0.1.7。** 本地 acpx 一次性/持久会话监督、脱敏证据、doctor/cleanup、
   调用方封装、打包与发布工程均已实现。它们继续作为兼容面维护，但不再定义新开发架构。
-- **计划中 —— vNext Stage 0/1。** AgentProfile/不可变 RunSpec、ManagedProcess、Native ACP 精确配置、
-  process-per-Run 的 Session load/切换、Native 存储隔离、失败关闭状态、权限桥与真实 OpenCode
-  B 级证据。源码/依赖实施需单独批准；见[当前 active plan](docs/plans/active/2026-07-21-vnext-stage01-native-acp-implementation.md)。
+- **已合并 —— vNext Stage 0/1（0.2.0 源码线）。** AgentProfile/不可变 RunSpec、ManagedProcess、
+  Native ACP 精确配置、process-per-Run 的 Session load/切换、Native 存储隔离、失败关闭状态、
+  默认拒绝权限中介与真实 OpenCode B 级证据已合并进 `main`。Stage 1 是库级核心，不构成生产
+  验收；见[已归档 plan](docs/plans/archive/2026-07-21-vnext-stage01-native-acp-implementation.md)。
 - **计划中 —— vNext Stage 2。** `arsd` UDS 入口、peer/ownership、reconciliation、有界运行、真实
   denied-action 权限证明与 cgroup 崩溃遏制。G12 caller-UID policy 和所有生产启用均需单独批准。
 - **暂存 —— Sachima 集成。** 仅在 ARS 通过生产验收且另获集成授权后实现 socket backend；公网
