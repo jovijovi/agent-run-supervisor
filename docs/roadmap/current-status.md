@@ -11,7 +11,7 @@ supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 
 ```text
 base_branch: main
-active_plan: none
+active_plan: docs/plans/active/2026-07-22-vnext-stage2-arsd-production-ingress.md
 ```
 
 ## Authority chain
@@ -30,16 +30,21 @@ new work.
 - **Product target:** one local supervision plane: `trusted caller → arsd UDS → ars-core/Native ACP → registered external AGENT`.
 - **Released baseline:** v0.1.7 acpx behavior remains compatibility-only; it is not the new-development architecture.
 - **Stage 0/1 — merged.** The Native ACP core (C1–C10) is merged into `main` and versioned in the
-  0.2.0 source candidate (CHANGELOG 0.2.0 section, synced version metadata). The L1/L2 suites and
+  released 0.2.0 line (CHANGELOG 0.2.0 section, synced version metadata). The L1/L2 suites and
   real OpenCode 1.18.4 B-grade acceptance closed the stage: exact literal K3/max, real
   `session/load` historical-token continuity across process-per-Run, and exact switching through
   the registered second model (profile revision 2 closed model pair). Sanitized acceptance
   evidence stays in the operator-held out-of-Git C10 records; closure detail:
   [phase archive](archive/phases/vnext-stage01-native-acp.md).
-- **Production acceptance:** Stage 2 `arsd` plus G12 and real S1–S5; unimplemented and separately
-  approved. The 0.2.0 source line ships no `arsd`, Native service, or Native CLI production entry.
-- **Release/publication:** tag, GitHub Release, and PyPI publication of 0.2.0 are separately
-  approved operator actions and have not occurred.
+- **Production acceptance:** Stage 2 `arsd` plus G12 and real S1–S5. A source-grounded active
+  plan is registered (see `active_plan`); `arsd` remains unimplemented, and source
+  implementation, G12 caller UID policy, the user-service/cgroup harness, production
+  enablement, push/PR/merge/release/deployment, and Sachima integration each remain separately
+  approved and are not approved today. The released 0.2.0 line ships no `arsd`, Native
+  service, or Native CLI production entry.
+- **Release/publication:** v0.2.0 is tagged, released on GitHub, and published to PyPI
+  (operator-verified 2026-07-22). Any further release/publication remains a separately
+  approved operator action.
 - **Later integration:** Sachima `ArsdBackend`; parked until ARS production acceptance.
 
 ## Phase board
@@ -48,7 +53,7 @@ new work.
 |---|---|---|---|
 | vNext authority reset | Documentation complete | GOAL/PRD/design/roadmap + cold archive | no implementation authority |
 | Stage 0/1 — Native ACP core | Merged into `main`; closed | [archived plan](../plans/archive/2026-07-21-vnext-stage01-native-acp-implementation.md) · [phase archive](archive/phases/vnext-stage01-native-acp.md) | closed at merge; production claims only via Stage 2 |
-| Stage 2 — `arsd` production ingress | Planned; no active plan | PRD/architecture/technical solution | separate source + G12 + service/harness approval; S1–S5 |
+| Stage 2 — `arsd` production ingress | Plan registered; implementation not approved | [active plan](../plans/active/2026-07-22-vnext-stage2-arsd-production-ingress.md) · PRD/architecture/technical solution | separate source, G12, service/cgroup-harness, and production-enablement approvals; real S1–S5; no push/PR/merge/release/deployment or Sachima approval |
 | Sachima integration | Parked | boundary only | after ARS production acceptance and separate approval |
 
 ## Open gates
@@ -59,9 +64,10 @@ Stage 0/1 gates (G1, G3–G8) closed with the merged core; closure evidence is s
 | Gate | Blocks | Required fact |
 |---|---|---|
 | G9/G10/G11 | Stage 2 production | cgroup containment, real denied-action canary, robustness (Stage 2 re-proves real credential/model usability inside S1–S5) |
-| G12 caller UID/ownership policy | Stage 2 production enablement | approved policy owner and exact allowed UID values |
+| G12 caller UID/ownership policy | production enablement (A5); whether it must also precede Stage 2 source start or real acceptance is an unresolved authority conflict recorded as an Operator decision in the active plan (§3 / T1) | approved policy owner and exact UID→principal/owner-namespace mapping values |
 
-G12 is a required production gate, not optional DLP backlog. Optional DLP enhancements remain future work.
+G12 is a required gate, not optional DLP backlog; its timing relative to Stage 2 source start is an open
+Operator decision recorded in the active plan (§3 / T1). Optional DLP enhancements remain future work.
 
 ## Cold history
 

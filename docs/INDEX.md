@@ -2,10 +2,11 @@
 
 # Documentation Index
 
-Total: 61 documents tracked across 2 statuses.
+Total: 62 documents tracked across 2 statuses.
 
-## Active (15)
+## Active (16)
 
+- [vNext Stage 2 — arsd production ingress implementation plan](plans/active/2026-07-22-vnext-stage2-arsd-production-ingress.md) — created 2026-07-22
 - [agent-run-supervisor vNext System Architecture](design/architecture.md) — created 2026-07-21
 - [agent-run-supervisor vNext Technical Solution](design/technical-solution.md) — created 2026-07-21
 - [agent-run-supervisor vNext PRD](product/prd.md) — created 2026-07-21
