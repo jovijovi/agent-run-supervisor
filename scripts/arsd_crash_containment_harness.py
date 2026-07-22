@@ -550,7 +550,7 @@ def _capture_original_cgroup_identities_for_sigkill(
     Captures every cgroup PID identity fail-closed. The exact ``agent_ident``
     returned by the earlier effective.json gate must appear byte/value-exact in
     this snapshot; missing, unreadable, or PID-reused AGENT identity refuses
-    before ``os.kill``. Unrelated identities never substitute.
+    before pidfd SIGKILL. Unrelated identities never substitute.
     """
     original_idents: list[tuple[int, int]] = []
     for pid in cgroup_pids:
@@ -591,6 +591,75 @@ def _require_agent_identity_dead_after_crash(agent_ident: tuple[int, int]) -> No
     """Require the exact pre-crash AGENT identity is dead (PID-reuse safe)."""
     if _identity_alive(agent_ident):
         raise HarnessGateError("crash-run agent identity still alive after SIGKILL")
+
+
+def _require_linux_pidfd() -> None:
+    """Fail closed unless Linux pidfd open/send APIs are available."""
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        raise HarnessGateError("linux pidfd support required; refusing SIGKILL")
+
+
+def _pidfd_sigkill_verified_main(
+    *,
+    unit_name: str,
+    main_pid: int,
+    main_ident: tuple[int, int],
+    agent_ident: tuple[int, int],
+) -> tuple[list[int], list[tuple[int, int]]]:
+    """PID-reuse-safe SIGKILL of the captured MainPID via pidfd.
+
+    Never uses raw ``os.kill``. Captures a pidfd for the initial MainPID, then
+    immediately before the signal re-reads ``systemctl MainPID``, live start
+    identity, and a fresh cgroup snapshot. Requires the exact same PID/start
+    identity, MainPID membership, and exact AGENT identity in that snapshot.
+    Closes the pidfd on every path. Any mismatch or pidfd failure becomes a
+    sanitized ``HarnessGateError`` with no signal delivered to an unrelated
+    process.
+    """
+    _require_linux_pidfd()
+    pidfd: int | None = None
+    try:
+        try:
+            pidfd = os.pidfd_open(main_pid)
+        except OSError as exc:
+            raise HarnessGateError("pidfd open failed") from exc
+
+        # Immediate pre-signal re-validation (never trust the earlier snapshot).
+        live_main = _main_pid(unit_name)
+        if live_main != main_pid:
+            raise HarnessGateError("MainPID changed before pidfd SIGKILL")
+        live_ident = _process_start_identity(main_pid)
+        if live_ident is None or live_ident != main_ident:
+            raise HarnessGateError(
+                "MainPID start identity changed before pidfd SIGKILL"
+            )
+        fresh_pids, original_idents = _final_pre_sigkill_cgroup_snapshot(
+            unit_name=unit_name,
+            agent_ident=agent_ident,
+        )
+        if main_pid not in fresh_pids:
+            raise HarnessGateError(
+                "MainPID absent from refreshed cgroup before pidfd SIGKILL"
+            )
+        if main_ident not in original_idents:
+            raise HarnessGateError(
+                "MainPID identity missing from refreshed cgroup snapshot"
+            )
+        if agent_ident not in original_idents:
+            raise HarnessGateError(
+                "crash-run agent identity missing from final pre-SIGKILL snapshot"
+            )
+        try:
+            signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+        except OSError as exc:
+            raise HarnessGateError("pidfd send_signal failed") from exc
+        return fresh_pids, original_idents
+    finally:
+        if pidfd is not None:
+            try:
+                os.close(pidfd)
+            except OSError:
+                pass
 
 
 def _s4_evidence_payload(
@@ -770,6 +839,9 @@ def run_s4(inputs: dict[str, str]) -> int:
         main_pid = _main_pid(unit_name)
         if main_pid <= 1:
             raise HarnessGateError("could not resolve MainPID for SIGKILL")
+        main_ident = _process_start_identity(main_pid)
+        if main_ident is None:
+            raise HarnessGateError("could not resolve MainPID start identity")
         before_pids = _cgroup_procs_for_unit(unit_name)
         agent_ident = _require_agent_identity_before_sigkill(
             run_dir=run_dir,
@@ -778,13 +850,14 @@ def run_s4(inputs: dict[str, str]) -> int:
         )
         agent_identity_from_effective = True
         agent_pid_in_cgroup_before_crash = True
-        # Fresh membership immediately before identity capture and os.kill —
-        # never reuse the stale before_pids list above.
-        original_cgroup_pids, original_idents = _final_pre_sigkill_cgroup_snapshot(
+        # PID-reuse-safe kill: pidfd + immediate MainPID/start/cgroup re-check.
+        # Never raw os.kill; never reuse the stale before_pids list above.
+        original_cgroup_pids, original_idents = _pidfd_sigkill_verified_main(
             unit_name=unit_name,
+            main_pid=main_pid,
+            main_ident=main_ident,
             agent_ident=agent_ident,
         )
-        os.kill(main_pid, signal.SIGKILL)
 
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:

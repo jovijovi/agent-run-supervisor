@@ -1386,3 +1386,238 @@ def test_r4_b6_pre_kill_refresh_keeps_exact_agent_and_returns_fresh_pids(
     assert calls == 1
     assert fresh_pids == [main_pid, agent_ident[0], helper_ident[0]]
     assert agent_ident in idents
+
+
+# -- R5 B4: PID-reuse-safe harness kill via pidfd -----------------------------
+
+
+def _patch_pidfd(monkeypatch, harness, *, open_fd=77, on_send=None, on_open=None):
+    """Install pidfd APIs even when the interpreter build lacks them."""
+    closed: list[int] = []
+
+    def default_open(pid, flags=0):
+        return open_fd
+
+    def default_send(pidfd, sig, *a, **k):
+        return None
+
+    monkeypatch.setattr(
+        harness.os, "pidfd_open", on_open or default_open, raising=False
+    )
+    monkeypatch.setattr(
+        harness.signal,
+        "pidfd_send_signal",
+        on_send or default_send,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        harness.os, "close", lambda fd: closed.append(fd), raising=False
+    )
+    return closed
+
+
+def test_r5_b4_pidfd_sigkill_success_exact_identity(monkeypatch) -> None:
+    harness = _load_harness()
+    _assert_no_host_mutation(monkeypatch, harness)
+    main_pid = 5100
+    main_ident = (5100, 11)
+    agent_ident = (5200, 22)
+    helper = (5300, 33)
+    live = {
+        main_pid: main_ident,
+        agent_ident[0]: agent_ident,
+        helper[0]: helper,
+    }
+    sent: list[tuple[int, int]] = []
+
+    def on_send(pidfd, sig, *a, **k):
+        sent.append((pidfd, sig))
+
+    closed = _patch_pidfd(monkeypatch, harness, open_fd=77, on_send=on_send)
+    monkeypatch.setattr(harness, "_main_pid", lambda _u: main_pid)
+    monkeypatch.setattr(
+        harness,
+        "_cgroup_procs_for_unit",
+        lambda _u: [main_pid, agent_ident[0], helper[0]],
+    )
+    monkeypatch.setattr(harness, "_process_start_identity", lambda pid: live.get(pid))
+
+    pids, idents = harness._pidfd_sigkill_verified_main(
+        unit_name="unit.service",
+        main_pid=main_pid,
+        main_ident=main_ident,
+        agent_ident=agent_ident,
+    )
+    assert sent == [(77, harness.signal.SIGKILL)]
+    assert 77 in closed
+    assert main_pid in pids
+    assert agent_ident in idents
+    assert main_ident in idents
+
+
+def test_r5_b4_pidfd_refuses_mainpid_changed(monkeypatch) -> None:
+    harness = _load_harness()
+    _assert_no_host_mutation(monkeypatch, harness)
+    main_pid = 6100
+    main_ident = (6100, 1)
+    agent_ident = (6200, 2)
+
+    def boom_send(*_a, **_k):
+        raise AssertionError("must not signal")
+
+    closed = _patch_pidfd(monkeypatch, harness, open_fd=88, on_send=boom_send)
+    monkeypatch.setattr(harness, "_main_pid", lambda _u: 6111)
+    with pytest.raises(harness.HarnessGateError, match="MainPID changed"):
+        harness._pidfd_sigkill_verified_main(
+            unit_name="unit.service",
+            main_pid=main_pid,
+            main_ident=main_ident,
+            agent_ident=agent_ident,
+        )
+    assert 88 in closed
+
+
+def test_r5_b4_pidfd_refuses_pid_reuse_new_start(monkeypatch) -> None:
+    harness = _load_harness()
+    _assert_no_host_mutation(monkeypatch, harness)
+    main_pid = 7100
+    main_ident = (7100, 1)
+    agent_ident = (7200, 2)
+
+    def boom_send(*_a, **_k):
+        raise AssertionError("must not signal")
+
+    closed = _patch_pidfd(monkeypatch, harness, open_fd=99, on_send=boom_send)
+    monkeypatch.setattr(harness, "_main_pid", lambda _u: main_pid)
+    monkeypatch.setattr(
+        harness,
+        "_process_start_identity",
+        lambda pid: (pid, 999) if pid == main_pid else None,
+    )
+    with pytest.raises(harness.HarnessGateError, match="start identity"):
+        harness._pidfd_sigkill_verified_main(
+            unit_name="unit.service",
+            main_pid=main_pid,
+            main_ident=main_ident,
+            agent_ident=agent_ident,
+        )
+    assert 99 in closed
+
+
+def test_r5_b4_pidfd_refuses_mainpid_absent_from_cgroup(monkeypatch) -> None:
+    harness = _load_harness()
+    _assert_no_host_mutation(monkeypatch, harness)
+    main_pid = 8100
+    main_ident = (8100, 5)
+    agent_ident = (8200, 6)
+    live = {main_pid: main_ident, agent_ident[0]: agent_ident}
+
+    def boom_send(*_a, **_k):
+        raise AssertionError("must not signal")
+
+    closed = _patch_pidfd(monkeypatch, harness, open_fd=101, on_send=boom_send)
+    monkeypatch.setattr(harness, "_main_pid", lambda _u: main_pid)
+    monkeypatch.setattr(harness, "_process_start_identity", lambda pid: live.get(pid))
+    monkeypatch.setattr(harness, "_cgroup_procs_for_unit", lambda _u: [agent_ident[0]])
+    with pytest.raises(harness.HarnessGateError, match="MainPID absent"):
+        harness._pidfd_sigkill_verified_main(
+            unit_name="unit.service",
+            main_pid=main_pid,
+            main_ident=main_ident,
+            agent_ident=agent_ident,
+        )
+    assert 101 in closed
+
+
+def test_r5_b4_pidfd_refuses_agent_moved_out(monkeypatch) -> None:
+    harness = _load_harness()
+    _assert_no_host_mutation(monkeypatch, harness)
+    main_pid = 9100
+    main_ident = (9100, 7)
+    agent_ident = (9200, 8)
+    live = {main_pid: main_ident, 9400: (9400, 1)}
+
+    def boom_send(*_a, **_k):
+        raise AssertionError("must not signal")
+
+    closed = _patch_pidfd(monkeypatch, harness, open_fd=102, on_send=boom_send)
+    monkeypatch.setattr(harness, "_main_pid", lambda _u: main_pid)
+    monkeypatch.setattr(harness, "_process_start_identity", lambda pid: live.get(pid))
+    monkeypatch.setattr(harness, "_cgroup_procs_for_unit", lambda _u: [main_pid, 9400])
+    with pytest.raises(harness.HarnessGateError):
+        harness._pidfd_sigkill_verified_main(
+            unit_name="unit.service",
+            main_pid=main_pid,
+            main_ident=main_ident,
+            agent_ident=agent_ident,
+        )
+    assert 102 in closed
+
+
+def test_r5_b4_pidfd_open_failure_sanitized(monkeypatch) -> None:
+    harness = _load_harness()
+    _assert_no_host_mutation(monkeypatch, harness)
+
+    def boom_open(*_a, **_k):
+        raise OSError("raw open path must not surface")
+
+    def boom_send(*_a, **_k):
+        raise AssertionError("must not signal")
+
+    _patch_pidfd(monkeypatch, harness, on_open=boom_open, on_send=boom_send)
+    with pytest.raises(harness.HarnessGateError, match="pidfd open") as err:
+        harness._pidfd_sigkill_verified_main(
+            unit_name="unit.service",
+            main_pid=1,
+            main_ident=(1, 1),
+            agent_ident=(2, 2),
+        )
+    assert "raw open path" not in str(err.value)
+
+
+def test_r5_b4_pidfd_send_failure_closes_fd(monkeypatch) -> None:
+    harness = _load_harness()
+    _assert_no_host_mutation(monkeypatch, harness)
+    main_pid = 10100
+    main_ident = (10100, 3)
+    agent_ident = (10200, 4)
+    live = {main_pid: main_ident, agent_ident[0]: agent_ident}
+
+    def boom_send(*_a, **_k):
+        raise OSError("send failed raw")
+
+    closed = _patch_pidfd(monkeypatch, harness, open_fd=103, on_send=boom_send)
+    monkeypatch.setattr(harness, "_main_pid", lambda _u: main_pid)
+    monkeypatch.setattr(harness, "_process_start_identity", lambda pid: live.get(pid))
+    monkeypatch.setattr(
+        harness, "_cgroup_procs_for_unit", lambda _u: [main_pid, agent_ident[0]]
+    )
+    with pytest.raises(harness.HarnessGateError, match="pidfd send"):
+        harness._pidfd_sigkill_verified_main(
+            unit_name="unit.service",
+            main_pid=main_pid,
+            main_ident=main_ident,
+            agent_ident=agent_ident,
+        )
+    assert 103 in closed
+
+
+def test_r5_b4_os_kill_never_used_by_pidfd_helper(monkeypatch) -> None:
+    harness = _load_harness()
+    _assert_no_host_mutation(monkeypatch, harness)
+
+    def boom_kill(*_a, **_k):
+        raise AssertionError("os.kill must never be used")
+
+    def boom_open(*_a, **_k):
+        raise OSError("no pidfd")
+
+    monkeypatch.setattr(harness.os, "kill", boom_kill, raising=False)
+    _patch_pidfd(monkeypatch, harness, on_open=boom_open)
+    with pytest.raises(harness.HarnessGateError):
+        harness._pidfd_sigkill_verified_main(
+            unit_name="unit.service",
+            main_pid=1,
+            main_ident=(1, 1),
+            agent_ident=(2, 2),
+        )

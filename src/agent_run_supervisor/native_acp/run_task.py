@@ -35,7 +35,14 @@ from agent_run_supervisor.managed_process import (
     spawn_managed_process,
 )
 from agent_run_supervisor.redaction import RedactionReport, redact_text
-from agent_run_supervisor.result import build_result_payload
+from agent_run_supervisor.result import (
+    MAX_FINAL_MESSAGE_BYTES,
+    build_result_payload,
+    enforce_native_result_ceiling,
+    sanitize_failure_reason,
+    sanitize_usage,
+    truncate_utf8_bytes,
+)
 from agent_run_supervisor.session import (
     STATE_OPEN,
     SessionLock,
@@ -183,6 +190,48 @@ class _PreDispatchFailure(Exception):
 
 
 @dataclass
+class FinalMessageAccumulator:
+    """Bounded agent-message accumulation at ingestion (not only finalization).
+
+    Keeps only accepted UTF-8 parts under ``max_bytes`` plus a discarded-chunk
+    count and truncation flag — never retains unbounded discarded chunk bodies.
+    """
+
+    max_bytes: int = MAX_FINAL_MESSAGE_BYTES
+    _parts: list[str] = field(default_factory=list)
+    _byte_len: int = 0
+    truncated: bool = False
+    discarded_chunks: int = 0
+
+    def ingest(self, text: str) -> None:
+        if not isinstance(text, str) or not text:
+            return
+        raw = text.encode("utf-8")
+        if self._byte_len >= self.max_bytes:
+            self.truncated = True
+            self.discarded_chunks += 1
+            return
+        remaining = self.max_bytes - self._byte_len
+        if len(raw) <= remaining:
+            self._parts.append(text)
+            self._byte_len += len(raw)
+            return
+        kept = truncate_utf8_bytes(raw, remaining)
+        if kept:
+            self._parts.append(kept.decode("utf-8"))
+            self._byte_len += len(kept)
+        self.truncated = True
+        self.discarded_chunks += 1
+
+    def text(self) -> str:
+        return "".join(self._parts)
+
+    @property
+    def retained_bytes(self) -> int:
+        return self._byte_len
+
+
+@dataclass
 class _RunContext:
     handle: Any = None
     session_id: str | None = None
@@ -212,10 +261,15 @@ class _RunContext:
     observation_interrupted: bool = False
     pre_dispatch: _PreDispatchFailure | None = None
     pipeline_error: BaseException | None = None
-    agent_texts: list[str] = field(default_factory=list)
+    final_message_acc: FinalMessageAccumulator = field(
+        default_factory=FinalMessageAccumulator
+    )
     exit_state: ManagedExit | None = None
     redaction: RedactionReport = field(default_factory=RedactionReport)
     error: BaseException | None = None
+    # When True, required quarantine/disposition failed: retain lease and
+    # refuse to publish a terminal result.
+    disposition_failed: bool = False
 
 
 def _utc_now_iso() -> str:
@@ -622,6 +676,15 @@ class RunTask:
             lambda: self._write_marker(ctx, PROMPT_ACCEPTED_MARKER)
         )
         self._emit(ctx, {"type": "session_prompt_sent"})
+        # Re-check after marker + session_prompt_sent: emit failure or a
+        # queue/consumer that became unsafe must never call prompt. Marker
+        # already implies conservative unknown/quarantine — never overclaim
+        # predispatch after this point. Reserved max_events is intentionally
+        # not re-checked here (the prompt-sent slot may be the last reservation).
+        if ctx.pipeline_error is not None or (
+            ctx.writer is not None and not ctx.writer.consumer_queue_healthy
+        ):
+            return
         try:
             outcome = await asyncio.wait_for(
                 driver.prompt_once(self._prompt_text), turn_timeout
@@ -637,7 +700,7 @@ class RunTask:
                 ctx.observation_interrupted = True
             return
         ctx.stop_reason = outcome.stop_reason
-        ctx.usage = outcome.usage
+        ctx.usage = sanitize_usage(outcome.usage)
         if ctx.stop_reason is not None:
             self._emit(
                 ctx, {"type": "run_completed", "stop_reason": ctx.stop_reason}
@@ -685,7 +748,7 @@ class RunTask:
                     content = update.get("content") or {}
                     text = content.get("text")
                     if isinstance(text, str):
-                        ctx.agent_texts.append(text)
+                        ctx.final_message_acc.ingest(text)
                 self._emit(ctx, normalizer.normalize_update(update))
             except Exception as exc:
                 if ctx.pipeline_error is None:
@@ -781,12 +844,34 @@ class RunTask:
     def _emergency_cleanup(self, ctx: _RunContext) -> None:
         """Sync-only last resort: kill the group, persist one conservative
         terminal fact if none exists, quarantine a dispatched-uncertain
-        session, and release the lease. Every step is independent."""
+        session, and release the lease. Every step is independent except
+        required quarantine must precede result publication and lease release.
+        """
         try:
             if ctx.proc is not None:
                 ctx.proc.kill_group(reason="emergency_finalize")
         except Exception:
             pass
+        need_quarantine = (
+            ctx.session_id is not None
+            and ctx.dispatch_started
+            and ctx.stop_reason is None
+        )
+        if need_quarantine:
+            try:
+                reason = (
+                    "emergency finalization: dispatched turn without a "
+                    "reliable terminal"
+                )
+                self._session_store.write_quarantine_pending(
+                    ctx.session_id, reason=reason, run_id=self._run_id
+                )
+                self._session_store.mark_quarantined(
+                    ctx.session_id, reason=reason, run_id=self._run_id
+                )
+            except Exception:
+                # Required quarantine failed: no terminal result, no lease release.
+                return
         try:
             if ctx.handle is not None and not (
                 ctx.handle.run_dir / "result.json"
@@ -805,7 +890,7 @@ class RunTask:
                     exit_code=None,
                     signal=None,
                     stop_reason=ctx.stop_reason,
-                    usage=ctx.usage,
+                    usage=sanitize_usage(ctx.usage),
                     final_message="",
                     truncated=False,
                     truncate_reason=None,
@@ -814,22 +899,14 @@ class RunTask:
                 )
                 if ctx.session_id is not None:
                     payload["session_id"] = ctx.session_id
+                payload = enforce_native_result_ceiling(
+                    payload,
+                    run_id=self._run_id,
+                    run_dir=ctx.handle.run_dir,
+                    session_id=ctx.session_id,
+                )
                 storage.write_once_json(
                     ctx.handle.run_dir / "result.json", payload
-                )
-        except Exception:
-            pass
-        try:
-            if (
-                ctx.session_id is not None
-                and ctx.dispatch_started
-                and ctx.stop_reason is None
-            ):
-                self._session_store.mark_quarantined(
-                    ctx.session_id,
-                    reason="emergency finalization: dispatched turn without a "
-                    "reliable terminal",
-                    run_id=self._run_id,
                 )
         except Exception:
             pass
@@ -969,10 +1046,15 @@ class RunTask:
                 pass
 
         final_message = ""
-        if ctx.agent_texts:
-            joined = "".join(ctx.agent_texts)
+        truncated = False
+        truncate_reason: str | None = None
+        if ctx.final_message_acc.retained_bytes or ctx.final_message_acc.truncated:
+            joined = ctx.final_message_acc.text()
             final_message, report = redact_text(joined, location="final_message")
             ctx.redaction.merge(report)
+            if ctx.final_message_acc.truncated:
+                truncated = True
+                truncate_reason = "max_final_message_bytes"
         stderr_text = ""
         if ctx.proc is not None:
             raw_stderr = ctx.proc.stderr_bytes().decode("utf-8", errors="replace")
@@ -998,33 +1080,56 @@ class RunTask:
             exit_code=ctx.exit_state.exit_code if ctx.exit_state else None,
             signal=ctx.exit_state.signal if ctx.exit_state else None,
             stop_reason=ctx.stop_reason,
-            usage=ctx.usage,
+            usage=sanitize_usage(ctx.usage),
             final_message=final_message,
-            truncated=False,
-            truncate_reason=None,
+            truncated=truncated,
+            truncate_reason=truncate_reason,
             run_dir=ctx.handle.run_dir,
             raw_event_path="events.jsonl",
         )
         if ctx.session_id is not None:
             payload["session_id"] = ctx.session_id
         if ctx.pre_dispatch is not None:
-            payload["failure_reason"] = ctx.pre_dispatch.reason
+            payload["failure_reason"] = sanitize_failure_reason(
+                ctx.pre_dispatch.reason
+            )
         elif ctx.supervisor_cancelled:
-            payload["failure_reason"] = "supervisor cancellation"
+            payload["failure_reason"] = sanitize_failure_reason(
+                "supervisor cancellation"
+            )
         elif ctx.error is not None:
-            payload["failure_reason"] = str(ctx.error)
+            payload["failure_reason"] = sanitize_failure_reason(str(ctx.error))
+
+        before_ceiling = payload
+        payload = enforce_native_result_ceiling(
+            payload,
+            run_id=self._run_id,
+            run_dir=ctx.handle.run_dir,
+            session_id=ctx.session_id,
+        )
+        if payload is not before_ceiling and payload.get("status") == "failed":
+            status = AgentRunStatus.FAILED
 
         try:
-            storage.write_once_json(ctx.handle.run_dir / "result.json", payload)
-        except FileExistsError:
-            # A concurrent finalizer won the write-once race; the first
-            # terminal fact stands, irreversibly.
-            payload = ctx.handle.read_json("result.json")
-            status = AgentRunStatus(payload["status"])
-        self._write_progress(ctx, status.value)
+            session_state = self._publish_terminal_with_disposition(
+                ctx, status=status, disposition=disposition, payload=payload
+            )
+        except Exception as exc:
+            ctx.disposition_failed = True
+            return NativeRunResult(
+                run_id=self._run_id,
+                status=AgentRunStatus.FAILED,
+                payload={
+                    "run_id": self._run_id,
+                    "status": "failed",
+                    "error": f"session disposition failed: {exc}",
+                },
+                run_dir=ctx.handle.run_dir,
+                session_id=ctx.session_id,
+                session_state=self._session_state(ctx),
+            )
 
-        session_state = self._apply_session_disposition(ctx, status, disposition)
-
+        status = AgentRunStatus(payload["status"])
         return NativeRunResult(
             run_id=self._run_id,
             status=status,
@@ -1051,33 +1156,52 @@ class RunTask:
             evidence_pipeline_failure=ctx.pipeline_error is not None,
         )
 
-    def _apply_session_disposition(
-        self, ctx: _RunContext, status: AgentRunStatus, disposition: str
+    def _publish_terminal_with_disposition(
+        self,
+        ctx: _RunContext,
+        *,
+        status: AgentRunStatus,
+        disposition: str,
+        payload: dict[str, Any],
     ) -> str | None:
-        if ctx.session_id is None:
-            return None
+        """Quarantine-before-result when required; release lease only after both."""
+        if disposition == "quarantined" and ctx.session_id is not None:
+            reason = (
+                "observation lost after dispatch"
+                if status is AgentRunStatus.UNKNOWN
+                else f"run finalized {status.value} without a reliable terminal"
+            )
+            # Never swallow: fence + quarantine must succeed before result.
+            self._session_store.write_quarantine_pending(
+                ctx.session_id, reason=reason, run_id=self._run_id
+            )
+            self._session_store.mark_quarantined(
+                ctx.session_id, reason=reason, run_id=self._run_id
+            )
+
         try:
-            if disposition == "quarantined":
-                reason = (
-                    "observation lost after dispatch"
-                    if status is AgentRunStatus.UNKNOWN
-                    else f"run finalized {status.value} without a reliable terminal"
-                )
-                self._session_store.mark_quarantined(
-                    ctx.session_id, reason=reason, run_id=self._run_id
-                )
-            elif ctx.ephemeral:
+            storage.write_once_json(ctx.handle.run_dir / "result.json", payload)
+        except FileExistsError:
+            # A concurrent finalizer won the write-once race; the first
+            # terminal fact stands, irreversibly.
+            existing = ctx.handle.read_json("result.json")
+            payload.clear()
+            payload.update(existing)
+            status = AgentRunStatus(payload["status"])
+        self._write_progress(ctx, status.value)
+
+        if disposition != "quarantined" and ctx.ephemeral and ctx.session_id is not None:
+            try:
                 self._session_store.mark_closed(ctx.session_id)
-        except Exception:
-            pass
-        finally:
-            if ctx.lock is not None:
-                try:
-                    self._session_store.release_lock(
-                        ctx.session_id, ctx.lock.token
-                    )
-                except Exception:
-                    pass
+            except Exception:
+                pass
+
+        if ctx.lock is not None and ctx.session_id is not None:
+            try:
+                self._session_store.release_lock(ctx.session_id, ctx.lock.token)
+            except Exception:
+                pass
+            ctx.lock = None
         return self._session_state(ctx)
 
     def _session_state(self, ctx: _RunContext) -> str | None:

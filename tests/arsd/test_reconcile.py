@@ -1670,3 +1670,38 @@ def test_r4_b1_incomplete_or_mistyped_terminal_is_untrusted(
     assert "cli" not in str(err.value)
     assert sessions.open_session(session_id).state == STATE_QUARANTINED
     assert not (run_dir / "progress.json").exists()
+
+
+def test_r5_b3_reconcile_converges_quarantine_pending_fence(
+    tmp_path: Path,
+) -> None:
+    """Interrupted fence (open session.json) refuses lease; reconcile quarantines."""
+    from agent_run_supervisor.session import QUARANTINE_PENDING_JSON
+
+    reconcile = _import_reconcile()
+    root = tmp_path / "sv"
+    sessions = storage.native_session_store(root)
+    events = storage.native_event_store(root)
+    run_id = "run-fence-1"
+    session_id = "sess-fence-1"
+    session_dir = _seed_session(sessions, session_id)
+    _seed_lock(session_dir, expires_at=(T0 + dt.timedelta(hours=1)).isoformat())
+    run_dir = events.create_run(run_id).run_dir
+    _seed_submission(run_dir, request_id="fence-1", run_id=run_id, ars_session_id=session_id)
+    _seed_marker(run_dir, run_id)
+    sessions.write_quarantine_pending(
+        session_id, reason="interrupted finalize", run_id=run_id, now=T0
+    )
+    assert (session_dir / QUARANTINE_PENDING_JSON).is_file()
+    assert sessions.open_session(session_id).state == STATE_OPEN
+    with pytest.raises(SessionQuarantinedError):
+        sessions.acquire_lock(
+            session_id, "hermes", required_state=STATE_OPEN, now=T0
+        )
+
+    reconcile.reconcile(root)
+    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert not (session_dir / QUARANTINE_PENDING_JSON).exists()
+    result = json.loads((run_dir / "result.json").read_text())
+    assert result["status"] == "unknown"
+    assert result["retryable"] is False

@@ -937,3 +937,304 @@ def test_r4_b3_writer_close_failure_on_completed_is_evidence_pipeline(
     assert payload.get("detail_code") == "EVIDENCE_PIPELINE"
     # Bounded cleanup: no asyncio resource warnings from undrained writers.
     assert not any(issubclass(w.category, ResourceWarning) for w in caught)
+
+
+# -- R5 B1: bounded Native result at ingestion ---------------------------------
+
+
+def test_r5_b1_final_message_accumulator_bounds_many_chunks() -> None:
+    from agent_run_supervisor.native_acp.run_task import FinalMessageAccumulator
+    from agent_run_supervisor.result import MAX_FINAL_MESSAGE_BYTES
+
+    acc = FinalMessageAccumulator()
+    chunk = ("A" * 4096) + "\x00\x01\x07"
+    for _ in range(64):
+        acc.ingest(chunk)
+    assert acc.retained_bytes <= MAX_FINAL_MESSAGE_BYTES
+    assert acc.truncated is True
+    assert acc.discarded_chunks >= 1
+    assert len(acc.text().encode("utf-8")) <= MAX_FINAL_MESSAGE_BYTES
+    # Discarded bodies are not retained — only count + bounded parts.
+    assert sum(len(p) for p in acc._parts) == len(acc.text())
+
+
+def test_r5_b1_large_message_truncates_and_fits_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import warnings
+
+    from agent_run_supervisor.arsd import protocol
+    from agent_run_supervisor.arsd.reconcile import _MAX_TERMINAL_RESULT_BYTES
+    from agent_run_supervisor.native_acp.run_task import FinalMessageAccumulator
+    from agent_run_supervisor.result import (
+        MAX_FINAL_MESSAGE_BYTES,
+        MAX_NATIVE_RESULT_SERIALIZED_BYTES,
+        native_result_serialized_size,
+        validate_native_terminal_result,
+    )
+
+    # Flood many large/control-character chunks at ingestion without blowing
+    # the spawn environment (ARG_MAX). Keep only bounded accumulator state.
+    real_ingest = FinalMessageAccumulator.ingest
+    flood = ("x\x00\x01" * 512)
+
+    def ingest_flood(self, text: str) -> None:
+        for _ in range(80):
+            real_ingest(self, flood)
+
+    monkeypatch.setattr(FinalMessageAccumulator, "ingest", ingest_flood)
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = _run(harness.task())
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    assert result.status is AgentRunStatus.COMPLETED
+    assert payload["truncated"] is True
+    assert payload["truncate_reason"] == "max_final_message_bytes"
+    assert len(payload["final_message"].encode("utf-8")) <= MAX_FINAL_MESSAGE_BYTES
+    size = native_result_serialized_size(payload)
+    assert size <= MAX_NATIVE_RESULT_SERIALIZED_BYTES
+    assert size <= _MAX_TERMINAL_RESULT_BYTES
+    assert size < protocol.MAX_FRAME_BYTES
+    assert validate_native_terminal_result(payload, run_id="run-0001") is not None
+    frame = protocol.encode_frame(
+        protocol.build_result(
+            "st-1",
+            {"run_id": "run-0001", "result": payload},
+        )
+    )
+    assert len(frame) <= protocol.MAX_FRAME_BYTES
+    assert not any(issubclass(w.category, ResourceWarning) for w in caught)
+
+
+def test_r5_b1_oversized_optional_fields_coerce_to_minimal_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_run_supervisor.result import (
+        MAX_NATIVE_RESULT_SERIALIZED_BYTES,
+        enforce_native_result_ceiling,
+        native_result_serialized_size,
+        validate_native_terminal_result,
+    )
+
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    result = _run(harness.task())
+    payload = dict(result.payload)
+    # Force a ceiling miss via an enormous optional extension field.
+    payload["failure_reason"] = "Z" * (MAX_NATIVE_RESULT_SERIALIZED_BYTES)
+    assert native_result_serialized_size(payload) > MAX_NATIVE_RESULT_SERIALIZED_BYTES
+    coerced = enforce_native_result_ceiling(
+        payload,
+        run_id="run-0001",
+        run_dir=harness.run_dir(),
+        session_id="sess-native-1",
+    )
+    assert coerced["status"] == "failed"
+    assert coerced["retryable"] is False
+    assert coerced["detail_code"] == "EVIDENCE_PIPELINE"
+    assert native_result_serialized_size(coerced) <= MAX_NATIVE_RESULT_SERIALIZED_BYTES
+    assert validate_native_terminal_result(coerced, run_id="run-0001") is not None
+
+
+# -- R5 B2: zero-prompt evidence gate -----------------------------------------
+
+
+def test_r5_b2_consumer_dead_before_dispatch_never_prompts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_run_supervisor.native_acp.event_writer import EventWriter
+
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    real_start = EventWriter.start
+
+    async def start_then_kill_consumer(self):
+        await real_start(self)
+        consumer = self._consumer
+        assert consumer is not None
+        consumer.cancel()
+        try:
+            await consumer
+        except asyncio.CancelledError:
+            pass
+
+    monkeypatch.setattr(EventWriter, "start", start_then_kill_consumer)
+    prompt_calls = {"n": 0}
+    original = NativeAcpDriver.prompt_once
+
+    async def counting_prompt(self, text):
+        prompt_calls["n"] += 1
+        return await original(self, text)
+
+    monkeypatch.setattr(NativeAcpDriver, "prompt_once", counting_prompt)
+    result = _run(harness.task())
+    assert prompt_calls["n"] == 0
+    assert "session/prompt" not in harness.methods_seen()
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    assert payload["status"] == "failed"
+    assert payload["retryable"] is False
+    assert payload.get("detail_code") == "EVIDENCE_PIPELINE"
+    assert not (harness.run_dir() / "prompt-dispatch-started").exists()
+    assert result.status is AgentRunStatus.FAILED
+
+
+def test_r5_b2_queue_full_before_dispatch_never_prompts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exact-full queue makes can_accept false at the dispatch gate; no prompt."""
+    from agent_run_supervisor.native_acp.event_writer import EventWriter
+
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    real_can = EventWriter.can_accept.fget
+
+    def can_accept(self):
+        if getattr(self, "_r5_simulate_queue_full", False):
+            # Mirror the exact-full gate without hanging the consumer on close.
+            return False
+        return real_can(self)
+
+    monkeypatch.setattr(EventWriter, "can_accept", property(can_accept))
+
+    real_dispatch = RunTask._dispatch
+
+    async def dispatch_with_full_queue(self, ctx, turn_timeout):
+        assert ctx.writer is not None
+        # Saturate the real queue to the exact-full condition, then force the
+        # gated property so the pre-prompt check matches production semantics.
+        while not ctx.writer._queue.full():
+            ctx.writer._queue.put_nowait({"type": "pad"})
+        assert ctx.writer._queue.full()
+        ctx.writer._r5_simulate_queue_full = True
+        return await real_dispatch(self, ctx, turn_timeout)
+
+    monkeypatch.setattr(RunTask, "_dispatch", dispatch_with_full_queue)
+
+    prompt_calls = {"n": 0}
+    original = NativeAcpDriver.prompt_once
+
+    async def counting_prompt(self, text):
+        prompt_calls["n"] += 1
+        return await original(self, text)
+
+    monkeypatch.setattr(NativeAcpDriver, "prompt_once", counting_prompt)
+    result = _run(harness.task())
+    assert prompt_calls["n"] == 0
+    assert "session/prompt" not in harness.methods_seen()
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    assert payload["retryable"] is False
+    assert payload["status"] == "failed"
+    assert payload.get("detail_code") == "EVIDENCE_PIPELINE"
+    assert not (harness.run_dir() / "prompt-dispatch-started").exists()
+    assert result.status is AgentRunStatus.FAILED
+
+
+def test_r5_b2_session_prompt_sent_enqueue_fail_skips_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pre-check passes; session_prompt_sent enqueue fails → prompt call count 0."""
+    from agent_run_supervisor.native_acp.event_writer import (
+        EventWriter,
+        EventWriterOverflow,
+    )
+
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    prompt_calls = {"n": 0}
+    original_prompt = NativeAcpDriver.prompt_once
+
+    async def counting_prompt(self, text):
+        prompt_calls["n"] += 1
+        return await original_prompt(self, text)
+
+    monkeypatch.setattr(NativeAcpDriver, "prompt_once", counting_prompt)
+
+    real_emit = EventWriter.emit_nowait
+
+    def emit_fail_prompt_sent(self, event):
+        if event.get("type") == "session_prompt_sent":
+            self.overflowed = True
+            raise EventWriterOverflow("injected session_prompt_sent enqueue failure")
+        return real_emit(self, event)
+
+    monkeypatch.setattr(EventWriter, "emit_nowait", emit_fail_prompt_sent)
+    result = _run(harness.task())
+    assert prompt_calls["n"] == 0
+    assert "session/prompt" not in harness.methods_seen()
+    assert (harness.run_dir() / "prompt-dispatch-started").exists()
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    # Marker written ⇒ conservative unknown/quarantine, never predispatch claim.
+    assert payload["status"] == "unknown"
+    assert payload["retryable"] is False
+    record = harness.session_store().open_session("sess-native-1")
+    assert record.state == "quarantined"
+    assert result.status is AgentRunStatus.UNKNOWN
+
+
+# -- R5 B3: quarantine-before-result + durable fence --------------------------
+
+
+def test_r5_b3_fence_before_result_and_failure_retains_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import datetime as dt
+
+    from agent_run_supervisor.session import (
+        QUARANTINE_PENDING_JSON,
+        STATE_OPEN,
+        SessionQuarantinedError,
+        SessionStore,
+    )
+
+    script = dict(HAPPY_SCRIPT)
+    script["hang_prompt_until_cancel"] = True
+    harness = Harness(tmp_path, monkeypatch, script)
+
+    real_mark = SessionStore.mark_quarantined
+    calls = {"n": 0}
+
+    def boom_mark(self, session_id, **kwargs):
+        calls["n"] += 1
+        # Fence must already exist before the state write attempt.
+        session_dir = Path(self.base_dir) / session_id
+        assert (session_dir / QUARANTINE_PENDING_JSON).is_file()
+        raise OSError("injected mark_quarantined failure")
+
+    monkeypatch.setattr(SessionStore, "mark_quarantined", boom_mark)
+    result = _run(
+        harness.task(
+            request=_request(limits=RunLimits(turn_timeout_seconds=0.3))
+        )
+    )
+    run_dir = harness.run_dir()
+    assert not (run_dir / "result.json").exists()
+    session_dir = harness.root / "native-sessions" / "sess-native-1"
+    assert (session_dir / QUARANTINE_PENDING_JSON).is_file()
+    assert (session_dir / "lock.json").is_file()
+    # Force TTL expiry: fence still denies acquire.
+    later = dt.datetime(2099, 1, 1, tzinfo=dt.timezone.utc)
+    store = harness.session_store()
+    with pytest.raises(SessionQuarantinedError):
+        store.acquire_lock(
+            "sess-native-1", "hermes", required_state=STATE_OPEN, now=later
+        )
+    # Later successful reconciliation quarantine clears fence.
+    monkeypatch.setattr(SessionStore, "mark_quarantined", real_mark)
+    store.mark_quarantined(
+        "sess-native-1", reason="reconcile", run_id="run-0001", now=later
+    )
+    assert not (session_dir / QUARANTINE_PENDING_JSON).exists()
+    assert store.open_session("sess-native-1").state == "quarantined"
+    assert calls["n"] >= 1
+    assert result.payload.get("error") or result.status is AgentRunStatus.FAILED
+
+
+def test_r5_b3_happy_completed_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_run_supervisor.session import QUARANTINE_PENDING_JSON
+
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    result = _run(harness.task())
+    assert result.status is AgentRunStatus.COMPLETED
+    session_dir = harness.root / "native-sessions" / "sess-native-1"
+    assert not (session_dir / QUARANTINE_PENDING_JSON).exists()
+    assert harness.session_store().open_session("sess-native-1").state == "open"
+    assert not (session_dir / "lock.json").exists()

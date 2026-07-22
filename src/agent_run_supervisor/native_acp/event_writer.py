@@ -76,11 +76,44 @@ class EventWriter:
 
     @property
     def can_accept(self) -> bool:
-        return (
-            not self._closed
-            and not self.overflowed
-            and self._reserved < self._max_events
-        )
+        """True only when a live consumer can still take another event.
+
+        Requires: not closed/overflowed, reserved count below max_events, a
+        live (started and not-done) consumer, and a not-full queue. Task
+        inspection never leaks exceptions — any probe failure is refuse.
+        """
+        try:
+            if self._closed or self.overflowed:
+                return False
+            if self._reserved >= self._max_events:
+                return False
+            if self._queue.full():
+                return False
+            consumer = self._consumer
+            if consumer is None or consumer.done():
+                return False
+            return True
+        except Exception:
+            return False
+
+    @property
+    def consumer_queue_healthy(self) -> bool:
+        """Live consumer + not-full queue; ignores the reserved max_events budget.
+
+        Used after ``session_prompt_sent`` to detect emit/queue/consumer failure
+        without treating the just-reserved prompt-sent slot as a prompt ban.
+        """
+        try:
+            if self._closed or self.overflowed:
+                return False
+            if self._queue.full():
+                return False
+            consumer = self._consumer
+            if consumer is None or consumer.done():
+                return False
+            return True
+        except Exception:
+            return False
 
     async def start(self) -> None:
         if self._consumer is None:
@@ -158,7 +191,16 @@ class EventWriter:
                     except asyncio.CancelledError:
                         pass
                 # Re-raise consumer failure (or complete successfully).
-                await consumer
+                # A cancelled consumer is an evidence-pipeline failure, never
+                # an outer task cancellation signal for the Run finalizer.
+                try:
+                    await consumer
+                except asyncio.CancelledError:
+                    if consumer.cancelled():
+                        raise EventWriterOverflow(
+                            "event writer consumer cancelled"
+                        ) from None
+                    raise
                 return
             # Sentinel enqueue won: finish put, then drain/await consumer.
             await put_task

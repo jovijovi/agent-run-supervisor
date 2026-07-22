@@ -190,3 +190,34 @@ def test_r4_residual_origin_malformed_types_never_raise(
         assert validated["origin"] == origin
     else:
         assert validated is None
+
+
+def test_r5_b1_validate_rejects_over_exact_serialized_ceiling() -> None:
+    from agent_run_supervisor.result import (
+        MAX_NATIVE_RESULT_SERIALIZED_BYTES,
+        native_result_serialized_size,
+    )
+
+    payload = _native_payload(AgentRunStatus.COMPLETED)
+    payload["final_message"] = "x" * (MAX_NATIVE_RESULT_SERIALIZED_BYTES)
+    assert native_result_serialized_size(payload) > MAX_NATIVE_RESULT_SERIALIZED_BYTES
+    assert validate_native_terminal_result(payload, run_id="run_probe") is None
+
+
+def test_r5_b1_minimal_evidence_pipeline_fits_and_validates() -> None:
+    from agent_run_supervisor.result import (
+        MAX_NATIVE_RESULT_SERIALIZED_BYTES,
+        build_minimal_evidence_pipeline_result,
+        native_result_serialized_size,
+    )
+
+    payload = build_minimal_evidence_pipeline_result(
+        run_id="run_probe",
+        run_dir=Path("/tmp/run_probe"),
+        session_id="sess",
+    )
+    assert native_result_serialized_size(payload) <= MAX_NATIVE_RESULT_SERIALIZED_BYTES
+    assert validate_native_terminal_result(payload, run_id="run_probe") is not None
+    assert payload["status"] == "failed"
+    assert payload["retryable"] is False
+    assert payload["detail_code"] == "EVIDENCE_PIPELINE"

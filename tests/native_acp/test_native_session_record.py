@@ -458,3 +458,61 @@ def test_commit_last_effective_updates_atomically(tmp_path: Path) -> None:
     store.mark_quarantined("native-1", reason="r", run_id="run-5", now=later)
     with pytest.raises(SessionQuarantinedError):
         store.commit_last_effective("native-1", model="a/b", effort="low", now=later)
+
+
+def test_r5_b3_quarantine_pending_fence_blocks_acquire_even_after_ttl(
+    tmp_path: Path,
+) -> None:
+    import datetime as dt
+
+    from agent_run_supervisor.session import (
+        QUARANTINE_PENDING_JSON,
+        STATE_OPEN,
+        SessionQuarantinedError,
+    )
+
+    store = _store(tmp_path)
+    _native(store)
+    lock = store.acquire_lock(
+        "native-1", "owner", required_state=STATE_OPEN, now=T0, lease_seconds=1
+    )
+    assert lock.token
+    store.write_quarantine_pending(
+        "native-1", reason="interrupted", run_id="run-fence", now=T0
+    )
+    session_dir = tmp_path / "native-root" / "native-1"
+    assert (session_dir / QUARANTINE_PENDING_JSON).is_file()
+    assert store.open_session("native-1").state == "open"
+    later = T0 + dt.timedelta(seconds=3600)
+    with pytest.raises(SessionQuarantinedError):
+        store.acquire_lock(
+            "native-1", "other", required_state=STATE_OPEN, now=later
+        )
+    # Successful quarantine clears fence.
+    store.mark_quarantined(
+        "native-1", reason="converged", run_id="run-fence", now=later
+    )
+    assert not (session_dir / QUARANTINE_PENDING_JSON).exists()
+    assert store.open_session("native-1").state == "quarantined"
+
+
+def test_r5_b3_mark_quarantined_clears_preexisting_fence_when_already_quarantined(
+    tmp_path: Path,
+) -> None:
+    from agent_run_supervisor.session import QUARANTINE_PENDING_JSON
+
+    store = _store(tmp_path)
+    _native(store)
+    store.mark_quarantined("native-1", reason="first", run_id="run-1", now=T0)
+    session_dir = tmp_path / "native-root" / "native-1"
+    # Simulate a stale fence left beside an already-quarantined record.
+    (session_dir / QUARANTINE_PENDING_JSON).write_text(
+        '{"schema":"ars.quarantine_pending","version":1,"run_id":"run-1",'
+        '"reason":"stale","timestamp":"t"}',
+        encoding="utf-8",
+    )
+    again = store.mark_quarantined(
+        "native-1", reason="ignored", run_id="run-2", now=T0
+    )
+    assert again.quarantine_reason == "first"
+    assert not (session_dir / QUARANTINE_PENDING_JSON).exists()

@@ -1243,3 +1243,60 @@ def test_unknown_op_rejected(tmp_path: Path) -> None:
             await harness.aclose()
 
     run_async(case())
+
+
+def test_r5_b1_run_status_frame_encodes_truncated_native_result(tmp_path: Path) -> None:
+    """A budget-truncated Native result remains queryable under MAX_FRAME_BYTES."""
+    from agent_run_supervisor.exit_classifier import AgentRunStatus
+    from agent_run_supervisor.result import (
+        MAX_FINAL_MESSAGE_BYTES,
+        build_result_payload,
+        enforce_native_result_ceiling,
+    )
+
+    async def case():
+        harness = Harness(tmp_path, mode="complete")
+        caller = caller_for(principal_a())
+        try:
+            reply = await harness.submit(caller, "enc-trunc")
+            run_id = reply["run_id"]
+            task = harness.handlers.registry.task_for(run_id)
+            await asyncio.wait({task})
+            run_dir = harness.run_dir(run_id)
+            msg = ("x\x00" * (MAX_FINAL_MESSAGE_BYTES // 2 + 100))
+            final = msg.encode("utf-8")[:MAX_FINAL_MESSAGE_BYTES].decode(
+                "utf-8", errors="ignore"
+            )
+            payload = build_result_payload(
+                run_id=run_id,
+                status=AgentRunStatus.COMPLETED,
+                origin="acp",
+                detail_code=None,
+                retryable=False,
+                exit_code=0,
+                signal=None,
+                stop_reason="end_turn",
+                usage=None,
+                final_message=final,
+                truncated=True,
+                truncate_reason="max_final_message_bytes",
+                run_dir=run_dir,
+                raw_event_path="events.jsonl",
+            )
+            payload = enforce_native_result_ceiling(
+                payload, run_id=run_id, run_dir=run_dir, session_id=None
+            )
+            (run_dir / "result.json").write_text(
+                json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+            )
+            status = await call(
+                harness, caller, "run_status", "enc-1", {"run_id": run_id}
+            )
+            assert status["result"]["truncated"] is True
+            assert status["result"]["truncate_reason"] == "max_final_message_bytes"
+            frame = protocol.encode_frame(protocol.build_result("enc-1", status))
+            assert len(frame) <= protocol.MAX_FRAME_BYTES
+        finally:
+            await harness.aclose()
+
+    run_async(case())

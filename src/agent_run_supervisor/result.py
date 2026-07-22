@@ -1,10 +1,22 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from agent_run_supervisor.exit_classifier import _RETRYABLE_DEFAULT, AgentRunStatus
+
+# Native final-message UTF-8 budget at ingestion. Sized so worst-case JSON
+# escaping plus the result envelope stays below reconciliation's 1 MiB reader
+# and UDS MAX_FRAME_BYTES (1 MiB); the exact serialized result ceiling below
+# is the hard write gate.
+MAX_FINAL_MESSAGE_BYTES = 64 * 1024
+# Exact on-disk Native result.json ceiling (write-once indent=2 form).
+MAX_NATIVE_RESULT_SERIALIZED_BYTES = 512 * 1024
+# Optional terminal fields that can grow from external/error data.
+MAX_USAGE_SERIALIZED_BYTES = 4 * 1024
+MAX_FAILURE_REASON_BYTES = 4 * 1024
 
 
 @dataclass
@@ -14,6 +26,97 @@ class RunOutcome:
     run_dir: Path
     status: AgentRunStatus
     result: dict[str, Any]
+
+
+def truncate_utf8_bytes(data: bytes, max_bytes: int) -> bytes:
+    """Return a ``data`` prefix of at most ``max_bytes`` on a valid UTF-8 boundary."""
+    if max_bytes <= 0 or not data:
+        return b""
+    chunk = data[:max_bytes]
+    while chunk:
+        try:
+            chunk.decode("utf-8")
+            return chunk
+        except UnicodeDecodeError:
+            chunk = chunk[:-1]
+    return b""
+
+
+def sanitize_usage(usage: Any) -> dict[str, Any] | None:
+    """Bound optional Native ``usage``; drop or replace when oversized/untrusted."""
+    if usage is None:
+        return None
+    if not isinstance(usage, dict):
+        return None
+    try:
+        rendered = json.dumps(usage, sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return None
+    if len(rendered.encode("utf-8")) > MAX_USAGE_SERIALIZED_BYTES:
+        return {"truncated": True, "truncate_reason": "max_usage_bytes"}
+    return usage
+
+
+def sanitize_failure_reason(reason: Any) -> str | None:
+    """Bound optional ``failure_reason`` to a UTF-8 byte budget."""
+    if reason is None:
+        return None
+    if not isinstance(reason, str):
+        reason = str(reason)
+    raw = reason.encode("utf-8")
+    if len(raw) <= MAX_FAILURE_REASON_BYTES:
+        return reason
+    return truncate_utf8_bytes(raw, MAX_FAILURE_REASON_BYTES).decode("utf-8")
+
+
+def native_result_serialized_size(payload: Mapping[str, Any]) -> int:
+    """Byte size of the write-once Native result form (indent=2, sort_keys)."""
+    return len(
+        json.dumps(dict(payload), sort_keys=True, indent=2).encode("utf-8")
+    )
+
+
+def build_minimal_evidence_pipeline_result(
+    *,
+    run_id: str,
+    run_dir: Path,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """Minimal failed/non-retryable EVIDENCE_PIPELINE terminal that fits the ceiling."""
+    payload = build_result_payload(
+        run_id=run_id,
+        status=AgentRunStatus.FAILED,
+        origin="supervisor",
+        detail_code="EVIDENCE_PIPELINE",
+        retryable=False,
+        exit_code=None,
+        signal=None,
+        stop_reason=None,
+        usage=None,
+        final_message="",
+        truncated=False,
+        truncate_reason=None,
+        run_dir=run_dir,
+        raw_event_path="events.jsonl",
+    )
+    if session_id is not None:
+        payload["session_id"] = session_id
+    return payload
+
+
+def enforce_native_result_ceiling(
+    payload: dict[str, Any],
+    *,
+    run_id: str,
+    run_dir: Path,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """Return ``payload`` if it fits the exact ceiling; else a minimal terminal."""
+    if native_result_serialized_size(payload) <= MAX_NATIVE_RESULT_SERIALIZED_BYTES:
+        return payload
+    return build_minimal_evidence_pipeline_result(
+        run_id=run_id, run_dir=run_dir, session_id=session_id
+    )
 
 
 def build_result_payload(
@@ -205,5 +308,12 @@ def validate_native_terminal_result(
         return None
     # business_verdict is reserved; Native terminals emit null only.
     if payload.get("business_verdict") is not None:
+        return None
+    # Exact serialized ceiling: a terminal that cannot be framed/queried is
+    # untrusted evidence (fail closed).
+    try:
+        if native_result_serialized_size(payload) > MAX_NATIVE_RESULT_SERIALIZED_BYTES:
+            return None
+    except (TypeError, ValueError):
         return None
     return payload

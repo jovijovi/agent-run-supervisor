@@ -331,3 +331,68 @@ def test_r4_b3_close_preserves_normal_flush_order() -> None:
         assert writer._consumer is None
 
     asyncio.run(case())
+
+
+def test_r5_b2_can_accept_requires_live_consumer_and_not_full_queue() -> None:
+    async def case() -> None:
+        handle = RecordingHandle()
+        writer = EventWriter(handle, max_event_bytes=65536, queue_maxsize=2)
+        assert writer.can_accept is False  # no consumer yet
+        await writer.start()
+        assert writer.can_accept is True
+        consumer = writer._consumer
+        assert consumer is not None
+        consumer.cancel()
+        try:
+            await consumer
+        except asyncio.CancelledError:
+            pass
+        assert consumer.done()
+        assert writer.can_accept is False
+        with pytest.raises(EventWriterOverflow, match="consumer cancelled"):
+            await writer.close()
+
+        writer2 = EventWriter(
+            RecordingHandle(), max_event_bytes=65536, queue_maxsize=1
+        )
+        await writer2.start()
+        writer2._queue.put_nowait({"type": "pad"})
+        assert writer2._queue.full()
+        assert writer2.can_accept is False
+        # Drain so close can finish.
+        writer2._queue.get_nowait()
+        await writer2.close()
+
+    asyncio.run(case())
+
+
+def test_r5_b2_can_accept_never_leaks_task_inspection_exceptions() -> None:
+    async def case() -> None:
+        handle = RecordingHandle()
+        writer = EventWriter(handle, max_event_bytes=65536)
+        await writer.start()
+
+        class BoomTask:
+            def done(self):
+                raise RuntimeError("task probe boom")
+
+        writer._consumer = BoomTask()  # type: ignore[assignment]
+        assert writer.can_accept is False
+        writer._consumer = None
+        await writer.close()
+
+    asyncio.run(case())
+
+
+def test_r5_b2_consumer_queue_healthy_ignores_reserved_budget() -> None:
+    async def case() -> None:
+        writer = EventWriter(
+            RecordingHandle(), max_event_bytes=65536, max_events=1, queue_maxsize=4
+        )
+        await writer.start()
+        await writer.emit({"type": "only"})
+        assert writer.can_accept is False  # reserved budget exhausted
+        assert writer.consumer_queue_healthy is True  # consumer/queue still safe
+        await writer.close()
+
+    asyncio.run(case())
