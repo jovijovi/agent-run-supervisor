@@ -254,3 +254,50 @@ def test_r10_b3_sanitize_failure_reason_rejects_raw_hostile_text() -> None:
         "supervisor cancellation"
     )
     assert sanitize_failure_reason(None) is None
+
+
+def test_r11_b1_validate_rejects_hostile_failure_reason() -> None:
+    """Persisted Native terminals: non-allowlisted failure_reason is INVALID."""
+    import secrets
+
+    from agent_run_supervisor.result import ALLOWED_FAILURE_REASONS
+
+    canary_path = "/tmp/" + "leakcanary-" + secrets.token_hex(4)
+    canary_secret = "sk-" + secrets.token_hex(12)
+    canary_provider = "provider-exception-Traceback"
+    hostile = (
+        f"OSError at {canary_path}; token={canary_secret}; "
+        f"{canary_provider}: credential material"
+    )
+    assert validate_native_terminal_result(
+        _native_payload(AgentRunStatus.FAILED, failure_reason=hostile),
+        run_id="run_probe",
+    ) is None
+    assert validate_native_terminal_result(
+        _native_payload(AgentRunStatus.FAILED, failure_reason=123),
+        run_id="run_probe",
+    ) is None
+    assert validate_native_terminal_result(
+        _native_payload(AgentRunStatus.FAILED, failure_reason="not allowlisted"),
+        run_id="run_probe",
+    ) is None
+
+    # Absent key and explicit None remain allowed; categorical stays trusted.
+    absent = _native_payload(AgentRunStatus.FAILED)
+    assert "failure_reason" not in absent
+    assert validate_native_terminal_result(absent, run_id="run_probe") is not None
+    assert (
+        validate_native_terminal_result(
+            _native_payload(AgentRunStatus.FAILED, failure_reason=None),
+            run_id="run_probe",
+        )
+        is not None
+    )
+    allowed = "spawn failed"
+    assert allowed in ALLOWED_FAILURE_REASONS
+    validated = validate_native_terminal_result(
+        _native_payload(AgentRunStatus.FAILED, failure_reason=allowed),
+        run_id="run_probe",
+    )
+    assert validated is not None
+    assert validated["failure_reason"] == allowed

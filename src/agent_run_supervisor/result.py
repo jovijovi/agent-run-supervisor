@@ -334,6 +334,15 @@ def _validate_native_terminal_result_inner(
     # business_verdict is reserved; Native terminals emit null only.
     if payload.get("business_verdict") is not None:
         return None
+    # Optional failure_reason: absent/None stay allowed; any present non-null
+    # value must be an exact allowlisted categorical string. Never sanitize
+    # here — reject so storage classifies the terminal untrusted.
+    if "failure_reason" in payload:
+        reason = payload["failure_reason"]
+        if reason is not None and (
+            not isinstance(reason, str) or reason not in ALLOWED_FAILURE_REASONS
+        ):
+            return None
     # Exact serialized ceiling: a terminal that cannot be framed/queried is
     # untrusted evidence (fail closed).
     try:

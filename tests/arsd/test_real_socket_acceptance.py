@@ -58,6 +58,7 @@ pytestmark = pytest.mark.skipif(
 from agent_run_supervisor.arsd import client as arsd_client
 from agent_run_supervisor.arsd import protocol
 from agent_run_supervisor.native_acp import storage
+from agent_run_supervisor.native_acp.run_task import DISPATCH_STARTED_MARKER
 
 REQUIRED_MODEL = "kimi-for-coding/k3"
 REQUIRED_EFFORT = "max"
@@ -648,9 +649,11 @@ def test_s5_malformed_failing_isolation_then_success() -> None:
         )
         bad_run_id = accepted["run_id"]
         bad_result = _wait_result(cli, bad_run_id)
-    assert bad_result["status"] in {"failed", "unknown"}
-    bad_events = _events(_run_dir(bad_run_id))
+    assert bad_result["status"] == "failed"
+    bad_run_dir = _run_dir(bad_run_id)
+    bad_events = _events(bad_run_dir)
     assert sum(1 for e in bad_events if e.get("type") == "session_prompt_sent") == 0
+    assert not (bad_run_dir / DISPATCH_STARTED_MARKER).exists()
 
     key = "arsd-s5-idem-" + secrets.token_hex(4)
     idem_sess = "arsd-accept-s5-idem-" + secrets.token_hex(4)
@@ -703,9 +706,11 @@ def test_s5_malformed_failing_isolation_then_success() -> None:
             ),
         )
         fail_result = _wait_result(cli, fail["run_id"])
-    assert fail_result["status"] in {"failed", "unknown"}
-    fail_events = _events(_run_dir(fail["run_id"]))
+    assert fail_result["status"] == "failed"
+    fail_run_dir = _run_dir(fail["run_id"])
+    fail_events = _events(fail_run_dir)
     assert sum(1 for e in fail_events if e.get("type") == "session_prompt_sent") == 0
+    assert not (fail_run_dir / DISPATCH_STARTED_MARKER).exists()
 
     ok_marker = "S5_OK"
     with arsd_client.ArsdClient(sock) as cli:

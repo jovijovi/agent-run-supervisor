@@ -318,14 +318,39 @@ class RunRegistry:
             return
         await asyncio.wait({task})
 
+    async def wait_until_idle(self) -> None:
+        """Await until no Run tasks remain registered.
+
+        Snapshot + ``asyncio.wait`` only — no busy polling and no background
+        workers. Propagates cancellation of the waiter.
+        """
+        while True:
+            async with self._lock:
+                tasks = [entry.task for entry in self._entries.values()]
+            if not tasks:
+                return
+            await asyncio.wait(tasks)
+
     async def cancel_all(self, *, wait_seconds: float) -> None:
+        """Cancel every registered Run; drain fail-closed after the cancel bound.
+
+        Clears reservations immediately, requests cancellation, and waits up to
+        ``wait_seconds``. Any tasks still live after that bound are awaited
+        without a second timeout so the singleton lease cannot be released
+        while registry tasks remain registered. External process kill is the
+        ultimate bound.
+        """
         async with self._lock:
             tasks = [entry.task for entry in self._entries.values()]
             self._reservations.clear()
         for task in tasks:
             task.cancel()
-        if tasks:
-            await asyncio.wait(tasks, timeout=wait_seconds)
+        if not tasks:
+            return
+        await asyncio.wait(tasks, timeout=wait_seconds)
+        pending = {task for task in tasks if not task.done()}
+        if pending:
+            await asyncio.wait(pending)
 
 
 class EventFollowStream:

@@ -307,6 +307,80 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+async def _release_lease_after_registry_idle(
+    registry: handlers.RunRegistry,
+    lease: DaemonInstanceLease,
+) -> None:
+    """Retain the singleton lease until the registry is idle; cancel-resistant.
+
+    Shields one owned ``wait_until_idle`` lifecycle so cancelling the
+    ``serve_daemon`` task cannot cancel the drain or release ownership while a
+    Run remains registered. Caller cancellation is absorbed/reconciled
+    (``uncancel``) and re-raised only after idle + lease release. Caller
+    ``cancelling()`` is classified before target-done race. No detached task,
+    polling, or swallowed cancellation.
+    """
+    cancelled = False
+
+    def _absorb_cancel() -> None:
+        nonlocal cancelled
+        cancelled = True
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            task.uncancel()
+
+    def _observe_drain_done() -> None:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            drain.result()
+
+    drain = asyncio.create_task(
+        registry.wait_until_idle(),
+        name="arsd:wait-until-idle",
+    )
+    try:
+        while True:
+            try:
+                await asyncio.shield(drain)
+                break
+            except asyncio.CancelledError:
+                # Classify by caller cancelling() first: same-turn drain
+                # completion must not be mistaken for target-only cancel.
+                me = asyncio.current_task()
+                if me is not None and me.cancelling():
+                    _absorb_cancel()
+                    if drain.done():
+                        _observe_drain_done()
+                        break
+                    continue
+                if drain.done():
+                    _observe_drain_done()
+                    break
+                _absorb_cancel()
+    finally:
+        # Never detach: keep shielding the owned drain until it finishes.
+        while not drain.done():
+            try:
+                await asyncio.shield(drain)
+            except asyncio.CancelledError:
+                me = asyncio.current_task()
+                if me is not None and me.cancelling():
+                    _absorb_cancel()
+                    if drain.done():
+                        _observe_drain_done()
+                        break
+                    continue
+                if drain.done():
+                    _observe_drain_done()
+                    break
+                _absorb_cancel()
+            except Exception:
+                break
+
+    lease.release()
+    if cancelled:
+        raise asyncio.CancelledError()
+
+
 async def serve_daemon(
     *,
     socket_path: Path | str,
@@ -335,6 +409,7 @@ async def serve_daemon(
 
     # Exclusive ownership before any reconciliation mutation or listen.
     lease = acquire_daemon_instance_lease(root)
+    arsd_handlers: handlers.ArsdHandlers | None = None
     try:
         # Startup reconciliation must complete successfully before bind/listen.
         try:
@@ -358,54 +433,64 @@ async def serve_daemon(
         if run_task_factory is not None and hasattr(run_task_factory, "handlers"):
             run_task_factory.handlers = arsd_handlers
 
-        srv = server.ArsdServer(
-            socket_path=path,
-            policy=policy,
-            handler=arsd_handlers,
-            max_connections=max_connections,
-        )
-
-        local_stop = stop_event if stop_event is not None else asyncio.Event()
-        loop = asyncio.get_running_loop()
-        handlers_installed: list[signal.Signals] = []
-
-        def _request_stop() -> None:
-            local_stop.set()
-
-        if install_signals:
-            for sig in (signal.SIGTERM, signal.SIGINT):
-                try:
-                    loop.add_signal_handler(sig, _request_stop)
-                    handlers_installed.append(sig)
-                except (NotImplementedError, RuntimeError):
-                    _LOGGER.warning("arsd: signal handler unavailable for %s", sig)
-
         try:
-            try:
-                await srv.start()
-            except server.ServerStartupError as err:
-                raise DaemonStartupError(str(err)) from err
+            srv = server.ArsdServer(
+                socket_path=path,
+                policy=policy,
+                handler=arsd_handlers,
+                max_connections=max_connections,
+            )
 
-            await local_stop.wait()
+            local_stop = stop_event if stop_event is not None else asyncio.Event()
+            loop = asyncio.get_running_loop()
+            handlers_installed: list[signal.Signals] = []
+
+            def _request_stop() -> None:
+                local_stop.set()
+
+            if install_signals:
+                for sig in (signal.SIGTERM, signal.SIGINT):
+                    try:
+                        loop.add_signal_handler(sig, _request_stop)
+                        handlers_installed.append(sig)
+                    except (NotImplementedError, RuntimeError):
+                        _LOGGER.warning(
+                            "arsd: signal handler unavailable for %s", sig
+                        )
 
             try:
-                await asyncio.wait_for(
-                    _graceful_shutdown(srv, arsd_handlers),
-                    timeout=shutdown_timeout,
-                )
-            except asyncio.TimeoutError:
-                _LOGGER.error("arsd: shutdown exceeded bound; forcing exit path")
-                with contextlib.suppress(Exception):
-                    await srv.aclose()
-                with contextlib.suppress(Exception):
-                    await arsd_handlers.aclose()
-            return 0
+                try:
+                    await srv.start()
+                except server.ServerStartupError as err:
+                    raise DaemonStartupError(str(err)) from err
+
+                await local_stop.wait()
+
+                try:
+                    await asyncio.wait_for(
+                        _graceful_shutdown(srv, arsd_handlers),
+                        timeout=shutdown_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    _LOGGER.error("arsd: shutdown exceeded bound; forcing exit path")
+                    with contextlib.suppress(Exception):
+                        await srv.aclose()
+                    with contextlib.suppress(Exception):
+                        await arsd_handlers.aclose()
+                return 0
+            finally:
+                for sig in handlers_installed:
+                    with contextlib.suppress(Exception):
+                        loop.remove_signal_handler(sig)
         finally:
-            for sig in handlers_installed:
-                with contextlib.suppress(Exception):
-                    loop.remove_signal_handler(sig)
+            # Fail-closed: once the registry exists, every exit path — including
+            # serve-task cancellation — retains the lease until idle. Shutdown
+            # timeout must not bypass this drain; process kill is the bound.
+            await _release_lease_after_registry_idle(arsd_handlers.registry, lease)
     finally:
-        lease.release()
+        # Startup failures before registry creation may release normally.
+        if arsd_handlers is None:
+            lease.release()
 
 
 async def _graceful_shutdown(

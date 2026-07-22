@@ -1532,6 +1532,240 @@ def test_sigterm_shutdown_shutting_down_unlink_bounded_exit(sock_root: Path) -> 
     run_async(case())
 
 
+def test_r11_b3_shutdown_holds_lease_until_registry_drained(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Singleton lease stays held while a sticky Run remains registered."""
+
+    async def case():
+        path = sock_path(sock_root)
+        root = supervisor_root(sock_root)
+        release = asyncio.Event()
+        run_started = asyncio.Event()
+        stop = asyncio.Event()
+        release_order: list[str] = []
+
+        class _StickyRunner:
+            async def run(self):
+                run_started.set()
+                while not release.is_set():
+                    try:
+                        await asyncio.wait_for(release.wait(), 0.01)
+                    except asyncio.TimeoutError:
+                        continue
+                    except asyncio.CancelledError:
+                        task = asyncio.current_task()
+                        if task is not None:
+                            task.uncancel()
+                        continue
+
+        class _StickyFactory:
+            def __init__(self) -> None:
+                self.handlers = None
+                self.calls: list[dict] = []
+
+            def __call__(self, *, command, run_id, prepared_handle, submitted_at):
+                self.calls.append(
+                    {
+                        "run_id": run_id,
+                        "prepared_handle": prepared_handle,
+                        "submitted_at": submitted_at,
+                        "command": command,
+                    }
+                )
+                return _StickyRunner()
+
+        factory = _StickyFactory()
+        real_acquire = arsd_main.acquire_daemon_instance_lease
+
+        def tracking_acquire(supervisor_root_path):
+            lease = real_acquire(supervisor_root_path)
+            real_release = lease.release
+
+            def tracking_release():
+                release_order.append("release")
+                return real_release()
+
+            lease.release = tracking_release  # type: ignore[method-assign]
+            return lease
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", tracking_acquire)
+
+        serve_task = asyncio.create_task(
+            arsd_main.serve_daemon(
+                socket_path=path,
+                supervisor_root=root,
+                policy=same_uid_policy(),
+                run_task_factory=factory,
+                cancel_wait_seconds=0.05,
+                shutdown_timeout=0.2,
+                stop_event=stop,
+                install_signals=False,
+            )
+        )
+        await wait_for_socket(path)
+
+        def submit_once() -> str:
+            with arsd_client.ArsdClient(path) as cli:
+                accepted = cli.submit(
+                    request_id="r11-lease-1",
+                    payload=submit_payload(
+                        request=valid_wire_request(
+                            ars_session_id=None, session_reuse="none"
+                        )
+                    ),
+                )
+                return accepted["run_id"]
+
+        run_id = await asyncio.to_thread(submit_once)
+        await asyncio.wait_for(run_started.wait(), 2.0)
+        assert factory.handlers is not None
+        assert factory.handlers.registry.is_registered(run_id)
+
+        stop.set()
+        # Past cancel_wait + shutdown_timeout: serve must remain pending and
+        # must not release the lease while the sticky Run is still registered.
+        await asyncio.sleep(0.5)
+        assert not serve_task.done()
+        assert release_order == []
+        assert factory.handlers.registry.is_registered(run_id)
+
+        with pytest.raises(arsd_main.DaemonStartupError) as err:
+            arsd_main.acquire_daemon_instance_lease(root)
+        message = str(err.value).lower()
+        assert "already" in message or "lease" in message or "lock" in message
+        assert SECRET_SENTINEL not in str(err.value)
+
+        release.set()
+        rc = await asyncio.wait_for(serve_task, 2.0)
+        assert rc == 0
+        assert release_order == ["release"]
+        assert not factory.handlers.registry.is_registered(run_id)
+
+        lease = arsd_main.acquire_daemon_instance_lease(root)
+        lease.release()
+
+    run_async(case())
+
+
+def test_r11b_serve_task_cancel_holds_lease_until_registry_idle(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancelling serve_daemon must not release the lease while a Run is live."""
+
+    async def case():
+        path = sock_path(sock_root)
+        root = supervisor_root(sock_root)
+        release = asyncio.Event()
+        run_started = asyncio.Event()
+        stop = asyncio.Event()
+        release_order: list[str] = []
+
+        class _StickyRunner:
+            async def run(self):
+                run_started.set()
+                while not release.is_set():
+                    try:
+                        await asyncio.wait_for(release.wait(), 0.01)
+                    except asyncio.TimeoutError:
+                        continue
+                    except asyncio.CancelledError:
+                        task = asyncio.current_task()
+                        if task is not None:
+                            task.uncancel()
+                        continue
+
+        class _StickyFactory:
+            def __init__(self) -> None:
+                self.handlers = None
+                self.calls: list[dict] = []
+
+            def __call__(self, *, command, run_id, prepared_handle, submitted_at):
+                self.calls.append(
+                    {
+                        "run_id": run_id,
+                        "prepared_handle": prepared_handle,
+                        "submitted_at": submitted_at,
+                        "command": command,
+                    }
+                )
+                return _StickyRunner()
+
+        factory = _StickyFactory()
+        real_acquire = arsd_main.acquire_daemon_instance_lease
+
+        def tracking_acquire(supervisor_root_path):
+            lease = real_acquire(supervisor_root_path)
+            real_release = lease.release
+
+            def tracking_release():
+                release_order.append("release")
+                return real_release()
+
+            lease.release = tracking_release  # type: ignore[method-assign]
+            return lease
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", tracking_acquire)
+
+        serve_task = asyncio.create_task(
+            arsd_main.serve_daemon(
+                socket_path=path,
+                supervisor_root=root,
+                policy=same_uid_policy(),
+                run_task_factory=factory,
+                cancel_wait_seconds=0.05,
+                shutdown_timeout=0.2,
+                stop_event=stop,
+                install_signals=False,
+            )
+        )
+        await wait_for_socket(path)
+
+        def submit_once() -> str:
+            with arsd_client.ArsdClient(path) as cli:
+                accepted = cli.submit(
+                    request_id="r11b-lease-1",
+                    payload=submit_payload(
+                        request=valid_wire_request(
+                            ars_session_id=None, session_reuse="none"
+                        )
+                    ),
+                )
+                return accepted["run_id"]
+
+        run_id = await asyncio.to_thread(submit_once)
+        await asyncio.wait_for(run_started.wait(), 2.0)
+        assert factory.handlers is not None
+        assert factory.handlers.registry.is_registered(run_id)
+
+        stop.set()
+        # Enter shutdown / final idle drain, then cancel the serve task itself.
+        await asyncio.sleep(0.3)
+        assert not serve_task.done()
+        serve_task.cancel()
+        await asyncio.sleep(0.5)
+        assert not serve_task.done()
+        assert release_order == []
+        assert factory.handlers.registry.is_registered(run_id)
+
+        with pytest.raises(arsd_main.DaemonStartupError) as err:
+            arsd_main.acquire_daemon_instance_lease(root)
+        message = str(err.value).lower()
+        assert "already" in message or "lease" in message or "lock" in message
+        assert SECRET_SENTINEL not in str(err.value)
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(serve_task, 2.0)
+        assert release_order == ["release"]
+        assert not factory.handlers.registry.is_registered(run_id)
+
+        lease = arsd_main.acquire_daemon_instance_lease(root)
+        lease.release()
+
+    run_async(case())
+
+
 def test_follow_list_terminates_after_terminal_stream_exhaustion(
     sock_root: Path,
 ) -> None:

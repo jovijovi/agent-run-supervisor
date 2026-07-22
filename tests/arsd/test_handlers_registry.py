@@ -2730,3 +2730,126 @@ def test_r10_b4_follow_idle_seconds_accepts_minimum_boundary(
             await harness.aclose()
 
     run_async(case())
+
+
+# -- R11 B1/B3: failure_reason allowlist + cancel_all lease drain ------------
+
+
+def test_r11_b1_run_status_does_not_return_hostile_failure_reason(
+    tmp_path: Path,
+) -> None:
+    """Hostile failure_reason is INVALID; status must not return the canary."""
+    import secrets
+
+    async def case():
+        canary_path = "/tmp/" + "leakcanary-" + secrets.token_hex(4)
+        canary_secret = "sk-" + secrets.token_hex(12)
+        hostile = f"OSError at {canary_path}; token={canary_secret}"
+
+        harness = Harness(tmp_path / "hostile", mode="pending")
+        seed_session(harness.session_store, session_id="sess-arsd-1")
+        caller = caller_for(principal_a())
+        try:
+            reply = await harness.submit(caller, "r11-hostile")
+            run_id = reply["run_id"]
+            await asyncio.sleep(0.05)
+            run_dir = harness.run_dir(run_id)
+            payload = _full_result(run_dir, run_id, status="failed")
+            payload["failure_reason"] = hostile
+            (run_dir / "result.json").write_text(
+                json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+            )
+            terminal = admission.inspect_terminal_result(run_dir, run_id=run_id)
+            assert terminal.kind is storage.NativeTerminalKind.INVALID
+            with pytest.raises(protocol.ProtocolError) as err:
+                await call(
+                    harness, caller, "run_status", "r11-hostile-st", {"run_id": run_id}
+                )
+            assert err.value.code == protocol.INTERNAL
+            assert canary_path not in err.value.message
+            assert canary_secret not in err.value.message
+            frame = protocol.encode_frame(
+                protocol.build_error("r11-hostile-st", err.value.code, err.value.message)
+            )
+            assert canary_path.encode() not in frame
+            assert canary_secret.encode() not in frame
+        finally:
+            await harness.aclose()
+
+        harness = Harness(tmp_path / "allowed", mode="complete")
+        seed_session(harness.session_store, session_id="sess-arsd-1")
+        caller = caller_for(principal_a())
+        try:
+            reply = await harness.submit(caller, "r11-allowed")
+            run_id = reply["run_id"]
+            task = harness.handlers.registry.task_for(run_id)
+            await asyncio.wait({task})
+            run_dir = harness.run_dir(run_id)
+            payload = _full_result(run_dir, run_id, status="failed")
+            payload["failure_reason"] = "spawn failed"
+            (run_dir / "result.json").write_text(
+                json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+            )
+            terminal = admission.inspect_terminal_result(run_dir, run_id=run_id)
+            assert terminal.kind is storage.NativeTerminalKind.TRUSTED
+            status = await call(
+                harness, caller, "run_status", "r11-allowed-st", {"run_id": run_id}
+            )
+            assert status["result"]["failure_reason"] == "spawn failed"
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_r11_b3_cancel_all_awaits_sticky_after_bound(tmp_path: Path) -> None:
+    """cancel_all may bound the first cancel attempt, then must drain live tasks."""
+
+    async def case():
+        _ = tmp_path  # hermetic registry-only; fixture kept for suite consistency
+        registry = handlers.RunRegistry(max_concurrent_runs=2)
+        token = await registry.reserve(session_id=None)
+        release = asyncio.Event()
+        started = asyncio.Event()
+
+        async def sticky():
+            started.set()
+            while not release.is_set():
+                try:
+                    await asyncio.wait_for(release.wait(), 0.01)
+                except asyncio.TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    task = asyncio.current_task()
+                    if task is not None:
+                        task.uncancel()
+                    continue
+
+        await registry.register(
+            "run-r11-cancel-all",
+            sticky(),
+            reservation=token,
+            principal_id="p",
+            owner="hermes",
+            namespace="hermes/doc-check",
+            session_id=None,
+            submitted_at="2026-07-22T00:00:00+00:00",
+        )
+        await started.wait()
+        # Outstanding reservation must clear even while a sticky Run stays live.
+        reserved = await registry.reserve(session_id=None)
+        assert reserved in registry._reservations
+
+        waiter = asyncio.create_task(registry.cancel_all(wait_seconds=0.05))
+        await asyncio.sleep(0.2)
+        assert not waiter.done()
+        assert registry.is_registered("run-r11-cancel-all")
+        assert registry._reservations == {}
+
+        release.set()
+        await asyncio.wait_for(waiter, 1.0)
+        assert registry.active_count() == 0
+        assert not registry.is_registered("run-r11-cancel-all")
+        assert registry._reservations == {}
+
+    run_async(case())
