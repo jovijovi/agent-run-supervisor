@@ -18,6 +18,7 @@ from agent_run_supervisor.arsd.server import (
     CallerPolicy,
     Principal,
 )
+from agent_run_supervisor.arsd.service_unit import ServiceUnitError, render_service_unit
 from agent_run_supervisor.native_acp import storage
 
 _LOGGER = logging.getLogger("agent_run_supervisor.arsd")
@@ -91,10 +92,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="Local unprivileged arsd Unix-domain-socket daemon",
     )
     parser.add_argument(
+        "--print-service-unit",
+        action="store_true",
+        help=(
+            "Render a systemd --user unit to stdout and exit. "
+            "Does not check euid, reconcile, bind, or start the daemon. "
+            "Optional --socket/--supervisor-root/--caller-mapping override "
+            "user-scope specifier defaults; zero mappings remain fail-closed."
+        ),
+    )
+    parser.add_argument(
         "--supervisor-root",
         type=Path,
-        required=True,
-        help="Native supervisor root (native-runs/ + native-sessions/)",
+        default=None,
+        help=(
+            "Native supervisor root (native-runs/ + native-sessions/). "
+            "Required for daemon mode; optional for --print-service-unit."
+        ),
     )
     parser.add_argument(
         "--socket",
@@ -103,7 +117,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "AF_UNIX socket path (default: "
             "$XDG_RUNTIME_DIR/agent-run-supervisor/arsd.sock or "
-            "<supervisor_root>/arsd/arsd.sock)"
+            "<supervisor_root>/arsd/arsd.sock; print mode uses %%t/... )"
         ),
     )
     parser.add_argument(
@@ -113,7 +127,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         metavar="UID:principal_id:owner:namespace",
         help=(
             "Explicit peer-UID→principal mapping. Repeatable. "
-            "Zero mappings refuse to listen."
+            "Zero mappings refuse to listen in daemon mode."
         ),
     )
     parser.add_argument(
@@ -131,6 +145,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="INFO",
         choices=("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"),
     )
+
+    # Preserve Slice-5 fail-closed argparse contract (empty argv → SystemExit)
+    # while allowing ``--print-service-unit`` alone for wheel smoke / A3 export.
+    _orig_parse_args = parser.parse_args
+
+    def parse_args(
+        args: list[str] | None = None,
+        namespace: argparse.Namespace | None = None,
+    ) -> argparse.Namespace:
+        ns = _orig_parse_args(args, namespace)
+        if not ns.print_service_unit and ns.supervisor_root is None:
+            parser.error("--supervisor-root is required unless --print-service-unit")
+        return ns
+
+    parser.parse_args = parse_args  # type: ignore[method-assign]
     return parser
 
 
@@ -241,10 +270,37 @@ async def _graceful_shutdown(
 def main(argv: list[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+
+    # Print mode exits before euid check, reconciliation, socket bind,
+    # service/process creation, or caller-policy admission.
+    if args.print_service_unit:
+        try:
+            unit = render_service_unit(
+                socket_path=None if args.socket is None else str(args.socket),
+                supervisor_root=(
+                    None if args.supervisor_root is None else str(args.supervisor_root)
+                ),
+                caller_mappings=tuple(args.caller_mapping or ()),
+                python_executable=sys.executable,
+            )
+        except ServiceUnitError as err:
+            print(f"arsd: invalid service unit: {err}", file=sys.stderr)
+            return 2
+        sys.stdout.write(unit)
+        if not unit.endswith("\n"):
+            sys.stdout.write("\n")
+        return 0
+
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if args.supervisor_root is None:
+        print(
+            "arsd: refusing to start without --supervisor-root",
+            file=sys.stderr,
+        )
+        return 2
     root = Path(args.supervisor_root)
     socket_path = (
         Path(args.socket) if args.socket is not None else default_socket_path(root)
