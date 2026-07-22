@@ -108,11 +108,16 @@ class PermissionBridge:
         result: dict[str, Any] = {"decision": decision, "reason": reason}
         return result
 
-    def _inside_workspace(self, path: str) -> bool:
+    def _resolve_workspace_path(self, path: str) -> Path:
+        """The single canonical workspace-bound resolution: a relative path
+        is workspace-root-relative — never supervisor-process-cwd-relative —
+        and symlinks are resolved before the containment decision."""
         candidate = Path(path)
         if not candidate.is_absolute():
             candidate = self._workspace_root / candidate
-        resolved = candidate.resolve()
+        return candidate.resolve()
+
+    def _inside_workspace(self, resolved: Path) -> bool:
         return resolved == self._workspace_root or (
             self._workspace_root in resolved.parents
         )
@@ -126,17 +131,21 @@ class PermissionBridge:
                 decision="deny",
                 reason="grant does not include read",
             )
-        if not self._inside_workspace(path):
+        resolved = self._resolve_workspace_path(path)
+        if not self._inside_workspace(resolved):
             return self._emit(
                 requested_op="fs_read",
                 decision="deny",
                 reason="path is outside the bound workspace",
             )
-        return self._emit(
+        decision = self._emit(
             requested_op="fs_read",
             decision="allow",
             reason="workspace-internal read under read grant",
         )
+        # The actual read must use exactly the path the decision validated.
+        decision["resolved_path"] = str(resolved)
+        return decision
 
     def decide_fs_write(self, path: str) -> dict[str, Any]:
         return self._emit(

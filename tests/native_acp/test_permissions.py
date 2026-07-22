@@ -98,6 +98,44 @@ def test_fs_read_traversal_outside_workspace_denies(tmp_path: Path) -> None:
     assert events[-1].decision == "deny"
 
 
+@pytest.mark.parametrize("cwd_name", ["cwd-a", "cwd-b"])
+def test_relative_fs_read_resolves_workspace_bound_regardless_of_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cwd_name: str
+) -> None:
+    # The decision and the actual read must share one canonical
+    # workspace-bound path: a relative request never resolves against the
+    # supervisor process cwd, whatever that cwd happens to be.
+    bridge, workspace, events = _bridge(tmp_path)
+    (workspace / "same.txt").write_text("workspace copy", encoding="utf-8")
+    decoy_cwd = tmp_path / cwd_name
+    decoy_cwd.mkdir()
+    (decoy_cwd / "same.txt").write_text("supervisor cwd copy", encoding="utf-8")
+    monkeypatch.chdir(decoy_cwd)
+
+    decision = bridge.decide_fs_read("same.txt")
+    assert decision["decision"] == "allow"
+    assert decision["resolved_path"] == str((workspace / "same.txt").resolve())
+    assert events[-1].decision == "allow"
+
+
+def test_fs_read_decision_carries_canonical_path_for_absolute_inside(
+    tmp_path: Path,
+) -> None:
+    bridge, workspace, events = _bridge(tmp_path)
+    target = workspace / "docs" / "note.md"
+    decision = bridge.decide_fs_read(str(target))
+    assert decision["decision"] == "allow"
+    assert decision["resolved_path"] == str(target.resolve())
+
+
+def test_purely_relative_traversal_is_denied(tmp_path: Path) -> None:
+    bridge, _, events = _bridge(tmp_path)
+    decision = bridge.decide_fs_read("../outside.txt")
+    assert decision["decision"] == "deny"
+    assert "resolved_path" not in decision
+    assert events[-1].decision == "deny"
+
+
 def test_fs_read_without_read_capability_denies(tmp_path: Path) -> None:
     bridge, workspace, events = _bridge(tmp_path, capabilities=())
     assert bridge.decide_fs_read(str(workspace / "doc.md"))["decision"] == "deny"

@@ -453,6 +453,200 @@ def test_retry_of_run_id_never_mutates_the_original(
     assert original_result.read_bytes() == before
 
 
+def test_fs_read_serves_workspace_file_never_supervisor_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Controller reproduction: workspace and supervisor cwd each contain
+    # same.txt; the mediated relative read must return the workspace-bound
+    # file, never the supervisor-cwd one.
+    script = dict(HAPPY_SCRIPT)
+    script["fs_read_path"] = "same.txt"
+    harness = Harness(tmp_path, monkeypatch, script)
+    (harness.workspace / "same.txt").write_text("WORKSPACE_TRUTH", encoding="utf-8")
+    decoy_cwd = tmp_path / "decoy-supervisor-cwd"
+    decoy_cwd.mkdir()
+    (decoy_cwd / "same.txt").write_text("SUPERVISOR_DECOY", encoding="utf-8")
+    monkeypatch.chdir(decoy_cwd)
+
+    result = _run(harness.task())
+    assert result.status is AgentRunStatus.COMPLETED, result.payload
+    assert "FS_CONTENT:WORKSPACE_TRUTH" in result.payload["final_message"]
+    assert "SUPERVISOR_DECOY" not in result.payload["final_message"]
+    events = (harness.run_dir() / "events.jsonl").read_text(encoding="utf-8")
+    assert '"requested_op": "fs_read"' in events.replace("'", '"') or "fs_read" in events
+    assert '"decision": "allow"' in events or "allow" in events
+
+
+def test_fs_read_outside_workspace_is_denied_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("OUTSIDE_SECRET", encoding="utf-8")
+    script = dict(HAPPY_SCRIPT)
+    script["fs_read_path"] = str(outside)
+    harness = Harness(tmp_path, monkeypatch, script)
+
+    result = _run(harness.task())
+    assert result.status is AgentRunStatus.COMPLETED, result.payload
+    assert "FS_DENIED" in result.payload["final_message"]
+    assert "OUTSIDE_SECRET" not in result.payload["final_message"]
+    events = (harness.run_dir() / "events.jsonl").read_text(encoding="utf-8")
+    assert "fs_read" in events
+    assert "deny" in events
+
+
+async def _wait_until(condition, *, timeout: float = 30.0, message: str = "") -> None:
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if condition():
+            return
+        await asyncio.sleep(0.02)
+    pytest.fail(message or "condition never became true")
+
+
+def _assert_pid_gone_sync(pid: int, *, timeout: float = 15.0) -> None:
+    import os
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.05)
+    pytest.fail(f"child {pid} survived cancellation")
+
+
+def _recording_spawn(monkeypatch: pytest.MonkeyPatch) -> list:
+    from agent_run_supervisor.native_acp import run_task as run_task_module
+
+    spawned: list = []
+    real_spawn = run_task_module.spawn_managed_process
+
+    async def wrapper(**kwargs):
+        proc = await real_spawn(**kwargs)
+        spawned.append(proc)
+        return proc
+
+    monkeypatch.setattr(run_task_module, "spawn_managed_process", wrapper)
+    return spawned
+
+
+def test_cancellation_before_dispatch_finalizes_controlled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = dict(HAPPY_SCRIPT)
+    script["hang_on_set_config"] = True
+    harness = Harness(tmp_path, monkeypatch, script)
+    spawned = _recording_spawn(monkeypatch)
+
+    async def case() -> None:
+        task = asyncio.ensure_future(harness.task().run())
+        await _wait_until(lambda: bool(spawned), message="child never spawned")
+        await asyncio.sleep(0.5)  # sit inside the hanging set_config await
+        task.cancel()
+        # Cancellation is never hidden, and finalization is bounded.
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 30)
+
+    asyncio.run(case())
+
+    run_dir = harness.run_dir()
+    payload = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    assert payload["status"] == "failed"
+    assert payload["detail_code"] == "SUPERVISOR_CANCELLED"
+    assert payload["retryable"] is False
+    assert not (run_dir / "prompt-dispatch-started").exists()
+    assert not (run_dir / "prompt-accepted").exists()
+    record = harness.session_store().open_session("sess-native-1")
+    assert record.state == "open"  # 0-Turn cancel keeps the session reusable
+    assert not (
+        harness.root / "native-sessions" / "sess-native-1" / "lock.json"
+    ).exists()
+    _assert_pid_gone_sync(spawned[0].pid)
+
+
+def test_cancellation_after_dispatch_is_conservative_and_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = dict(HAPPY_SCRIPT)
+    script["hang_prompt_until_cancel"] = True
+    harness = Harness(tmp_path, monkeypatch, script)
+    spawned = _recording_spawn(monkeypatch)
+    marker = harness.run_dir() / "prompt-dispatch-started"
+
+    async def case() -> None:
+        task = asyncio.ensure_future(harness.task().run())
+        await _wait_until(marker.exists, message="dispatch marker never appeared")
+        await asyncio.sleep(0.2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 30)
+
+    asyncio.run(case())
+
+    run_dir = harness.run_dir()
+    payload = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    # Dispatched with no reliable ACP terminal: conservative, never completed.
+    assert payload["status"] == "cancelled"
+    assert payload["status"] != "completed"
+    assert payload["detail_code"] == "SUPERVISOR_CANCELLED"
+    assert payload["retryable"] is False
+    assert (run_dir / "prompt-dispatch-started").exists()
+    record = harness.session_store().open_session("sess-native-1")
+    assert record.state == "quarantined"
+    assert not (
+        harness.root / "native-sessions" / "sess-native-1" / "lock.json"
+    ).exists()
+    _assert_pid_gone_sync(spawned[0].pid)
+
+
+def test_repeated_cancellation_not_hidden_and_emergency_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_run_supervisor.native_acp.event_writer import EventWriter
+
+    script = dict(HAPPY_SCRIPT)
+    script["hang_prompt_until_cancel"] = True
+    harness = Harness(tmp_path, monkeypatch, script)
+    spawned = _recording_spawn(monkeypatch)
+    marker = harness.run_dir() / "prompt-dispatch-started"
+
+    async def case() -> None:
+        entered_close = asyncio.Event()
+
+        async def hanging_close(self) -> None:
+            entered_close.set()
+            await asyncio.sleep(3600)
+
+        monkeypatch.setattr(EventWriter, "close", hanging_close)
+        task = asyncio.ensure_future(harness.task().run())
+        await _wait_until(marker.exists, message="dispatch marker never appeared")
+        task.cancel()
+        await asyncio.wait_for(entered_close.wait(), 30)
+        task.cancel()  # repeated cancellation while finalization is stuck
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 30)
+
+    asyncio.run(case())
+
+    run_dir = harness.run_dir()
+    payload = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    # Emergency path stays conservative: dispatched + no reliable terminal
+    # is unknown/quarantined/retryable=false, never completed.
+    assert payload["status"] == "unknown"
+    assert payload["retryable"] is False
+    assert payload["detail_code"] == "EMERGENCY_FINALIZE"
+    record = harness.session_store().open_session("sess-native-1")
+    assert record.state == "quarantined"
+    assert not (
+        harness.root / "native-sessions" / "sess-native-1" / "lock.json"
+    ).exists()
+    _assert_pid_gone_sync(spawned[0].pid)
+
+
 def test_session_reuse_none_uses_ephemeral_record_closed_at_terminal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

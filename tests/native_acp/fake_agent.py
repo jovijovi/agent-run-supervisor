@@ -23,6 +23,9 @@ Script keys (all optional):
 - ``final_message``: agent_message_chunk text before end_turn.
 - ``nonce_memory``: echo previously prompted nonce text back (used by C9
   switching tests to model context continuity).
+- ``fs_read_path``: during the prompt, send a client-bound
+  ``fs/read_text_file`` request for that path and echo the outcome in the
+  final message (``FS_CONTENT:<text>`` on success, ``FS_DENIED`` on error).
 """
 
 from __future__ import annotations
@@ -76,6 +79,7 @@ class FakeAgent:
         initial = script.get("initial_options") or _default_initial_options()
         self.options = {option["id"]: dict(option) for option in initial}
         self.pending_prompt_id: Any = None
+        self.pending_fs_prompt_id: Any = None
         self.update_session_id: str | None = None
         self.remembered: list[str] = []
 
@@ -106,6 +110,8 @@ class FakeAgent:
         method = message.get("method")
         request_id = message.get("id")
         if method is None:
+            if message.get("id") == "fs-req-1" and self.pending_fs_prompt_id is not None:
+                self._on_fs_response(message)
             return
         self._trace(method)
         params = message.get("params") or {}
@@ -195,6 +201,20 @@ class FakeAgent:
             text = block.get("text")
             if isinstance(text, str):
                 self.remembered.append(text)
+        if self.script.get("fs_read_path"):
+            self.pending_fs_prompt_id = request_id
+            _emit(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "fs-req-1",
+                    "method": "fs/read_text_file",
+                    "params": {
+                        "sessionId": self.update_session_id or self.session_id,
+                        "path": self.script["fs_read_path"],
+                    },
+                }
+            )
+            return
         if self.script.get("hang_prompt_until_cancel"):
             self.pending_prompt_id = request_id
             return
@@ -209,6 +229,28 @@ class FakeAgent:
         )
         _result(
             request_id,
+            {
+                "stopReason": "end_turn",
+                "usage": {"totalTokens": 30, "inputTokens": 20, "outputTokens": 10},
+            },
+        )
+
+    def _on_fs_response(self, message: dict[str, Any]) -> None:
+        prompt_id = self.pending_fs_prompt_id
+        self.pending_fs_prompt_id = None
+        result = message.get("result")
+        if isinstance(result, dict) and isinstance(result.get("content"), str):
+            text = f"FS_CONTENT:{result['content']}"
+        else:
+            text = "FS_DENIED"
+        self._notify_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": text},
+            }
+        )
+        _result(
+            prompt_id,
             {
                 "stopReason": "end_turn",
                 "usage": {"totalTokens": 30, "inputTokens": 20, "outputTokens": 10},

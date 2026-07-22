@@ -258,17 +258,30 @@ class RunTask:
                 session_id=None,
                 session_state=None,
             )
+        cancelled = False
         try:
             await self._drive(ctx)
         except _PreDispatchFailure as failure:
             ctx.pre_dispatch = failure
         except asyncio.CancelledError:
-            raise
+            # Supervisor-side cancellation still finalizes (bounded): child
+            # shutdown/reap, one terminal fact, session disposition, lease
+            # release — then the cancellation is re-raised, never hidden.
+            cancelled = True
+            ctx.supervisor_cancelled = True
+            if ctx.dispatch_started and ctx.stop_reason is None:
+                # The wind-down kills the child without an ACP terminal: the
+                # escalated-kill-after-dispatch row (conservative, never
+                # completed).
+                ctx.escalated_kill = True
         except BaseException as exc:  # top-level exception guard
             ctx.error = exc
             if ctx.dispatch_started and ctx.stop_reason is None:
                 ctx.observation_interrupted = True
-        return await self._finalize(ctx)
+        result = await self._finalize_bounded(ctx)
+        if cancelled:
+            raise asyncio.CancelledError()
+        return result
 
     # -- drive -------------------------------------------------------------
 
@@ -622,7 +635,9 @@ class RunTask:
             decision = ctx.bridge.decide_fs_read(request["path"])
             if decision["decision"] != "allow":
                 raise PermissionError(decision["reason"])
-            return Path(request["path"]).read_text(encoding="utf-8")
+            # Read exactly the canonical workspace-bound path the decision
+            # validated — never a supervisor-cwd-relative resolution.
+            return Path(decision["resolved_path"]).read_text(encoding="utf-8")
 
         return handler
 
@@ -663,6 +678,110 @@ class RunTask:
         }
 
     # -- finalization ------------------------------------------------------
+
+    _FINALIZE_TIMEOUT_SECONDS = 60.0
+
+    async def _finalize_bounded(self, ctx: _RunContext) -> NativeRunResult:
+        """Finalization is bounded and cancellation-safe: a repeated
+        cancellation or a hung finalization triggers last-resort synchronous
+        cleanup instead of hanging or leaking, and repeated cancellation is
+        always propagated."""
+        try:
+            return await asyncio.wait_for(
+                self._finalize(ctx), self._FINALIZE_TIMEOUT_SECONDS
+            )
+        except asyncio.CancelledError:
+            self._emergency_cleanup(ctx)
+            raise
+        except asyncio.TimeoutError:
+            self._emergency_cleanup(ctx)
+            return self._result_after_emergency(ctx)
+
+    def _emergency_cleanup(self, ctx: _RunContext) -> None:
+        """Sync-only last resort: kill the group, persist one conservative
+        terminal fact if none exists, quarantine a dispatched-uncertain
+        session, and release the lease. Every step is independent."""
+        try:
+            if ctx.proc is not None:
+                ctx.proc.kill_group(reason="emergency_finalize")
+        except Exception:
+            pass
+        try:
+            if ctx.handle is not None and not (
+                ctx.handle.run_dir / "result.json"
+            ).exists():
+                status = (
+                    AgentRunStatus.UNKNOWN
+                    if ctx.dispatch_started and ctx.stop_reason is None
+                    else AgentRunStatus.FAILED
+                )
+                payload = build_result_payload(
+                    run_id=self._run_id,
+                    status=status,
+                    origin="supervisor",
+                    detail_code="EMERGENCY_FINALIZE",
+                    retryable=_RETRYABLE_DEFAULT[status],
+                    exit_code=None,
+                    signal=None,
+                    stop_reason=ctx.stop_reason,
+                    usage=ctx.usage,
+                    final_message="",
+                    truncated=False,
+                    truncate_reason=None,
+                    run_dir=ctx.handle.run_dir,
+                    raw_event_path="events.jsonl",
+                )
+                if ctx.session_id is not None:
+                    payload["session_id"] = ctx.session_id
+                storage.write_once_json(
+                    ctx.handle.run_dir / "result.json", payload
+                )
+        except Exception:
+            pass
+        try:
+            if (
+                ctx.session_id is not None
+                and ctx.dispatch_started
+                and ctx.stop_reason is None
+            ):
+                self._session_store.mark_quarantined(
+                    ctx.session_id,
+                    reason="emergency finalization: dispatched turn without a "
+                    "reliable terminal",
+                    run_id=self._run_id,
+                )
+        except Exception:
+            pass
+        try:
+            if ctx.lock is not None and ctx.session_id is not None:
+                self._session_store.release_lock(ctx.session_id, ctx.lock.token)
+        except Exception:
+            pass
+
+    def _result_after_emergency(self, ctx: _RunContext) -> NativeRunResult:
+        try:
+            payload = ctx.handle.read_json("result.json")
+            return NativeRunResult(
+                run_id=self._run_id,
+                status=AgentRunStatus(payload["status"]),
+                payload=payload,
+                run_dir=ctx.handle.run_dir,
+                session_id=ctx.session_id,
+                session_state=self._session_state(ctx),
+            )
+        except Exception:
+            return NativeRunResult(
+                run_id=self._run_id,
+                status=AgentRunStatus.FAILED,
+                payload={
+                    "run_id": self._run_id,
+                    "status": "failed",
+                    "error": "finalization timed out",
+                },
+                run_dir=getattr(ctx.handle, "run_dir", None),
+                session_id=ctx.session_id,
+                session_state=None,
+            )
 
     async def _finalize(self, ctx: _RunContext) -> NativeRunResult:
         try:
@@ -733,6 +852,8 @@ class RunTask:
         ):
             status = AgentRunStatus.FAILED
             detail_code = "EVIDENCE_PIPELINE"
+        elif ctx.supervisor_cancelled:
+            detail_code = "SUPERVISOR_CANCELLED"
         elif ctx.observation_interrupted and status is AgentRunStatus.UNKNOWN:
             detail_code = "OBSERVATION_LOST"
         elif ctx.child_exit_without_terminal:
@@ -797,6 +918,8 @@ class RunTask:
             payload["session_id"] = ctx.session_id
         if ctx.pre_dispatch is not None:
             payload["failure_reason"] = ctx.pre_dispatch.reason
+        elif ctx.supervisor_cancelled:
+            payload["failure_reason"] = "supervisor cancellation"
         elif ctx.error is not None:
             payload["failure_reason"] = str(ctx.error)
 
