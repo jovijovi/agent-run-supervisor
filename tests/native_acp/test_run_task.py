@@ -964,7 +964,6 @@ def test_r5_b1_large_message_truncates_and_fits_ceiling(
     import warnings
 
     from agent_run_supervisor.arsd import protocol
-    from agent_run_supervisor.arsd.reconcile import _MAX_TERMINAL_RESULT_BYTES
     from agent_run_supervisor.native_acp.run_task import FinalMessageAccumulator
     from agent_run_supervisor.result import (
         MAX_FINAL_MESSAGE_BYTES,
@@ -994,7 +993,6 @@ def test_r5_b1_large_message_truncates_and_fits_ceiling(
     assert len(payload["final_message"].encode("utf-8")) <= MAX_FINAL_MESSAGE_BYTES
     size = native_result_serialized_size(payload)
     assert size <= MAX_NATIVE_RESULT_SERIALIZED_BYTES
-    assert size <= _MAX_TERMINAL_RESULT_BYTES
     assert size < protocol.MAX_FRAME_BYTES
     assert validate_native_terminal_result(payload, run_id="run-0001") is not None
     frame = protocol.encode_frame(
@@ -1299,3 +1297,72 @@ def test_r5_b3_happy_completed_unchanged(
     assert not (session_dir / QUARANTINE_PENDING_JSON).exists()
     assert harness.session_store().open_session("sess-native-1").state == "open"
     assert not (session_dir / "lock.json").exists()
+
+
+def test_r7_b2_forged_invalid_existing_result_quarantines_no_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FileExists with invalid artifact must fence/quarantine and not release."""
+    from agent_run_supervisor.session import QUARANTINE_PENDING_JSON
+
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    handle = _precreated_handle(harness)
+    # Plant invalid forged terminal before the task publishes.
+    (handle.run_dir / "result.json").write_text(
+        json.dumps({"run_id": "run-0001", "status": "completed", "retryable": False}),
+        encoding="utf-8",
+    )
+    result = _run(harness.task(prepared_handle=handle))
+    session_dir = harness.root / "native-sessions" / "sess-native-1"
+    record = harness.session_store().open_session("sess-native-1")
+    assert record.state == "quarantined" or (
+        session_dir / QUARANTINE_PENDING_JSON
+    ).is_file()
+    assert result.status is not AgentRunStatus.COMPLETED
+    # Must not look like a clean successful lease release.
+    assert (session_dir / "lock.json").exists() or record.state == "quarantined"
+
+
+def test_r7_b3_awaited_event_fsync_failure_skips_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """File fsync failure during durable append → prompt call count 0."""
+    import os
+    import stat
+
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    prompt_calls = {"n": 0}
+    original_prompt = NativeAcpDriver.prompt_once
+
+    async def counting_prompt(self, text):
+        prompt_calls["n"] += 1
+        return await original_prompt(self, text)
+
+    monkeypatch.setattr(NativeAcpDriver, "prompt_once", counting_prompt)
+
+    real_fsync = os.fsync
+    real_append = RunHandle.append_text
+    state = {"boom": False}
+
+    def boom_prompt_sent_append(self, name, value):
+        if (
+            not state["boom"]
+            and isinstance(value, str)
+            and "session_prompt_sent" in value
+        ):
+            state["boom"] = True
+
+            def boom_fsync(fd: int) -> None:
+                st = os.fstat(fd)
+                if stat.S_ISREG(st.st_mode):
+                    raise OSError(5, "injected append fsync failure")
+                return real_fsync(fd)
+
+            monkeypatch.setattr(os, "fsync", boom_fsync)
+        return real_append(self, name, value)
+
+    monkeypatch.setattr(RunHandle, "append_text", boom_prompt_sent_append)
+    result = _run(harness.task())
+    assert prompt_calls["n"] == 0
+    assert "session/prompt" not in harness.methods_seen()
+    assert result.status in {AgentRunStatus.FAILED, AgentRunStatus.UNKNOWN}

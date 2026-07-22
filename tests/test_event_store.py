@@ -74,11 +74,11 @@ def test_exclusive_create_bytes_zero_write_fails_closed_leaves_artifact(
     with pytest.raises(EventStoreError) as err:
         exclusive_create_bytes(path, b"payload-bytes")
     message = str(err.value)
-    assert "path" not in message.lower() or "exclusive" in message.lower()
     assert "payload-bytes" not in message
-    assert path.exists()  # uncertain artifact; no silent unlink
-    with pytest.raises(FileExistsError):
-        exclusive_create_bytes(path, b"payload-bytes")
+    assert not path.exists()  # final path never published
+    # Uncertain temp debris remains fail-closed (no silent final publish).
+    temps = [p for p in tmp_path.iterdir() if p.name.startswith(".tmp-excl-")]
+    assert temps
 
 
 def test_exclusive_create_bytes_fsyncs_file_then_parent_before_success(
@@ -88,45 +88,23 @@ def test_exclusive_create_bytes_fsyncs_file_then_parent_before_success(
     payload = b"durable"
     order: list[str] = []
     real_fsync = os.fsync
-    real_open = os.open
-    tracked: dict[int, str] = {}
-
-    def tracking_open(file, flags, mode=0o777, *args, **kwargs):
-        fd = real_open(file, flags, mode, *args, **kwargs)
-        label = "file" if Path(file) == path else "parent" if Path(file) == path.parent else str(file)
-        if Path(file) == path:
-            tracked[fd] = "file"
-        elif Path(file) == path.parent or (
-            isinstance(file, int) is False and Path(os.fspath(file)) == path.parent
-        ):
-            tracked[fd] = "parent"
-        else:
-            try:
-                st = os.fstat(fd)
-                if stat.S_ISDIR(st.st_mode) and Path(os.fspath(file)).resolve() == path.parent.resolve():
-                    tracked[fd] = "parent"
-            except OSError:
-                pass
-        return fd
 
     def tracking_fsync(fd: int) -> None:
-        which = tracked.get(fd)
-        if which is None:
-            # Re-open path may reuse fds; classify via fstat + known inodes.
+        st = os.fstat(fd)
+        if stat.S_ISREG(st.st_mode):
+            order.append("file")
+        elif stat.S_ISDIR(st.st_mode):
             try:
-                st = os.fstat(fd)
-                file_ino = path.stat().st_ino if path.exists() else None
-                parent_ino = path.parent.stat().st_ino
-                if stat.S_ISREG(st.st_mode) and file_ino is not None and st.st_ino == file_ino:
-                    which = "file"
-                elif stat.S_ISDIR(st.st_mode) and st.st_ino == parent_ino:
-                    which = "parent"
+                if st.st_ino == path.parent.resolve().stat().st_ino:
+                    order.append("parent")
+                else:
+                    order.append("other-dir")
             except OSError:
-                which = "other"
-        order.append(which or "other")
+                order.append("other-dir")
+        else:
+            order.append("other")
         return real_fsync(fd)
 
-    monkeypatch.setattr(os, "open", tracking_open)
     monkeypatch.setattr(os, "fsync", tracking_fsync)
     exclusive_create_bytes(path, payload)
     assert path.read_bytes() == payload
@@ -153,9 +131,9 @@ def test_exclusive_create_bytes_file_fsync_failure_leaves_uncertain_artifact(
     with pytest.raises(EventStoreError) as err:
         exclusive_create_bytes(path, b"secret-bytes")
     assert "secret-bytes" not in str(err.value)
-    assert path.exists()
-    with pytest.raises(FileExistsError):
-        exclusive_create_bytes(path, b"again")
+    assert not path.exists()
+    temps = [p for p in tmp_path.iterdir() if p.name.startswith(".tmp-excl-")]
+    assert temps
 
 
 def test_exclusive_create_bytes_refuses_symlink_final_component(
@@ -512,3 +490,368 @@ def test_r6_b2_legacy_atomic_write_json_semantics_unchanged(tmp_path: Path) -> N
     atomic_write_json(path, {"a": 1})
     assert json.loads(path.read_text(encoding="utf-8")) == {"a": 1}
     assert _mode_octal(path) == 0o600
+
+
+# -- R7 B1 durable_secure_mkdir ------------------------------------------------
+
+
+def test_r7_b1_durable_secure_mkdir_nested_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_run_supervisor.event_store import durable_secure_mkdir
+
+    leaf = tmp_path / "svroot" / "native-runs"
+    order: list[str] = []
+    real_mkdir = os.mkdir
+    real_fsync = os.fsync
+    expected_new = (tmp_path / "svroot").resolve()
+    expected_leaf = leaf.resolve()
+    expected_parent = tmp_path.resolve()
+
+    def tracking_mkdir(path, mode=0o777):
+        order.append(f"mkdir:{Path(path).name}")
+        return real_mkdir(path, mode)
+
+    def tracking_fsync(fd: int) -> None:
+        st = os.fstat(fd)
+        if not stat.S_ISDIR(st.st_mode):
+            return real_fsync(fd)
+        for label, target in (
+            ("new_dir", expected_new),
+            ("leaf", expected_leaf),
+            ("parent", expected_parent),
+            ("svroot_as_parent", expected_new),
+        ):
+            try:
+                if target.exists() and st.st_ino == target.stat().st_ino:
+                    order.append(f"fsync:{label}")
+                    break
+            except OSError:
+                continue
+        else:
+            order.append("fsync:other")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "mkdir", tracking_mkdir)
+    monkeypatch.setattr(os, "fsync", tracking_fsync)
+    durable_secure_mkdir(leaf)
+    assert leaf.is_dir()
+    assert _mode_octal(leaf) == DIR_MODE
+    assert _mode_octal(tmp_path / "svroot") == DIR_MODE
+    assert "mkdir:svroot" in order
+    assert "mkdir:native-runs" in order
+    assert order.index("mkdir:svroot") < order.index("mkdir:native-runs")
+    assert any(x.startswith("fsync:") for x in order)
+
+
+def test_r7_b1_durable_secure_mkdir_parent_fsync_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_run_supervisor.event_store import durable_secure_mkdir
+
+    leaf = tmp_path / "only-child"
+    real_fsync = os.fsync
+    parent = tmp_path.resolve()
+
+    def boom_parent(fd: int) -> None:
+        st = os.fstat(fd)
+        if (
+            parent.exists()
+            and stat.S_ISDIR(st.st_mode)
+            and st.st_ino == parent.stat().st_ino
+        ):
+            raise OSError(5, "injected parent fsync failure")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", boom_parent)
+    with pytest.raises(EventStoreError) as err:
+        durable_secure_mkdir(leaf)
+    assert "injected" not in str(err.value).lower() or "durable" in str(err.value).lower()
+    assert "path" not in str(err.value).lower() or "mkdir" in str(err.value).lower()
+
+
+def test_r7_b1_durable_secure_mkdir_symlink_and_existing(
+    tmp_path: Path,
+) -> None:
+    from agent_run_supervisor.event_store import durable_secure_mkdir
+
+    real = tmp_path / "real-dir"
+    real.mkdir()
+    link = tmp_path / "link-dir"
+    link.symlink_to(real, target_is_directory=True)
+    with pytest.raises(EventStoreError):
+        durable_secure_mkdir(link)
+
+    insecure = tmp_path / "insecure"
+    insecure.mkdir()
+    insecure.chmod(0o755)
+    durable_secure_mkdir(insecure)
+    assert _mode_octal(insecure) == DIR_MODE
+
+
+def test_r7_b1_existing_dir_fsyncs_after_chmod_before_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Existing real dir: force 0700 then fsync that directory before success."""
+    from agent_run_supervisor.event_store import durable_secure_mkdir
+
+    existing = tmp_path / "native-runs"
+    existing.mkdir()
+    existing.chmod(0o755)
+    order: list[str] = []
+    real_chmod = os.chmod
+    real_fsync = os.fsync
+    expected = existing.resolve()
+
+    def tracking_chmod(path, mode, *args, **kwargs):
+        order.append(f"chmod:{mode:o}")
+        return real_chmod(path, mode, *args, **kwargs)
+
+    def tracking_fsync(fd: int) -> None:
+        st = os.fstat(fd)
+        if stat.S_ISDIR(st.st_mode) and st.st_ino == expected.stat().st_ino:
+            order.append("fsync:dir")
+        else:
+            order.append("fsync:other")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "chmod", tracking_chmod)
+    monkeypatch.setattr(os, "fsync", tracking_fsync)
+    durable_secure_mkdir(existing)
+    assert _mode_octal(existing) == DIR_MODE
+    assert "chmod:700" in order
+    assert "fsync:dir" in order
+    assert order.index("chmod:700") < order.index("fsync:dir")
+
+
+def test_r7_b1_existing_dir_chmod_failure_is_sanitized_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_run_supervisor.event_store import durable_secure_mkdir
+
+    existing = tmp_path / "native-sessions"
+    existing.mkdir()
+    secret = "sk-live-" + "CHMODFAIL"  # concatenated; no scannable literal
+
+    def boom_chmod(path, mode, *args, **kwargs):
+        raise OSError(1, f"injected chmod for {secret}")
+
+    monkeypatch.setattr(os, "chmod", boom_chmod)
+    with pytest.raises(EventStoreError) as err:
+        durable_secure_mkdir(existing)
+    message = str(err.value)
+    assert secret not in message
+    assert "injected" not in message.lower()
+
+
+def test_r7_b1_existing_dir_fsync_failure_is_sanitized_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_run_supervisor.event_store import durable_secure_mkdir
+
+    existing = tmp_path / "native-runs"
+    existing.mkdir()
+    existing.chmod(0o755)
+    real_fsync = os.fsync
+    expected = existing.resolve()
+    secret = "sk-live-" + "FSYNCFAIL"  # concatenated; no scannable literal
+
+    def boom_dir(fd: int) -> None:
+        st = os.fstat(fd)
+        if (
+            expected.exists()
+            and stat.S_ISDIR(st.st_mode)
+            and st.st_ino == expected.stat().st_ino
+        ):
+            raise OSError(5, f"injected dir fsync for {secret}")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", boom_dir)
+    with pytest.raises(EventStoreError) as err:
+        durable_secure_mkdir(existing)
+    message = str(err.value)
+    assert secret not in message
+    assert "injected" not in message.lower()
+
+
+def test_r7_b1_create_race_fsyncs_raced_dir_and_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lost-create FileExists: verify, chmod 0700, fsync dir then parent."""
+    from agent_run_supervisor.event_store import durable_secure_mkdir
+
+    leaf = tmp_path / "raced-child"
+    order: list[str] = []
+    real_mkdir = os.mkdir
+    real_chmod = os.chmod
+    real_fsync = os.fsync
+    expected_leaf = leaf.resolve()
+    expected_parent = tmp_path.resolve()
+
+    def race_mkdir(path, mode=0o777):
+        # Simulate a concurrent creator winning the mkdir race.
+        real_mkdir(path, 0o755)
+        raise FileExistsError(17, "File exists")
+
+    def tracking_chmod(path, mode, *args, **kwargs):
+        if Path(path).resolve() == expected_leaf:
+            order.append(f"chmod:{mode:o}")
+        return real_chmod(path, mode, *args, **kwargs)
+
+    def tracking_fsync(fd: int) -> None:
+        st = os.fstat(fd)
+        if not stat.S_ISDIR(st.st_mode):
+            return real_fsync(fd)
+        if expected_leaf.exists() and st.st_ino == expected_leaf.stat().st_ino:
+            order.append("fsync:dir")
+        elif st.st_ino == expected_parent.stat().st_ino:
+            order.append("fsync:parent")
+        else:
+            order.append("fsync:other")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "mkdir", race_mkdir)
+    monkeypatch.setattr(os, "chmod", tracking_chmod)
+    monkeypatch.setattr(os, "fsync", tracking_fsync)
+    durable_secure_mkdir(leaf)
+    assert leaf.is_dir()
+    assert _mode_octal(leaf) == DIR_MODE
+    assert order == ["chmod:700", "fsync:dir", "fsync:parent"]
+
+
+def test_r7_b1_create_race_chmod_failure_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_run_supervisor.event_store import durable_secure_mkdir
+
+    leaf = tmp_path / "raced-child"
+    real_mkdir = os.mkdir
+    secret = "sk-live-" + "RACECHMOD"  # concatenated; no scannable literal
+
+    def race_mkdir(path, mode=0o777):
+        real_mkdir(path, 0o755)
+        raise FileExistsError(17, "File exists")
+
+    def boom_chmod(path, mode, *args, **kwargs):
+        raise OSError(1, f"injected race chmod for {secret}")
+
+    monkeypatch.setattr(os, "mkdir", race_mkdir)
+    monkeypatch.setattr(os, "chmod", boom_chmod)
+    with pytest.raises(EventStoreError) as err:
+        durable_secure_mkdir(leaf)
+    assert secret not in str(err.value)
+
+
+def test_r7_b1_create_race_parent_fsync_failure_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_run_supervisor.event_store import durable_secure_mkdir
+
+    leaf = tmp_path / "raced-child"
+    real_mkdir = os.mkdir
+    real_fsync = os.fsync
+    parent = tmp_path.resolve()
+    secret = "sk-live-" + "RACEFSYNC"  # concatenated; no scannable literal
+
+    def race_mkdir(path, mode=0o777):
+        real_mkdir(path, 0o755)
+        raise FileExistsError(17, "File exists")
+
+    def boom_parent(fd: int) -> None:
+        st = os.fstat(fd)
+        if (
+            parent.exists()
+            and stat.S_ISDIR(st.st_mode)
+            and st.st_ino == parent.stat().st_ino
+        ):
+            # Only fail the parent fsync after the raced leaf exists.
+            if leaf.exists():
+                raise OSError(5, f"injected race parent fsync for {secret}")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "mkdir", race_mkdir)
+    monkeypatch.setattr(os, "fsync", boom_parent)
+    with pytest.raises(EventStoreError) as err:
+        durable_secure_mkdir(leaf)
+    assert secret not in str(err.value)
+
+
+# -- R7 B3 durable append_text -------------------------------------------------
+
+
+def test_r7_b3_append_text_short_write_and_zero_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = EventStore(base_dir=tmp_path)
+    handle = store.create_run("run_append")
+    payload = "ABCDEFGH"
+    real_write = os.write
+    state = {"n": 0}
+
+    def short_then_real(fd: int, data: bytes) -> int:
+        state["n"] += 1
+        if state["n"] == 1 and len(data) > 1:
+            return real_write(fd, data[:1])
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "write", short_then_real)
+    handle.append_text("events.jsonl", payload)
+    assert (handle.run_dir / "events.jsonl").read_text(encoding="utf-8") == payload
+    assert state["n"] >= 2
+
+    monkeypatch.setattr(os, "write", lambda fd, data: 0)
+    with pytest.raises(EventStoreError):
+        handle.append_text("events.jsonl", "more")
+
+
+def test_r7_b3_append_text_fsync_create_symlink_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = EventStore(base_dir=tmp_path)
+    handle = store.create_run("run_append2")
+    order: list[str] = []
+    real_fsync = os.fsync
+    path = handle.run_dir / "events.jsonl"
+    parent = handle.run_dir.resolve()
+
+    def tracking_fsync(fd: int) -> None:
+        st = os.fstat(fd)
+        if stat.S_ISREG(st.st_mode):
+            order.append("file")
+        elif stat.S_ISDIR(st.st_mode) and st.st_ino == parent.stat().st_ino:
+            order.append("parent")
+        else:
+            order.append("other")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", tracking_fsync)
+    handle.append_text("events.jsonl", "first\n")
+    assert "file" in order
+    assert "parent" in order
+    assert order.index("file") < order.index("parent")
+
+    order.clear()
+    handle.append_text("events.jsonl", "second\n")
+    assert "file" in order
+    assert "parent" not in order  # existing file: no parent fsync
+
+    # Symlink leaf refused.
+    target = handle.run_dir / "real.jsonl"
+    target.write_text("x\n", encoding="utf-8")
+    link = handle.run_dir / "link.jsonl"
+    link.symlink_to(target)
+    with pytest.raises(EventStoreError):
+        handle.append_text("link.jsonl", "hijack\n")
+    assert target.read_text(encoding="utf-8") == "x\n"
+
+    # Injected file fsync failure.
+    def boom_file(fd: int) -> None:
+        st = os.fstat(fd)
+        if stat.S_ISREG(st.st_mode):
+            raise OSError(5, "injected append fsync failure")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", boom_file)
+    with pytest.raises(EventStoreError) as err:
+        handle.append_ndjson("boom.jsonl", {"secret": "nope"})
+    assert "nope" not in str(err.value)

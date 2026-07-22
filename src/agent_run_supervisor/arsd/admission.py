@@ -202,18 +202,39 @@ def submission_binds_key(submission: Mapping[str, Any], key: AdmissionKey) -> bo
 
 
 def has_terminal_result(run_dir: Path) -> bool:
-    return (Path(run_dir) / "result.json").is_file()
+    """True only when a TRUSTED Native terminal artifact is present."""
+    state = inspect_terminal_result(run_dir)
+    return state.kind is storage.NativeTerminalKind.TRUSTED
+
+
+def inspect_terminal_result(
+    run_dir: Path, *, run_id: str | None = None
+) -> storage.NativeTerminalState:
+    """Typed Native terminal inspection (ABSENT / TRUSTED / INVALID)."""
+    run_dir = Path(run_dir)
+    rid = run_id if isinstance(run_id, str) and run_id else run_dir.name
+    return storage.read_native_terminal_result(run_dir / "result.json", run_id=rid)
 
 
 def read_result(run_dir: Path) -> dict[str, Any] | None:
-    path = Path(run_dir) / "result.json"
-    if not path.is_file():
+    """Return a TRUSTED Native terminal payload, else ``None`` (absent/invalid)."""
+    state = inspect_terminal_result(run_dir)
+    if state.kind is storage.NativeTerminalKind.TRUSTED:
+        return state.payload
+    return None
+
+
+def bound_session_id_for_run(
+    *, run_id: str, submission: Mapping[str, Any] | None
+) -> str | None:
+    """Resolve the Session bound to a Native run from its submission artifact."""
+    if submission is None:
         return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
+    reuse = submission.get("session_reuse")
+    if reuse == "reuse":
+        ars_session_id = submission.get("ars_session_id")
+        return ars_session_id if isinstance(ars_session_id, str) else None
+    return f"{run_id}-ephemeral"
 
 
 def read_progress(run_dir: Path) -> dict[str, Any] | None:

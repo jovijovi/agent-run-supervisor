@@ -46,6 +46,10 @@ MAX_EVENT_LINE_BYTES = LIMIT_MAX_EVENT_BYTES_MAX + _EVENT_LINE_ENVELOPE_HEADROOM
 # Aggregate events payload budget below MAX_FRAME_BYTES with envelope headroom.
 MAX_EVENTS_RESPONSE_BYTES = 768 * 1024
 _READ_CHUNK_BYTES = 65_536
+_UNTRUSTED_TERMINAL_MESSAGE = "untrusted or corrupt terminal evidence"
+_UNTRUSTED_TERMINAL_QUARANTINE_REASON = (
+    "live path: untrusted or corrupt Native terminal evidence"
+)
 
 _PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
     "server_info": frozenset(),
@@ -61,6 +65,37 @@ _PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
 
 RunTaskFactory = Callable[..., Any]
 HandlerResult = Mapping[str, Any] | AsyncIterator[Mapping[str, Any]]
+
+
+def _quarantine_bound_session(
+    session_store: SessionStore | None,
+    *,
+    run_id: str,
+    submission: Mapping[str, Any] | None,
+) -> None:
+    """Fence+quarantine the bound Session; never release/reuse on invalid terminal."""
+    if session_store is None:
+        return
+    session_id = admission.bound_session_id_for_run(
+        run_id=run_id, submission=submission
+    )
+    if not session_id:
+        return
+    try:
+        session_store.write_quarantine_pending(
+            session_id,
+            reason=_UNTRUSTED_TERMINAL_QUARANTINE_REASON,
+            run_id=run_id,
+        )
+        session_store.mark_quarantined(
+            session_id,
+            reason=_UNTRUSTED_TERMINAL_QUARANTINE_REASON,
+            run_id=run_id,
+        )
+    except SessionNotFoundError:
+        return
+    except SessionQuarantinedError:
+        return
 
 
 def _utc_now_iso() -> str:
@@ -227,8 +262,10 @@ class RunRegistry:
             _LOGGER.exception("arsd: run task failed (%s)", run_id)
             return None
         finally:
-            async with self._lock:
-                self._entries.pop(run_id, None)
+            # Single-threaded asyncio: a non-awaiting pop is cancellation-safe
+            # and must run even when CancelledError is propagating (an
+            # `async with` lock acquire here can be cancelled before pop).
+            self._entries.pop(run_id, None)
 
     async def cancel(self, run_id: str, *, wait_seconds: float) -> bool:
         async with self._lock:
@@ -266,6 +303,8 @@ class EventFollowStream:
         from_seq: int,
         idle_seconds: float,
         queue_size: int,
+        session_store: SessionStore | None = None,
+        submission: Mapping[str, Any] | None = None,
     ) -> None:
         self._run_dir = run_dir
         self._run_id = run_id
@@ -280,6 +319,8 @@ class EventFollowStream:
         self._watcher: asyncio.Task[Any] | None = None
         self._closed = False
         self._wait_tasks: set[asyncio.Task[Any]] = set()
+        self._session_store = session_store
+        self._submission = submission
 
     def __aiter__(self) -> EventFollowStream:
         if self._watcher is None and not self._closed:
@@ -375,8 +416,26 @@ class EventFollowStream:
                         )
                         return
                     self._cursor = max(self._cursor, int(event["seq"]))
-                if admission.has_terminal_result(self._run_dir) and not events:
+                terminal = admission.inspect_terminal_result(
+                    self._run_dir, run_id=self._run_id
+                )
+                if (
+                    terminal.kind is storage.NativeTerminalKind.TRUSTED
+                    and not events
+                ):
                     await self._queue.put(None)
+                    return
+                if terminal.kind is storage.NativeTerminalKind.INVALID:
+                    _quarantine_bound_session(
+                        self._session_store,
+                        run_id=self._run_id,
+                        submission=self._submission,
+                    )
+                    self._fail(
+                        protocol.ProtocolError(
+                            protocol.INTERNAL, _UNTRUSTED_TERMINAL_MESSAGE
+                        )
+                    )
                     return
                 try:
                     await asyncio.wait_for(self._stop.wait(), self._idle)
@@ -863,8 +922,16 @@ class ArsdHandlers:
                 "request_id already bound to a different request digest",
             )
         registered = self.registry.is_registered(run_id)
-        terminal = admission.has_terminal_result(run_dir)
-        if registered or terminal:
+        terminal = admission.inspect_terminal_result(run_dir, run_id=run_id)
+        if terminal.kind is storage.NativeTerminalKind.INVALID:
+            _quarantine_bound_session(
+                self._session_store, run_id=run_id, submission=submission
+            )
+            raise protocol.ProtocolError(
+                protocol.SUBMISSION_INDETERMINATE,
+                _UNTRUSTED_TERMINAL_MESSAGE,
+            )
+        if registered or terminal.kind is storage.NativeTerminalKind.TRUSTED:
             return {
                 "run_id": run_id,
                 "accepted_at": submission["accepted_at"],
@@ -941,8 +1008,17 @@ class ArsdHandlers:
     ) -> dict[str, Any]:
         run_dir, submission = self._authorize_run(caller, payload.get("run_id"))
         progress = admission.read_progress(run_dir)
-        result = admission.read_result(run_dir)
-        run_id = payload.get("run_id")
+        run_id = str(payload.get("run_id"))
+        terminal = admission.inspect_terminal_result(run_dir, run_id=run_id)
+        if terminal.kind is storage.NativeTerminalKind.INVALID:
+            await self._contain_invalid_terminal(
+                run_id=run_id, run_dir=run_dir, submission=submission
+            )
+        result = (
+            terminal.payload
+            if terminal.kind is storage.NativeTerminalKind.TRUSTED
+            else None
+        )
         if progress is None and result is None:
             accepted_at = (
                 submission.get("accepted_at") if submission is not None else None
@@ -962,7 +1038,7 @@ class ArsdHandlers:
     async def _run_events(
         self, caller: server.AuthenticatedCaller, payload: Mapping[str, Any]
     ) -> HandlerResult:
-        run_dir, _submission = self._authorize_run(caller, payload.get("run_id"))
+        run_dir, submission = self._authorize_run(caller, payload.get("run_id"))
         from_seq = payload.get("from_seq", 0)
         if isinstance(from_seq, bool) or not isinstance(from_seq, int) or from_seq < 0:
             raise protocol.ProtocolError(
@@ -1026,6 +1102,8 @@ class ArsdHandlers:
             from_seq=from_seq,
             idle_seconds=idle_seconds,
             queue_size=self._follow_queue,
+            session_store=self._session_store,
+            submission=submission,
         )
         stream._owner_set = self._follow_streams
         self._follow_streams.add(stream)
@@ -1034,19 +1112,50 @@ class ArsdHandlers:
     async def _run_cancel(
         self, caller: server.AuthenticatedCaller, payload: Mapping[str, Any]
     ) -> dict[str, Any]:
-        run_dir, _submission = self._authorize_run(caller, payload.get("run_id"))
+        run_dir, submission = self._authorize_run(caller, payload.get("run_id"))
         run_id = str(payload.get("run_id"))
         await self.registry.cancel(run_id, wait_seconds=self._cancel_wait)
         for _ in range(50):
             if not self.registry.is_registered(run_id):
                 break
             await asyncio.sleep(0.01)
-        result = admission.read_result(run_dir)
+        terminal = admission.inspect_terminal_result(run_dir, run_id=run_id)
+        if terminal.kind is storage.NativeTerminalKind.INVALID:
+            await self._contain_invalid_terminal(
+                run_id=run_id, run_dir=run_dir, submission=submission
+            )
         body: dict[str, Any] = {"run_id": run_id}
-        if result is not None:
-            body["result"] = result
-            body["status"] = result.get("status")
+        if terminal.kind is storage.NativeTerminalKind.TRUSTED and terminal.payload is not None:
+            body["result"] = terminal.payload
+            body["status"] = terminal.payload.get("status")
         return body
+
+    async def _contain_invalid_terminal(
+        self,
+        *,
+        run_id: str,
+        run_dir: Path,
+        submission: Mapping[str, Any] | None,
+    ) -> None:
+        """Cancel/contain a live Run, fence+quarantine Session, then refuse."""
+        del run_dir  # path retained for call-site clarity; quarantine uses session store
+        if self.registry.is_registered(run_id):
+            await self.registry.cancel(run_id, wait_seconds=self._cancel_wait)
+            for _ in range(50):
+                if not self.registry.is_registered(run_id):
+                    break
+                await asyncio.sleep(0.01)
+        try:
+            _quarantine_bound_session(
+                self._session_store, run_id=run_id, submission=submission
+            )
+        except Exception:
+            raise protocol.ProtocolError(
+                protocol.INTERNAL, _UNTRUSTED_TERMINAL_MESSAGE
+            ) from None
+        raise protocol.ProtocolError(
+            protocol.INTERNAL, _UNTRUSTED_TERMINAL_MESSAGE
+        )
 
     def _authorize_session(
         self, caller: server.AuthenticatedCaller, session_id: Any

@@ -1710,20 +1710,24 @@ def test_r5_b3_reconcile_converges_quarantine_pending_fence(
 def test_r6_b3_secure_terminal_reader_maps_int_limit_and_nesting(
     tmp_path: Path,
 ) -> None:
-    from agent_run_supervisor.arsd import reconcile as reconcile_mod
+    from agent_run_supervisor.native_acp import storage
+    from agent_run_supervisor.native_acp.storage import NativeTerminalKind
 
     run_dir = tmp_path / "run_malformed"
     run_dir.mkdir()
     path = run_dir / "result.json"
-    # Over-digit integer within 1 MiB cap.
+    # Over-digit integer within the Native terminal read cap.
     path.write_bytes(b'{"n":' + b"1" + b"0" * 10000 + b"}")
-    assert reconcile_mod._validate_terminal_result(path, run_id="run_malformed") is None
+    assert (
+        storage.read_native_terminal_result(path, run_id="run_malformed").kind
+        is NativeTerminalKind.INVALID
+    )
 
     depth = 3000
     nested = b"{" + b'"a":{' * depth + b'"x":1' + b"}" * depth + b"}"
-    if len(nested) < reconcile_mod._MAX_TERMINAL_RESULT_BYTES:
+    if len(nested) < storage._MAX_TERMINAL_READ_BYTES:
         path.write_bytes(nested)
         assert (
-            reconcile_mod._validate_terminal_result(path, run_id="run_malformed")
-            is None
+            storage.read_native_terminal_result(path, run_id="run_malformed").kind
+            is NativeTerminalKind.INVALID
         )

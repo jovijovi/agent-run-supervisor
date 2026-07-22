@@ -97,50 +97,55 @@ class CancelFake:
         except asyncio.CancelledError:
             run_id = self.prepared_handle.run_id
             run_dir = self.prepared_handle.run_dir
+            from agent_run_supervisor.exit_classifier import (
+                _RETRYABLE_DEFAULT,
+                AgentRunStatus,
+            )
+            from agent_run_supervisor.result import build_result_payload
+
             if self.mode == "pre-dispatch":
-                storage.write_once_json(
-                    run_dir / "result.json",
-                    {
-                        "run_id": run_id,
-                        "status": "failed",
-                        "retryable": False,
-                        "stop_reason": None,
-                        "origin": "supervisor",
-                        "detail_code": "CANCELLED_PRE_DISPATCH",
-                    },
-                )
+                status = AgentRunStatus.FAILED
+                detail = "CANCELLED_PRE_DISPATCH"
+                origin = "supervisor"
+                stop_reason = None
             elif self.mode == "cancelled-terminal":
-                storage.write_once_json(
-                    run_dir / "result.json",
-                    {
-                        "run_id": run_id,
-                        "status": "cancelled",
-                        "retryable": False,
-                        "stop_reason": "cancelled",
-                        "origin": "acp",
-                        "detail_code": None,
-                    },
-                )
+                status = AgentRunStatus.CANCELLED
+                detail = None
+                origin = "acp"
+                stop_reason = "cancelled"
             elif self.mode == "no-terminal":
-                storage.write_once_json(
-                    run_dir / "result.json",
-                    {
-                        "run_id": run_id,
-                        "status": "unknown",
-                        "retryable": False,
-                        "stop_reason": None,
-                        "origin": "supervisor",
-                        "detail_code": "CANCEL_WITHOUT_TERMINAL",
-                    },
-                )
+                status = AgentRunStatus.UNKNOWN
+                detail = "CANCEL_WITHOUT_TERMINAL"
+                origin = "supervisor"
+                stop_reason = None
+            else:
+                raise RuntimeError(f"unknown cancel fake mode: {self.mode}")
+            storage.write_once_json(
+                run_dir / "result.json",
+                build_result_payload(
+                    run_id=run_id,
+                    status=status,
+                    origin=origin,
+                    detail_code=detail,
+                    retryable=_RETRYABLE_DEFAULT[status],
+                    exit_code=None,
+                    signal=None,
+                    stop_reason=stop_reason,
+                    usage=None,
+                    final_message="",
+                    truncated=False,
+                    truncate_reason=None,
+                    run_dir=run_dir,
+                    raw_event_path="events.jsonl",
+                ),
+            )
+            if self.mode == "no-terminal":
                 if self.session_store is not None and self.session_id is not None:
                     self.session_store.mark_quarantined(
                         self.session_id,
                         reason="cancel_without_trustworthy_terminal",
                         run_id=run_id,
                     )
-            else:
-                raise RuntimeError(f"unknown cancel fake mode: {self.mode}")
             raise
 
 
@@ -1630,3 +1635,188 @@ def test_r6_residual_ensure_page_encodes_adversarial_is_internal() -> None:
         )
     assert err.value.code == protocol.INTERNAL
     assert "Circular" not in err.value.message
+
+
+# -- R7 B2 live trusted terminal reader ---------------------------------------
+
+
+def _full_result(run_dir: Path, run_id: str, *, status="completed"):
+    from agent_run_supervisor.exit_classifier import _RETRYABLE_DEFAULT, AgentRunStatus
+    from agent_run_supervisor.result import build_result_payload
+
+    status_enum = AgentRunStatus(status)
+    return build_result_payload(
+        run_id=run_id,
+        status=status_enum,
+        origin="acp" if status == "completed" else "supervisor",
+        detail_code=None if status == "completed" else "X",
+        retryable=_RETRYABLE_DEFAULT[status_enum],
+        exit_code=0 if status == "completed" else None,
+        signal=None,
+        stop_reason="end_turn" if status == "completed" else None,
+        usage=None,
+        final_message="",
+        truncated=False,
+        truncate_reason=None,
+        run_dir=run_dir,
+        raw_event_path="events.jsonl",
+    )
+
+
+def test_r7_b2_run_status_rejects_symlink_oversize_malformed_compat(
+    tmp_path: Path,
+) -> None:
+    async def case():
+        harness = Harness(tmp_path, mode="pending")
+        seed_session(harness.session_store, session_id="sess-arsd-1")
+        caller = caller_for(principal_a())
+        try:
+            reply = await harness.submit(caller, "r7-bad-1")
+            run_id = reply["run_id"]
+            run_dir = harness.run_dir(run_id)
+            # Symlink result
+            target = run_dir / "elsewhere.json"
+            target.write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+            (run_dir / "result.json").symlink_to(target)
+            await expect_code(
+                harness,
+                caller,
+                "run_status",
+                "r7-sym",
+                protocol.INTERNAL,
+                {"run_id": run_id},
+            )
+            assert harness.session_store.open_session("sess-arsd-1").state == "quarantined"
+        finally:
+            await harness.aclose()
+
+        harness = Harness(tmp_path / "h2", mode="pending")
+        seed_session(harness.session_store, session_id="sess-arsd-1")
+        caller = caller_for(principal_a())
+        try:
+            reply = await harness.submit(caller, "r7-bad-2")
+            run_id = reply["run_id"]
+            run_dir = harness.run_dir(run_id)
+            (run_dir / "result.json").write_bytes(b"{not-json")
+            await expect_code(
+                harness,
+                caller,
+                "run_status",
+                "r7-mal",
+                protocol.INTERNAL,
+                {"run_id": run_id},
+            )
+            assert harness.session_store.open_session("sess-arsd-1").state == "quarantined"
+        finally:
+            await harness.aclose()
+
+        harness = Harness(tmp_path / "h3", mode="pending")
+        seed_session(harness.session_store, session_id="sess-arsd-1")
+        caller = caller_for(principal_a())
+        try:
+            reply = await harness.submit(caller, "r7-bad-3")
+            run_id = reply["run_id"]
+            run_dir = harness.run_dir(run_id)
+            # Minimal compat-only shape must not be trusted as Native terminal.
+            (run_dir / "result.json").write_text(
+                json.dumps(
+                    {"run_id": run_id, "status": "completed", "retryable": False}
+                ),
+                encoding="utf-8",
+            )
+            await expect_code(
+                harness,
+                caller,
+                "run_status",
+                "r7-compat",
+                protocol.INTERNAL,
+                {"run_id": run_id},
+            )
+            assert harness.session_store.open_session("sess-arsd-1").state == "quarantined"
+        finally:
+            await harness.aclose()
+
+        harness = Harness(tmp_path / "h4", mode="complete")
+        seed_session(harness.session_store, session_id="sess-arsd-1")
+        caller = caller_for(principal_a())
+        try:
+            reply = await harness.submit(caller, "r7-ok")
+            run_id = reply["run_id"]
+            task = harness.handlers.registry.task_for(run_id)
+            await asyncio.wait({task})
+            status = await call(
+                harness, caller, "run_status", "r7-ok-st", {"run_id": run_id}
+            )
+            assert status["result"]["status"] == "completed"
+            assert "error_code" in status["result"]
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_r7_b2_cancel_invalid_terminal_quarantines_registered(
+    tmp_path: Path,
+) -> None:
+    async def case():
+        harness = Harness(tmp_path, mode="pending")
+        seed_session(harness.session_store, session_id="sess-arsd-1")
+        caller = caller_for(principal_a())
+        try:
+            reply = await harness.submit(caller, "r7-can-1")
+            run_id = reply["run_id"]
+            assert harness.handlers.registry.is_registered(run_id)
+            # Ensure the guarded task has started before cancel (otherwise
+            # Task.cancel() can complete before ``_run_guarded`` runs).
+            await asyncio.sleep(0.05)
+            (harness.run_dir(run_id) / "result.json").write_bytes(b"[]")
+            await expect_code(
+                harness,
+                caller,
+                "run_cancel",
+                "r7-can",
+                protocol.INTERNAL,
+                {"run_id": run_id},
+            )
+            for _ in range(100):
+                if not harness.handlers.registry.is_registered(run_id):
+                    break
+                await asyncio.sleep(0.01)
+            assert not harness.handlers.registry.is_registered(run_id)
+            assert harness.session_store.open_session("sess-arsd-1").state == "quarantined"
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_r7_b2_quarantine_failure_still_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_run_supervisor.session import SessionStore
+
+    async def case():
+        harness = Harness(tmp_path, mode="pending")
+        seed_session(harness.session_store, session_id="sess-arsd-1")
+        caller = caller_for(principal_a())
+
+        def boom(self, session_id, **kwargs):
+            raise OSError("injected quarantine failure")
+
+        monkeypatch.setattr(SessionStore, "mark_quarantined", boom)
+        try:
+            reply = await harness.submit(caller, "r7-qf-1")
+            run_id = reply["run_id"]
+            (harness.run_dir(run_id) / "result.json").write_bytes(b"{")
+            await expect_code(
+                harness,
+                caller,
+                "run_status",
+                "r7-qf",
+                protocol.INTERNAL,
+                {"run_id": run_id},
+            )
+        finally:
+            await harness.aclose()
+
+    run_async(case())

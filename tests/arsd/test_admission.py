@@ -141,13 +141,29 @@ class FakeRunner:
 
     async def run(self):
         if self.mode == "complete":
+            from agent_run_supervisor.exit_classifier import AgentRunStatus
+            from agent_run_supervisor.result import build_result_payload
+
+            run_id = self.prepared_handle.run_id
+            run_dir = self.prepared_handle.run_dir
             storage.write_once_json(
-                self.prepared_handle.run_dir / "result.json",
-                {
-                    "run_id": self.prepared_handle.run_id,
-                    "status": "completed",
-                    "retryable": False,
-                },
+                run_dir / "result.json",
+                build_result_payload(
+                    run_id=run_id,
+                    status=AgentRunStatus.COMPLETED,
+                    origin="acp",
+                    detail_code=None,
+                    retryable=False,
+                    exit_code=0,
+                    signal=None,
+                    stop_reason="end_turn",
+                    usage=None,
+                    final_message="",
+                    truncated=False,
+                    truncate_reason=None,
+                    run_dir=run_dir,
+                    raw_event_path="events.jsonl",
+                ),
             )
             return None
         try:
@@ -964,9 +980,15 @@ def test_submission_durability_failure_blocks_ack_and_dispatch(
             assert secret not in str(err)
             assert harness.factory.calls == []
             assert not harness.handlers.registry.is_registered(run_id)
-            # Uncertain exclusive artifact must remain; no silent delete+dispatch.
+            # Atomic no-clobber publish: final path must not appear on fsync failure.
             submission = harness.run_dir(run_id) / "submission.json"
-            assert submission.exists()
+            assert not submission.exists()
+            temps = [
+                p
+                for p in harness.run_dir(run_id).iterdir()
+                if p.name.startswith(".tmp-excl-")
+            ]
+            assert temps  # uncertain temp debris remains fail-closed
         finally:
             await harness.aclose()
 
