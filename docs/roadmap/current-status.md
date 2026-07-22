@@ -35,9 +35,9 @@ new work.
   chair-approved exact model-switch closure through the registered second model
   `deepseek/deepseek-v4-pro` (profile revision 2 closed model pair). No Stage 0/1 implementation
   blocker remains; sanitized acceptance evidence lives in the operator-held out-of-Git C10 records.
-- **Integration state:** push, pull-request creation, review, and merge are the separately approved
-  next steps; the implemented Stage 0/1 work is complete locally while integration remains pending.
-  Live pull-request/CI/merge truth belongs to GitHub, never to this board.
+- **Integration state:** the implemented Stage 0/1 work is complete locally; integration remains
+  pending under its separate approvals. Live pull-request/CI/merge truth belongs to GitHub, never
+  to this board.
 - **Production acceptance:** Stage 2 `arsd` plus G12 and real S1–S5; unimplemented and separately approved.
 - **Later integration:** Sachima `ArsdBackend`; parked until ARS production acceptance.
 
