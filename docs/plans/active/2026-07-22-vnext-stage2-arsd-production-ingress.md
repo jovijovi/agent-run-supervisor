@@ -137,7 +137,7 @@ publication; Sachima `ArsdBackend` or pin changes; Gateway/IM/live traffic.
 
 | # | Approval | Blocks | Notes |
 |---|---|---|---|
-| A1 | Stage 2 source implementation start | Slices 1–5 and 6a (any `src/`/`tests/`/`scripts/` write) | fresh branch/worktree from live `origin/main`; **not ready** until the §3 G12-timing decision (T1) is recorded |
+| A1 | Stage 2 source implementation start | Slices 1–5 and 6a (any `src/`/`tests/`/`scripts/` write) | fresh branch/worktree from live `origin/main`; **granted** — the §3 T1 sequencing ruling is recorded and authorizes A1 now (Operator, 2026-07-22) |
 | A2 | G12 caller policy: policy owner + exact UID→principal/owner/namespace mapping | production enablement (A5) always; A1/A4 additionally per the §3 sequencing ruling | no production UID value or owner mapping is invented by docs, code, or tests |
 | A3 | User-service/cgroup harness | Slice 6 harness execution (unit activation, crash-kill runs, `loginctl` linger) | rendering the unit is source-lane; *activation* is A3 |
 | A4 | Real external-AGENT acceptance | real OpenCode S1–S5 runs (includes credential availability) | fakes never substitute |
@@ -146,28 +146,47 @@ publication; Sachima `ArsdBackend` or pin changes; Gateway/IM/live traffic.
 Push, PR creation, merge, tag/Release/PyPI each additionally remain Hermes-owned separate
 approvals and are not granted by any row above.
 
-**G12 timing conflict (unresolved — Operator decision required, T1).** The authority chain
+**G12 timing conflict (T1) — sequencing ruling recorded 2026-07-22 below; mapping still
+open under A2.** The authority chain
 does not state one consistent G12 timing. PRD R6 ("exact UID values and policy ownership are
 Stage 2 gate G12; documentation does not choose them"), technical solution §9 ("G12 requires
 explicit approval of caller UID policy and values before production enablement"), and the
 board's gate table bind G12 to *production enablement*; technical solution §11 states Stage 2
 "adds `arsd` and production acceptance only after separate approval **and G12 resolution**".
-This plan does not choose between those readings — that is higher-authority arbitration the
-plan author does not own. Fail closed: until the Operator records the T1 decision, **A1 is
-not ready and no Stage 2 source implementation starts**. The T1 decision must supply both:
+Choosing between those readings was higher-authority arbitration the plan author does not
+own, so this plan recorded the conflict and held A1 fail-closed pending the Operator's T1
+decision. **The Operator has now supplied the sequencing ruling — recorded verbatim below —
+and A1 is unblocked:** §11's "G12 resolution" does not require G12 closure before A1 source
+start. The second T1 half — the exact policy owner and UID→principal/owner/namespace mapping
+values — remains deferred to A2 (it may arrive at G12 closure itself) and blocks A4 real
+acceptance and A5 production enablement.
 
-1. **Sequencing** — whether §11's "G12 resolution" requires G12 closure (or an explicit
-   Operator ruling) before A1 and/or before real S1–S5 acceptance, or is satisfied by G12
-   closing before enablement only.
-2. **The mapping** — the exact policy owner and UID→principal/owner/namespace mapping values
-   (these may arrive at G12 closure itself; the sequencing ruling is what can unblock A1
-   earlier).
+The recorded ruling requires no redesign: the caller policy is injected configuration (§6);
+code, tests, and docs never record production values; the daemon has no implicit default
+mapping and refuses to serve without an explicit one; and because acceptance before A2/G12
+resolution is not permitted, only Slice 6 timing shifts — real S1–S5 execution waits behind
+A2/G12 and the separate A3/A4 approvals.
 
-The plan stays fully executable under either outcome with no redesign: the caller policy is
-injected configuration either way (§6); code, tests, and docs never record production values;
-the daemon has no implicit default mapping and refuses to serve without an explicit one; and
-real S1–S5 runs under an explicitly recorded test-scoped mapping only if the T1 ruling
-permits acceptance before G12 closure — otherwise only Slice 6 timing shifts.
+**Recorded T1 sequencing ruling (Operator, 2026-07-22).** The Operator instruction
+`开始执行计划吧`, following the controller's stated default, authorizes A1 source
+implementation now. The recorded sequencing ruling:
+
+- A1 Slices 1–5 and 6a may proceed before exact G12 production mapping values exist.
+- Source implements a generic immutable CallerPolicy seam with zero implicit/default
+  mappings and fail-closed startup.
+- Hermetic tests may inject explicit synthetic/test-scoped mappings only; no production
+  UID, owner, namespace or credential value may appear.
+- A2 remains unresolved: policy owner and exact UID→principal/owner/namespace mapping
+  values.
+- A4 real external-AGENT acceptance and A5 production enablement remain blocked until
+  A2/G12 is explicitly resolved and separately approved.
+- A3 service/cgroup harness execution remains separately blocked.
+- Push/PR/merge/release/deploy/Sachima/Gateway/IM remain unapproved.
+
+This resolves T1 part (1): §11's "G12 resolution" is not required before A1 source start;
+it must be explicitly resolved and separately approved before real S1–S5 acceptance (A4)
+and production enablement (A5). T1 part (2) — the policy owner and exact mapping values —
+stays open and is carried by A2 (§15).
 
 ## 4. Minimal architecture slice
 
@@ -780,7 +799,9 @@ hermetic-test-only and are never C-grade evidence.
 Gate mapping: G9 ← S4; G10 ← S2; G11 ← S1+S3+S5 (robustness plus re-proven real
 credential/model usability inside the socket path); G12 is an approval artifact (policy owner
 + exact UID→principal/owner/namespace mapping) — not producible by tests; A5 stays blocked
-until it is recorded, and its sequencing relative to A1/A4 is the open T1 decision (§3).
+until it is recorded, and its sequencing relative to A1/A4 is settled by the recorded T1
+ruling (§3): it does not gate A1 source start, and A4 stays blocked until A2/G12 is
+explicitly resolved and separately approved.
 
 ## 12. Permissions and execution lanes
 
@@ -864,7 +885,7 @@ until it is recorded, and its sequencing relative to A1/A4 is the open T1 decisi
 
 | # | Open decision | Owner | Blocks | Overturn/closure evidence |
 |---|---|---|---|---|
-| T1 | G12: (a) sequencing ruling for the §3 authority conflict; (b) policy owner + exact UID→principal/owner/namespace mapping | operator (Hermes controller) | A1 source start (sequencing ruling) and production enablement (A5); A4 scope per the ruling | recorded Operator decision naming the sequencing outcome, the policy owner, and the mapping (mapping may arrive at G12 closure) |
+| T1 | G12: (a) sequencing ruling for the §3 authority conflict — **recorded 2026-07-22 (§3)**, A1 unblocked; (b) policy owner + exact UID→principal/owner/namespace mapping — open | operator (Hermes controller) | (b) blocks A4 real acceptance and A5 production enablement per the recorded ruling; A1 is no longer blocked | (a) closed by the §3 recorded ruling; (b) closes only by a recorded Operator decision naming the policy owner and the mapping (may arrive at G12 closure) |
 | T2 | Acceptance-host service manager facts: systemd --user availability, linger, or documented equivalent | operator | Slice 6 execution (A3) | recorded A3 approval with host facts |
 | T3 | Real-acceptance credential/window availability for OpenCode 1.18.4 (K3 + registered second model) | operator | Slice 6 real runs (A4) | recorded A4 approval |
 
@@ -877,10 +898,11 @@ in §§5–8 are binding regardless of final names.
 
 ## 16. Explicit implementation handoff
 
-This plan's existence authorizes nothing. Still separately and explicitly required: the T1
-G12-timing decision (§3), without which A1 is not ready; A1 source implementation start;
-A2 G12 policy owner/mapping; A3 harness; A4 real-AGENT acceptance; A5 production enablement;
-and every push, PR, merge, tag, GitHub Release, PyPI publication, deployment, Sachima
+This plan's existence authorizes nothing. The T1 sequencing decision is recorded and A1
+source implementation start is granted (§3, Operator, 2026-07-22). Still separately and
+explicitly required: A2 G12 policy owner/mapping; A3 harness; A4 real-AGENT acceptance;
+A5 production enablement; and every push, PR, merge, tag, GitHub Release, PyPI publication,
+deployment, Sachima
 `ArsdBackend` change, Gateway/IM wiring, or live traffic decision. After A1, a fresh Lead
 Developer executes Slices 1–5 and 6a by TDD on a new branch/worktree from live `origin/main`
 — existing-module edits limited to the §10 authorized list — with Hermes owning scope
