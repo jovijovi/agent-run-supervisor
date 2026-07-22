@@ -15,6 +15,7 @@ unsupported at initialize.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Awaitable, Callable
 
 from . import require_sdk
@@ -27,6 +28,10 @@ FsWriteHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
 class SessionIdentityViolation(RuntimeError):
     """An update arrived for a different external session than expected."""
+
+
+class UpdateCallbackError(RuntimeError):
+    """A session-update callback failed; update delivery cannot be proven."""
 
 
 class NativeAcpClient:
@@ -47,6 +52,12 @@ class NativeAcpClient:
         self._fs_write_handler = fs_write_handler
         self.expected_session_id: str | None = None
         self.identity_violation: str | None = None
+        # Monotonic completed-update-callback counter + wakeup for the
+        # driver's pre-response delivery barrier (the SDK resolves request
+        # futures without awaiting queued notification handlers).
+        self._updates_completed = 0
+        self._update_event = asyncio.Event()
+        self.callback_failure: str | None = None
 
     # -- helpers -----------------------------------------------------------
 
@@ -68,11 +79,39 @@ class NativeAcpClient:
             return dump(by_alias=True, exclude_none=True, warnings=False)
         return dict(model)
 
+    # -- update delivery barrier -------------------------------------------
+
+    @property
+    def updates_completed(self) -> int:
+        return self._updates_completed
+
+    async def wait_for_updates_completed(self, target: int) -> None:
+        """Await the monotonic completion counter reaching ``target``.
+
+        Fails closed if any update callback failed. The caller owns the time
+        bound (the Run's turn timeout); this never polls or sleeps.
+        """
+        while self._updates_completed < target and self.callback_failure is None:
+            self._update_event.clear()
+            if self._updates_completed >= target or self.callback_failure is not None:
+                break
+            await self._update_event.wait()
+        if self.callback_failure is not None:
+            raise UpdateCallbackError(self.callback_failure)
+
     # -- Client protocol ---------------------------------------------------
 
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
-        self._observe_session_id(session_id)
-        self._on_update(session_id, self._dump(update))
+        try:
+            self._observe_session_id(session_id)
+            self._on_update(session_id, self._dump(update))
+        except Exception as exc:
+            if self.callback_failure is None:
+                self.callback_failure = f"session_update callback failed: {exc}"
+            raise
+        finally:
+            self._updates_completed += 1
+            self._update_event.set()
 
     async def request_permission(
         self,

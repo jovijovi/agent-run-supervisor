@@ -18,7 +18,7 @@ from typing import Any, Callable, Mapping
 from agent_run_supervisor.managed_process import ManagedProcess
 
 from . import require_sdk
-from .client import NativeAcpClient
+from .client import NativeAcpClient, UpdateCallbackError
 from .config_fidelity import ConfigFidelityError, ConfigFidelityMachine
 
 
@@ -63,15 +63,24 @@ class NativeAcpDriver:
         # written to the transport and drained (the SDK sender resolves each
         # send only after write+drain) — the prompt-accepted boundary.
         self._prompt_frame_hooks: list[Callable[[], None]] = []
+        # Wire-order count of incoming session/update frames. The SDK receive
+        # loop notifies observers synchronously before enqueueing the handler
+        # and before resolving any response future, so every update frame that
+        # precedes a response is counted here before that response resolves.
+        self._updates_observed = 0
 
     def add_prompt_frame_hook(self, hook: Callable[[], None]) -> None:
         self._prompt_frame_hooks.append(hook)
 
     def _observe_stream(self, event: Any) -> None:
-        direction = getattr(event, "direction", None)
-        if getattr(direction, "name", "") != "OUTGOING":
-            return
+        direction = getattr(getattr(event, "direction", None), "name", "")
         message = getattr(event, "message", None) or {}
+        if direction == "INCOMING":
+            if message.get("method") == "session/update":
+                self._updates_observed += 1
+            return
+        if direction != "OUTGOING":
+            return
         if message.get("method") == "session/prompt":
             for hook in list(self._prompt_frame_hooks):
                 hook()
@@ -227,6 +236,16 @@ class NativeAcpDriver:
             "session/prompt",
             connection.prompt(session_id=session_id, prompt=[block]),
         )
+        # Pre-response delivery barrier: the SDK resolves the prompt future
+        # without awaiting queued session/update handlers, so every update
+        # frame observed on the wire before this response must complete its
+        # client callback before the turn returns — otherwise finalization
+        # could cancel those handlers and silently lose final-message/event
+        # evidence. The caller's turn timeout is the only time bound.
+        try:
+            await self._client.wait_for_updates_completed(self._updates_observed)
+        except UpdateCallbackError as exc:
+            raise NativeDriverError(str(exc)) from exc
         usage = _dump(response.usage) if response.usage is not None else None
         self._check_identity()
         return PromptOutcome(stop_reason=response.stop_reason, usage=usage)

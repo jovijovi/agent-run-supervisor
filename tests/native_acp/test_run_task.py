@@ -454,6 +454,38 @@ def test_retry_of_run_id_never_mutates_the_original(
     assert original_result.read_bytes() == before
 
 
+def test_delayed_update_dispatch_is_captured_before_finalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The SDK receive loop resolves the prompt response future without
+    # awaiting queued session/update handlers. This injects a dispatch delay
+    # into the client callback (the exact raced hop) and proves the turn
+    # still captures the final message and normalized event BEFORE the
+    # terminal result is written — the pre-response delivery barrier, not a
+    # lucky scheduling order.
+    from agent_run_supervisor.native_acp.client import NativeAcpClient
+
+    original_session_update = NativeAcpClient.session_update
+
+    async def delayed_session_update(self, session_id, update, **kwargs):
+        await asyncio.sleep(0.3)
+        return await original_session_update(self, session_id, update, **kwargs)
+
+    monkeypatch.setattr(NativeAcpClient, "session_update", delayed_session_update)
+
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    result = _run(harness.task())
+
+    assert result.status is AgentRunStatus.COMPLETED, result.payload
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    assert payload["final_message"] == "FAKE_AGENT_OK"
+    events = [
+        json.loads(line)
+        for line in (harness.run_dir() / "events.jsonl").read_text().splitlines()
+    ]
+    assert any(event["type"] == "agent_message_delta" for event in events)
+
+
 def test_fs_read_serves_workspace_file_never_supervisor_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
