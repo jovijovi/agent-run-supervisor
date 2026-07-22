@@ -35,11 +35,13 @@
 
 ---
 
-> **Released vs. target.** The commands and APIs below describe the released **v0.1.7 acpx
-> compatibility surface**. New development follows the vNext authority chain in [`GOAL.md`](GOAL.md),
+> **Released vs. target.** The commands and APIs below describe the **v0.1.7 acpx compatibility
+> surface**, unchanged in 0.2.0. Version 0.2.0 adds the **Stage 0/1 Native ACP core** — a
+> library-level ars-core vertical built under the vNext authority chain in [`GOAL.md`](GOAL.md),
 > the [PRD](docs/product/prd.md), and [design](docs/design/architecture.md): unprivileged local `arsd`
-> UDS ingress → ars-core/Native ACP → registered external AGENT. That target is staged and **not yet
-> implemented or production-enabled**. Historical requirements/plans are retained only in cold archives.
+> UDS ingress → ars-core/Native ACP → registered external AGENT. The `arsd` ingress is Stage 2 and
+> **not yet implemented**: 0.2.0 ships **no `arsd`, no Native service, and no Native CLI production
+> entry**, and is not production-enabled. Historical requirements/plans stay in cold archives.
 
 ## What it does
 
@@ -55,11 +57,17 @@ normalized events, classifies a **supervisor-owned status**, and writes **redact
 restrictive-permission local artifacts**. The caller gets auditable evidence — not a tangle of
 runner-lifecycle code.
 
-The released v0.1.7 product covers **two local acpx execution modes**: one-shot exec and a local
-persistent-session lifecycle (create/send/status/close/abort/list). That released line contains no
-daemon. The separately staged vNext target adds a thin, unprivileged local `arsd` UDS host as the sole
-production ingress; it is not implemented yet. Neither line is Sachima, a Gateway plugin, or an IM
-adapter, and ARS never emits a business verdict (`business_verdict` is always `null`).
+The released acpx surface covers **two local acpx execution modes**: one-shot exec and a local
+persistent-session lifecycle (create/send/status/close/abort/list); it contains no daemon. Version
+0.2.0 additionally carries the **Stage 0/1 Native ACP core** (`agent_run_supervisor.native_acp` plus
+`managed_process`): supervised live-stdio AGENT processes, frozen profile/spec admission,
+exact-or-zero configuration, `session/load` continuity with cross-Run model/effort switching,
+isolated `native-runs/`/`native-sessions/` evidence, and fail-closed
+`unknown/quarantined/retryable=false` state — reachable today as a library/test surface only. The
+separately staged Stage 2 target adds a thin, unprivileged local `arsd` UDS host as the sole
+production ingress; it is not implemented yet, so 0.2.0 has no Native service or Native CLI entry.
+Neither line is Sachima, a Gateway plugin, or an IM adapter, and ARS never emits a business verdict
+(`business_verdict` is always `null`).
 
 ## How it works
 
@@ -345,6 +353,7 @@ for turn in list_turns("/path/to/sessions", "nightly-review"):
 |---|---|
 | Runtime | **Python ≥ 3.11**, standard-library only — zero third-party runtime dependencies. |
 | Tests (optional) | `pytest >= 8, < 10` (the `dev` extra). |
+| Native ACP core tests (optional) | The `native` extra pins `agent-client-protocol==0.11.0` for the Stage 0/1 L1/L2 suite; the real OpenCode smoke is opt-in (`ARS_NATIVE_SMOKE=1`) and needs a registered OpenCode 1.18.4 install. |
 | Real AGENT runs / session turns | **Node + acpx + the target AGENT CLI** available locally — required for `run` (without `--no-real-run`) and for the real `session create/send/status/close/abort` turn & management commands. The Codex smoke helper specifically needs `npx` plus Codex CLI via `CODEX_PATH` or `PATH`. |
 | No-AGENT commands | `validate-role`, `replay`, `doctor`, `run --no-real-run`, `session list`, and `cleanup` (dry-run) need **no** Node/acpx and launch **no** AGENT. |
 
@@ -356,7 +365,7 @@ Short commands are available via the root [`Makefile`](Makefile):
 ```bash
 git clone https://github.com/jovijovi/agent-run-supervisor.git
 cd agent-run-supervisor
-make sync      # uv sync --extra dev --extra release
+make sync      # uv sync --locked --extra dev --extra release --extra native
 make verify    # full local gates (same as CI)
 make build     # sdist/wheel + twine check
 make smoke     # build + installed-wheel smoke
@@ -367,7 +376,7 @@ make help      # list all targets
 Equivalent without Make:
 
 ```bash
-uv sync --extra dev --extra release
+uv sync --locked --extra dev --extra release --extra native
 ./scripts/verify_local.sh
 ```
 
@@ -375,10 +384,16 @@ uv sync --extra dev --extra release
 [`docs/roadmap/verification.md`](docs/roadmap/verification.md) (tests, doctor/replay smoke,
 docs index/drift, static safety scan, build/twine check, and installed-wheel smoke).
 
+The full suite covers the Stage 0/1 Native ACP core at L1/L2 against a hermetic fake agent (the
+`native` extra pins `agent-client-protocol==0.11.0`). The real OpenCode 1.18.4 smoke never runs
+in CI and is opt-in:
+`ARS_NATIVE_SMOKE=1 uv run pytest tests/native_acp/test_real_opencode_smoke.py -q`
+(needs the registered OpenCode installation and credentials).
+
 **pip fallback** (without uv):
 
 ```bash
-pip install -e '.[dev,release]'
+pip install -e '.[dev,release,native]'
 python3 -m pytest -q
 ```
 
@@ -440,7 +455,7 @@ Factual local gates that keep the supervisor honest (run from the repository roo
 | Safe artifacts | Redacted artifacts · `business_verdict = null` · EventStore `0700`/`0600` atomic NDJSON. |
 
 ```bash
-uv sync --extra dev --extra release
+uv sync --locked --extra dev --extra release --extra native
 ./scripts/verify_local.sh
 ```
 
@@ -454,10 +469,11 @@ status, gates, and non-approvals live in [`docs/roadmap/current-status.md`](docs
 - **Released compatibility baseline — v0.1.7.** Local acpx one-shot/persistent-session supervision,
   redacted evidence, doctor/cleanup, caller wrapper, packaging, and release engineering are implemented.
   They remain supported compatibility surfaces, not the architecture for new development.
-- **Planned — vNext Stage 0/1.** AgentProfile/immutable RunSpec, ManagedProcess, Native ACP exact config,
-  process-per-Run Session load/switching, isolated Native stores, fail-closed state, permissions, and
-  B-grade real OpenCode evidence. Source/dependency implementation requires separate approval; see the
-  [active plan](docs/plans/active/2026-07-21-vnext-stage01-native-acp-implementation.md).
+- **Merged — vNext Stage 0/1 (0.2.0 source line).** AgentProfile/immutable RunSpec, ManagedProcess,
+  Native ACP exact config, process-per-Run Session load/switching, isolated Native stores, fail-closed
+  state, default-deny permission mediation, and B-grade real OpenCode evidence are merged into `main`.
+  Stage 1 is a library-level core, not production acceptance; see the
+  [archived plan](docs/plans/archive/2026-07-21-vnext-stage01-native-acp-implementation.md).
 - **Planned — vNext Stage 2.** `arsd` UDS ingress, peer ownership, reconciliation, bounded operation,
   real denied-action mediation, and cgroup crash containment. G12 caller-UID policy and all production
   enablement require separate approval.

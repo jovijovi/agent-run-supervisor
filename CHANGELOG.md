@@ -15,6 +15,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Notes
 
+## [0.2.0] - 2026-07-22
+
+### Added
+
+- Stage 0/1 Native ACP core through ars-core (`agent_run_supervisor.native_acp`),
+  additive alongside the released acpx surfaces:
+  - Supervised live-stdio processes (`managed_process.py`): each Run spawns its
+    AGENT in a fresh POSIX session/process group with recorded `ProcessIdentity`,
+    supervisor-owned bounded stderr, SIGTERM→grace→SIGKILL group escalation with
+    kill metadata, and a reaping `wait()`; the official ACP SDK exclusively owns
+    the live stdin/stdout JSON-RPC wire.
+  - Frozen admission identity: a typed, closed `AgentProfile` registry
+    (`OPENCODE_1_18_4` revision 2 — OpenCode 1.18.4 with the registered closed
+    model pair `kimi-for-coding/k3` / `deepseek/deepseek-v4-pro`, literal effort
+    values, and credential slot names only — never values) resolves to a
+    controlled `ResolvedLaunchSpec`, then an immutable `AgentRunSpec`/`spec_hash`
+    sealed before spawn; `EffectiveRunState` records observations only and never
+    rewrites the frozen request.
+  - Exact-or-zero configuration fidelity: initialize → `session/new` or
+    `session/load` → discovery → set model → fresh model-dependent option set →
+    rediscover and set effort → exact requested == effective readback; a missing
+    capability, unadvertised value, or inexact readback fails before dispatch
+    with zero prompt (literal `max` is never downgraded).
+  - Session continuity and cross-Run switching: process-per-Run over one
+    unchanged external session ID with real `session/load` (silent session
+    re-creation is a hard failure); model/effort are immutable per Run and
+    switch only between completed Runs with exact readback; partial switching
+    sends no prompt and must prove rollback, otherwise the Session quarantines.
+  - Isolated Native storage and evidence: the `native_acp/storage.py` seam binds
+    `native-runs/` and `native-sessions/` roots (`0700` dirs, `0600` files),
+    write-once `spec`/`launch`/`effective`/`result` artifacts and dispatch
+    markers, and one bounded per-Run event writer with monotonic `seq` and
+    truncation markers; legacy acpx `runs/`/`sessions/` stores are never read,
+    written, or migrated (regression-pinned with poisoned same-ID fixtures and
+    byte snapshots).
+  - Fail-closed terminal state and duplicate prevention: additive Run statuses
+    `failed`/`cancelled`/`unknown`, `prompt-dispatch-started`/`prompt-accepted`
+    markers, and a finalization table under which a possibly-dispatched Run
+    without a trustworthy terminal result ends `unknown` with `retryable=false`
+    and quarantines its Session; nothing auto-retries, replays, or resumes it,
+    and successor work is a new caller-authorized Run linked by
+    `retry_of_run_id`.
+  - Permission and workspace boundaries: `PermissionBridge` enforces the frozen
+    per-Run execution grant default-deny (registered workspace-internal reads
+    allowed; write/terminal/unknown operations denied) with redacted
+    `MediationEvent` evidence — cooperative-agent mediation, not an OS sandbox.
+  - Cancellation and finalization cleanup: supervisor cancel/timeout escalates
+    through ACP cancel and process-group termination; finalization reaps the
+    child, persists one irreversible terminal fact, and releases the session
+    lease on all paths, including quarantine.
+  - Packaging: optional `native` extra pinning `agent-client-protocol==0.11.0`
+    with SDK contract tests; the base install stays stdlib-only.
+
+### Changed
+
+- Dev/CI installs are lock-enforced and include the Native suite: `make sync`
+  and the CI verify jobs run `uv sync --locked --extra dev --extra release
+  --extra native`, and the canonical verifier gained an `uv lock --check` gate.
+
+### Fixed
+
+- Inbound `session/update` drain ordering in the new Native driver: prompt
+  completion waits for every update frame observed before the prompt response
+  to finish its client callback (a pre-response delivery barrier), so
+  finalization can never cancel queued handlers and silently lose
+  final-message/event evidence.
+
+### Notes
+
+- Stage 0/1 is a library-level core with real OpenCode 1.18.4 B-grade
+  acceptance evidence (exact K3/`max`, `session/load` context continuity across
+  process-per-Run, and registered-model switching). It is not production
+  acceptance: this version ships no `arsd` daemon, no Native service or Native
+  CLI production entry, and no Stage 2 socket-path acceptance; production
+  enablement, release publication, and Sachima integration remain separately
+  approved work.
+- The released v0.1.7 acpx one-shot/persistent-session surfaces are unchanged
+  and remain the compatibility baseline; Native code never reads or writes
+  their stores and never falls back to acpx.
+- Developers verify with `make verify`; the real OpenCode smoke is opt-in via
+  `ARS_NATIVE_SMOKE=1` (`tests/native_acp/test_real_opencode_smoke.py`).
+
 ## [0.1.7] - 2026-07-16
 
 ### Added

@@ -2,13 +2,12 @@
 
 # Documentation Index
 
-Total: 60 documents tracked across 2 statuses.
+Total: 61 documents tracked across 2 statuses.
 
-## Active (16)
+## Active (15)
 
 - [agent-run-supervisor vNext System Architecture](design/architecture.md) — created 2026-07-21
 - [agent-run-supervisor vNext Technical Solution](design/technical-solution.md) — created 2026-07-21
-- [ARS vNext Stage 0/1 implementation — Native ACP core](plans/active/2026-07-21-vnext-stage01-native-acp-implementation.md) — created 2026-07-21
 - [agent-run-supervisor vNext PRD](product/prd.md) — created 2026-07-21
 - [ARS vNext Roadmap Governance](roadmap/README.md) — created 2026-07-21
 - [ARS vNext Roadmap Current Status](roadmap/current-status.md) — created 2026-07-21
@@ -23,10 +22,12 @@ Total: 60 documents tracked across 2 statuses.
 - [Engineering practices](practices/README.md) — created 2026-05-28
 - [Verification gates for implementation PRs](roadmap/verification.md) — created 2026-05-28
 
-## Archived (44)
+## Archived (46)
 
+- [vNext Stage 0/1 — Native ACP core through ars-core](roadmap/archive/phases/vnext-stage01-native-acp.md) — created 2026-07-22
 - [Pre-vNext-reset GOAL snapshot](archive/pre-vnext-reset-2026-07-21/GOAL.md) — created 2026-07-21
 - [Pre-vNext-reset authority archive](archive/pre-vnext-reset-2026-07-21/README.md) — created 2026-07-21
+- [ARS vNext Stage 0/1 implementation — Native ACP core](plans/archive/2026-07-21-vnext-stage01-native-acp-implementation.md) — created 2026-07-21
 - [ARS vNext Stage 0 + Stage 1 development plan — Native ACP vertical (pre-arsd)](plans/archive/2026-07-21-vnext-stage01-native-acp.md) — created 2026-07-21
 - [S2 — Session permission / goal-turn / no-op hardening](roadmap/archive/phases/s2-permissioned-session.md) — created 2026-07-21
 - [Permissioned session prompt turns, goal-turn compilation, no-op fail-closed classification](plans/archive/2026-07-08-permissioned-session-goal-noop.md) — created 2026-07-08

@@ -2,7 +2,7 @@
 title: "Verification gates for implementation PRs"
 status: active
 created_at: 2026-05-28
-last_validated_at: 2026-07-07T16:45:00+0800
+last_validated_at: 2026-07-22
 ---
 
 # Verification gates for implementation PRs
@@ -10,7 +10,8 @@ last_validated_at: 2026-07-07T16:45:00+0800
 Canonical local entry: [`scripts/verify_local.sh`](../../scripts/verify_local.sh)
 (mirrors CI `Verify` workflow).
 
-Primary local entry (after `uv sync --extra dev --extra release`):
+Primary local entry (after `make sync`, i.e.
+`uv sync --locked --extra dev --extra release --extra native`):
 
 ```bash
 ./scripts/verify_local.sh
@@ -19,6 +20,7 @@ Primary local entry (after `uv sync --extra dev --extra release`):
 Step-by-step equivalent:
 
 ```bash
+uv lock --check
 uv run python scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0
 uv run pytest -q
 uv run python -m compileall -q src scripts tests
@@ -36,6 +38,7 @@ git diff --check
 ```
 
 **pip fallback** (without uv): replace `uv run …` with `PYTHONPATH=src python3 -m …` or installed
-console scripts after `pip install -e '.[dev,release]'`.
+console scripts after `pip install -e '.[dev,release,native]'` (the `uv lock --check` step is
+uv-only and is skipped on this path).
 
 For source changes, also run secret-shaped and static dangerous-pattern scans over added lines.
