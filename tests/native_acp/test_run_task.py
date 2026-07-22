@@ -13,6 +13,7 @@ import pytest
 
 pytest.importorskip("acp")
 
+from agent_run_supervisor.event_store import EventStore, RunHandle
 from agent_run_supervisor.exit_classifier import AgentRunStatus
 from agent_run_supervisor.native_acp import profile as profile_module
 from agent_run_supervisor.native_acp import storage
@@ -694,3 +695,152 @@ def test_session_reuse_none_uses_ephemeral_record_closed_at_terminal(
     ephemeral = records[0]
     assert ephemeral.session_kind == "native"
     assert ephemeral.state == "closed"
+
+
+# --- Slice 3b: prepared RunHandle admission handoff -----------------------
+
+
+def _create_run_spy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    calls: list[str] = []
+    original = EventStore.create_run
+
+    def spying(self: EventStore, run_id: str) -> RunHandle:
+        calls.append(run_id)
+        return original(self, run_id)
+
+    monkeypatch.setattr(EventStore, "create_run", spying)
+    return calls
+
+
+def _precreated_handle(harness: Harness, run_id: str = "run-0001") -> RunHandle:
+    return storage.native_event_store(harness.root).create_run(run_id)
+
+
+def test_prepared_handle_skips_create_run_and_keeps_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    handle = _precreated_handle(harness)
+    calls = _create_run_spy(monkeypatch)
+
+    result = _run(harness.task(prepared_handle=handle))
+
+    assert result.status is AgentRunStatus.COMPLETED
+    assert calls == []  # the admission-side exclusive create is never repeated
+    assert result.run_dir == handle.run_dir
+    for artifact in (
+        "spec.json",
+        "launch.json",
+        "effective.json",
+        "events.jsonl",
+        "result.json",
+        "progress.json",
+        "prompt-dispatch-started",
+        "prompt-accepted",
+        "stderr.log",
+        "redaction-report.json",
+    ):
+        assert (handle.run_dir / artifact).exists(), artifact
+    payload = json.loads((handle.run_dir / "result.json").read_text())
+    assert payload["status"] == "completed"
+
+
+def test_without_prepared_handle_exactly_one_exclusive_create(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    calls = _create_run_spy(monkeypatch)
+    result = _run(harness.task())
+    assert result.status is AgentRunStatus.COMPLETED
+    assert calls == ["run-0001"]
+
+
+def test_without_prepared_handle_create_failure_path_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    _precreated_handle(harness)  # occupy the run dir: exclusive create fails
+    result = _run(harness.task())
+    assert result.status is AgentRunStatus.FAILED
+    assert result.run_dir is None
+    assert "already exists" in result.payload["error"]
+
+
+def test_prepared_handle_wrong_type_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    with pytest.raises(NativeRunTaskError, match="RunHandle"):
+        harness.task(prepared_handle="run-0001")
+
+
+def test_prepared_handle_must_match_run_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    other = _precreated_handle(harness, "run-0002")
+    with pytest.raises(NativeRunTaskError, match="run_id"):
+        harness.task(prepared_handle=other)
+
+
+def test_prepared_handle_arbitrary_directory_injection_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    foreign = tmp_path / "elsewhere" / "run-0001"
+    foreign.mkdir(parents=True)
+    handle = RunHandle(run_id="run-0001", run_dir=foreign)
+    with pytest.raises(NativeRunTaskError, match="event-store run directory"):
+        harness.task(prepared_handle=handle)
+
+
+def test_prepared_handle_symlinked_run_dir_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    handle = _precreated_handle(harness)
+    foreign = tmp_path / "foreign-target"
+    foreign.mkdir()
+    (foreign / "sentinel.txt").write_text("foreign content stays intact")
+    before = sorted(entry.name for entry in foreign.iterdir())
+
+    # Replace the reserved final run-id entry with a link to a foreign dir:
+    # both sides of a naive resolve()-comparison collapse to the same target.
+    handle.run_dir.rmdir()
+    handle.run_dir.symlink_to(foreign, target_is_directory=True)
+
+    with pytest.raises(NativeRunTaskError, match="symlink"):
+        harness.task(prepared_handle=handle)
+
+    assert (foreign / "sentinel.txt").read_text() == "foreign content stays intact"
+    assert sorted(entry.name for entry in foreign.iterdir()) == before
+
+
+def test_prepared_handle_missing_or_file_path_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    absent = RunHandle(run_id="run-0001", run_dir=harness.run_dir())
+    with pytest.raises(NativeRunTaskError, match="missing or not a directory"):
+        harness.task(prepared_handle=absent)
+
+    harness.run_dir().parent.mkdir(parents=True, exist_ok=True)
+    harness.run_dir().write_text("not a directory")
+    occupied = RunHandle(run_id="run-0001", run_dir=harness.run_dir())
+    with pytest.raises(NativeRunTaskError, match="missing or not a directory"):
+        harness.task(prepared_handle=occupied)
+
+
+def test_prepared_handle_keeps_native_store_root_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    bad_events = EventStore(base_dir=tmp_path / "not-native")
+    handle = bad_events.create_run("run-0001")
+    with pytest.raises(NativeRunTaskError, match="native-runs"):
+        harness.task(
+            prepared_handle=handle,
+            supervisor_root=None,
+            session_store=storage.native_session_store(harness.root),
+            event_store=bad_events,
+        )

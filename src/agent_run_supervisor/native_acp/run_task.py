@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from agent_run_supervisor.event_store import RunHandle
 from agent_run_supervisor.exit_classifier import _RETRYABLE_DEFAULT, AgentRunStatus
 from agent_run_supervisor.managed_process import (
     ManagedExit,
@@ -213,6 +214,7 @@ class RunTask:
         submitted_at: str | None = None,
         retry_of_run_id: str | None = None,
         cwd: str | None = None,
+        prepared_handle: RunHandle | None = None,
     ) -> None:
         if supervisor_root is not None:
             session_store = storage.native_session_store(supervisor_root)
@@ -233,6 +235,38 @@ class RunTask:
                 f"session store root {session_store.base_dir} is not a "
                 f"{storage.NATIVE_SESSIONS_DIRNAME} root"
             )
+        if prepared_handle is not None:
+            # arsd admission handoff: only the exact reserved directory of
+            # this run in this event store may be adopted — never an
+            # arbitrary injected path.
+            if not isinstance(prepared_handle, RunHandle):
+                raise NativeRunTaskError(
+                    "prepared_handle must be an event_store.RunHandle"
+                )
+            if prepared_handle.run_id != run_id:
+                raise NativeRunTaskError(
+                    "prepared_handle run_id does not match this RunTask run_id"
+                )
+            # Resolve ancestors only: resolving the final run-id entry would
+            # let a symlink planted there collapse both comparison sides onto
+            # the same foreign target and bypass the injection guard.
+            handed_dir = Path(prepared_handle.run_dir)
+            expected_dir = Path(event_store.base_dir).resolve() / run_id
+            if handed_dir.parent.resolve() / handed_dir.name != expected_dir:
+                raise NativeRunTaskError(
+                    "prepared_handle run_dir is not the configured native "
+                    "event-store run directory for this run_id"
+                )
+            if expected_dir.is_symlink():
+                raise NativeRunTaskError(
+                    "prepared_handle run_dir is a symlink, not the reserved "
+                    "event-store run directory"
+                )
+            if not expected_dir.is_dir():
+                raise NativeRunTaskError(
+                    "prepared_handle run_dir is missing or not a directory"
+                )
+        self._prepared_handle = prepared_handle
         self._request = request
         self._prompt_text = prompt_text
         self._run_id = run_id
@@ -248,18 +282,28 @@ class RunTask:
 
     async def run(self) -> NativeRunResult:
         ctx = _RunContext()
-        try:
-            ctx.handle = self._event_store.create_run(self._run_id)
-        except Exception as exc:
-            payload = {"run_id": self._run_id, "status": "failed", "error": str(exc)}
-            return NativeRunResult(
-                run_id=self._run_id,
-                status=AgentRunStatus.FAILED,
-                payload=payload,
-                run_dir=None,
-                session_id=None,
-                session_state=None,
-            )
+        if self._prepared_handle is not None:
+            # The admission side already performed the single exclusive
+            # create_run for this key; repeating it here would break the
+            # at-most-one-reservation contract.
+            ctx.handle = self._prepared_handle
+        else:
+            try:
+                ctx.handle = self._event_store.create_run(self._run_id)
+            except Exception as exc:
+                payload = {
+                    "run_id": self._run_id,
+                    "status": "failed",
+                    "error": str(exc),
+                }
+                return NativeRunResult(
+                    run_id=self._run_id,
+                    status=AgentRunStatus.FAILED,
+                    payload=payload,
+                    run_dir=None,
+                    session_id=None,
+                    session_state=None,
+                )
         cancelled = False
         try:
             await self._drive(ctx)
