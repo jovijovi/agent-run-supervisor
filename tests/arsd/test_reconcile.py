@@ -1525,3 +1525,148 @@ def test_terminal_result_close_oserror_is_untrusted_quarantines(
     assert not (run_dir / "progress.json").exists()
     assert (run_dir / "result.json").read_bytes() == result_bytes
     assert result_fds <= closed_ok
+
+
+# ---------------------------------------------------------------------------
+# R4 / B1 — trustworthy Native terminal result (complete shape)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["completed", "failed", "cancelled", "timed_out", "unknown"],
+)
+def test_r4_b1_complete_native_terminal_statuses_are_trusted(
+    tmp_path: Path, status: str
+) -> None:
+    reconcile = _import_reconcile()
+    root = tmp_path / "sv"
+    sessions = storage.native_session_store(root)
+    events = storage.native_event_store(root)
+    run_id = f"run-native-{status}"
+    session_id = "sess-reuse-1"
+    _seed_session(sessions, session_id)
+    run_dir = events.create_run(run_id).run_dir
+    _seed_submission(run_dir, request_id=f"native-{status}", run_id=run_id)
+    if status == "unknown":
+        _seed_marker(run_dir, run_id)
+    result_bytes = _seed_result(
+        run_dir, run_id=run_id, status=status, session_id=session_id
+    )
+    session_before = (sessions.base_dir / session_id / SESSION_JSON).read_bytes()
+
+    reconcile.reconcile(root)
+    assert (run_dir / "result.json").read_bytes() == result_bytes
+    if status == "unknown":
+        assert sessions.open_session(session_id).state == STATE_QUARANTINED
+        assert (run_dir / "progress.json").is_file()
+    else:
+        assert (sessions.base_dir / session_id / SESSION_JSON).read_bytes() == session_before
+
+
+def test_r4_b1_minimal_runner_error_is_untrusted_and_refuses_startup(
+    tmp_path: Path,
+) -> None:
+    reconcile = _import_reconcile()
+    root = tmp_path / "sv"
+    sessions = storage.native_session_store(root)
+    events = storage.native_event_store(root)
+    run_id = "run-runner-error"
+    session_id = "sess-reuse-1"
+    _seed_session(sessions, session_id)
+    run_dir = events.create_run(run_id).run_dir
+    _seed_submission(run_dir, request_id="runner-error", run_id=run_id)
+    _seed_marker(run_dir, run_id)
+    # Minimal shape that matched the old status/retryable-only gate.
+    raw = json.dumps(
+        {
+            "run_id": run_id,
+            "status": "runner_error",
+            "retryable": True,
+        }
+    ).encode("utf-8")
+    (run_dir / "result.json").write_bytes(raw)
+
+    with pytest.raises(reconcile.ReconciliationError) as err:
+        reconcile.reconcile(root)
+    message = str(err.value)
+    assert "untrusted" in message.lower() or "terminal" in message.lower()
+    assert "runner_error" not in message
+    assert "True" not in message
+    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert not (run_dir / "progress.json").exists()
+    assert (run_dir / "result.json").read_bytes() == raw
+
+
+def _complete_terminal(run_dir: Path, run_id: str, status: AgentRunStatus) -> dict:
+    return build_result_payload(
+        run_id=run_id,
+        status=status,
+        origin="supervisor",
+        detail_code=None if status is AgentRunStatus.COMPLETED else "PROBE",
+        retryable=_RETRYABLE_DEFAULT[status],
+        exit_code=None,
+        signal=None,
+        stop_reason=None,
+        usage=None,
+        final_message="",
+        truncated=False,
+        truncate_reason=None,
+        run_dir=run_dir,
+        raw_event_path="events.jsonl",
+    )
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        "drop_origin",
+        "origin_cli",
+        "retryable_int",
+        "truncated_int",
+        "completed_with_error_code",
+        "failed_without_error_code",
+        "drop_stderr_path",
+    ],
+)
+def test_r4_b1_incomplete_or_mistyped_terminal_is_untrusted(
+    tmp_path: Path, corrupt: str
+) -> None:
+    reconcile = _import_reconcile()
+    root = tmp_path / "sv"
+    sessions = storage.native_session_store(root)
+    events = storage.native_event_store(root)
+    run_id = "run-mistyped"
+    session_id = "sess-reuse-1"
+    _seed_session(sessions, session_id)
+    run_dir = events.create_run(run_id).run_dir
+    _seed_submission(run_dir, request_id="mistyped", run_id=run_id)
+    _seed_marker(run_dir, run_id)
+    status = (
+        AgentRunStatus.FAILED
+        if corrupt == "failed_without_error_code"
+        else AgentRunStatus.COMPLETED
+    )
+    payload = _complete_terminal(run_dir, run_id, status)
+    if corrupt == "drop_origin":
+        del payload["origin"]
+    elif corrupt == "origin_cli":
+        payload["origin"] = "cli"
+    elif corrupt == "retryable_int":
+        payload["retryable"] = 0
+    elif corrupt == "truncated_int":
+        payload["truncated"] = 1
+    elif corrupt == "completed_with_error_code":
+        payload["error_code"] = "FAILED"
+    elif corrupt == "failed_without_error_code":
+        payload["error_code"] = None
+    elif corrupt == "drop_stderr_path":
+        del payload["stderr_path"]
+    raw = json.dumps(payload).encode("utf-8")
+    (run_dir / "result.json").write_bytes(raw)
+
+    with pytest.raises(reconcile.ReconciliationError) as err:
+        reconcile.reconcile(root)
+    assert "cli" not in str(err.value)
+    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert not (run_dir / "progress.json").exists()

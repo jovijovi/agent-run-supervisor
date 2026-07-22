@@ -128,13 +128,42 @@ class EventWriter:
             raise EventWriterOverflow("event queue is full") from None
 
     async def close(self) -> None:
-        """Flush queued events and stop the consumer."""
+        """Flush queued events and stop the consumer.
+
+        If the consumer has already failed and the queue is full, awaiting
+        ``queue.put(None)`` alone would hang forever. Race the sentinel enqueue
+        against consumer completion: a finished/failed consumer cancels any
+        pending put and surfaces its exception promptly; a successful sentinel
+        enqueue awaits the consumer normally. The consumer reference is always
+        cleared; append failures are never swallowed.
+        """
         if self._closed:
             return
         self._closed = True
-        if self._consumer is not None:
-            await self._queue.put(None)
-            await self._consumer
+        consumer = self._consumer
+        if consumer is None:
+            return
+        put_task: asyncio.Task[None] | None = None
+        try:
+            put_task = asyncio.ensure_future(self._queue.put(None))
+            done, _pending = await asyncio.wait(
+                {put_task, consumer},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if consumer in done:
+                if put_task is not None and not put_task.done():
+                    put_task.cancel()
+                    try:
+                        await put_task
+                    except asyncio.CancelledError:
+                        pass
+                # Re-raise consumer failure (or complete successfully).
+                await consumer
+                return
+            # Sentinel enqueue won: finish put, then drain/await consumer.
+            await put_task
+            await consumer
+        finally:
             self._consumer = None
 
     async def _drain(self) -> None:

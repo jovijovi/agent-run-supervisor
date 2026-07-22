@@ -8,6 +8,7 @@ import dataclasses
 import datetime as _dt
 import json
 import logging
+import math
 import weakref
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Mapping
@@ -32,6 +33,8 @@ DEFAULT_EVENTS_PAGE_LIMIT = 100
 MAX_EVENTS_PAGE_LIMIT = 1000
 DEFAULT_EVENT_FOLLOW_QUEUE = 256
 DEFAULT_FOLLOW_IDLE_SECONDS = 0.25
+# Production ceiling for run_events follow idle (seconds). Documented max.
+MAX_FOLLOW_IDLE_SECONDS = 3600.0
 EVENTS_FILENAME = "events.jsonl"
 # Conservative per-line bound for events.jsonl evidence reads (handlers-local).
 MAX_EVENT_LINE_BYTES = 65_536
@@ -814,20 +817,34 @@ class ArsdHandlers:
                 "exhausted": exhausted,
             }
         idle = payload.get("follow_idle_seconds", DEFAULT_FOLLOW_IDLE_SECONDS)
-        if (
-            isinstance(idle, bool)
-            or not isinstance(idle, (int, float))
-            or idle <= 0
-        ):
+        if isinstance(idle, bool) or not isinstance(idle, (int, float)):
             raise protocol.ProtocolError(
                 protocol.INVALID_REQUEST,
-                "follow_idle_seconds must be a positive number",
+                "follow_idle_seconds must be a positive finite number "
+                f"at most {int(MAX_FOLLOW_IDLE_SECONDS)} seconds",
             )
+        # Integers: exact numeric compare — never float() huge decoded JSON ints.
+        if type(idle) is int:
+            if idle <= 0 or idle > MAX_FOLLOW_IDLE_SECONDS:
+                raise protocol.ProtocolError(
+                    protocol.INVALID_REQUEST,
+                    "follow_idle_seconds must be a positive finite number "
+                    f"at most {int(MAX_FOLLOW_IDLE_SECONDS)} seconds",
+                )
+            idle_seconds = float(idle)
+        else:
+            if not math.isfinite(idle) or idle <= 0 or idle > MAX_FOLLOW_IDLE_SECONDS:
+                raise protocol.ProtocolError(
+                    protocol.INVALID_REQUEST,
+                    "follow_idle_seconds must be a positive finite number "
+                    f"at most {int(MAX_FOLLOW_IDLE_SECONDS)} seconds",
+                )
+            idle_seconds = float(idle)
         stream = EventFollowStream(
             run_dir=run_dir,
             run_id=run_id,
             from_seq=from_seq,
-            idle_seconds=float(idle),
+            idle_seconds=idle_seconds,
             queue_size=self._follow_queue,
         )
         stream._owner_set = self._follow_streams

@@ -565,6 +565,28 @@ def _capture_original_cgroup_identities_for_sigkill(
     return original_idents
 
 
+def _final_pre_sigkill_cgroup_snapshot(
+    *,
+    unit_name: str,
+    agent_ident: tuple[int, int],
+) -> tuple[list[int], list[tuple[int, int]]]:
+    """Refresh ``cgroup.procs`` immediately before identity capture and SIGKILL.
+
+    Call order (mechanically auditable):
+    1. ``_cgroup_procs_for_unit(unit_name)`` — fresh membership, never a stale
+       list from the earlier pre-check.
+    2. ``_capture_original_cgroup_identities_for_sigkill`` — exact AGENT must
+       still be present; unrelated PIDs never substitute.
+    Returns ``(fresh_pids, original_idents)`` for evidence and kill tracking.
+    """
+    fresh_pids = _cgroup_procs_for_unit(unit_name)
+    original_idents = _capture_original_cgroup_identities_for_sigkill(
+        cgroup_pids=fresh_pids,
+        agent_ident=agent_ident,
+    )
+    return fresh_pids, original_idents
+
+
 def _require_agent_identity_dead_after_crash(agent_ident: tuple[int, int]) -> None:
     """Require the exact pre-crash AGENT identity is dead (PID-reuse safe)."""
     if _identity_alive(agent_ident):
@@ -756,8 +778,10 @@ def run_s4(inputs: dict[str, str]) -> int:
         )
         agent_identity_from_effective = True
         agent_pid_in_cgroup_before_crash = True
-        original_idents = _capture_original_cgroup_identities_for_sigkill(
-            cgroup_pids=before_pids,
+        # Fresh membership immediately before identity capture and os.kill —
+        # never reuse the stale before_pids list above.
+        original_cgroup_pids, original_idents = _final_pre_sigkill_cgroup_snapshot(
+            unit_name=unit_name,
             agent_ident=agent_ident,
         )
         os.kill(main_pid, signal.SIGKILL)
@@ -873,7 +897,7 @@ def run_s4(inputs: dict[str, str]) -> int:
         evidence = _s4_evidence_payload(
             unit_name=unit_name,
             crashed_run_id=run_id,
-            original_cgroup_pids=before_pids,
+            original_cgroup_pids=original_cgroup_pids,
             agent_identity_from_effective=agent_identity_from_effective,
             agent_pid_in_cgroup_before_crash=agent_pid_in_cgroup_before_crash,
             agent_identity_dead_after_crash=agent_identity_dead_after_crash,

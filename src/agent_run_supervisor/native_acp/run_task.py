@@ -84,6 +84,8 @@ class FinalizationObservations:
     permission_violation: bool = False
     # A partial between-Run switch whose exact rollback could not be proven.
     rollback_unproven: bool = False
+    # Bounded evidence writer overflow / close / consumer failure.
+    evidence_pipeline_failure: bool = False
 
 
 _COMPLETED_STOP_REASONS = frozenset(
@@ -100,6 +102,12 @@ def finalize_run_state(
     Exit-code classification is subordinate by construction: no exit code is
     consulted, so a dispatched Turn without a reliable ACP terminal can never
     finalize completed/cancelled-class.
+
+    Evidence-pipeline failure is modeled explicitly: an existing durable result
+    remains irreversible; ``unknown`` uncertainty remains the strongest status;
+    otherwise a post-dispatch evidence-pipeline failure yields ``failed`` and
+    keeps any already-required quarantine disposition (overriding
+    completed/cancelled/timed_out).
     """
     obs = observations
     if obs.result_exists:
@@ -111,6 +119,21 @@ def finalize_run_state(
         # exact readback proof.
         disposition = "quarantined" if obs.rollback_unproven else "active"
         return (AgentRunStatus.FAILED, disposition)
+
+    status, disposition = _post_dispatch_finalize(obs)
+    if obs.evidence_pipeline_failure and status is not AgentRunStatus.UNKNOWN:
+        if status in (
+            AgentRunStatus.COMPLETED,
+            AgentRunStatus.CANCELLED,
+            AgentRunStatus.TIMED_OUT,
+        ):
+            return (AgentRunStatus.FAILED, disposition)
+    return (status, disposition)
+
+
+def _post_dispatch_finalize(
+    obs: FinalizationObservations,
+) -> tuple[AgentRunStatus, str]:
     if obs.acp_stop_reason is not None:
         if obs.permission_violation:
             return (AgentRunStatus.FAILED, "active")
@@ -873,20 +896,36 @@ class RunTask:
                 ctx.proc.kill_group(reason="finalize_force_kill")
                 ctx.exit_state = await ctx.proc.wait()
 
-        observations = FinalizationObservations(
-            result_exists=(ctx.handle.run_dir / "result.json").exists(),
-            dispatch_started=ctx.dispatch_started,
-            acp_stop_reason=ctx.stop_reason,
-            supervisor_cancelled=ctx.supervisor_cancelled,
-            supervisor_timed_out=ctx.supervisor_timed_out,
-            child_exit_without_terminal=ctx.child_exit_without_terminal,
-            observation_interrupted=ctx.observation_interrupted,
-            escalated_kill_after_dispatch=ctx.escalated_kill,
-            permission_violation=(
-                ctx.bridge.turn_failed if ctx.bridge is not None else False
-            ),
-            rollback_unproven=ctx.rollback_unproven,
-        )
+        # Provisional state only as needed to enqueue final failure evidence
+        # before the writer is closed. Close/drain next; capture close failure
+        # into the evidence pipeline; then freeze final state/payload once.
+        # Never emit after close.
+        if ctx.writer is not None:
+            provisional = self._observations(ctx)
+            provisional_status, _ = finalize_run_state(provisional)
+            if (
+                provisional_status is not None
+                and provisional_status is not AgentRunStatus.COMPLETED
+            ):
+                self._emit(
+                    ctx,
+                    {
+                        "type": "run_failed",
+                        "code": {
+                            AgentRunStatus.FAILED: "FAILED",
+                            AgentRunStatus.CANCELLED: "CANCELLED",
+                            AgentRunStatus.TIMED_OUT: "TIMED_OUT",
+                            AgentRunStatus.UNKNOWN: "UNKNOWN",
+                        }.get(provisional_status, "FAILED"),
+                    },
+                )
+            try:
+                await ctx.writer.close()
+            except Exception as exc:
+                if ctx.pipeline_error is None:
+                    ctx.pipeline_error = exc
+
+        observations = self._observations(ctx)
         status, disposition = finalize_run_state(observations)
         if status is None:
             payload = ctx.handle.read_json("result.json")
@@ -899,16 +938,10 @@ class RunTask:
                 session_state=self._session_state(ctx),
             )
 
-        # Evidence-pipeline failure is the top-level boundary applied to
-        # evidence: a completed-class turn with broken evidence is failed.
         detail_code: str | None = None
         if ctx.pre_dispatch is not None:
             detail_code = ctx.pre_dispatch.detail_code
-        elif ctx.pipeline_error is not None and status in (
-            AgentRunStatus.COMPLETED,
-            AgentRunStatus.CANCELLED,
-        ):
-            status = AgentRunStatus.FAILED
+        elif ctx.pipeline_error is not None and status is AgentRunStatus.FAILED:
             detail_code = "EVIDENCE_PIPELINE"
         elif ctx.supervisor_cancelled:
             detail_code = "SUPERVISOR_CANCELLED"
@@ -981,17 +1014,6 @@ class RunTask:
         elif ctx.error is not None:
             payload["failure_reason"] = str(ctx.error)
 
-        if ctx.writer is not None:
-            if status is not AgentRunStatus.COMPLETED:
-                self._emit(
-                    ctx,
-                    {"type": "run_failed", "code": payload.get("error_code")},
-                )
-            try:
-                await ctx.writer.close()
-            except Exception:
-                pass
-
         try:
             storage.write_once_json(ctx.handle.run_dir / "result.json", payload)
         except FileExistsError:
@@ -1010,6 +1032,23 @@ class RunTask:
             run_dir=ctx.handle.run_dir,
             session_id=ctx.session_id,
             session_state=session_state,
+        )
+
+    def _observations(self, ctx: _RunContext) -> FinalizationObservations:
+        return FinalizationObservations(
+            result_exists=(ctx.handle.run_dir / "result.json").exists(),
+            dispatch_started=ctx.dispatch_started,
+            acp_stop_reason=ctx.stop_reason,
+            supervisor_cancelled=ctx.supervisor_cancelled,
+            supervisor_timed_out=ctx.supervisor_timed_out,
+            child_exit_without_terminal=ctx.child_exit_without_terminal,
+            observation_interrupted=ctx.observation_interrupted,
+            escalated_kill_after_dispatch=ctx.escalated_kill,
+            permission_violation=(
+                ctx.bridge.turn_failed if ctx.bridge is not None else False
+            ),
+            rollback_unproven=ctx.rollback_unproven,
+            evidence_pipeline_failure=ctx.pipeline_error is not None,
         )
 
     def _apply_session_disposition(

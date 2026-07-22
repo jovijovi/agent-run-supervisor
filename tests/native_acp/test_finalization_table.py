@@ -177,3 +177,66 @@ def test_result_exists_wins_over_everything() -> None:
     )
     assert status is None
     assert disposition == "keep"
+
+
+def test_r4_b2_evidence_pipeline_overrides_completed_to_failed_active() -> None:
+    status, disposition = _finalize(
+        dispatch_started=True,
+        acp_stop_reason="end_turn",
+        evidence_pipeline_failure=True,
+    )
+    assert status is AgentRunStatus.FAILED
+    assert disposition == "active"
+    assert _RETRYABLE_DEFAULT[status] is False
+
+
+def test_r4_b2_evidence_pipeline_overrides_cancelled_to_failed() -> None:
+    status, disposition = _finalize(
+        dispatch_started=True,
+        acp_stop_reason="cancelled",
+        evidence_pipeline_failure=True,
+    )
+    assert status is AgentRunStatus.FAILED
+    assert disposition == "active"
+
+
+def test_r4_b2_evidence_pipeline_overrides_timed_out_keeps_quarantine() -> None:
+    status, disposition = _finalize(
+        dispatch_started=True,
+        escalated_kill_after_dispatch=True,
+        supervisor_timed_out=True,
+        evidence_pipeline_failure=True,
+    )
+    assert status is AgentRunStatus.FAILED
+    assert disposition == "quarantined"
+    assert _RETRYABLE_DEFAULT[status] is False
+
+
+def test_r4_b2_unknown_remains_stronger_than_evidence_pipeline() -> None:
+    status, disposition = _finalize(
+        dispatch_started=True,
+        observation_interrupted=True,
+        evidence_pipeline_failure=True,
+    )
+    assert status is AgentRunStatus.UNKNOWN
+    assert disposition == "quarantined"
+
+
+def test_r4_b2_existing_result_still_irreversible_with_evidence_pipeline() -> None:
+    status, disposition = _finalize(
+        result_exists=True,
+        dispatch_started=True,
+        evidence_pipeline_failure=True,
+        acp_stop_reason="end_turn",
+    )
+    assert status is None
+    assert disposition == "keep"
+
+
+def test_r4_b2_pre_dispatch_evidence_pipeline_stays_failed_active() -> None:
+    status, disposition = _finalize(
+        dispatch_started=False,
+        evidence_pipeline_failure=True,
+    )
+    assert status is AgentRunStatus.FAILED
+    assert disposition == "active"

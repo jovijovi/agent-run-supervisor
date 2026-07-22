@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent_run_supervisor.exit_classifier import AgentRunStatus
+from agent_run_supervisor.exit_classifier import _RETRYABLE_DEFAULT, AgentRunStatus
 
 
 @dataclass
@@ -83,3 +83,127 @@ _ERROR_CODE_FOR_STATUS: dict[AgentRunStatus, str | None] = {
 
 def _default_error_code(status: AgentRunStatus) -> str | None:
     return _ERROR_CODE_FOR_STATUS.get(status)
+
+
+# Native ACP terminal vocabulary (PRD R5). Compat/acpx statuses are never trusted here.
+_NATIVE_TERMINAL_STATUSES = frozenset(
+    {
+        AgentRunStatus.COMPLETED,
+        AgentRunStatus.FAILED,
+        AgentRunStatus.CANCELLED,
+        AgentRunStatus.TIMED_OUT,
+        AgentRunStatus.UNKNOWN,
+    }
+)
+_NATIVE_ORIGINS = frozenset({"acp", "supervisor"})
+_REQUIRED_NATIVE_RESULT_FIELDS = (
+    "run_id",
+    "status",
+    "business_verdict",
+    "error_code",
+    "detail_code",
+    "origin",
+    "retryable",
+    "acpx_exit_code",
+    "signal",
+    "stop_reason",
+    "usage",
+    "final_message",
+    "truncated",
+    "truncate_reason",
+    "observed_effect",
+    "run_dir",
+    "stderr_path",
+    "raw_event_path",
+    "redaction_report_path",
+)
+
+
+def _is_strict_bool(value: Any) -> bool:
+    return type(value) is bool
+
+
+def _is_optional_int(value: Any) -> bool:
+    return value is None or (type(value) is int)
+
+
+def _is_optional_str(value: Any) -> bool:
+    return value is None or isinstance(value, str)
+
+
+def _is_optional_dict(value: Any) -> bool:
+    return value is None or isinstance(value, dict)
+
+
+def validate_native_terminal_result(
+    payload: Any, *, run_id: str
+) -> dict[str, Any] | None:
+    """Validate a persisted Native ACP terminal ``result.json`` object.
+
+    Requires the complete base shape emitted by :func:`build_result_payload`,
+    exact ``run_id``, supported Native statuses only, exact retryability, and
+    strict types (``bool`` is not ``int``). Optional Native extension fields may
+    remain. Returns the validated payload, or ``None`` when evidence is
+    untrusted. Fail-closed: never raises with raw field values.
+    """
+    if not isinstance(payload, dict):
+        return None
+    for key in _REQUIRED_NATIVE_RESULT_FIELDS:
+        if key not in payload:
+            return None
+    if payload.get("run_id") != run_id or not isinstance(payload.get("run_id"), str):
+        return None
+    status_raw = payload.get("status")
+    if not isinstance(status_raw, str):
+        return None
+    try:
+        status = AgentRunStatus(status_raw)
+    except ValueError:
+        return None
+    if status not in _NATIVE_TERMINAL_STATUSES:
+        return None
+    retryable = payload.get("retryable")
+    if not _is_strict_bool(retryable):
+        return None
+    if retryable is not _RETRYABLE_DEFAULT[status]:
+        return None
+    origin = payload.get("origin")
+    if not isinstance(origin, str) or origin not in _NATIVE_ORIGINS:
+        return None
+    error_code = payload.get("error_code")
+    if status is AgentRunStatus.COMPLETED:
+        if error_code is not None:
+            return None
+    elif not isinstance(error_code, str):
+        return None
+    if not _is_optional_str(payload.get("detail_code")):
+        return None
+    if not _is_optional_int(payload.get("acpx_exit_code")):
+        return None
+    if not _is_optional_int(payload.get("signal")):
+        return None
+    if not _is_optional_str(payload.get("stop_reason")):
+        return None
+    if not _is_optional_dict(payload.get("usage")):
+        return None
+    if not isinstance(payload.get("final_message"), str):
+        return None
+    if not _is_strict_bool(payload.get("truncated")):
+        return None
+    if not _is_optional_str(payload.get("truncate_reason")):
+        return None
+    observed = payload.get("observed_effect")
+    if observed is not None and not _is_strict_bool(observed):
+        return None
+    if not isinstance(payload.get("run_dir"), str):
+        return None
+    if not isinstance(payload.get("stderr_path"), str):
+        return None
+    if not isinstance(payload.get("raw_event_path"), str):
+        return None
+    if not isinstance(payload.get("redaction_report_path"), str):
+        return None
+    # business_verdict is reserved; Native terminals emit null only.
+    if payload.get("business_verdict") is not None:
+        return None
+    return payload

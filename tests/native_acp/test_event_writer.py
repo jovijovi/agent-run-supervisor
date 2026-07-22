@@ -222,3 +222,112 @@ def test_max_events_reservation_holds_under_queue_timeout_path() -> None:
         assert len(handle.records) == before
 
     asyncio.run(case())
+
+
+class FailingAppendHandle:
+    """Append raises after ``fail_after`` successful writes (consumer-failure tap)."""
+
+    def __init__(self, *, fail_after: int = 0) -> None:
+        self.records: list[tuple[str, dict]] = []
+        self.calls = 0
+        self.fail_after = fail_after
+        self.error = OSError("injected consumer append failure")
+
+    def append_ndjson(self, name: str, record: dict) -> None:
+        self.calls += 1
+        if self.calls > self.fail_after:
+            raise self.error
+        self.records.append((name, dict(record)))
+
+
+def test_r4_b3_close_when_consumer_failed_queue_full_terminates_promptly() -> None:
+    """Failed consumer + saturated queue must not hang close on sentinel put."""
+
+    async def case() -> None:
+        import warnings
+
+        handle = FailingAppendHandle(fail_after=0)
+        writer = EventWriter(
+            handle,
+            max_event_bytes=65536,
+            queue_maxsize=2,
+            max_events=100,
+        )
+        await writer.start()
+        await writer.emit({"type": "first"})
+        consumer = writer._consumer
+        assert consumer is not None
+        await asyncio.wait({consumer}, timeout=2.0)
+        assert consumer.done()
+        # Saturate the queue after the consumer died — no drain can free a slot.
+        writer._queue.put_nowait({"type": "stuck-1"})
+        writer._queue.put_nowait({"type": "stuck-2"})
+        assert writer._queue.full()
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(OSError, match="injected consumer append failure"):
+                await asyncio.wait_for(writer.close(), 1.0)
+            # Deterministic cleanup: no pending consumer task reference.
+            assert writer._consumer is None
+            assert not any(issubclass(w.category, ResourceWarning) for w in caught)
+            pending = [
+                task
+                for task in asyncio.all_tasks()
+                if not task.done() and task is not asyncio.current_task()
+            ]
+            assert pending == []
+
+    asyncio.run(case())
+
+
+def test_r4_b3_close_when_consumer_failed_queue_not_full_surfaces_error() -> None:
+    async def case() -> None:
+        import warnings
+
+        handle = FailingAppendHandle(fail_after=0)
+        writer = EventWriter(handle, max_event_bytes=65536, queue_maxsize=8)
+        await writer.start()
+        await writer.emit({"type": "first"})
+        consumer = writer._consumer
+        assert consumer is not None
+        await asyncio.wait({consumer}, timeout=2.0)
+        assert consumer.done()
+        assert not writer._queue.full()
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(OSError, match="injected consumer append failure"):
+                await asyncio.wait_for(writer.close(), 1.0)
+            assert writer._consumer is None
+            assert not any(issubclass(w.category, ResourceWarning) for w in caught)
+
+    asyncio.run(case())
+
+
+def test_r4_b3_close_idempotent_after_successful_flush() -> None:
+    async def case() -> None:
+        handle = RecordingHandle()
+        writer = EventWriter(handle, max_event_bytes=65536)
+        await writer.start()
+        await writer.emit({"type": "usage_updated"})
+        await writer.close()
+        assert len(handle.records) == 1
+        await writer.close()  # idempotent; must not raise or leak
+        assert writer._consumer is None
+
+    asyncio.run(case())
+
+
+def test_r4_b3_close_preserves_normal_flush_order() -> None:
+    async def case() -> None:
+        handle = RecordingHandle()
+        writer = EventWriter(handle, max_event_bytes=65536, queue_maxsize=4)
+        await writer.start()
+        for index in range(4):
+            await writer.emit({"type": "tool_updated", "n": index})
+        await writer.close()
+        assert [record["n"] for _, record in handle.records] == [0, 1, 2, 3]
+        assert writer._consumer is None
+
+    asyncio.run(case())

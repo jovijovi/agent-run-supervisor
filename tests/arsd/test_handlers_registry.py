@@ -725,6 +725,99 @@ def test_natural_follow_completion_does_not_retain_stream(tmp_path: Path) -> Non
     run_async(case())
 
 
+@pytest.mark.parametrize(
+    "idle",
+    [
+        True,
+        False,
+        "1",
+        0,
+        -1,
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        3600.1,
+        10_000,
+        10**10000,
+    ],
+    ids=[
+        "true",
+        "false",
+        "str_1",
+        "zero",
+        "neg",
+        "nan",
+        "inf",
+        "ninf",
+        "over_float",
+        "10000",
+        "huge_int_1e10000",
+    ],
+)
+def test_r4_b5_follow_idle_seconds_rejects_non_finite_or_over_max(
+    tmp_path: Path, idle
+) -> None:
+    async def case():
+        harness = Harness(tmp_path)
+        caller = caller_for(principal_a())
+        try:
+            reply = await harness.submit(caller, "idle-bad-1")
+            before = set(harness.handlers._follow_streams)
+            with pytest.raises(protocol.ProtocolError) as err:
+                await call(
+                    harness,
+                    caller,
+                    "run_events",
+                    "idle-bad",
+                    {
+                        "run_id": reply["run_id"],
+                        "from_seq": 0,
+                        "follow": True,
+                        "follow_idle_seconds": idle,
+                    },
+                )
+            assert err.value.code == protocol.INVALID_REQUEST
+            assert "follow_idle" in err.value.message
+            # No stream registry entry / task created on rejection.
+            assert set(harness.handlers._follow_streams) == before
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+@pytest.mark.parametrize("idle", [0.05, 1, 3600, handlers.DEFAULT_FOLLOW_IDLE_SECONDS])
+def test_r4_b5_follow_idle_seconds_accepts_finite_production_values(
+    tmp_path: Path, idle
+) -> None:
+    async def case():
+        harness = Harness(tmp_path)
+        caller = caller_for(principal_a())
+        stream = None
+        try:
+            reply = await harness.submit(caller, "idle-ok-1")
+            stream = await call(
+                harness,
+                caller,
+                "run_events",
+                "idle-ok",
+                {
+                    "run_id": reply["run_id"],
+                    "from_seq": 0,
+                    "follow": True,
+                    "follow_idle_seconds": idle,
+                },
+            )
+            assert stream in harness.handlers._follow_streams
+            assert float(stream._idle) == float(idle)
+        finally:
+            if stream is not None:
+                await stream.aclose()
+            await harness.aclose()
+
+    run_async(case())
+
+
 def test_authorize_run_rejects_symlinked_run_dir(tmp_path: Path) -> None:
     async def case():
         from tests.arsd.test_admission import submit_command as _submit_command

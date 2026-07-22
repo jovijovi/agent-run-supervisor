@@ -20,7 +20,7 @@ from agent_run_supervisor.event_store import EventStore, atomic_write_json
 from agent_run_supervisor.exit_classifier import _RETRYABLE_DEFAULT, AgentRunStatus
 from agent_run_supervisor.native_acp import storage
 from agent_run_supervisor.native_acp.run_task import DISPATCH_STARTED_MARKER
-from agent_run_supervisor.result import build_result_payload
+from agent_run_supervisor.result import build_result_payload, validate_native_terminal_result
 from agent_run_supervisor.session import SessionNotFoundError, SessionStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -148,14 +148,14 @@ def _refuse_untrusted_terminal(
 def _validate_terminal_result(
     path: Path, *, run_id: str
 ) -> dict[str, Any] | None:
-    """Return a trusted terminal object, or ``None`` if evidence is unusable.
+    """Return a trusted Native terminal object, or ``None`` if unusable.
 
     Opens with ``O_RDONLY|O_NOFOLLOW``, validates the opened fd is a regular
-    file, and reads through that fd with a finite cap. Requires a JSON object
-    with exact ``run_id``, a recognized ``AgentRunStatus`` value, and exact
-    bool ``retryable`` matching the status default (including
-    ``unknown -> retryable=false``). Any fstat/read/close ``OSError`` is
-    treated as untrusted evidence (``None``); the fd is always closed.
+    file, and reads through that fd with a finite cap. Delegates schema trust
+    to :func:`validate_native_terminal_result` (complete Native base shape,
+    supported statuses only, exact retryability, strict types). Any
+    fstat/read/close ``OSError`` is untrusted evidence (``None``); the fd is
+    always closed.
     """
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
@@ -195,26 +195,7 @@ def _validate_terminal_result(
         payload = json.loads(text)
     except (UnicodeDecodeError, json.JSONDecodeError):
         return None
-    if not isinstance(payload, dict):
-        return None
-    if payload.get("run_id") != run_id:
-        return None
-    status_raw = payload.get("status")
-    if not isinstance(status_raw, str):
-        return None
-    try:
-        status = AgentRunStatus(status_raw)
-    except ValueError:
-        return None
-    retryable = payload.get("retryable")
-    if type(retryable) is not bool:
-        return None
-    expected = _RETRYABLE_DEFAULT[status]
-    if retryable is not expected:
-        return None
-    if status is AgentRunStatus.UNKNOWN and retryable is not False:
-        return None
-    return payload
+    return validate_native_terminal_result(payload, run_id=run_id)
 
 
 def _read_fd_capped(fd: int, limit: int) -> bytes:

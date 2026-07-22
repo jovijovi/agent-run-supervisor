@@ -91,6 +91,23 @@ def test_request_rejects_unknown_reuse_mode() -> None:
         _request(session_reuse="clone")
 
 
+@pytest.mark.parametrize("version", [2, 0, -1, True, False, "1", 1.0, None])
+def test_r4_b4_request_rejects_non_exact_schema_version(version) -> None:
+    from agent_run_supervisor.native_acp.spec import SPEC_SCHEMA_VERSION
+
+    assert SPEC_SCHEMA_VERSION == 1
+    with pytest.raises(SpecValidationError):
+        _request(schema_version=version)  # type: ignore[arg-type]
+
+
+def test_r4_b4_request_defaults_missing_schema_version_to_current() -> None:
+    from agent_run_supervisor.native_acp.spec import SPEC_SCHEMA_VERSION
+
+    req = _request()
+    assert req.schema_version == SPEC_SCHEMA_VERSION
+    assert SPEC_SCHEMA_VERSION == 1
+
+
 def test_limits_must_be_positive() -> None:
     with pytest.raises(SpecValidationError):
         RunLimits(turn_timeout_seconds=0)

@@ -178,6 +178,12 @@ class AgentRunRequest:
     schema_version: int = SPEC_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        _require(
+            not isinstance(self.schema_version, bool)
+            and isinstance(self.schema_version, int)
+            and self.schema_version == SPEC_SCHEMA_VERSION,
+            f"schema_version must be exactly {SPEC_SCHEMA_VERSION}",
+        )
         _require_text(self.owner, "owner")
         _require_text(self.namespace, "namespace")
         _require_text(self.profile_id, "profile_id")

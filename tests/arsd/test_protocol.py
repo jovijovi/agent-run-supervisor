@@ -405,6 +405,19 @@ def test_parse_submit_schema_version_must_be_integer(version) -> None:
     _reject("INVALID_REQUEST", protocol.parse_submit, payload)
 
 
+def test_r4_b4_parse_submit_rejects_schema_version_2_before_admission() -> None:
+    payload = valid_submit_payload()
+    payload["request"]["schema_version"] = 2
+    _reject("INVALID_REQUEST", protocol.parse_submit, payload)
+
+
+def test_r4_b4_parse_submit_accepts_missing_schema_version_as_v1() -> None:
+    payload = valid_submit_payload()
+    payload["request"].pop("schema_version", None)
+    command = protocol.parse_submit(payload)
+    assert command.request.schema_version == 1
+
+
 @pytest.mark.parametrize("key", ["argv", "env", "executable", "config_json"])
 def test_parse_submit_rejects_launch_surfaces_at_payload_level(key: str) -> None:
     payload = valid_submit_payload()

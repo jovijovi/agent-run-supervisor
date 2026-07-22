@@ -405,7 +405,9 @@ _BEHAVIOR_MUTATIONS = [
         "recovery_policy_hash",
         {"request": valid_wire_request(recovery_policy_hash="sha256:" + "5" * 64)},
     ),
-    ("schema_version", {"request": valid_wire_request(schema_version=2)}),
+    # schema_version is pinned to SPEC_SCHEMA_VERSION (R4/B4); it is no longer a
+    # free behavior-mutation input for digest sensitivity. Wire rejection of
+    # schema_version!=1 is covered by tests/arsd/test_protocol.py (r4_b4).
 ]
 
 

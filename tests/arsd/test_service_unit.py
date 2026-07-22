@@ -1273,3 +1273,116 @@ def test_r3_final_snapshot_unrelated_identities_do_not_substitute(monkeypatch) -
     msg = str(err.value).lower()
     assert "agent" in msg or "identity" in msg or "snapshot" in msg
     assert "mapping" not in msg
+
+
+def test_r4_b6_pre_kill_refreshes_cgroup_and_refuses_when_agent_omitted(
+    monkeypatch,
+) -> None:
+    """Initial cgroup list includes AGENT; refreshed list omits it → refuse, no kill."""
+    harness = _load_harness()
+    _assert_no_host_mutation(monkeypatch, harness)
+    main_pid = 9100
+    agent_ident = (9200, 4242)
+    helper_ident = (9300, 111)
+    calls: list[list[int]] = []
+
+    def fake_cgroup(_unit: str) -> list[int]:
+        # First membership check includes AGENT; final refresh drops it.
+        if not calls:
+            pids = [main_pid, agent_ident[0], helper_ident[0]]
+        else:
+            pids = [main_pid, helper_ident[0]]
+        calls.append(list(pids))
+        return pids
+
+    live = {
+        main_pid: (main_pid, 7),
+        agent_ident[0]: agent_ident,
+        helper_ident[0]: helper_ident,
+    }
+    monkeypatch.setattr(harness, "_cgroup_procs_for_unit", fake_cgroup)
+    monkeypatch.setattr(harness, "_process_start_identity", lambda pid: live.get(pid))
+
+    first = harness._cgroup_procs_for_unit("unit.service")
+    assert agent_ident[0] in first
+    with pytest.raises(harness.HarnessGateError) as err:
+        harness._final_pre_sigkill_cgroup_snapshot(
+            unit_name="unit.service",
+            agent_ident=agent_ident,
+        )
+    assert len(calls) == 2
+    assert agent_ident[0] not in calls[1]
+    msg = str(err.value).lower()
+    assert "agent" in msg or "identity" in msg or "snapshot" in msg
+    assert "mapping" not in msg
+
+
+def test_r4_b6_pre_kill_refreshes_cgroup_and_refuses_replaced_agent(
+    monkeypatch,
+) -> None:
+    """Refreshed list replaces AGENT PID with an unrelated descendant → refuse."""
+    harness = _load_harness()
+    _assert_no_host_mutation(monkeypatch, harness)
+    main_pid = 9100
+    agent_ident = (9200, 4242)
+    impostor = (9400, 7777)
+    calls: list[list[int]] = []
+
+    def fake_cgroup(_unit: str) -> list[int]:
+        if not calls:
+            pids = [main_pid, agent_ident[0]]
+        else:
+            pids = [main_pid, impostor[0]]
+        calls.append(list(pids))
+        return pids
+
+    live = {
+        main_pid: (main_pid, 7),
+        agent_ident[0]: agent_ident,
+        impostor[0]: impostor,
+    }
+    monkeypatch.setattr(harness, "_cgroup_procs_for_unit", fake_cgroup)
+    monkeypatch.setattr(harness, "_process_start_identity", lambda pid: live.get(pid))
+
+    # Earlier membership check (stale) still saw the AGENT.
+    first = harness._cgroup_procs_for_unit("unit.service")
+    assert agent_ident[0] in first
+    with pytest.raises(harness.HarnessGateError):
+        harness._final_pre_sigkill_cgroup_snapshot(
+            unit_name="unit.service",
+            agent_ident=agent_ident,
+        )
+    assert len(calls) == 2
+    assert impostor[0] in calls[-1]
+    assert agent_ident[0] not in calls[-1]
+
+
+def test_r4_b6_pre_kill_refresh_keeps_exact_agent_and_returns_fresh_pids(
+    monkeypatch,
+) -> None:
+    harness = _load_harness()
+    _assert_no_host_mutation(monkeypatch, harness)
+    main_pid = 9100
+    agent_ident = (9200, 4242)
+    helper_ident = (9300, 111)
+    calls = 0
+
+    def fake_cgroup(_unit: str) -> list[int]:
+        nonlocal calls
+        calls += 1
+        return [main_pid, agent_ident[0], helper_ident[0]]
+
+    live = {
+        main_pid: (main_pid, 7),
+        agent_ident[0]: agent_ident,
+        helper_ident[0]: helper_ident,
+    }
+    monkeypatch.setattr(harness, "_cgroup_procs_for_unit", fake_cgroup)
+    monkeypatch.setattr(harness, "_process_start_identity", lambda pid: live.get(pid))
+    fresh_pids, idents = harness._final_pre_sigkill_cgroup_snapshot(
+        unit_name="unit.service",
+        agent_ident=agent_ident,
+    )
+    assert calls == 1
+    assert fresh_pids == [main_pid, agent_ident[0], helper_ident[0]]
+    assert agent_ident in idents

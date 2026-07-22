@@ -877,3 +877,63 @@ def test_max_events_overflow_after_dispatch_fails_non_retryable(
     # Prompt was attempted (dispatch path), but evidence overflow controlled the verdict.
     assert (harness.run_dir() / "prompt-dispatch-started").exists()
     assert "session/prompt" in harness.methods_seen()
+
+
+def test_r4_b2_hang_overflow_timeout_must_not_persist_retryable_timed_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-terminating prompt + max_events overflow + supervisor timeout.
+
+    Evidence-pipeline failure must win over timed_out (which is retryable).
+    """
+    script = dict(HAPPY_SCRIPT)
+    script["hang_prompt_until_cancel"] = True
+    harness = Harness(tmp_path, monkeypatch, script)
+    result = _run(
+        harness.task(
+            request=_request(
+                # Allows dispatch, then overflows on post-dispatch evidence while
+                # the prompt hangs until the sealed turn timeout.
+                limits=RunLimits(max_events=3, turn_timeout_seconds=0.5)
+            )
+        )
+    )
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    assert payload["status"] != "timed_out"
+    assert payload["status"] == "failed"
+    assert payload["retryable"] is False
+    assert payload.get("detail_code") == "EVIDENCE_PIPELINE"
+    assert (harness.run_dir() / "prompt-dispatch-started").exists()
+    assert result.status is AgentRunStatus.FAILED
+
+
+def test_r4_b3_writer_close_failure_on_completed_is_evidence_pipeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An otherwise-completed Run whose writer close/consumer fails must not
+    persist completed — fail closed as non-retryable EVIDENCE_PIPELINE."""
+    import warnings
+
+    from agent_run_supervisor.native_acp.event_writer import EventWriter
+
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    real_close = EventWriter.close
+
+    async def close_then_fail(self):
+        await real_close(self)
+        raise OSError("injected consumer append failure")
+
+    monkeypatch.setattr(EventWriter, "close", close_then_fail)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = _run(harness.task())
+
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    assert result.status is AgentRunStatus.FAILED
+    assert payload["status"] == "failed"
+    assert payload["status"] != "completed"
+    assert payload["retryable"] is False
+    assert payload.get("detail_code") == "EVIDENCE_PIPELINE"
+    # Bounded cleanup: no asyncio resource warnings from undrained writers.
+    assert not any(issubclass(w.category, ResourceWarning) for w in caught)
