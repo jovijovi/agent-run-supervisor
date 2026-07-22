@@ -36,9 +36,11 @@ from agent_run_supervisor.native_acp.spec import AgentRunRequest, InputRef, RunL
 
 REQUIRED_MODEL = "kimi-for-coding/k3"
 REQUIRED_EFFORT = "max"
-# Exact advertised second model approved by the C10 G3 gate record; never a
-# guess or alias. Its real usability is proven by smoke 3 itself.
-SECOND_MODEL = "kimi-for-coding/kimi-for-coding"
+# Chair-approved second model from the Phase-A zero-prompt capability probe:
+# the exact advertised ID whose post-set-model option set carries the effort
+# selector with literal offered values (high|max). Never a guess or alias;
+# real usability is proven by the S3 model-switch acceptance itself.
+SECOND_MODEL = "deepseek/deepseek-v4-pro"
 SECOND_EFFORT = "high"
 
 RUN_TIMEOUT_SECONDS = 900
@@ -67,7 +69,7 @@ def _request(model: str, effort: str, session_id: str) -> AgentRunRequest:
         grant_role_hash="sha256:" + "2" * 64,
         grant_capabilities=("read",),
         mcp_snapshot_hashes=(),
-        credential_refs=("kimi-for-coding",),
+        credential_refs=("kimi-for-coding", "deepseek"),
         limits=RunLimits(),
         evidence_policy_hash="sha256:" + "3" * 64,
         recovery_policy_hash="sha256:" + "4" * 64,
@@ -256,34 +258,111 @@ def test_s2_session_load_nonce_continuity() -> None:
     )
 
 
-MODEL_SWITCH_NAMED_GAP = (
-    "named G3 gap: on real OpenCode 1.18.4 the 'effort' selector is "
-    "model-dependent and is advertised only for kimi-for-coding/k3 "
-    "(choices low|high|max). The complete post-set-model option set for both "
-    "approved candidate second models (kimi-for-coding/kimi-for-coding, "
-    "kimi-for-coding/kimi-for-coding-highspeed) contains no effort selector, "
-    "so neither is usable under the mandatory exact sequence "
-    "set-model → rediscover-effort → set-effort → exact-readback. "
-    "An effort-only switch never substitutes for the model-switch acceptance; "
-    "Stage-1 exit stays blocked on this smoke pending chair decision."
-)
+def test_s3_model_switch_with_exact_readback() -> None:
+    """Real between-Run model switching on the same external session
+    (chair-approved acceptance replacing the earlier named-gap skip):
+    K3/max baseline → deepseek-v4-pro/high → K3/max, all three Runs on one
+    external Agent Session through process-per-Run session/load."""
+    root, workspace = _fresh_root("s3m")
+    store = storage.native_session_store(root)
+    assert sorted(entry.name for entry in workspace.iterdir()) == []
 
+    r1 = _run(
+        root,
+        workspace,
+        "run-s3m-a",
+        _request(REQUIRED_MODEL, REQUIRED_EFFORT, "smoke-s3m"),
+        "Reply with exactly S3M_BASELINE_OK and nothing else. Do not use any tools.",
+    )
+    assert r1.status is AgentRunStatus.COMPLETED, r1.payload
+    _spec_effective_equality(r1.run_dir)
+    record = store.open_session("smoke-s3m")
+    external_id = record.agent_session_id
+    assert external_id
+    assert (record.last_effective_model, record.last_effective_effort) == (
+        REQUIRED_MODEL,
+        REQUIRED_EFFORT,
+    )
 
-def test_s3_model_switch_blocked_named_gap() -> None:
-    # Fail-closed per the plan: no effort-only substitution, no guessed or
-    # aliased model, no architecture change. The gap evidence (triaged failed
-    # run + live option-set probe) lives in the out-of-Git C10 evidence dir.
-    pytest.skip(MODEL_SWITCH_NAMED_GAP)
+    # Real model-ID switch with an offered literal effort, exact-readback
+    # gated before the prompt.
+    r2 = _run(
+        root,
+        workspace,
+        "run-s3m-b",
+        _request(SECOND_MODEL, SECOND_EFFORT, "smoke-s3m"),
+        "Reply with exactly S3M_SWITCH_OK and nothing else. Do not use any tools.",
+    )
+    assert r2.status is AgentRunStatus.COMPLETED, r2.payload
+    effective2 = _effective(r2.run_dir)
+    assert effective2["effective_model"] == SECOND_MODEL
+    assert effective2["effective_effort"] == SECOND_EFFORT
+    _spec_effective_equality(r2.run_dir)
+    families2 = [event["type"] for event in _events(r2.run_dir)]
+    assert "session_load_requested" in families2
+    assert "session_new_requested" not in families2
+    record = store.open_session("smoke-s3m")
+    assert record.agent_session_id == external_id
+    assert (record.last_effective_model, record.last_effective_effort) == (
+        SECOND_MODEL,
+        SECOND_EFFORT,
+    )
+
+    # Switch back to literal K3/max: the switch-back proof.
+    r3 = _run(
+        root,
+        workspace,
+        "run-s3m-c",
+        _request(REQUIRED_MODEL, REQUIRED_EFFORT, "smoke-s3m"),
+        "Reply with exactly S3M_RETURN_OK and nothing else. Do not use any tools.",
+    )
+    assert r3.status is AgentRunStatus.COMPLETED, r3.payload
+    effective3 = _effective(r3.run_dir)
+    assert effective3["effective_model"] == REQUIRED_MODEL
+    assert effective3["effective_effort"] == REQUIRED_EFFORT
+    _spec_effective_equality(r3.run_dir)
+    families3 = [event["type"] for event in _events(r3.run_dir)]
+    assert "session_load_requested" in families3
+    assert "session_new_requested" not in families3
+    record = store.open_session("smoke-s3m")
+    assert record.agent_session_id == external_id  # unchanged across all three
+    assert (record.last_effective_model, record.last_effective_effort) == (
+        REQUIRED_MODEL,
+        REQUIRED_EFFORT,
+    )
+
+    for result in (r1, r2, r3):
+        assert (result.run_dir / "prompt-dispatch-started").exists()
+        assert (result.run_dir / "prompt-accepted").exists()
+        identity = _effective(result.run_dir)["process_identity"]
+        _assert_pid_gone(identity["pid"])
+    assert sorted(entry.name for entry in workspace.iterdir()) == []
+
+    _evidence(
+        "s3-model-switch",
+        {
+            "chair_approved_second_model": SECOND_MODEL,
+            "offered_effort_used": SECOND_EFFORT,
+            "baseline_pair": [REQUIRED_MODEL, REQUIRED_EFFORT],
+            "switched_pair": [SECOND_MODEL, SECOND_EFFORT],
+            "switch_back_pair": [REQUIRED_MODEL, REQUIRED_EFFORT],
+            "exact_readback_before_each_prompt": True,
+            "external_session_id_unchanged": True,
+            "reuse_runs_used_session_load_only": True,
+            "last_effective_commits_verified": True,
+            "markers_present_each_run": True,
+            "workspace_pre_post_empty": True,
+            "children_reaped": True,
+            "artifact_dirs": [str(r1.run_dir), str(r2.run_dir), str(r3.run_dir)],
+        },
+    )
 
 
 def test_s3_effort_switch_with_exact_readback() -> None:
-    """Real between-Run effort switching on the same external session.
-
-    This proves the effort half of the switch acceptance (max→high→max, each
-    exact-readback gated, last_effective committed, session/load reuse). It
-    is explicitly NOT a substitute for the model-switch acceptance, which is
-    blocked by MODEL_SWITCH_NAMED_GAP.
-    """
+    """Real between-Run effort switching on the same external session
+    (max→high→max on K3, each exact-readback gated, last_effective
+    committed, session/load reuse) — complements the model-switch
+    acceptance above."""
     root, workspace = _fresh_root("s3")
     store = storage.native_session_store(root)
 
@@ -307,7 +386,7 @@ def test_s3_effort_switch_with_exact_readback() -> None:
         root,
         workspace,
         "run-s3b",
-        _request(REQUIRED_MODEL, SECOND_EFFORT, "smoke-s3"),
+        _request(REQUIRED_MODEL, "high", "smoke-s3"),
         "Reply with exactly S3_SWITCH_OK and nothing else. Do not use any tools.",
     )
     assert r2.status is AgentRunStatus.COMPLETED, r2.payload
@@ -348,14 +427,13 @@ def test_s3_effort_switch_with_exact_readback() -> None:
         "s3-effort-switch",
         {
             "baseline_pair": [REQUIRED_MODEL, REQUIRED_EFFORT],
-            "switched_pair": [REQUIRED_MODEL, SECOND_EFFORT],
+            "switched_pair": [REQUIRED_MODEL, "high"],
             "switch_back_pair": [REQUIRED_MODEL, REQUIRED_EFFORT],
             "exact_readback_each_run": True,
             "last_effective_commits_verified": True,
             "external_session_id_unchanged": True,
             "session_load_reused": True,
-            "not_a_substitute_for_model_switch": True,
-            "model_switch_named_gap": MODEL_SWITCH_NAMED_GAP,
+            "complements": "s3-model-switch acceptance",
             "artifact_dirs": [str(r1.run_dir), str(r2.run_dir), str(r3.run_dir)],
         },
     )
