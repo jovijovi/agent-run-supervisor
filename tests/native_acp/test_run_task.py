@@ -1606,8 +1606,38 @@ def test_r8_residual_finalize_failure_payload_omits_exception_text(
     assert "/tmp/secret-path" not in blob
     assert "RuntimeError" not in blob
     assert "OSError" not in blob
-    # In-memory only — do not publish a durable false terminal from this path.
-    assert not (harness.run_dir() / "result.json").exists()
+
+
+def test_r9_b2_finalize_inner_failure_invokes_emergency_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unexpected `_finalize_inner` failure must emergency-clean before return."""
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    spawned = _recording_spawn(monkeypatch)
+    cleanup_calls: list[str] = []
+    real_emergency = RunTask._emergency_cleanup
+
+    def tracking_emergency(self, ctx):
+        cleanup_calls.append("emergency")
+        return real_emergency(self, ctx)
+
+    async def boom_inner(self, ctx):
+        # Fail before driver close / child reap — the pre-reap gap.
+        raise RuntimeError(_CANARY_EXC)
+
+    monkeypatch.setattr(RunTask, "_emergency_cleanup", tracking_emergency)
+    monkeypatch.setattr(RunTask, "_finalize_inner", boom_inner)
+    result = _run(harness.task())
+    assert cleanup_calls == ["emergency"]
+    assert result.status is AgentRunStatus.FAILED
+    assert result.payload["status"] == "failed"
+    assert result.payload["error"] == "finalization failed"
+    assert result.payload["detail_code"] == "FINALIZATION_FAILED"
+    blob = json.dumps(result.payload)
+    assert _CANARY_EXC not in blob
+    assert "RuntimeError" not in blob
+    assert spawned, "child process was never spawned"
+    _assert_pid_gone_sync(spawned[0].pid)
 
 
 def test_r8_residual_disposition_failure_payload_omits_exception_text(

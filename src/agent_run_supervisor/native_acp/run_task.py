@@ -1007,8 +1007,11 @@ class RunTask:
         except asyncio.CancelledError:
             raise
         except BaseException:
-            # Caller-visible in-memory failure only — never interpolate exception
-            # text, paths, secrets, or exception class names into the payload.
+            # Pre-reap / unexpected inner failure: contain the child and lease
+            # before any result that lets registry deregistration proceed.
+            # Caller-visible payload stays fixed/sanitized — never interpolate
+            # exception text, paths, secrets, or exception class names.
+            self._emergency_cleanup(ctx)
             payload = {
                 "run_id": self._run_id,
                 "status": "failed",

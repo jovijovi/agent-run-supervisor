@@ -268,6 +268,15 @@ class RunRegistry:
             self._entries.pop(run_id, None)
 
     async def cancel(self, run_id: str, *, wait_seconds: float) -> bool:
+        """Request cancellation and wait up to ``wait_seconds``.
+
+        Returns True only when the registry task has actually finished.
+        Timeout/error while the task remains live is uncontained (False) —
+        never reported as successful containment. Caller ``CancelledError``
+        propagates (waiter cancellation is not a containment outcome); a
+        shielded task that itself finishes via cancellation remains a normal
+        containment result.
+        """
         async with self._lock:
             entry = self._entries.get(run_id)
             task = entry.task if entry is not None else None
@@ -276,11 +285,32 @@ class RunRegistry:
         task.cancel()
         try:
             await asyncio.wait_for(asyncio.shield(task), wait_seconds)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+        except asyncio.TimeoutError:
             pass
+        except asyncio.CancelledError:
+            # shield(task) re-raises the task's CancelledError outcome when the
+            # task finishes cancelled; that is containment, not waiter cancel.
+            # Propagate only when *this* coroutine was cancelled.
+            me = asyncio.current_task()
+            if me is not None and me.cancelling():
+                raise
         except Exception:
             pass
-        return True
+        return bool(task.done())
+
+    async def wait_until_unregistered(self, run_id: str) -> None:
+        """Await the existing registry task until it finishes and unregisters.
+
+        Uses ``asyncio.wait`` on the live task — no busy polling and no
+        background workers. Propagates cancellation of the waiter; the task's
+        own outcome is ignored (lifecycle completion is the only contract).
+        """
+        async with self._lock:
+            entry = self._entries.get(run_id)
+            task = entry.task if entry is not None else None
+        if task is None or task.done():
+            return
+        await asyncio.wait({task})
 
     async def cancel_all(self, *, wait_seconds: float) -> None:
         async with self._lock:
@@ -1134,20 +1164,37 @@ class ArsdHandlers:
         run_dir: Path,
         submission: Mapping[str, Any] | None,
     ) -> None:
-        """Cancel/contain a live Run, fence+quarantine Session, then refuse."""
+        """Cancel/contain a live Run, fence+quarantine Session, then refuse.
+
+        No caller-visible refusal is emitted while the registry entry can still
+        represent a live Run. A bounded cancel timeout/error is treated as
+        uncontained: fence the Session, then await actual task unregistration
+        before the sanitized untrusted-terminal refusal.
+        """
         del run_dir  # path retained for call-site clarity; quarantine uses session store
         if self.registry.is_registered(run_id):
             try:
                 await self.registry.cancel(run_id, wait_seconds=self._cancel_wait)
-                for _ in range(50):
-                    if not self.registry.is_registered(run_id):
-                        break
-                    await asyncio.sleep(0.01)
             except Exception:
-                # Cancel/containment failure must not skip fence+refuse.
                 _LOGGER.exception(
                     "arsd: containment cancel failed for untrusted terminal %s", run_id
                 )
+                # Ensure cancellation was requested even when wait/report failed.
+                task = self.registry.task_for(run_id)
+                if task is not None and not task.done():
+                    task.cancel()
+            if self.registry.is_registered(run_id):
+                # Uncontained after the bounded cancel attempt: fence first,
+                # then wait on the existing task lifecycle (no renamed refuse).
+                try:
+                    _quarantine_bound_session(
+                        self._session_store, run_id=run_id, submission=submission
+                    )
+                except Exception:
+                    _LOGGER.exception(
+                        "arsd: containment quarantine failed for live run %s", run_id
+                    )
+                await self.registry.wait_until_unregistered(run_id)
         try:
             _quarantine_bound_session(
                 self._session_store, run_id=run_id, submission=submission

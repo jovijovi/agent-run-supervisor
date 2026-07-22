@@ -1976,3 +1976,246 @@ def test_r8_b2_trusted_and_absent_registered_idempotency_preserved(
             await harness.aclose()
 
     run_async(case())
+
+
+# -- R9 B1: cancel timeout must not fake containment / refuse while live ------
+
+
+def test_r9_b1_cancel_timeout_reports_uncontained(tmp_path: Path) -> None:
+    """RunRegistry.cancel must not report success when the task outlives wait."""
+
+    async def case():
+        registry = handlers.RunRegistry(max_concurrent_runs=1)
+        token = await registry.reserve(session_id=None)
+        release = asyncio.Event()
+        started = asyncio.Event()
+
+        async def sticky():
+            started.set()
+            while not release.is_set():
+                try:
+                    await asyncio.wait_for(release.wait(), 0.01)
+                except asyncio.TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    # Absorb cancel (3.11+ cancel-count) and stay registered.
+                    task = asyncio.current_task()
+                    if task is not None:
+                        task.uncancel()
+                    continue
+
+        await registry.register(
+            "run-r9-cancel",
+            sticky(),
+            reservation=token,
+            principal_id="p",
+            owner="hermes",
+            namespace="hermes/doc-check",
+            session_id=None,
+            submitted_at="2026-07-22T00:00:00+00:00",
+        )
+        await started.wait()
+        assert registry.is_registered("run-r9-cancel")
+        ok = await registry.cancel("run-r9-cancel", wait_seconds=0.05)
+        assert ok is False
+        assert registry.is_registered("run-r9-cancel")
+        release.set()
+        task = registry.task_for("run-r9-cancel")
+        assert task is not None
+        with contextlib.suppress(BaseException):
+            await asyncio.wait_for(task, 1.0)
+
+    run_async(case())
+
+
+def test_r9_b1_wait_until_unregistered_awaits_task_lifecycle(
+    tmp_path: Path,
+) -> None:
+    """Registry wait primitive uses the existing task; no busy poll / workers."""
+
+    async def case():
+        registry = handlers.RunRegistry(max_concurrent_runs=1)
+        token = await registry.reserve(session_id=None)
+        release = asyncio.Event()
+        started = asyncio.Event()
+
+        async def worker():
+            started.set()
+            await release.wait()
+
+        await registry.register(
+            "run-r9-wait",
+            worker(),
+            reservation=token,
+            principal_id="p",
+            owner="hermes",
+            namespace="hermes/doc-check",
+            session_id=None,
+            submitted_at="2026-07-22T00:00:00+00:00",
+        )
+        await started.wait()
+        waiter = asyncio.create_task(registry.wait_until_unregistered("run-r9-wait"))
+        await asyncio.sleep(0.05)
+        assert not waiter.done()
+        assert registry.is_registered("run-r9-wait")
+        release.set()
+        await asyncio.wait_for(waiter, 1.0)
+        assert not registry.is_registered("run-r9-wait")
+
+    run_async(case())
+
+
+def test_r9_b1_wait_until_unregistered_propagates_waiter_cancellation(
+    tmp_path: Path,
+) -> None:
+    async def case():
+        registry = handlers.RunRegistry(max_concurrent_runs=1)
+        token = await registry.reserve(session_id=None)
+        started = asyncio.Event()
+
+        async def worker():
+            started.set()
+            await asyncio.Event().wait()
+
+        await registry.register(
+            "run-r9-wcancel",
+            worker(),
+            reservation=token,
+            principal_id="p",
+            owner="hermes",
+            namespace="hermes/doc-check",
+            session_id=None,
+            submitted_at="2026-07-22T00:00:00+00:00",
+        )
+        await started.wait()
+        waiter = asyncio.create_task(
+            registry.wait_until_unregistered("run-r9-wcancel")
+        )
+        await asyncio.sleep(0.02)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert registry.is_registered("run-r9-wcancel")
+        task = registry.task_for("run-r9-wcancel")
+        assert task is not None
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await asyncio.wait_for(task, 1.0)
+
+    run_async(case())
+
+
+def test_r9_b1_cancel_propagates_waiter_cancellation(tmp_path: Path) -> None:
+    """Caller CancelledError must propagate from RunRegistry.cancel, not become False."""
+
+    async def case():
+        registry = handlers.RunRegistry(max_concurrent_runs=1)
+        token = await registry.reserve(session_id=None)
+        release = asyncio.Event()
+        started = asyncio.Event()
+
+        async def sticky():
+            started.set()
+            while not release.is_set():
+                try:
+                    await asyncio.wait_for(release.wait(), 0.01)
+                except asyncio.TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    task = asyncio.current_task()
+                    if task is not None:
+                        task.uncancel()
+                    continue
+
+        await registry.register(
+            "run-r9-ccancel",
+            sticky(),
+            reservation=token,
+            principal_id="p",
+            owner="hermes",
+            namespace="hermes/doc-check",
+            session_id=None,
+            submitted_at="2026-07-22T00:00:00+00:00",
+        )
+        await started.wait()
+        assert registry.is_registered("run-r9-ccancel")
+        waiter = asyncio.create_task(
+            registry.cancel("run-r9-ccancel", wait_seconds=30.0)
+        )
+        try:
+            # Let cancel() enter the shielded wait_for before cancelling the waiter.
+            await asyncio.sleep(0.05)
+            assert not waiter.done()
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+            assert registry.is_registered("run-r9-ccancel")
+        finally:
+            release.set()
+            if not waiter.done():
+                waiter.cancel()
+                with contextlib.suppress(BaseException):
+                    await waiter
+            task = registry.task_for("run-r9-ccancel")
+            if task is not None:
+                with contextlib.suppress(BaseException):
+                    await asyncio.wait_for(task, 1.0)
+
+    run_async(case())
+
+
+def test_r9_b1_invalid_terminal_waits_for_unregistration_before_refusal(
+    tmp_path: Path,
+) -> None:
+    """No caller-visible ProtocolError while the registry entry is still live."""
+
+    async def case():
+        harness = Harness(tmp_path, mode="pending", cancel_wait_seconds=0.05)
+        seed_session(harness.session_store, session_id="sess-arsd-1")
+        caller = caller_for(principal_a())
+
+        async def timeout_cancel(run_id, *, wait_seconds):
+            # Bounded cancel attempt expires; task remains registered/live.
+            del run_id
+            await asyncio.sleep(min(float(wait_seconds), 0.05))
+            return False
+
+        try:
+            reply = await harness.submit(caller, "r9-live-1")
+            run_id = reply["run_id"]
+            await asyncio.sleep(0.05)
+            assert harness.handlers.registry.is_registered(run_id)
+            (harness.run_dir(run_id) / "result.json").write_bytes(b"[]")
+            harness.handlers.registry.cancel = timeout_cancel  # type: ignore[method-assign]
+
+            status_task = asyncio.create_task(
+                call(harness, caller, "run_status", "r9-live", {"run_id": run_id})
+            )
+            # Past the bounded cancel attempt: handler must still be pending.
+            await asyncio.sleep(0.2)
+            assert not status_task.done(), (
+                "containment must not return/raise while the Run is registered"
+            )
+            assert harness.handlers.registry.is_registered(run_id)
+            assert (
+                harness.session_store.open_session("sess-arsd-1").state == "quarantined"
+            )
+
+            reg_task = harness.handlers.registry.task_for(run_id)
+            assert reg_task is not None
+            reg_task.cancel()
+            with pytest.raises(protocol.ProtocolError) as err:
+                await asyncio.wait_for(status_task, 2.0)
+            assert err.value.code == protocol.INTERNAL
+            assert "untrusted" in err.value.message.lower() or (
+                "corrupt" in err.value.message.lower()
+            )
+            assert not harness.handlers.registry.is_registered(run_id)
+        finally:
+            if "status_task" in locals() and not status_task.done():
+                status_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await status_task
+            await harness.aclose()
+
+    run_async(case())
