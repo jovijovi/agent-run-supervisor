@@ -16,6 +16,10 @@ class AgentRunStatus(str, Enum):
     PROTOCOL_ERROR = "protocol_error"
     INFRASTRUCTURE_ERROR = "infrastructure_error"
     POLICY_ERROR = "policy_error"
+    # Native ACP terminal vocabulary (PRD R5); never produced by classify_exit.
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    UNKNOWN = "unknown"
 
 
 _RETRYABLE_DEFAULT: dict[AgentRunStatus, bool] = {
@@ -32,6 +36,10 @@ _RETRYABLE_DEFAULT: dict[AgentRunStatus, bool] = {
     AgentRunStatus.PROTOCOL_ERROR: False,
     AgentRunStatus.INFRASTRUCTURE_ERROR: True,
     AgentRunStatus.POLICY_ERROR: False,
+    AgentRunStatus.FAILED: False,
+    AgentRunStatus.CANCELLED: False,
+    # unknown is hard-False: a possibly-dispatched prompt is never retried.
+    AgentRunStatus.UNKNOWN: False,
 }
 
 _BASE_STATUS_FOR_EXIT: dict[int, AgentRunStatus] = {

@@ -122,6 +122,15 @@ aliased model ID.
   - Pin symbols/types required by the current vNext technical solution: client-side connection class (expected `ClientSideConnection`), `Client` callback surface (session update, permission request, fs), initialize / session new / **session load** / session close / set-config / prompt / **cancel** entry points, config-option carriers (expected `NewSessionResponse.config_options`, `SetSessionConfigOptionResponse.config_options`, `ConfigOptionUpdate`), stop-reason vocabulary incl. `end_turn`.
   - Record the connection constructor's stream/I-O model (asyncio streams vs raw pipes) — this pins the C3 stream surface.
   - Where an actual name differs from the current vNext design's expectation but is semantically equivalent, the test pins the **actual** name and the same commit updates this plan's symbol table with a drift note; a semantic gap (e.g., no session-load API) is a Stage-0 stop (§5).
+  - **Symbol drift note (C1, verified against installed 0.11.0):** the actual config setter is
+    `ClientSideConnection.set_config_option` (design expectation `set_session_config_option`) and the
+    actual `Client` callback protocol lives at `acp.interfaces.Client` (design expectation
+    `acp.schema.Client`); both are semantically equivalent and the contract tests pin the actual names.
+    Verified surface: `acp.client.connection.ClientSideConnection` with `initialize / new_session /
+    load_session / set_config_option / prompt / cancel / close_session`; constructor takes
+    `input_stream`/`output_stream` and enforces asyncio `StreamWriter`/`StreamReader` at runtime;
+    callback surface `session_update / request_permission / read_text_file / write_text_file`;
+    config-option carriers and `end_turn` stop reason are as expected. No semantic gap.
 - **G5 audit (read-only; source-grounded consumer inventory, not a grep transcript):** searches (`grep -rn "AgentRunStatus"` plus at least one independent status-string-literal search, e.g. `grep -rn '"completed"\|"failed"\|_SUCCESS_STATUSES\|supervisor_status' src tests`, and CodeGraph cross-reference) are **discovery signals only — neither grep nor CodeGraph alone is claimed as proof of consumer completeness or correctness**. The audit reads each consumer and must cover, at minimum, these classes:
   - enum definitions/imports and enum-keyed mappings: `exit_classifier.py:7` (`AgentRunStatus`), `_RETRYABLE_DEFAULT:21`, `_BASE_STATUS_FOR_EXIT:37`, `result.py:66` (`_ERROR_CODE_FOR_STATUS` + `_default_error_code:81` — `.get` tolerant, returns `None` for unmapped members);
   - direct and indirect status **string** readers, literal comparisons, and success sets: `commands.py:216,310` (`result["status"] == "completed"` exit-code mapping — new members map to exit 1; semantically meaningful), `runner.py:229` (literal `"dry_run"` status written outside the enum), `parser.py:145,392` (acpx stream/tool status vocabulary — classify explicitly as a distinct vocabulary, not a Run status consumer), `hermes_caller/events.py:54` (event status passthrough);
@@ -295,6 +304,16 @@ C2/C3/C4 are mutually independent and may be developed in any order after C1; C6
 
 - **Goal:** Stage-1 GREEN against the real agent. Deterministic RED discipline is carried by C5–C9's L2 suite; this slice's failures are real-world evidence, triaged and reported, never papered over.
 - **Preconditions (checked and reported first — G3/G6):** `ARS_NATIVE_SMOKE=1`; the executable resolved by `OPENCODE_1_18_4` reports version **1.18.4** (mismatch ⇒ stop: the profile is closed); Kimi Code credentials and literal K3 access are present through registered credential slots; at least one second model is both advertised by the same live Agent/provider and actually usable. The execution evidence records and explicitly approves that exact advertised model ID before the switch; the plan never guesses or aliases it. A missing prerequisite is reported as a named gap — an effort-only switch never substitutes for the model-switch acceptance. This is the **full G3 gate re-run with real credential/model usability, fail-closed**; the §2 DoR advisory readiness snapshot never substitutes for it.
+- **Second-model decision note (C10, chair-approved):** real OpenCode 1.18.4 advertises the `effort`
+  selector model-dependently — for `kimi-for-coding/k3` (literal choices low|high|max) but for
+  neither kimi candidate second model, which made the original candidates unusable under the exact
+  sequence (named gap, fail-closed, rollback proven). Per chair decision the exact model+effort
+  contract is kept unchanged and the registered second model is **`deepseek/deepseek-v4-pro`**
+  (already-configured `deepseek` credential slot; zero-prompt capability probe shows literal effort
+  choices high|max in its post-set-model set). `OPENCODE_1_18_4` revision 2 registers the closed
+  model pair and the second credential slot name; the S3 switch acceptance runs
+  K3/max → deepseek-v4-pro/high → K3/max on one external Session via `session/load`. Sanitized
+  evidence: out-of-Git C10 records (`phase-a-second-model-selection`, `s3-model-switch`).
 - **Create:** `tests/native_acp/test_real_opencode_smoke.py`, env-gated (skips in CI; operator-executed for Stage-1 exit), each smoke in a disposable empty workspace under a fresh temp dir **outside any tracked worktree**, with direct pre/post directory-listing assertions (both must be empty — the primary no-change evidence; `workspace_hash` is a binding-config hash and `git status` is never used as change evidence):
   1. **S1-equivalent read-only run** (new session): initialize capabilities recorded — **G6 checkpoint: `loadSession` advertised**; exact k3/`max` sequence with both discovery snapshots persisted; exactly one `session/prompt`; `stop_reason=end_turn`; result carries final_message and exact effective pair; normalized events + both markers + `redaction-report.json` with `matches: []`; workspace listings empty; no leftover processes (identity-probe on the recorded pgid/pid).
   2. **Continuity across process-per-Run:** R1 plants a random nonce; R2 on the same ARS session goes through `session/load` (external ID unchanged) and asks for recall; R2's final_message must contain the nonce. This is the **context-token continuity** proof the zero-prompt cross-process probe explicitly did not provide.

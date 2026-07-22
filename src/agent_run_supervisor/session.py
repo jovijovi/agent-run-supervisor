@@ -47,6 +47,11 @@ LIFECYCLE_GUARD = ".lifecycle.guard"
 
 STATE_OPEN = "open"
 STATE_CLOSED = "closed"
+# Native-only persistent state (PRD R5). acpx records never carry it; the
+# canonical Native vocabulary maps active <-> open at the storage seam.
+STATE_QUARANTINED = "quarantined"
+
+SESSION_KIND_NATIVE = "native"
 
 # Session ids name a directory under the sessions root, so they must be safe
 # path components: start alphanumeric, then alphanumerics/underscore/hyphen. No
@@ -91,21 +96,34 @@ class SessionClosedError(SessionError):
     """
 
 
+class SessionQuarantinedError(SessionClosedError):
+    """Raised when an operation targets a quarantined native session.
+
+    Subclasses :class:`SessionClosedError` so existing acpx catch-sites keep
+    catching (acpx records never carry the state). Quarantine is irreversible
+    in v1: no API un-quarantines a record.
+    """
+
+
 @dataclass(frozen=True)
 class SessionRecord:
+    # Field order is unchanged; the persisted key set per record kind is the
+    # contract (see ``_record_to_dict``), not dataclass default mechanics.
+    # Legacy acpx records always carry the role/policy/acpx fields; native
+    # records omit them entirely and never serialize null or sentinel values.
     schema_version: int
     session_id: str
-    role_id: str
-    role_hash: str
-    workspace_hash: str
-    policy_hash: str
-    acpx_version: str
-    adapter_agent: str
-    effective_cwd: str
-    matched_root: str | None
-    state: str
-    created_at: str
-    updated_at: str
+    role_id: str | None = None
+    role_hash: str | None = None
+    workspace_hash: str | None = None
+    policy_hash: str | None = None
+    acpx_version: str | None = None
+    adapter_agent: str | None = None
+    effective_cwd: str | None = None
+    matched_root: str | None = None
+    state: str = STATE_OPEN
+    created_at: str | None = None
+    updated_at: str | None = None
     acpx_session_id: str | None = None
     session_name: str | None = None
     # Optional native --mcp-config binding: canonical config path + content
@@ -113,6 +131,19 @@ class SessionRecord:
     # pre-feature records keep their exact serialized shape.
     mcp_config_path: str | None = None
     mcp_config_sha256: str | None = None
+    # Native session identity/observations (absent => legacy acpx record).
+    # All optional, omitted when unset — the exact mcp_config_* pattern.
+    session_kind: str | None = None
+    native_profile_id: str | None = None
+    native_profile_revision: int | None = None
+    native_profile_hash: str | None = None
+    agent_session_id: str | None = None
+    owner: str | None = None
+    namespace: str | None = None
+    last_effective_model: str | None = None
+    last_effective_effort: str | None = None
+    quarantine_reason: str | None = None
+    quarantined_by_run_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -222,6 +253,164 @@ class SessionStore:
             raise SessionExistsError(f"session {session_id!r} already exists") from exc
         return record
 
+    def create_native_session(
+        self,
+        *,
+        session_id: str,
+        profile_id: str,
+        profile_revision: int,
+        profile_hash: str,
+        owner: str,
+        namespace: str,
+        workspace_hash: str,
+        effective_cwd: str,
+        matched_root: str | None,
+        now: _dt.datetime | None = None,
+    ) -> SessionRecord:
+        """Create a Native session record — the only Native creation API.
+
+        Takes **no** ``AgentRoleSpec`` and never accepts, synthesizes, or
+        defaults any legacy role hash, policy hash, acpx version, adapter,
+        acpx session identifier, or sentinel value. Field provenance is fixed:
+        profile identity from the resolved frozen ``AgentProfile``, owner and
+        namespace from the authenticated identity frozen in the Run spec, and
+        the workspace binding from the spec's validated workspace (the spec's
+        binding hash — never the legacy role-based ``workspace_hash``).
+        Reachable from Native code solely via the ``native_acp.storage`` seam.
+        """
+        session_dir = self._session_dir(session_id)
+        if (session_dir / SESSION_JSON).exists():
+            raise SessionExistsError(f"session {session_id!r} already exists")
+        moment = _ensure_aware(now or _utc_now()).isoformat()
+        record = SessionRecord(
+            schema_version=SCHEMA_VERSION,
+            session_id=session_id,
+            workspace_hash=workspace_hash,
+            effective_cwd=effective_cwd,
+            matched_root=matched_root,
+            state=STATE_OPEN,  # canonical native 'active', persisted as 'open'
+            created_at=moment,
+            updated_at=moment,
+            session_kind=SESSION_KIND_NATIVE,
+            native_profile_id=profile_id,
+            native_profile_revision=profile_revision,
+            native_profile_hash=profile_hash,
+            agent_session_id=None,
+            owner=owner,
+            namespace=namespace,
+        )
+        secure_mkdir(session_dir)
+        try:
+            exclusive_create_bytes(
+                session_dir / SESSION_JSON, _json_bytes(_record_to_dict(record))
+            )
+        except FileExistsError as exc:
+            raise SessionExistsError(f"session {session_id!r} already exists") from exc
+        return record
+
+    def bind_agent_session(
+        self,
+        session_id: str,
+        *,
+        agent_session_id: str,
+        now: _dt.datetime | None = None,
+    ) -> SessionRecord:
+        """Commit the external Agent Session ID exactly once.
+
+        Called after the owning Run's first successful ``session/new``. Any
+        second bind — same or different value — is refused; generalized rebind
+        stays a non-goal.
+        """
+        session_dir = self._require_session_dir(session_id)
+        with _session_lock_guard(session_dir):
+            record = _record_from_dict(_read_json(session_dir / SESSION_JSON))
+            if record.session_kind != SESSION_KIND_NATIVE:
+                raise SessionBindingError(
+                    f"session {session_id!r} is not a native record",
+                )
+            if record.agent_session_id is not None:
+                raise SessionBindingError(
+                    f"session {session_id!r} already binds external session "
+                    f"{record.agent_session_id!r}; rebind is refused",
+                )
+            moment = _ensure_aware(now or _utc_now()).isoformat()
+            bound = replace(
+                record, agent_session_id=agent_session_id, updated_at=moment
+            )
+            atomic_write_json(session_dir / SESSION_JSON, _record_to_dict(bound))
+            return bound
+
+    def mark_quarantined(
+        self,
+        session_id: str,
+        *,
+        reason: str,
+        run_id: str,
+        now: _dt.datetime | None = None,
+    ) -> SessionRecord:
+        """Irreversibly quarantine a session (idempotent-safe, first fact wins).
+
+        Serialized under the same per-session guard as :meth:`mark_closed` and
+        the lease surface, so state transition vs lease minting is a single
+        serialized decision. Never unlinks an existing ``lock.json``: the
+        quarantining finalizer's already-held lease stays valid for its own
+        finalization writes. There is no un-quarantine API (v1 contract).
+        """
+        session_dir = self._require_session_dir(session_id)
+        with _session_lock_guard(session_dir):
+            record = _record_from_dict(_read_json(session_dir / SESSION_JSON))
+            if record.state == STATE_QUARANTINED:
+                return record
+            moment = _ensure_aware(now or _utc_now()).isoformat()
+            quarantined = replace(
+                record,
+                state=STATE_QUARANTINED,
+                quarantine_reason=reason,
+                quarantined_by_run_id=run_id,
+                updated_at=moment,
+            )
+            atomic_write_json(
+                session_dir / SESSION_JSON, _record_to_dict(quarantined)
+            )
+            return quarantined
+
+    def commit_last_effective(
+        self,
+        session_id: str,
+        *,
+        model: str,
+        effort: str,
+        now: _dt.datetime | None = None,
+    ) -> SessionRecord:
+        """Atomically record the last exact-readback-proven model/effort pair.
+
+        Commit timing contract: called only after an exact-readback success
+        inside the owning Run (post-readback, pre-prompt) and after a proven
+        rollback. Agent-side drift is evidence, never a record write.
+        """
+        session_dir = self._require_session_dir(session_id)
+        with _session_lock_guard(session_dir):
+            record = _record_from_dict(_read_json(session_dir / SESSION_JSON))
+            if record.state == STATE_QUARANTINED:
+                raise SessionQuarantinedError(
+                    f"session {session_id!r} is quarantined; observations are "
+                    "not committed",
+                )
+            if record.state != STATE_OPEN:
+                raise SessionClosedError(
+                    f"session {session_id!r} is {record.state!r}; last-effective "
+                    "commits require an open session",
+                )
+            moment = _ensure_aware(now or _utc_now()).isoformat()
+            updated = replace(
+                record,
+                last_effective_model=model,
+                last_effective_effort=effort,
+                updated_at=moment,
+            )
+            atomic_write_json(session_dir / SESSION_JSON, _record_to_dict(updated))
+            return updated
+
     def open_session(self, session_id: str) -> SessionRecord:
         session_dir = self._require_session_dir(session_id)
         data = _read_json(session_dir / SESSION_JSON)
@@ -268,7 +457,14 @@ class SessionStore:
 
         Callers invoke this *before* any mutation (send/close/abort) so a closed
         session can never be re-driven into acpx or have artifacts mutated.
+        This is a pre-lock static check; the in-guard ``required_state`` check
+        of :meth:`acquire_lock` is the correctness mechanism for native leases.
         """
+        if record.state == STATE_QUARANTINED:
+            raise SessionQuarantinedError(
+                f"session {record.session_id!r} is quarantined; "
+                "it refuses all new work",
+            )
         if record.state != STATE_OPEN:
             raise SessionClosedError(
                 f"session {record.session_id!r} is {record.state!r}; "
@@ -285,6 +481,11 @@ class SessionStore:
         session_dir = self._require_session_dir(session_id)
         with _session_lock_guard(session_dir):
             record = _record_from_dict(_read_json(session_dir / SESSION_JSON))
+            if record.state == STATE_QUARANTINED:
+                # Quarantine is irreversible; close must not replace it.
+                raise SessionQuarantinedError(
+                    f"session {session_id!r} is quarantined and cannot be closed",
+                )
             if record.state == STATE_CLOSED:
                 raise SessionClosedError(
                     f"session {session_id!r} is already closed",
@@ -453,6 +654,7 @@ class SessionStore:
         reclaim_crashed: bool = False,
         reclaimable: bool = True,
         holder_kind: str = "supervisor",
+        required_state: str | None = None,
     ) -> SessionLock:
         """Acquire the session's lease lock, creating ``lock.json`` exclusively.
 
@@ -474,6 +676,14 @@ class SessionStore:
         the caller updates the holder identity.
         Reclamation happens entirely under the per-session guard, so two
         acquirers cannot both reclaim: the loser then sees the fresh live lock.
+
+        ``required_state`` (native callers pass ``STATE_OPEN``) re-reads the
+        persisted session state **inside the same guarded critical section**
+        that inspects, reclaims, and creates ``lock.json`` — covering the
+        fresh-create, TTL-expired, and reclaim paths alike. A mismatch raises
+        :class:`SessionQuarantinedError`/:class:`SessionClosedError` and
+        neither creates nor unlinks any lock. The default ``None`` preserves
+        exact legacy behavior; no acpx call site is edited.
         """
         session_dir = self._require_session_dir(session_id)
         if (
@@ -483,6 +693,18 @@ class SessionStore:
         ):
             raise SessionLockError("lease_seconds must be a positive integer")
         with _session_lock_guard(session_dir):
+            if required_state is not None:
+                current = _record_from_dict(_read_json(session_dir / SESSION_JSON))
+                if current.state != required_state:
+                    if current.state == STATE_QUARANTINED:
+                        raise SessionQuarantinedError(
+                            f"session {session_id!r} is quarantined; no new "
+                            "lease is ever minted for it",
+                        )
+                    raise SessionClosedError(
+                        f"session {session_id!r} is {current.state!r}; lease "
+                        f"acquisition requires state {required_state!r}",
+                    )
             moment = _ensure_aware(now or _utc_now())
             lock_path = session_dir / LOCK_JSON
 
@@ -599,16 +821,54 @@ def _json_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, sort_keys=True, indent=2).encode("utf-8")
 
 
-def _record_to_dict(record: SessionRecord) -> dict[str, Any]:
-    """Serialize a record, omitting the optional mcp_config binding when unset.
+_LEGACY_ONLY_FIELDS = (
+    "role_id",
+    "role_hash",
+    "policy_hash",
+    "acpx_version",
+    "adapter_agent",
+    "acpx_session_id",
+)
 
-    Zero-migration shape: records for roles without mcp_config keep the exact
-    pre-feature ``session.json`` key set.
+_NATIVE_FIELDS = (
+    "session_kind",
+    "native_profile_id",
+    "native_profile_revision",
+    "native_profile_hash",
+    "agent_session_id",
+    "owner",
+    "namespace",
+    "last_effective_model",
+    "last_effective_effort",
+    "quarantine_reason",
+    "quarantined_by_run_id",
+)
+
+
+def _record_to_dict(record: SessionRecord) -> dict[str, Any]:
+    """Serialize a record, omitting kind-foreign and unset-optional fields.
+
+    Zero-migration shape: legacy acpx records keep their exact pre-feature
+    ``session.json`` key set byte-for-byte (native keys are all unset and
+    omitted). Native records omit the legacy role/policy/acpx keys entirely —
+    never serialized as null, never given sentinel values — plus any unset
+    native optionals (the mcp_config_* omit-when-unset pattern).
     """
     data = asdict(record)
     if record.mcp_config_path is None and record.mcp_config_sha256 is None:
         del data["mcp_config_path"]
         del data["mcp_config_sha256"]
+    if record.session_kind == SESSION_KIND_NATIVE:
+        for key in _LEGACY_ONLY_FIELDS:
+            del data[key]
+        if record.session_name is None:
+            del data["session_name"]
+        for key in _NATIVE_FIELDS:
+            if data[key] is None:
+                del data[key]
+    else:
+        for key in _NATIVE_FIELDS:
+            del data[key]
     return data
 
 
@@ -650,3 +910,60 @@ def _read_json(path: Path) -> dict[str, Any]:
 def _record_from_dict(data: dict[str, Any]) -> SessionRecord:
     fields = {key: data.get(key) for key in SessionRecord.__dataclass_fields__}
     return SessionRecord(**fields)
+
+
+def _profile_hash_of(profile: Any) -> Any:
+    value = getattr(profile, "profile_hash", None)
+    return value() if callable(value) else value
+
+
+def validate_native_binding(
+    record: SessionRecord,
+    *,
+    profile: Any,
+    workspace_result: Any,
+    owner: str,
+    namespace: str,
+    for_load: bool = False,
+) -> None:
+    """Fail closed unless ``record`` still matches the native Run's identity.
+
+    Hard-fails on profile (id/revision/hash), workspace-binding-hash, owner,
+    or namespace mismatch, and on a quarantined record. Model/effort
+    differences are **not** a mismatch — a new Run's frozen Spec is the
+    legitimate switching input. On the ``session/load`` path
+    (``for_load=True``) the committed external ``agent_session_id`` must be
+    present. ``profile`` needs ``profile_id``/``revision``/``profile_hash``
+    (attribute or zero-arg callable); ``workspace_result`` needs
+    ``workspace_hash``. The legacy role-based :meth:`SessionStore.validate_binding`
+    is untouched.
+    """
+    if record.state == STATE_QUARANTINED:
+        raise SessionQuarantinedError(
+            f"session {record.session_id!r} is quarantined; binding validation "
+            "refuses it",
+        )
+    if record.session_kind != SESSION_KIND_NATIVE:
+        raise SessionBindingError(
+            f"session {record.session_id!r} is not a native record",
+        )
+    mismatches: list[str] = []
+    if record.native_profile_id != getattr(profile, "profile_id", None):
+        mismatches.append("profile_id")
+    if record.native_profile_revision != getattr(profile, "revision", None):
+        mismatches.append("profile_revision")
+    if record.native_profile_hash != _profile_hash_of(profile):
+        mismatches.append("profile_hash")
+    if record.workspace_hash != getattr(workspace_result, "workspace_hash", None):
+        mismatches.append("workspace_hash")
+    if record.owner != owner:
+        mismatches.append("owner")
+    if record.namespace != namespace:
+        mismatches.append("namespace")
+    if for_load and record.agent_session_id is None:
+        mismatches.append("agent_session_id_missing")
+    if mismatches:
+        raise SessionBindingError(
+            f"native session {record.session_id!r} binding mismatch: "
+            f"{', '.join(mismatches)}",
+        )

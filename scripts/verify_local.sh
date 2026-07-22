@@ -5,6 +5,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+echo "==> Check uv lock consistency"
+uv lock --check
+
 echo "==> Validate acpx contract fixtures"
 uv run python scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0
 
