@@ -11,6 +11,7 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -1076,3 +1077,451 @@ def test_reconcile_module_has_no_lock_mutation_or_prompt_acp_sites() -> None:
     }
     assert not (calls & forbidden_session_mut), calls & forbidden_session_mut
     assert "mark_quarantined" in calls or "mark_quarantined" in refs
+
+
+# ---------------------------------------------------------------------------
+# Corrupt / untrusted existing terminal evidence (Codex R1 / B3)
+# ---------------------------------------------------------------------------
+
+
+def _raw_result_bytes(run_dir: Path, raw: bytes) -> Path:
+    path = run_dir / "result.json"
+    # Simulate crash between exclusive create and durable write (empty/truncated).
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    fd = os.open(path, flags, 0o600)
+    try:
+        if raw:
+            os.write(fd, raw)
+    finally:
+        os.close(fd)
+    return path
+
+
+def test_crash_between_exclusive_create_and_write_not_treated_terminal(
+    tmp_path: Path,
+) -> None:
+    reconcile = _import_reconcile()
+    root = tmp_path / "sv"
+    sessions = storage.native_session_store(root)
+    events = storage.native_event_store(root)
+    run_id = "run-empty-result"
+    session_id = "sess-reuse-1"
+    _seed_session(sessions, session_id)
+    run_dir = events.create_run(run_id).run_dir
+    _seed_submission(run_dir, request_id="empty-result", run_id=run_id)
+    _seed_marker(run_dir, run_id)
+    _raw_result_bytes(run_dir, b"")
+
+    with pytest.raises(reconcile.ReconciliationError) as err:
+        reconcile.reconcile(root)
+    message = str(err.value).lower()
+    assert (
+        "untrusted" in message
+        or "terminal" in message
+        or "corrupt" in message
+        or "invalid" in message
+    )
+    # Quarantine first for dispatched runs; never invent progress / overwrite result.
+    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert not (run_dir / "progress.json").exists()
+    assert (run_dir / "result.json").read_bytes() == b""
+
+
+def test_invalid_json_result_with_marker_quarantines_then_fails_startup(
+    tmp_path: Path,
+) -> None:
+    reconcile = _import_reconcile()
+    root = tmp_path / "sv"
+    sessions = storage.native_session_store(root)
+    events = storage.native_event_store(root)
+    run_id = "run-bad-json"
+    session_id = "sess-reuse-1"
+    _seed_session(sessions, session_id)
+    run_dir = events.create_run(run_id).run_dir
+    _seed_submission(run_dir, request_id="bad-json", run_id=run_id)
+    _seed_marker(run_dir, run_id)
+    bad = b'{"status": "completed", "run_id":'
+    (run_dir / "result.json").write_bytes(bad)
+
+    with pytest.raises(reconcile.ReconciliationError):
+        reconcile.reconcile(root)
+    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert not (run_dir / "progress.json").exists()
+    assert (run_dir / "result.json").read_bytes() == bad
+
+
+def test_symlink_result_json_never_treated_terminal(tmp_path: Path) -> None:
+    reconcile = _import_reconcile()
+    root = tmp_path / "sv"
+    sessions = storage.native_session_store(root)
+    events = storage.native_event_store(root)
+    run_id = "run-symlink-result"
+    session_id = "sess-reuse-1"
+    _seed_session(sessions, session_id)
+    run_dir = events.create_run(run_id).run_dir
+    _seed_submission(run_dir, request_id="symlink-result", run_id=run_id)
+    _seed_marker(run_dir, run_id)
+    target = run_dir / "elsewhere.json"
+    payload = {
+        "run_id": run_id,
+        "status": "completed",
+        "retryable": False,
+    }
+    target.write_text(json.dumps(payload), encoding="utf-8")
+    (run_dir / "result.json").symlink_to(target)
+
+    with pytest.raises(reconcile.ReconciliationError):
+        reconcile.reconcile(root)
+    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert (run_dir / "result.json").is_symlink()
+    assert not (run_dir / "progress.json").exists()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        ["not", "an", "object"],
+        {"status": "completed", "retryable": False},  # missing run_id
+        {"run_id": "wrong-id", "status": "completed", "retryable": False},
+        {"run_id": "run-schema", "status": "not-a-status", "retryable": False},
+        {"run_id": "run-schema", "status": "unknown", "retryable": True},
+        {"run_id": "run-schema", "status": "completed", "retryable": 0},
+        {"run_id": "run-schema", "status": "failed", "retryable": True},
+    ],
+)
+def test_invalid_result_schema_never_treated_terminal(
+    tmp_path: Path, payload: object
+) -> None:
+    reconcile = _import_reconcile()
+    root = tmp_path / "sv"
+    sessions = storage.native_session_store(root)
+    events = storage.native_event_store(root)
+    run_id = "run-schema"
+    session_id = "sess-reuse-1"
+    _seed_session(sessions, session_id)
+    run_dir = events.create_run(run_id).run_dir
+    _seed_submission(run_dir, request_id="schema", run_id=run_id)
+    _seed_marker(run_dir, run_id)
+    raw = json.dumps(payload).encode("utf-8")
+    (run_dir / "result.json").write_bytes(raw)
+
+    with pytest.raises(reconcile.ReconciliationError) as err:
+        reconcile.reconcile(root)
+    assert isinstance(err.value, reconcile.ReconciliationError)
+    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert not (run_dir / "progress.json").exists()
+    assert (run_dir / "result.json").read_bytes() == raw
+
+
+def test_pre_dispatch_corrupt_result_fails_without_inventing_session_state(
+    tmp_path: Path,
+) -> None:
+    reconcile = _import_reconcile()
+    root = tmp_path / "sv"
+    sessions = storage.native_session_store(root)
+    events = storage.native_event_store(root)
+    run_id = "run-pre-corrupt"
+    session_id = "sess-reuse-1"
+    _seed_session(sessions, session_id)
+    run_dir = events.create_run(run_id).run_dir
+    _seed_submission(run_dir, request_id="pre-corrupt", run_id=run_id)
+    # No dispatch marker — pre-dispatch corrupt evidence.
+    (run_dir / "result.json").write_bytes(b"{not-json")
+    session_before = (sessions.base_dir / session_id / SESSION_JSON).read_bytes()
+
+    with pytest.raises(reconcile.ReconciliationError):
+        reconcile.reconcile(root)
+    assert (sessions.base_dir / session_id / SESSION_JSON).read_bytes() == session_before
+    assert sessions.open_session(session_id).state == STATE_OPEN
+    assert not (run_dir / "progress.json").exists()
+
+
+def test_valid_existing_terminal_remains_write_once_idempotent(tmp_path: Path) -> None:
+    reconcile = _import_reconcile()
+    root = tmp_path / "sv"
+    sessions = storage.native_session_store(root)
+    events = storage.native_event_store(root)
+    run_id = "run-valid-keep"
+    session_id = "sess-reuse-1"
+    _seed_session(sessions, session_id)
+    run_dir = events.create_run(run_id).run_dir
+    _seed_submission(run_dir, request_id="valid-keep", run_id=run_id)
+    _seed_marker(run_dir, run_id)
+    result_bytes = _seed_result(
+        run_dir, run_id=run_id, status="completed", session_id=session_id
+    )
+    session_before = (sessions.base_dir / session_id / SESSION_JSON).read_bytes()
+
+    reconcile.reconcile(root)
+    reconcile.reconcile(root)
+    assert (run_dir / "result.json").read_bytes() == result_bytes
+    assert (sessions.base_dir / session_id / SESSION_JSON).read_bytes() == session_before
+
+
+def test_symlink_result_rejected_without_reading_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reconcile = _import_reconcile()
+    root = tmp_path / "sv"
+    sessions = storage.native_session_store(root)
+    events = storage.native_event_store(root)
+    run_id = "run-symlink-noread"
+    session_id = "sess-reuse-1"
+    _seed_session(sessions, session_id)
+    run_dir = events.create_run(run_id).run_dir
+    _seed_submission(run_dir, request_id="symlink-noread", run_id=run_id)
+    _seed_marker(run_dir, run_id)
+
+    secret = "sk-live-" + "RESULTTARGET"
+    target = run_dir / "hostile-target.json"
+    target.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "status": "completed",
+                "retryable": False,
+                "secret": secret,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "result.json").symlink_to(target)
+
+    path_reads: list[str] = []
+    real_read_text = Path.read_text
+
+    def tracking_read_text(self, *args, **kwargs):
+        path_reads.append(str(self))
+        if self.resolve() == target.resolve() or self.name == "hostile-target.json":
+            raise AssertionError("must not path-read symlink target")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", tracking_read_text)
+
+    with pytest.raises(reconcile.ReconciliationError) as err:
+        reconcile.reconcile(root)
+    assert secret not in str(err.value)
+    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert not any("hostile-target" in p for p in path_reads)
+    assert not (run_dir / "progress.json").exists()
+
+
+def test_result_path_swap_to_symlink_cannot_become_trusted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deterministic TOCTOU: path becomes symlink at the open/read seam."""
+    reconcile = _import_reconcile()
+    root = tmp_path / "sv"
+    sessions = storage.native_session_store(root)
+    events = storage.native_event_store(root)
+    run_id = "run-swap-result"
+    session_id = "sess-reuse-1"
+    _seed_session(sessions, session_id)
+    run_dir = events.create_run(run_id).run_dir
+    _seed_submission(run_dir, request_id="swap-result", run_id=run_id)
+    _seed_marker(run_dir, run_id)
+
+    result_path = run_dir / "result.json"
+    target = run_dir / "swapped-target.json"
+    valid = {
+        "run_id": run_id,
+        "status": "completed",
+        "retryable": False,
+    }
+    target.write_text(json.dumps(valid, sort_keys=True), encoding="utf-8")
+    # Start as a regular file whose bytes would be trusted if followed after swap.
+    result_path.write_bytes(target.read_bytes())
+
+    real_open = os.open
+    real_read_text = Path.read_text
+
+    def swap_to_symlink() -> None:
+        if result_path.exists() and not result_path.is_symlink():
+            result_path.unlink()
+            result_path.symlink_to(target)
+
+    def open_hook(path, flags, mode=0o777, *args, dir_fd=None, **kwargs):
+        if dir_fd is None:
+            try:
+                resolved = Path(os.fspath(path)).resolve()
+            except OSError:
+                resolved = None
+            if (
+                resolved == result_path.resolve()
+                and (flags & os.O_CREAT) == 0
+            ):
+                swap_to_symlink()
+            return real_open(path, flags, mode, *args, **kwargs)
+        return real_open(path, flags, mode, *args, dir_fd=dir_fd, **kwargs)
+
+    def read_text_hook(self, *args, **kwargs):
+        if Path(self).resolve() == result_path.resolve():
+            swap_to_symlink()
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", open_hook)
+    monkeypatch.setattr(Path, "read_text", read_text_hook)
+
+    with pytest.raises(reconcile.ReconciliationError):
+        reconcile.reconcile(root)
+    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert result_path.is_symlink()
+    assert not (run_dir / "progress.json").exists()
+
+
+def test_oversized_terminal_result_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reconcile = _import_reconcile()
+    root = tmp_path / "sv"
+    sessions = storage.native_session_store(root)
+    events = storage.native_event_store(root)
+    run_id = "run-oversize"
+    session_id = "sess-reuse-1"
+    _seed_session(sessions, session_id)
+    run_dir = events.create_run(run_id).run_dir
+    _seed_submission(run_dir, request_id="oversize", run_id=run_id)
+    _seed_marker(run_dir, run_id)
+
+    # Just over 1 MiB of JSON-ish bytes; must not be treated as trusted terminal.
+    oversized = b'{"run_id":"' + run_id.encode() + b'","status":"completed","retryable":false,"pad":"'
+    oversized += b"x" * (1 * 1024 * 1024)
+    oversized += b'"}'
+    assert len(oversized) > 1 * 1024 * 1024
+    (run_dir / "result.json").write_bytes(oversized)
+
+    # Prove we do not rely on unbounded Path.read_text success.
+    real_read_text = Path.read_text
+    path_reads: list[int] = []
+
+    def tracking_read_text(self, *args, **kwargs):
+        data = real_read_text(self, *args, **kwargs)
+        if Path(self).name == "result.json":
+            path_reads.append(len(data))
+        return data
+
+    monkeypatch.setattr(Path, "read_text", tracking_read_text)
+
+    with pytest.raises(reconcile.ReconciliationError):
+        reconcile.reconcile(root)
+    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert not (run_dir / "progress.json").exists()
+    # After GREEN, validator must not path-read the oversized artifact.
+    assert path_reads == []
+
+
+def test_terminal_result_read_oserror_is_untrusted_quarantines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reconcile = _import_reconcile()
+    root = tmp_path / "sv"
+    sessions = storage.native_session_store(root)
+    events = storage.native_event_store(root)
+    run_id = "run-read-fail"
+    session_id = "sess-reuse-1"
+    _seed_session(sessions, session_id)
+    run_dir = events.create_run(run_id).run_dir
+    _seed_submission(run_dir, request_id="read-fail", run_id=run_id)
+    _seed_marker(run_dir, run_id)
+    result_bytes = _seed_result(
+        run_dir, run_id=run_id, status="completed", session_id=session_id
+    )
+
+    real_open = os.open
+    real_close = os.close
+    real_read = os.read
+    opened: list[int] = []
+    closed: list[int] = []
+    result_fds: set[int] = set()
+
+    def tracking_open(path, flags, mode=0o777, *args, dir_fd=None, **kwargs):
+        if dir_fd is None:
+            fd = real_open(path, flags, mode, *args, **kwargs)
+        else:
+            fd = real_open(path, flags, mode, *args, dir_fd=dir_fd, **kwargs)
+        opened.append(fd)
+        try:
+            if Path(os.fspath(path)).name == "result.json":
+                result_fds.add(fd)
+        except TypeError:
+            pass
+        return fd
+
+    def boom_read(fd: int, n: int) -> bytes:
+        if fd in result_fds:
+            raise OSError(5, "injected result read failure")
+        return real_read(fd, n)
+
+    def tracking_close(fd: int) -> None:
+        closed.append(fd)
+        return real_close(fd)
+
+    monkeypatch.setattr(reconcile.os, "open", tracking_open)
+    monkeypatch.setattr(reconcile.os, "read", boom_read)
+    monkeypatch.setattr(reconcile.os, "close", tracking_close)
+
+    with pytest.raises(reconcile.ReconciliationError) as err:
+        reconcile.reconcile(root)
+    assert type(err.value) is reconcile.ReconciliationError
+    assert "injected" not in str(err.value)
+    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert not (run_dir / "progress.json").exists()
+    assert (run_dir / "result.json").read_bytes() == result_bytes
+    assert result_fds
+    assert set(result_fds) <= set(closed)
+
+
+def test_terminal_result_close_oserror_is_untrusted_quarantines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reconcile = _import_reconcile()
+    root = tmp_path / "sv"
+    sessions = storage.native_session_store(root)
+    events = storage.native_event_store(root)
+    run_id = "run-close-fail"
+    session_id = "sess-reuse-1"
+    _seed_session(sessions, session_id)
+    run_dir = events.create_run(run_id).run_dir
+    _seed_submission(run_dir, request_id="close-fail", run_id=run_id)
+    _seed_marker(run_dir, run_id)
+    result_bytes = _seed_result(
+        run_dir, run_id=run_id, status="completed", session_id=session_id
+    )
+
+    real_open = os.open
+    real_close = os.close
+    result_fds: set[int] = set()
+    closed_ok: set[int] = set()
+
+    def tracking_open(path, flags, mode=0o777, *args, dir_fd=None, **kwargs):
+        if dir_fd is None:
+            fd = real_open(path, flags, mode, *args, **kwargs)
+        else:
+            fd = real_open(path, flags, mode, *args, dir_fd=dir_fd, **kwargs)
+        try:
+            if Path(os.fspath(path)).name == "result.json":
+                result_fds.add(fd)
+        except TypeError:
+            pass
+        return fd
+
+    def boom_close(fd: int) -> None:
+        if fd in result_fds and fd not in closed_ok:
+            # Close the descriptor for real so it cannot leak, then surface OSError.
+            real_close(fd)
+            closed_ok.add(fd)
+            raise OSError(5, "injected result close failure")
+        return real_close(fd)
+
+    monkeypatch.setattr(reconcile.os, "open", tracking_open)
+    monkeypatch.setattr(reconcile.os, "close", boom_close)
+
+    with pytest.raises(reconcile.ReconciliationError) as err:
+        reconcile.reconcile(root)
+    assert type(err.value) is reconcile.ReconciliationError
+    assert "injected" not in str(err.value)
+    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert not (run_dir / "progress.json").exists()
+    assert (run_dir / "result.json").read_bytes() == result_bytes
+    assert result_fds <= closed_ok

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import stat
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -33,6 +35,15 @@ _DETAIL_RECONCILED_PRE_DISPATCH = "RECONCILED_PRE_DISPATCH"
 _QUARANTINE_REASON = (
     "reconciled: dispatched run without a trustworthy ACP terminal"
 )
+_UNTRUSTED_TERMINAL_MESSAGE = (
+    "untrusted or corrupt terminal evidence; refusing reconciliation"
+)
+# Conservative bound for startup terminal evidence (1 MiB); reads request +1.
+_MAX_TERMINAL_RESULT_BYTES = 1 * 1024 * 1024
+
+
+class ReconciliationError(RuntimeError):
+    """Sanitized fail-closed reconciliation refusal; daemon must not listen."""
 
 
 def reconcile(supervisor_root: Path) -> None:
@@ -75,10 +86,16 @@ def _reconcile_run(*, run_dir: Path, session_store: SessionStore) -> None:
         run_id=run_id, submission=submission, spec=spec
     )
 
-    if result_path.is_file():
-        existing = _read_json_object(result_path)
-        status = existing.get("status") if isinstance(existing, dict) else None
-        if status == AgentRunStatus.UNKNOWN.value and marker_present:
+    if _path_exists_nofollow(result_path):
+        existing = _validate_terminal_result(result_path, run_id=run_id)
+        if existing is None:
+            _refuse_untrusted_terminal(
+                session_store=session_store,
+                session_id=session_id,
+                run_id=run_id,
+                marker_present=marker_present,
+            )
+        if existing.get("status") == AgentRunStatus.UNKNOWN.value and marker_present:
             _ensure_session_quarantined(
                 session_store, session_id=session_id, run_id=run_id
             )
@@ -111,6 +128,113 @@ def _reconcile_run(*, run_dir: Path, session_store: SessionStore) -> None:
         detail_code=_DETAIL_RECONCILED_PRE_DISPATCH,
         session_id=expose_session,
     )
+
+
+def _refuse_untrusted_terminal(
+    *,
+    session_store: SessionStore,
+    session_id: str | None,
+    run_id: str,
+    marker_present: bool,
+) -> None:
+    """Quarantine when dispatched; always fail closed before progress/result."""
+    if marker_present:
+        _ensure_session_quarantined(
+            session_store, session_id=session_id, run_id=run_id
+        )
+    raise ReconciliationError(_UNTRUSTED_TERMINAL_MESSAGE)
+
+
+def _validate_terminal_result(
+    path: Path, *, run_id: str
+) -> dict[str, Any] | None:
+    """Return a trusted terminal object, or ``None`` if evidence is unusable.
+
+    Opens with ``O_RDONLY|O_NOFOLLOW``, validates the opened fd is a regular
+    file, and reads through that fd with a finite cap. Requires a JSON object
+    with exact ``run_id``, a recognized ``AgentRunStatus`` value, and exact
+    bool ``retryable`` matching the status default (including
+    ``unknown -> retryable=false``). Any fstat/read/close ``OSError`` is
+    treated as untrusted evidence (``None``); the fd is always closed.
+    """
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+
+    raw: bytes | None = None
+    try:
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raw = None
+            elif st.st_size > _MAX_TERMINAL_RESULT_BYTES:
+                raw = None
+            else:
+                raw = _read_fd_capped(fd, _MAX_TERMINAL_RESULT_BYTES + 1)
+                if len(raw) > _MAX_TERMINAL_RESULT_BYTES:
+                    raw = None
+        except OSError:
+            raw = None
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            raw = None
+
+    if raw is None:
+        return None
+
+    try:
+        text = raw.decode("utf-8")
+        payload = json.loads(text)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("run_id") != run_id:
+        return None
+    status_raw = payload.get("status")
+    if not isinstance(status_raw, str):
+        return None
+    try:
+        status = AgentRunStatus(status_raw)
+    except ValueError:
+        return None
+    retryable = payload.get("retryable")
+    if type(retryable) is not bool:
+        return None
+    expected = _RETRYABLE_DEFAULT[status]
+    if retryable is not expected:
+        return None
+    if status is AgentRunStatus.UNKNOWN and retryable is not False:
+        return None
+    return payload
+
+
+def _read_fd_capped(fd: int, limit: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while total < limit:
+        chunk = os.read(fd, min(65_536, limit - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
+def _path_exists_nofollow(path: Path) -> bool:
+    try:
+        os.lstat(path)
+    except OSError:
+        return False
+    return True
 
 
 def _resolve_session_id(
@@ -205,7 +329,7 @@ def _write_terminal_result(
     session_id: str | None,
 ) -> None:
     result_path = run_dir / _RESULT_NAME
-    if result_path.exists():
+    if _path_exists_nofollow(result_path):
         return
     payload = build_result_payload(
         run_id=run_id,
@@ -233,7 +357,7 @@ def _write_terminal_result(
 
 
 def _read_json_object(path: Path) -> dict[str, Any] | None:
-    if not path.is_file():
+    if not path.is_file() or path.is_symlink():
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,8 +71,19 @@ class EventStore:
         run_dir = self.base_dir / run_id
         if run_dir.exists():
             raise EventStoreError(f"EventStore: run_dir already exists: {run_dir}")
-        run_dir.mkdir(mode=DIR_MODE)
-        os.chmod(run_dir, DIR_MODE)
+        try:
+            run_dir.mkdir(mode=DIR_MODE)
+            os.chmod(run_dir, DIR_MODE)
+            # Durably publish the new run directory entry before exclusive
+            # admission artifacts (submission.json) are created inside it.
+            _fsync_dir(run_dir)
+            _fsync_dir(self.base_dir)
+        except EventStoreError:
+            raise
+        except OSError as exc:
+            raise EventStoreError(
+                "EventStore: failed to durably create run directory"
+            ) from exc
         return RunHandle(run_id=run_id, run_dir=run_dir)
 
     def permission_probe(self) -> dict[str, bool]:
@@ -110,18 +122,55 @@ def atomic_write_json(path: Path, payload: Mapping[str, Any]) -> Path:
 def exclusive_create_bytes(path: Path, data: bytes) -> Path:
     """Create ``path`` exclusively (``O_EXCL``) at ``FILE_MODE`` (0600).
 
-    Raises ``FileExistsError`` if the file already exists — this is the
-    primitive locks rely on so two writers can never both believe they created
-    the lock file.
+    Writes all bytes (zero-progress fails closed), fsyncs the file then the
+    parent directory before returning success. Write/fsync failures leave the
+    uncertain exclusive artifact in place (no silent unlink) and raise
+    ``EventStoreError`` with a sanitized message. ``FileExistsError`` is
+    preserved for the exclusive-create race.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, FILE_MODE)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
     try:
-        os.write(fd, data)
+        fd = os.open(path, flags, FILE_MODE)
+    except FileExistsError:
+        raise
+    except OSError as exc:
+        raise EventStoreError("EventStore: exclusive create failed") from exc
+    primary: BaseException | None = None
+    try:
+        try:
+            os.fchmod(fd, FILE_MODE)
+        except OSError as exc:
+            raise EventStoreError("EventStore: exclusive create failed") from exc
+        _write_all(fd, data)
+        try:
+            os.fsync(fd)
+        except OSError as exc:
+            raise EventStoreError(
+                "EventStore: exclusive create durability failed"
+            ) from exc
+    except BaseException as exc:
+        primary = exc
+        raise
     finally:
-        os.close(fd)
-    os.chmod(path, FILE_MODE)
+        try:
+            os.close(fd)
+        except OSError as close_exc:
+            if primary is None:
+                raise EventStoreError(
+                    "EventStore: exclusive create durability failed"
+                ) from close_exc
+    try:
+        _fsync_dir(path.parent)
+    except EventStoreError:
+        raise
+    except OSError as exc:
+        raise EventStoreError(
+            "EventStore: exclusive create durability failed"
+        ) from exc
     return path
 
 
@@ -153,7 +202,36 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
         raise
 
 
-def _mode(path: Path) -> int:
-    import stat
+def _write_all(fd: int, data: bytes) -> None:
+    offset = 0
+    length = len(data)
+    while offset < length:
+        try:
+            written = os.write(fd, data[offset:])
+        except OSError as exc:
+            raise EventStoreError("EventStore: exclusive create write failed") from exc
+        if written <= 0:
+            raise EventStoreError("EventStore: exclusive create write failed")
+        offset += written
 
+
+def _fsync_dir(path: Path) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        dir_fd = os.open(path, flags)
+    except OSError as exc:
+        raise EventStoreError("EventStore: directory durability failed") from exc
+    try:
+        os.fsync(dir_fd)
+    except OSError as exc:
+        raise EventStoreError("EventStore: directory durability failed") from exc
+    finally:
+        os.close(dir_fd)
+
+
+def _mode(path: Path) -> int:
     return stat.S_IMODE(os.stat(path).st_mode)

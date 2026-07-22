@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import fcntl
 import logging
 import os
 import signal
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -19,16 +21,149 @@ from agent_run_supervisor.arsd.server import (
     Principal,
 )
 from agent_run_supervisor.arsd.service_unit import ServiceUnitError, render_service_unit
+from agent_run_supervisor.event_store import DIR_MODE, FILE_MODE
 from agent_run_supervisor.native_acp import storage
 
 _LOGGER = logging.getLogger("agent_run_supervisor.arsd")
 
 DEFAULT_SHUTDOWN_TIMEOUT = 90.0
 DEFAULT_CANCEL_WAIT_SECONDS = 30.0
+_DAEMON_LOCK_DIRNAME = "arsd"
+_DAEMON_LOCK_FILENAME = "daemon.lock"
 
 
 class DaemonStartupError(RuntimeError):
     """Fail-closed daemon startup refusal; nothing is listening."""
+
+
+class DaemonInstanceLease:
+    """Exclusive per-supervisor-root daemon ownership via Linux advisory flock.
+
+    The lock file is opened O_CREAT|O_NOFOLLOW at 0600 relative to a verified
+    non-symlink lock directory fd, and never unlinked on release — close/crash
+    drops the kernel flock without an inode race.
+    """
+
+    def __init__(self, lock_path: Path, fd: int) -> None:
+        self.lock_path = Path(lock_path)
+        self._fd = fd
+        self._released = False
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        fd = self._fd
+        self._fd = -1
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def _open_lock_dir_fd(lock_dir: Path) -> int:
+    """Create-or-open ``lock_dir`` as a real non-symlink directory (0700)."""
+    try:
+        os.mkdir(lock_dir, DIR_MODE)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise DaemonStartupError("failed to prepare daemon instance lease") from exc
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        dir_fd = os.open(lock_dir, flags)
+    except OSError as exc:
+        raise DaemonStartupError("failed to prepare daemon instance lease") from exc
+    try:
+        st = os.fstat(dir_fd)
+        if not stat.S_ISDIR(st.st_mode):
+            raise DaemonStartupError("failed to prepare daemon instance lease")
+        try:
+            os.fchmod(dir_fd, DIR_MODE)
+        except OSError as exc:
+            raise DaemonStartupError("failed to prepare daemon instance lease") from exc
+    except DaemonStartupError:
+        _close_fd_best_effort(dir_fd)
+        raise
+    except OSError as exc:
+        _close_fd_best_effort(dir_fd)
+        raise DaemonStartupError("failed to prepare daemon instance lease") from exc
+    return dir_fd
+
+
+def _close_fd_best_effort(fd: int) -> None:
+    if fd < 0:
+        return
+    with contextlib.suppress(OSError):
+        os.close(fd)
+
+
+def _release_lock_fd(fd: int) -> None:
+    """Drop flock and close; never raises (failure paths must stay sanitized)."""
+    if fd < 0:
+        return
+    with contextlib.suppress(OSError):
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    _close_fd_best_effort(fd)
+
+
+def acquire_daemon_instance_lease(supervisor_root: Path | str) -> DaemonInstanceLease:
+    """Acquire the race-safe singleton lease for ``supervisor_root``."""
+    root = Path(supervisor_root)
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise DaemonStartupError("failed to prepare daemon instance lease") from exc
+
+    lock_dir = root / _DAEMON_LOCK_DIRNAME
+    lock_path = lock_dir / _DAEMON_LOCK_FILENAME
+    dir_fd = _open_lock_dir_fd(lock_dir)
+    fd = -1
+    try:
+        flags = os.O_RDWR | os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(_DAEMON_LOCK_FILENAME, flags, FILE_MODE, dir_fd=dir_fd)
+        except OSError as exc:
+            raise DaemonStartupError("failed to open daemon instance lease") from exc
+        try:
+            os.fchmod(fd, FILE_MODE)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            _release_lock_fd(fd)
+            fd = -1
+            raise DaemonStartupError(
+                "another arsd daemon already holds the lease for this supervisor root"
+            ) from exc
+        except OSError as exc:
+            _release_lock_fd(fd)
+            fd = -1
+            raise DaemonStartupError(
+                "failed to acquire daemon instance lease"
+            ) from exc
+    except BaseException:
+        # Close dirfd without masking the sanitized acquire error as raw OSError.
+        _close_fd_best_effort(dir_fd)
+        if fd >= 0:
+            _release_lock_fd(fd)
+            fd = -1
+        raise
+
+    try:
+        os.close(dir_fd)
+    except OSError as exc:
+        _release_lock_fd(fd)
+        fd = -1
+        raise DaemonStartupError(
+            "failed to prepare daemon instance lease"
+        ) from exc
+    return DaemonInstanceLease(lock_path, fd)
 
 
 def geteuid() -> int:
@@ -189,71 +324,79 @@ async def serve_daemon(
     root = Path(supervisor_root)
     path = Path(socket_path)
 
-    # Startup reconciliation must complete successfully before bind/listen.
-    reconcile.reconcile(root)
-
-    session_store = storage.native_session_store(root)
-    event_store = storage.native_event_store(root)
-    handler_kwargs: dict[str, Any] = {
-        "session_store": session_store,
-        "event_store": event_store,
-        "max_concurrent_runs": max_concurrent_runs,
-        "cancel_wait_seconds": cancel_wait_seconds,
-    }
-    if run_task_factory is not None:
-        handler_kwargs["run_task_factory"] = run_task_factory
-    else:
-        handler_kwargs["supervisor_root"] = root
-    arsd_handlers = handlers.ArsdHandlers(**handler_kwargs)
-    if run_task_factory is not None and hasattr(run_task_factory, "handlers"):
-        run_task_factory.handlers = arsd_handlers
-
-    srv = server.ArsdServer(
-        socket_path=path,
-        policy=policy,
-        handler=arsd_handlers,
-        max_connections=max_connections,
-    )
-
-    local_stop = stop_event if stop_event is not None else asyncio.Event()
-    loop = asyncio.get_running_loop()
-    handlers_installed: list[signal.Signals] = []
-
-    def _request_stop() -> None:
-        local_stop.set()
-
-    if install_signals:
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            try:
-                loop.add_signal_handler(sig, _request_stop)
-                handlers_installed.append(sig)
-            except (NotImplementedError, RuntimeError):
-                _LOGGER.warning("arsd: signal handler unavailable for %s", sig)
-
+    # Exclusive ownership before any reconciliation mutation or listen.
+    lease = acquire_daemon_instance_lease(root)
     try:
+        # Startup reconciliation must complete successfully before bind/listen.
         try:
-            await srv.start()
-        except server.ServerStartupError as err:
+            reconcile.reconcile(root)
+        except reconcile.ReconciliationError as err:
             raise DaemonStartupError(str(err)) from err
 
-        await local_stop.wait()
+        session_store = storage.native_session_store(root)
+        event_store = storage.native_event_store(root)
+        handler_kwargs: dict[str, Any] = {
+            "session_store": session_store,
+            "event_store": event_store,
+            "max_concurrent_runs": max_concurrent_runs,
+            "cancel_wait_seconds": cancel_wait_seconds,
+        }
+        if run_task_factory is not None:
+            handler_kwargs["run_task_factory"] = run_task_factory
+        else:
+            handler_kwargs["supervisor_root"] = root
+        arsd_handlers = handlers.ArsdHandlers(**handler_kwargs)
+        if run_task_factory is not None and hasattr(run_task_factory, "handlers"):
+            run_task_factory.handlers = arsd_handlers
+
+        srv = server.ArsdServer(
+            socket_path=path,
+            policy=policy,
+            handler=arsd_handlers,
+            max_connections=max_connections,
+        )
+
+        local_stop = stop_event if stop_event is not None else asyncio.Event()
+        loop = asyncio.get_running_loop()
+        handlers_installed: list[signal.Signals] = []
+
+        def _request_stop() -> None:
+            local_stop.set()
+
+        if install_signals:
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                try:
+                    loop.add_signal_handler(sig, _request_stop)
+                    handlers_installed.append(sig)
+                except (NotImplementedError, RuntimeError):
+                    _LOGGER.warning("arsd: signal handler unavailable for %s", sig)
 
         try:
-            await asyncio.wait_for(
-                _graceful_shutdown(srv, arsd_handlers),
-                timeout=shutdown_timeout,
-            )
-        except asyncio.TimeoutError:
-            _LOGGER.error("arsd: shutdown exceeded bound; forcing exit path")
-            with contextlib.suppress(Exception):
-                await srv.aclose()
-            with contextlib.suppress(Exception):
-                await arsd_handlers.aclose()
-        return 0
+            try:
+                await srv.start()
+            except server.ServerStartupError as err:
+                raise DaemonStartupError(str(err)) from err
+
+            await local_stop.wait()
+
+            try:
+                await asyncio.wait_for(
+                    _graceful_shutdown(srv, arsd_handlers),
+                    timeout=shutdown_timeout,
+                )
+            except asyncio.TimeoutError:
+                _LOGGER.error("arsd: shutdown exceeded bound; forcing exit path")
+                with contextlib.suppress(Exception):
+                    await srv.aclose()
+                with contextlib.suppress(Exception):
+                    await arsd_handlers.aclose()
+            return 0
+        finally:
+            for sig in handlers_installed:
+                with contextlib.suppress(Exception):
+                    loop.remove_signal_handler(sig)
     finally:
-        for sig in handlers_installed:
-            with contextlib.suppress(Exception):
-                loop.remove_signal_handler(sig)
+        lease.release()
 
 
 async def _graceful_shutdown(

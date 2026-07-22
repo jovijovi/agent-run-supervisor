@@ -935,6 +935,42 @@ def test_create_run_failure_fails_closed_then_recovers(tmp_path: Path) -> None:
     run_async(case())
 
 
+def test_submission_durability_failure_blocks_ack_and_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Admission must not acknowledge/dispatch when exclusive write durability fails."""
+    from agent_run_supervisor import event_store as event_store_mod
+
+    async def case():
+        harness = Harness(tmp_path)
+        caller = caller_for(principal_a())
+        run_id = derived("principal-a", "req-dur-1")
+        real_fsync = os.fsync
+        secret = "sk-live-" + "DURFAILCANARY"
+
+        def boom_file_fsync(fd: int) -> None:
+            st = os.fstat(fd)
+            if stat.S_ISREG(st.st_mode):
+                raise OSError(5, f"injected fsync for {secret}")
+            return real_fsync(fd)
+
+        monkeypatch.setattr(event_store_mod.os, "fsync", boom_file_fsync)
+        try:
+            err = await submit_expecting(
+                harness, caller, "req-dur-1", protocol.INTERNAL
+            )
+            assert secret not in str(err)
+            assert harness.factory.calls == []
+            assert not harness.handlers.registry.is_registered(run_id)
+            # Uncertain exclusive artifact must remain; no silent delete+dispatch.
+            submission = harness.run_dir(run_id) / "submission.json"
+            assert submission.exists()
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
 def test_crash_after_create_before_submission_consumes_key(tmp_path: Path) -> None:
     async def case():
         harness = Harness(tmp_path)
