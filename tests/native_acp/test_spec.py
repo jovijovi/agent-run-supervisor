@@ -149,6 +149,22 @@ def test_effort_outside_profile_domain_is_refused() -> None:
         assembler.resolve_profile(DEFAULT_REGISTRY)
 
 
+def test_model_outside_registered_closed_set_is_refused() -> None:
+    # The model selector's value domain is a closed registration: a request
+    # for any unregistered model is refused at profile resolution.
+    assembler = RunSpecAssembler(_request(requested_model="mystery/model-z"))
+    with pytest.raises(SpecValidationError):
+        assembler.resolve_profile(DEFAULT_REGISTRY)
+
+
+def test_registered_second_model_is_admissible() -> None:
+    assembler = RunSpecAssembler(
+        _request(requested_model="deepseek/deepseek-v4-pro", requested_effort="high")
+    )
+    profile = assembler.resolve_profile(DEFAULT_REGISTRY)
+    assert "deepseek/deepseek-v4-pro" in profile.registered_models
+
+
 # -- spec hash --------------------------------------------------------------
 
 
@@ -214,6 +230,7 @@ def _synthetic_profile(**overrides) -> AgentProfile:
         effort_selector_id="effort",
         default_model="provider/model-x",
         default_effort="max",
+        registered_models=("provider/model-x",),
         allowed_efforts=("high", "max"),
         requires_session_load=False,
         config_schema={"selectors": {"model": "string", "effort": "string"}},

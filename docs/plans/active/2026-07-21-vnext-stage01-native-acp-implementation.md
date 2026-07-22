@@ -304,6 +304,16 @@ C2/C3/C4 are mutually independent and may be developed in any order after C1; C6
 
 - **Goal:** Stage-1 GREEN against the real agent. Deterministic RED discipline is carried by C5–C9's L2 suite; this slice's failures are real-world evidence, triaged and reported, never papered over.
 - **Preconditions (checked and reported first — G3/G6):** `ARS_NATIVE_SMOKE=1`; the executable resolved by `OPENCODE_1_18_4` reports version **1.18.4** (mismatch ⇒ stop: the profile is closed); Kimi Code credentials and literal K3 access are present through registered credential slots; at least one second model is both advertised by the same live Agent/provider and actually usable. The execution evidence records and explicitly approves that exact advertised model ID before the switch; the plan never guesses or aliases it. A missing prerequisite is reported as a named gap — an effort-only switch never substitutes for the model-switch acceptance. This is the **full G3 gate re-run with real credential/model usability, fail-closed**; the §2 DoR advisory readiness snapshot never substitutes for it.
+- **Second-model decision note (C10, chair-approved):** real OpenCode 1.18.4 advertises the `effort`
+  selector model-dependently — for `kimi-for-coding/k3` (literal choices low|high|max) but for
+  neither kimi candidate second model, which made the original candidates unusable under the exact
+  sequence (named gap, fail-closed, rollback proven). Per chair decision the exact model+effort
+  contract is kept unchanged and the registered second model is **`deepseek/deepseek-v4-pro`**
+  (already-configured `deepseek` credential slot; zero-prompt capability probe shows literal effort
+  choices high|max in its post-set-model set). `OPENCODE_1_18_4` revision 2 registers the closed
+  model pair and the second credential slot name; the S3 switch acceptance runs
+  K3/max → deepseek-v4-pro/high → K3/max on one external Session via `session/load`. Sanitized
+  evidence: out-of-Git C10 records (`phase-a-second-model-selection`, `s3-model-switch`).
 - **Create:** `tests/native_acp/test_real_opencode_smoke.py`, env-gated (skips in CI; operator-executed for Stage-1 exit), each smoke in a disposable empty workspace under a fresh temp dir **outside any tracked worktree**, with direct pre/post directory-listing assertions (both must be empty — the primary no-change evidence; `workspace_hash` is a binding-config hash and `git status` is never used as change evidence):
   1. **S1-equivalent read-only run** (new session): initialize capabilities recorded — **G6 checkpoint: `loadSession` advertised**; exact k3/`max` sequence with both discovery snapshots persisted; exactly one `session/prompt`; `stop_reason=end_turn`; result carries final_message and exact effective pair; normalized events + both markers + `redaction-report.json` with `matches: []`; workspace listings empty; no leftover processes (identity-probe on the recorded pgid/pid).
   2. **Continuity across process-per-Run:** R1 plants a random nonce; R2 on the same ARS session goes through `session/load` (external ID unchanged) and asks for recall; R2's final_message must contain the nonce. This is the **context-token continuity** proof the zero-prompt cross-process probe explicitly did not provide.

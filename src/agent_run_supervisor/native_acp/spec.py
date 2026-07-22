@@ -383,6 +383,11 @@ class RunSpecAssembler:
     def resolve_profile(self, registry: ProfileRegistry) -> AgentProfile:
         profile = registry.get(self._request.profile_id)
         _require(
+            self._request.requested_model in profile.registered_models,
+            f"model {self._request.requested_model!r} is outside the registered "
+            f"closed set {profile.registered_models} for {profile.profile_id}",
+        )
+        _require(
             self._request.requested_effort in profile.allowed_efforts,
             f"effort {self._request.requested_effort!r} is outside the registered "
             f"domain {profile.allowed_efforts} for {profile.profile_id}",

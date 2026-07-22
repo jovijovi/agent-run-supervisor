@@ -97,6 +97,7 @@ def _profile() -> AgentProfile:
         effort_selector_id="effort",
         default_model="kimi-for-coding/k3",
         default_effort="max",
+        registered_models=("kimi-for-coding/k3", "provider/base"),
         allowed_efforts=("low", "medium", "high", "max"),
         requires_session_load=True,
         config_schema={"selectors": {"model": "string", "effort": "string"}},

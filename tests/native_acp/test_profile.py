@@ -31,7 +31,23 @@ def test_opencode_profile_literals_are_pinned() -> None:
     assert profile.default_effort == "max"
     assert "max" in profile.allowed_efforts
     assert profile.requires_session_load is True
-    assert profile.credential_slots == ("kimi-for-coding",)
+    assert profile.credential_slots == ("kimi-for-coding", "deepseek")
+
+
+def test_opencode_profile_registers_the_approved_second_model() -> None:
+    # Chair-approved C10 decision: the exact model+effort contract is kept
+    # and the registered closed model pair is k3 plus deepseek-v4-pro (the
+    # only configured-provider text/code model advertising a literal effort
+    # both of whose offered values sit inside the registered effort domain).
+    profile = OPENCODE_1_18_4
+    assert profile.revision == 2
+    assert profile.registered_models == (
+        "kimi-for-coding/k3",
+        "deepseek/deepseek-v4-pro",
+    )
+    assert profile.credential_slots == ("kimi-for-coding", "deepseek")
+    assert profile.snapshot_ref() == "registry:opencode-1.18.4@r2"
+    assert set(("high", "max")) <= set(profile.allowed_efforts)
 
 
 def test_profile_hash_and_snapshot_are_deterministic() -> None:
@@ -41,7 +57,11 @@ def test_profile_hash_and_snapshot_are_deterministic() -> None:
     assert len(first) == 64
     snapshot = OPENCODE_1_18_4.snapshot()
     assert snapshot["profile_id"] == "opencode-1.18.4"
-    assert OPENCODE_1_18_4.snapshot_ref() == "registry:opencode-1.18.4@r1"
+    assert snapshot["registered_models"] == [
+        "kimi-for-coding/k3",
+        "deepseek/deepseek-v4-pro",
+    ]
+    assert OPENCODE_1_18_4.snapshot_ref() == "registry:opencode-1.18.4@r2"
     assert len(OPENCODE_1_18_4.config_schema_hash()) == 64
 
 
@@ -73,6 +93,7 @@ def test_profile_rejects_unknown_construction_surface() -> None:
             effort_selector_id="effort",
             default_model="a/b",
             default_effort="max",
+            registered_models=("a/b",),
             allowed_efforts=("max",),
             requires_session_load=True,
             config_schema={},

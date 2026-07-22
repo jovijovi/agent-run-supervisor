@@ -55,6 +55,10 @@ class AgentProfile:
     effort_selector_id: str
     default_model: str
     default_effort: str
+    # Closed, registered value domains for the typed config selectors: a
+    # request outside them is refused at admission (live advertisement checks
+    # then gate the run itself).
+    registered_models: tuple[str, ...]
     allowed_efforts: tuple[str, ...]
     requires_session_load: bool
     config_schema: Mapping[str, Any]
@@ -71,6 +75,7 @@ class AgentProfile:
             "effort_selector_id": self.effort_selector_id,
             "default_model": self.default_model,
             "default_effort": self.default_effort,
+            "registered_models": list(self.registered_models),
             "allowed_efforts": list(self.allowed_efforts),
             "requires_session_load": self.requires_session_load,
             "config_schema": dict(self.config_schema),
@@ -107,9 +112,13 @@ class ProfileRegistry:
         return tuple(sorted(self._profiles))
 
 
+# Revision 2 (chair-approved C10 decision): the effort selector on real
+# OpenCode 1.18.4 is model-dependent, so the registered closed model pair is
+# k3 plus deepseek/deepseek-v4-pro — the configured-provider text/code model
+# whose live post-set-model option set advertises literal efforts high|max.
 OPENCODE_1_18_4 = AgentProfile(
     profile_id="opencode-1.18.4",
-    revision=1,
+    revision=2,
     executable_key="opencode",
     argv_template=("acp",),
     env_allowlist=(
@@ -123,17 +132,22 @@ OPENCODE_1_18_4 = AgentProfile(
         "XDG_DATA_HOME",
         "XDG_STATE_HOME",
     ),
-    credential_slots=("kimi-for-coding",),
+    credential_slots=("kimi-for-coding", "deepseek"),
     model_selector_id="model",
     effort_selector_id="effort",
     default_model="kimi-for-coding/k3",
     default_effort="max",
+    registered_models=("kimi-for-coding/k3", "deepseek/deepseek-v4-pro"),
     allowed_efforts=("low", "medium", "high", "max"),
     requires_session_load=True,
     config_schema={
-        "schema_version": 1,
+        "schema_version": 2,
         "selectors": {
-            "model": {"config_id": "model", "type": "string"},
+            "model": {
+                "config_id": "model",
+                "type": "string",
+                "domain": ["kimi-for-coding/k3", "deepseek/deepseek-v4-pro"],
+            },
             "effort": {
                 "config_id": "effort",
                 "type": "string",
