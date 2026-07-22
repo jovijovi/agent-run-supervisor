@@ -143,6 +143,24 @@ def _require_closed_keys(
         raise _invalid(f"unknown {where} fields present")
 
 
+def _validated_request_id(value: Any) -> str | None:
+    """Return ``value`` only when it satisfies the parse_request id contract."""
+    if not isinstance(value, str) or _REQUEST_ID_RE.fullmatch(value) is None:
+        return None
+    return value
+
+
+def correlated_request_id(frame: Mapping[str, Any] | Any) -> str | None:
+    """Best-effort request_id for error correlation before parse_request.
+
+    Returns a request_id only when it passes exactly the same type/length/
+    printability contract as ``parse_request``; otherwise ``None``.
+    """
+    if not isinstance(frame, Mapping):
+        return None
+    return _validated_request_id(frame.get("request_id"))
+
+
 def encode_frame(payload: Mapping[str, Any]) -> bytes:
     if not isinstance(payload, Mapping):
         raise ProtocolError(MALFORMED_FRAME, "frame payload must be a JSON object")
@@ -181,8 +199,8 @@ def parse_request(frame: Mapping[str, Any]) -> ParsedRequest:
         raise ProtocolError(
             UNSUPPORTED_API_VERSION, f"unsupported api_version; supported: {supported}"
         )
-    request_id = frame.get("request_id")
-    if not isinstance(request_id, str) or _REQUEST_ID_RE.fullmatch(request_id) is None:
+    request_id = _validated_request_id(frame.get("request_id"))
+    if request_id is None:
         raise _invalid(
             f"request_id must be 1..{MAX_REQUEST_ID_CHARS} characters from [A-Za-z0-9._-]"
         )

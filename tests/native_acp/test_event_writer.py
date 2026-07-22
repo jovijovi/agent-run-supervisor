@@ -55,7 +55,7 @@ def test_seq_is_monotonic_from_one() -> None:
 def test_byte_cap_truncates_but_preserves_family() -> None:
     async def case() -> None:
         handle = RecordingHandle()
-        writer = EventWriter(handle, max_event_bytes=200)
+        writer = EventWriter(handle, max_event_bytes=256)
         await writer.start()
         await writer.emit({"type": "permission_mediation", "decision": "deny", "reason": "r"})
         await writer.emit(
@@ -71,7 +71,7 @@ def test_byte_cap_truncates_but_preserves_family() -> None:
         assert oversized["truncated"] is True
         assert oversized["truncate_reason"] == "max_event_bytes"
         assert "detail" not in oversized
-        assert len(json.dumps(oversized)) <= 200
+        assert len(json.dumps(oversized)) <= 256
         assert records[2] == {"seq": 3, "type": "usage_updated"}
 
     asyncio.run(case())
@@ -157,5 +157,68 @@ def test_emit_nowait_full_queue_is_a_controlled_signal() -> None:
         finally:
             handle.gate.set()
             await writer.close()
+
+    asyncio.run(case())
+
+
+def test_event_writer_constructor_rejects_invalid_max_events_bounds() -> None:
+    handle = RecordingHandle()
+    with pytest.raises(ValueError):
+        EventWriter(handle, max_event_bytes=65536, max_events=0)
+    with pytest.raises(ValueError):
+        EventWriter(handle, max_event_bytes=65536, max_events=True)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        EventWriter(handle, max_event_bytes=255, max_events=10)
+    with pytest.raises(ValueError):
+        EventWriter(handle, max_event_bytes=65536, max_events=1_000_001)
+
+
+def test_max_events_allows_exactly_n_then_overflow_without_append() -> None:
+    async def case() -> None:
+        handle = RecordingHandle()
+        writer = EventWriter(handle, max_event_bytes=65536, max_events=3)
+        await writer.start()
+        for index in range(3):
+            await writer.emit({"type": "usage_updated", "n": index})
+        await writer.close()
+        assert len(handle.records) == 3
+
+        writer2 = EventWriter(handle, max_event_bytes=65536, max_events=2)
+        await writer2.start()
+        await writer2.emit({"type": "a"})
+        await writer2.emit({"type": "b"})
+        before = len(handle.records)
+        with pytest.raises(EventWriterOverflow):
+            await writer2.emit({"type": "c"})
+        assert writer2.overflowed is True
+        assert len(handle.records) == before
+        with pytest.raises(EventWriterOverflow):
+            writer2.emit_nowait({"type": "d"})
+        assert len(handle.records) == before
+        await writer2.close()
+
+    asyncio.run(case())
+
+
+def test_max_events_reservation_holds_under_queue_timeout_path() -> None:
+    async def case() -> None:
+        handle = RecordingHandle()
+        # No consumer started: the queue stays full so the second emit hits the
+        # producer timeout path after reserving a slot.
+        writer = EventWriter(
+            handle,
+            max_event_bytes=65536,
+            max_events=2,
+            queue_maxsize=1,
+            producer_timeout_seconds=0.05,
+        )
+        await writer.emit({"type": "first"})
+        with pytest.raises(EventWriterOverflow):
+            await writer.emit({"type": "blocked"})
+        assert writer.overflowed is True
+        before = len(handle.records)
+        with pytest.raises(EventWriterOverflow):
+            writer.emit_nowait({"type": "after-overflow"})
+        assert len(handle.records) == before
 
     asyncio.run(case())

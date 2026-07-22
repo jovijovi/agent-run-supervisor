@@ -582,3 +582,35 @@ def test_native_spec_error_mapping_never_echoes_caller_values() -> None:
     assert err.__cause__ is None
     rendered = "".join(traceback.format_exception(err))
     assert SECRET_SENTINEL not in rendered
+
+
+def test_correlated_request_id_helper_matches_parse_request_contract() -> None:
+    assert protocol.correlated_request_id({"request_id": "ok-1"}) == "ok-1"
+    assert protocol.correlated_request_id({"request_id": "r" * protocol.MAX_REQUEST_ID_CHARS}) == (
+        "r" * protocol.MAX_REQUEST_ID_CHARS
+    )
+    for bad in (None, "", "has space", "café", 7, True, ["x"], "r" * (protocol.MAX_REQUEST_ID_CHARS + 1)):
+        assert protocol.correlated_request_id({"request_id": bad}) is None
+    assert protocol.correlated_request_id("not-a-mapping") is None  # type: ignore[arg-type]
+    assert protocol.correlated_request_id({}) is None
+
+
+def test_parse_request_errors_preserve_valid_request_id_for_correlation() -> None:
+    # Helper + parse_request share one validator: valid id survives typed errors.
+    unknown = envelope(op="bogus", request_id="corr-unknown")
+    assert protocol.correlated_request_id(unknown) == "corr-unknown"
+    err = _reject("UNKNOWN_OP", protocol.parse_request, unknown)
+    assert err.message  # bounded/sanitized
+    assert SECRET_SENTINEL not in err.message
+
+    unsupported = envelope(api_version=99, request_id="corr-version")
+    assert protocol.correlated_request_id(unsupported) == "corr-version"
+    _reject("UNSUPPORTED_API_VERSION", protocol.parse_request, unsupported)
+
+    invalid_payload = envelope(payload=["nope"], request_id="corr-payload")
+    assert protocol.correlated_request_id(invalid_payload) == "corr-payload"
+    _reject("INVALID_REQUEST", protocol.parse_request, invalid_payload)
+
+    # Malformed / invalid request_id never correlates.
+    assert protocol.correlated_request_id(envelope(request_id="bad id", op="bogus")) is None
+    assert protocol.correlated_request_id(envelope(request_id=None, op="bogus")) is None

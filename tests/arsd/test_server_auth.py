@@ -354,8 +354,63 @@ def test_request_error_isolated_connection_survives(sock_root: Path) -> None:
             bad = {"api_version": 1, "op": "bogus", "request_id": "r1"}
             reply = await roundtrip(reader, writer, bad)
             assert reply["error"]["code"] == "UNKNOWN_OP"
+            assert reply["request_id"] == "r1"
             reply = await roundtrip(reader, writer, info_frame("r2"))
             assert reply == {"request_id": "r2", "result": {"op": "server_info"}}
+            await close(writer)
+
+    run_async(scenario())
+
+
+def test_parse_errors_echo_valid_request_id_on_wire(sock_root: Path) -> None:
+    async def scenario() -> None:
+        path = sock_path(sock_root)
+        async with serving(path):
+            reader, writer = await connect(path)
+
+            unknown = await roundtrip(
+                reader,
+                writer,
+                {"api_version": 1, "op": "nope", "request_id": "corr-op"},
+            )
+            assert unknown["request_id"] == "corr-op"
+            assert unknown["error"]["code"] == "UNKNOWN_OP"
+            assert SECRET_SENTINEL not in unknown["error"]["message"]
+
+            unsupported = await roundtrip(
+                reader,
+                writer,
+                {
+                    "api_version": 99,
+                    "op": "server_info",
+                    "request_id": "corr-ver",
+                    "payload": {},
+                },
+            )
+            assert unsupported["request_id"] == "corr-ver"
+            assert unsupported["error"]["code"] == "UNSUPPORTED_API_VERSION"
+
+            invalid_payload = await roundtrip(
+                reader,
+                writer,
+                {
+                    "api_version": 1,
+                    "op": "server_info",
+                    "request_id": "corr-pay",
+                    "payload": ["x"],
+                },
+            )
+            assert invalid_payload["request_id"] == "corr-pay"
+            assert invalid_payload["error"]["code"] == "INVALID_REQUEST"
+
+            bad_id = await roundtrip(
+                reader,
+                writer,
+                {"api_version": 1, "op": "bogus", "request_id": "bad id"},
+            )
+            assert bad_id["request_id"] is None
+            assert bad_id["error"]["code"] == "INVALID_REQUEST"
+
             await close(writer)
 
     run_async(scenario())
@@ -663,6 +718,38 @@ def test_streaming_handler_pushes_two_correlated_result_frames(sock_root: Path) 
             assert second["request_id"] == "stream-1"
             assert first["result"] == {"part": 1}
             assert second["result"] == {"part": 2}
+            # Natural exhaustion closes the connection after aclose.
+            assert await reader.readline() == b""
+            assert streams[0].closed is True
+            await close(writer)
+        finally:
+            await srv.aclose()
+
+    run_async(scenario())
+
+
+def test_streaming_natural_exhaustion_closes_connection(sock_root: Path) -> None:
+    async def scenario() -> None:
+        path = sock_path(sock_root)
+        streams: list[_StreamResult] = []
+
+        async def handler(caller, request):
+            stream = _StreamResult([{"done": True}])
+            streams.append(stream)
+            return stream
+
+        srv = server.ArsdServer(
+            socket_path=path, policy=same_uid_policy(), handler=handler
+        )
+        await srv.start()
+        try:
+            reader, writer = await connect(path)
+            writer.write(protocol.encode_frame(info_frame("eof-stream")))
+            await writer.drain()
+            frame = protocol.decode_frame(await reader.readline())
+            assert frame["result"] == {"done": True}
+            assert await reader.readline() == b""
+            assert streams[0].closed is True
             await close(writer)
         finally:
             await srv.aclose()
@@ -741,6 +828,8 @@ def test_streaming_protocol_error_emits_safe_error_frame(sock_root: Path) -> Non
             assert err["request_id"] == "err-stream"
             assert err["error"]["code"] == protocol.EVENT_BACKLOG_EXCEEDED
             assert SECRET_SENTINEL not in err["error"]["message"]
+            # Protocol error: one correlated typed error, then close.
+            assert await reader.readline() == b""
             await close(writer)
         finally:
             await srv.aclose()

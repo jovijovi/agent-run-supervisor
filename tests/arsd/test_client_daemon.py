@@ -1336,6 +1336,56 @@ def test_sigterm_shutdown_shutting_down_unlink_bounded_exit(sock_root: Path) -> 
     run_async(case())
 
 
+def test_follow_list_terminates_after_terminal_stream_exhaustion(
+    sock_root: Path,
+) -> None:
+    """Real UDS/client: list(subscription) ends after terminal/stream EOF.
+
+    No sleep-as-correctness: CompletingFactory writes result.json so the
+    follow watcher reaches natural StopAsyncIteration; the server must close
+    the connection so the client iterator terminates and releases resources.
+    """
+    path = sock_path(sock_root)
+    root = supervisor_root(sock_root)
+    factory = CompletingFactory(event_count=3, mode="complete")
+    with running_daemon(path, root, factory=factory):
+        sessions = storage.native_session_store(root)
+        seed_session(sessions, session_id="sess-follow-term")
+
+        cli = arsd_client.ArsdClient(path)
+        cli.connect()
+        accepted = cli.submit(
+            request_id="follow-term-1",
+            payload=submit_payload(
+                request=valid_wire_request(ars_session_id="sess-follow-term")
+            ),
+        )
+        run_id = accepted["run_id"]
+        # Wait until the injected run has written its terminal fact (no sleep
+        # bound as correctness — poll on the durable artifact).
+        run_dir = Path(storage.native_event_store(root).base_dir) / run_id
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not (run_dir / "result.json").exists():
+            time.sleep(0.02)
+        assert (run_dir / "result.json").exists()
+
+        frames = list(
+            cli.run_events(
+                run_id, from_seq=0, follow=True, follow_idle_seconds=0.05
+            )
+        )
+        assert frames
+        assert all(frame.get("follow") is True for frame in frames)
+        assert cli.closed is True
+        # Peer disconnect / natural EOF cancels only the subscription: Run
+        # already terminal and not cancelled by follow teardown.
+        with arsd_client.ArsdClient(path) as fresh:
+            status = fresh.run_status(run_id)
+            assert status["run_id"] == run_id
+            assert "result" in status
+            assert status["result"]["status"] == "completed"
+
+
 def test_cli_main_zero_mappings_exits_nonzero(
     sock_root: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:

@@ -844,3 +844,36 @@ def test_prepared_handle_keeps_native_store_root_validation(
             session_store=storage.native_session_store(harness.root),
             event_store=bad_events,
         )
+
+
+def test_max_events_overflow_pre_dispatch_never_sends_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    result = _run(harness.task(request=_request(limits=RunLimits(max_events=1))))
+    assert result.status is AgentRunStatus.FAILED
+    assert "session/prompt" not in harness.methods_seen()
+    assert not (harness.run_dir() / "prompt-dispatch-started").exists()
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    assert payload["status"] == "failed"
+    assert payload["retryable"] is False
+    # Terminal evidence outside the event stream remains possible.
+    assert (harness.run_dir() / "result.json").is_file()
+
+
+def test_max_events_overflow_after_dispatch_fails_non_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    # Generous enough for startup + prompt-sent evidence; tight enough that
+    # in-turn updates overflow the sealed max_events budget.
+    result = _run(harness.task(request=_request(limits=RunLimits(max_events=4))))
+    assert result.status is AgentRunStatus.FAILED
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    assert payload["status"] == "failed"
+    assert payload["retryable"] is False
+    assert payload.get("detail_code") == "EVIDENCE_PIPELINE"
+    assert (harness.run_dir() / "result.json").is_file()
+    # Prompt was attempted (dispatch path), but evidence overflow controlled the verdict.
+    assert (harness.run_dir() / "prompt-dispatch-started").exists()
+    assert "session/prompt" in harness.methods_seen()

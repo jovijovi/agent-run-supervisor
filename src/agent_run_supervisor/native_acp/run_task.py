@@ -363,7 +363,10 @@ class RunTask:
 
         # Architecture §8 native layout: the Run's event stream is events.jsonl.
         ctx.writer = EventWriter(
-            ctx.handle, max_event_bytes=limits.max_event_bytes, filename="events.jsonl"
+            ctx.handle,
+            max_event_bytes=limits.max_event_bytes,
+            max_events=limits.max_events,
+            filename="events.jsonl",
         )
         await ctx.writer.start()
         normalizer = NativeAcpEventNormalizer()
@@ -579,6 +582,15 @@ class RunTask:
     async def _dispatch(self, ctx: _RunContext, turn_timeout: float) -> None:
         driver = ctx.driver
         assert driver is not None
+        # Evidence overflow before the prompt wire write: fail closed with no
+        # prompt, never invent an uncertain post-dispatch row.
+        if ctx.writer is not None and (
+            ctx.pipeline_error is not None or not ctx.writer.can_accept
+        ):
+            raise _PreDispatchFailure(
+                "event writer overflow before prompt dispatch",
+                "EVIDENCE_PIPELINE",
+            )
         # Conservative uncertainty boundary: created immediately before the
         # wire write attempt.
         self._write_marker(ctx, DISPATCH_STARTED_MARKER)

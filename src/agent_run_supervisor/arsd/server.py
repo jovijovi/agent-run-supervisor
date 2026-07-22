@@ -370,7 +370,7 @@ class ArsdServer:
                     # Framing integrity is gone; resynchronization is unsafe.
                     return
                 continue
-            request_id: str | None = None
+            request_id = protocol.correlated_request_id(frame)
             try:
                 parsed = protocol.parse_request(frame)
                 request_id = parsed.request_id
@@ -415,7 +415,8 @@ class ArsdServer:
         """Push each yielded Mapping as its own result frame.
 
         Returns False when the connection must close. Cancelling/closing the
-        stream never cancels a Run — only this subscription.
+        stream never cancels a Run — only this subscription. Natural stream
+        exhaustion and protocol errors close after ``aclose``.
         """
         try:
             aiter = stream.__aiter__()
@@ -437,10 +438,10 @@ class ArsdServer:
                 try:
                     item = next_item.result()
                 except StopAsyncIteration:
-                    return True
+                    return False
                 except protocol.ProtocolError as err:
                     await self._send_error(writer, request_id, err.code, err.message)
-                    return True
+                    return False
                 except Exception as exc:
                     _LOGGER.error(
                         "arsd: stream handler failed (%s); closing connection",
