@@ -9,15 +9,18 @@ import datetime as _dt
 import json
 import logging
 import math
+import os
+import stat
 import weakref
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Mapping
+from typing import Any, AsyncIterator, Callable, Iterator, Mapping
 
 from agent_run_supervisor import __version__ as PACKAGE_VERSION
 from agent_run_supervisor.event_store import EventStore, EventStoreError
 from agent_run_supervisor.native_acp import storage
 from agent_run_supervisor.native_acp.profile import DEFAULT_REGISTRY, ProfileRegistry
 from agent_run_supervisor.native_acp.run_task import RunTask
+from agent_run_supervisor.native_acp.spec import LIMIT_MAX_EVENT_BYTES_MAX
 from agent_run_supervisor.session import (
     SessionNotFoundError,
     SessionQuarantinedError,
@@ -36,8 +39,13 @@ DEFAULT_FOLLOW_IDLE_SECONDS = 0.25
 # Production ceiling for run_events follow idle (seconds). Documented max.
 MAX_FOLLOW_IDLE_SECONDS = 3600.0
 EVENTS_FILENAME = "events.jsonl"
-# Conservative per-line bound for events.jsonl evidence reads (handlers-local).
-MAX_EVENT_LINE_BYTES = 65_536
+# Align stored-line bound with admitted max_event_bytes (up to 1 MiB) plus
+# small deterministic envelope headroom for seq/JSON framing on disk.
+_EVENT_LINE_ENVELOPE_HEADROOM = 256
+MAX_EVENT_LINE_BYTES = LIMIT_MAX_EVENT_BYTES_MAX + _EVENT_LINE_ENVELOPE_HEADROOM
+# Aggregate events payload budget below MAX_FRAME_BYTES with envelope headroom.
+MAX_EVENTS_RESPONSE_BYTES = 768 * 1024
+_READ_CHUNK_BYTES = 65_536
 
 _PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
     "server_info": frozenset(),
@@ -347,7 +355,17 @@ class EventFollowStream:
                 )
                 for event in events:
                     try:
+                        _ensure_events_page_encodes(
+                            run_id=self._run_id,
+                            events=[event],
+                            next_from_seq=int(event.get("seq") or self._cursor),
+                            exhausted=False,
+                            follow=True,
+                        )
                         self._queue.put_nowait(event)
+                    except protocol.ProtocolError as err:
+                        self._fail(err)
+                        return
                     except asyncio.QueueFull:
                         self._fail(
                             protocol.ProtocolError(
@@ -376,28 +394,112 @@ class EventFollowStream:
             )
 
 
+def _event_json_size(event: Mapping[str, Any]) -> int:
+    try:
+        return len(
+            json.dumps(
+                dict(event),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        raise protocol.ProtocolError(
+            protocol.INTERNAL, "event evidence is corrupt"
+        ) from None
+
+
+def _response_truncation_marker(event: Mapping[str, Any], *, seq: int) -> dict[str, Any]:
+    try:
+        event_type = event.get("type") or "unknown_update"
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        raise protocol.ProtocolError(
+            protocol.INTERNAL, "event evidence is corrupt"
+        ) from None
+    return {
+        "seq": seq,
+        "type": event_type,
+        "truncated": True,
+        "truncate_reason": "response_budget",
+    }
+
+
+def _iter_bounded_event_lines(fd: int) -> Iterator[bytes]:
+    """Yield raw line bytes (without trailing LF) with a hard per-line cap."""
+    buf = bytearray()
+    while True:
+        newline_at = buf.find(b"\n")
+        if newline_at >= 0:
+            line = bytes(buf[:newline_at])
+            del buf[: newline_at + 1]
+            if len(line) > MAX_EVENT_LINE_BYTES:
+                raise protocol.ProtocolError(
+                    protocol.INTERNAL, "event evidence line exceeds bound"
+                )
+            yield line
+            continue
+        if len(buf) > MAX_EVENT_LINE_BYTES:
+            raise protocol.ProtocolError(
+                protocol.INTERNAL, "event evidence line exceeds bound"
+            )
+        chunk = os.read(fd, min(_READ_CHUNK_BYTES, MAX_EVENT_LINE_BYTES - len(buf) + 1))
+        if not chunk:
+            if buf:
+                if len(buf) > MAX_EVENT_LINE_BYTES:
+                    raise protocol.ProtocolError(
+                        protocol.INTERNAL, "event evidence line exceeds bound"
+                    )
+                yield bytes(buf)
+            return
+        buf.extend(chunk)
+
+
 def _read_events_page(
     run_dir: Path, *, from_seq: int, limit: int
 ) -> tuple[list[dict[str, Any]], int, bool]:
     path = run_dir / EVENTS_FILENAME
-    if not path.is_file():
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
         return [], from_seq, True
+    except OSError:
+        raise protocol.ProtocolError(
+            protocol.INTERNAL, "event evidence is unreadable"
+        ) from None
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        raise protocol.ProtocolError(
+            protocol.INTERNAL, "event evidence is unreadable"
+        )
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        raise protocol.ProtocolError(
+            protocol.INTERNAL, "event evidence is unreadable"
+        ) from None
+
     selected: list[dict[str, Any]] = []
     last_seq = from_seq
+    used_bytes = 2  # events array brackets
+    stopped_early = False
     try:
-        with open(path, encoding="utf-8") as stream:
-            for raw in stream:
-                line_bytes = raw.encode("utf-8")
-                if len(line_bytes) > MAX_EVENT_LINE_BYTES:
-                    raise protocol.ProtocolError(
-                        protocol.INTERNAL, "event evidence line exceeds bound"
-                    )
-                line = raw.strip()
-                if not line:
+        try:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode):
+                raise protocol.ProtocolError(
+                    protocol.INTERNAL, "event evidence is unreadable"
+                )
+            for raw_line in _iter_bounded_event_lines(fd):
+                if not raw_line.strip():
                     continue
                 try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
+                    text = raw_line.decode("utf-8")
+                    event = json.loads(text)
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
                     raise protocol.ProtocolError(
                         protocol.INTERNAL, "event evidence is corrupt"
                     ) from None
@@ -416,18 +518,90 @@ def _read_events_page(
                     raise protocol.ProtocolError(
                         protocol.INTERNAL, "event evidence is corrupt"
                     )
-                selected.append(event)
-                last_seq = seq
-                if len(selected) >= limit:
-                    break
+
+                try:
+                    event_size = _event_json_size(event)
+                    separator = 1 if selected else 0
+                    if used_bytes + separator + event_size > MAX_EVENTS_RESPONSE_BYTES:
+                        if not selected:
+                            marker = _response_truncation_marker(event, seq=seq)
+                            marker_size = _event_json_size(marker)
+                            if used_bytes + marker_size > MAX_EVENTS_RESPONSE_BYTES:
+                                raise protocol.ProtocolError(
+                                    protocol.INTERNAL,
+                                    "event evidence exceeds response budget",
+                                )
+                            selected.append(marker)
+                            last_seq = seq
+                            used_bytes += marker_size
+                            stopped_early = True
+                            break
+                        stopped_early = True
+                        break
+
+                    selected.append(event)
+                    last_seq = seq
+                    used_bytes += separator + event_size
+                    if len(selected) >= limit:
+                        break
+                except protocol.ProtocolError:
+                    raise
+                except (TypeError, ValueError, OverflowError, RecursionError):
+                    raise protocol.ProtocolError(
+                        protocol.INTERNAL, "event evidence is corrupt"
+                    ) from None
+        finally:
+            os.close(fd)
     except protocol.ProtocolError:
         raise
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        raise protocol.ProtocolError(
+            protocol.INTERNAL, "event evidence is corrupt"
+        ) from None
     except OSError:
         raise protocol.ProtocolError(
             protocol.INTERNAL, "event evidence is unreadable"
         ) from None
-    exhausted = len(selected) < limit
+
+    if stopped_early:
+        exhausted = False
+    else:
+        exhausted = len(selected) < limit
     return selected, last_seq, exhausted
+
+
+def _ensure_events_page_encodes(
+    *,
+    run_id: str,
+    events: list[dict[str, Any]],
+    next_from_seq: int,
+    exhausted: bool,
+    follow: bool = False,
+) -> None:
+    """Fail closed if a page cannot be framed with a max-length request_id."""
+    body: dict[str, Any] = {
+        "run_id": run_id,
+        "events": events,
+    }
+    if follow:
+        body["follow"] = True
+        if events:
+            body["seq"] = events[0].get("seq")
+    else:
+        body["next_from_seq"] = next_from_seq
+        body["exhausted"] = exhausted
+    try:
+        protocol.encode_frame(
+            protocol.build_result("x" * protocol.MAX_REQUEST_ID_CHARS, body)
+        )
+    except protocol.ProtocolError as err:
+        raise protocol.ProtocolError(
+            protocol.INTERNAL, "event page exceeds frame bound"
+        ) from err
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        raise protocol.ProtocolError(
+            protocol.INTERNAL, "event evidence is corrupt"
+        ) from None
 
 
 class ArsdHandlers:
@@ -809,6 +983,12 @@ class ArsdHandlers:
         if not follow:
             events, next_from_seq, exhausted = _read_events_page(
                 run_dir, from_seq=from_seq, limit=limit
+            )
+            _ensure_events_page_encodes(
+                run_id=run_id,
+                events=events,
+                next_from_seq=next_from_seq,
+                exhausted=exhausted,
             )
             return {
                 "run_id": run_id,

@@ -85,10 +85,20 @@ def _is_finite_number(value: Any) -> bool:
 
 
 def _validate_limit_float(name: str, value: Any, maximum: float) -> None:
-    _require(_is_finite_number(value), f"limit {name} must be a finite number")
-    number = float(value)
-    _require(number > 0, f"limit {name} must be positive")
-    _require(number <= maximum, f"limit {name} exceeds maximum")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SpecValidationError(f"limit {name} must be a finite number")
+    # Integers: exact compare against positivity/maximum BEFORE float() so huge
+    # decoded JSON ints never OverflowError inside validation.
+    if type(value) is int:
+        _require(value > 0, f"limit {name} must be positive")
+        _require(value <= maximum, f"limit {name} exceeds maximum")
+        return
+    _require(
+        value == value and value not in (float("inf"), float("-inf")),
+        f"limit {name} must be a finite number",
+    )
+    _require(value > 0, f"limit {name} must be positive")
+    _require(value <= maximum, f"limit {name} exceeds maximum")
 
 
 def _validate_limit_int(name: str, value: Any, maximum: int, *, minimum: int = 1) -> None:

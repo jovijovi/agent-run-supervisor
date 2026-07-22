@@ -405,3 +405,33 @@ def test_effective_state_holds_observations_only(tmp_path: Path) -> None:
     # Observations never flow back into the sealed spec.
     assert spec.runtime.model_id == "kimi-for-coding/k3"
     assert spec.session.ars_session_id is None
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "startup_timeout_seconds",
+        "turn_timeout_seconds",
+        "cancel_grace_seconds",
+    ],
+)
+def test_r6_b5_run_limits_huge_int_no_overflow(field: str) -> None:
+    with pytest.raises(SpecValidationError) as err:
+        RunLimits(**{field: 10**10000})
+    message = str(err.value)
+    assert field in message
+    assert "OverflowError" not in message
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "startup_timeout_seconds",
+        "turn_timeout_seconds",
+        "cancel_grace_seconds",
+    ],
+)
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_r6_b5_run_limits_nan_inf_refused(field: str, bad: float) -> None:
+    with pytest.raises(SpecValidationError):
+        RunLimits(**{field: bad})

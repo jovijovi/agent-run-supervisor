@@ -878,7 +878,12 @@ def test_authorize_run_rejects_symlinked_run_dir(tmp_path: Path) -> None:
             + json.dumps({"seq": 1, "type": "m"})
             + "\n",
         ),
-        ("oversized", '{"seq":1,"type":"m","text":"' + ("x" * 70000) + '"}\n'),
+        (
+            "oversized",
+            '{"seq":1,"type":"m","text":"'
+            + ("x" * (handlers.MAX_EVENT_LINE_BYTES + 8))
+            + '"}\n',
+        ),
     ],
 )
 def test_events_page_corrupt_evidence_fails_closed(
@@ -1300,3 +1305,328 @@ def test_r5_b1_run_status_frame_encodes_truncated_native_result(tmp_path: Path) 
             await harness.aclose()
 
     run_async(case())
+
+
+def test_r6_b4_near_1mib_stored_event_yields_truncation_marker(tmp_path: Path) -> None:
+    async def case():
+        harness = Harness(tmp_path)
+        caller = caller_for(principal_a())
+        try:
+            reply = await harness.submit(caller, "big-ev-1")
+            run_id = reply["run_id"]
+            run_dir = harness.run_dir(run_id)
+            # Valid configured near-1MiB event on disk.
+            big = {
+                "seq": 1,
+                "type": "agent_message_delta",
+                "text": "x" * (1024 * 1024 - 128),
+            }
+            line = json.dumps(big, sort_keys=True, ensure_ascii=False) + "\n"
+            assert len(line.encode("utf-8")) <= handlers.MAX_EVENT_LINE_BYTES
+            (run_dir / "events.jsonl").write_text(line, encoding="utf-8")
+            page = await call(
+                harness,
+                caller,
+                "run_events",
+                "big-page",
+                {"run_id": run_id, "from_seq": 0, "limit": 10},
+            )
+            assert len(page["events"]) == 1
+            marker = page["events"][0]
+            assert marker["seq"] == 1
+            assert marker["type"] == "agent_message_delta"
+            assert marker["truncated"] is True
+            assert marker["truncate_reason"] == "response_budget"
+            assert "text" not in marker
+            frame = protocol.encode_frame(
+                protocol.build_result("x" * protocol.MAX_REQUEST_ID_CHARS, page)
+            )
+            assert len(frame) <= protocol.MAX_FRAME_BYTES
+            # Raw durable evidence remains on disk.
+            raw = (run_dir / "events.jsonl").read_text(encoding="utf-8")
+            assert "x" * 1000 in raw
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_r6_b4_many_events_page_early_then_continue_without_loss(
+    tmp_path: Path,
+) -> None:
+    async def case():
+        harness = Harness(tmp_path)
+        caller = caller_for(principal_a())
+        try:
+            reply = await harness.submit(caller, "page-budget-1")
+            run_id = reply["run_id"]
+            run_dir = harness.run_dir(run_id)
+            # Many medium events that individually fit but exceed aggregate budget.
+            chunk = "y" * 40_000
+            events = []
+            with open(run_dir / "events.jsonl", "w", encoding="utf-8") as stream:
+                for seq in range(1, 40):
+                    event = {"seq": seq, "type": "message", "text": chunk}
+                    stream.write(json.dumps(event, sort_keys=True) + "\n")
+                    events.append(seq)
+            seen: list[int] = []
+            cursor = 0
+            pages = 0
+            while True:
+                page = await call(
+                    harness,
+                    caller,
+                    "run_events",
+                    f"pb-{pages}",
+                    {"run_id": run_id, "from_seq": cursor, "limit": 1000},
+                )
+                pages += 1
+                page_seqs = [event["seq"] for event in page["events"]]
+                assert page_seqs
+                seen.extend(page_seqs)
+                frame = protocol.encode_frame(
+                    protocol.build_result("x" * protocol.MAX_REQUEST_ID_CHARS, page)
+                )
+                assert len(frame) <= protocol.MAX_FRAME_BYTES
+                if page["exhausted"]:
+                    break
+                assert page["next_from_seq"] == page_seqs[-1]
+                cursor = page["next_from_seq"]
+                assert pages < 50
+            assert seen == events
+            assert pages > 1
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_r6_b4_overlong_line_rejects_without_unbounded_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def case():
+        harness = Harness(tmp_path)
+        caller = caller_for(principal_a())
+        try:
+            reply = await harness.submit(caller, "overlong-1")
+            run_id = reply["run_id"]
+            run_dir = harness.run_dir(run_id)
+            over = b"{" + b'"a":"' + b"z" * (handlers.MAX_EVENT_LINE_BYTES + 10) + b'"}\n'
+            (run_dir / "events.jsonl").write_bytes(over)
+            reads = {"n": 0, "max": 0}
+            real_read = os.read
+
+            def tracking_read(fd, n):
+                reads["n"] += 1
+                reads["max"] = max(reads["max"], n)
+                return real_read(fd, n)
+
+            monkeypatch.setattr(os, "read", tracking_read)
+            with pytest.raises(protocol.ProtocolError) as err:
+                await call(
+                    harness,
+                    caller,
+                    "run_events",
+                    "overlong",
+                    {"run_id": run_id, "from_seq": 0, "limit": 10},
+                )
+            assert err.value.code == protocol.INTERNAL
+            assert "z" * 50 not in err.value.message
+            assert reads["max"] <= handlers.MAX_EVENT_LINE_BYTES + 1
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_r6_b4_symlink_and_non_regular_rejected(tmp_path: Path) -> None:
+    async def case():
+        harness = Harness(tmp_path)
+        caller = caller_for(principal_a())
+        try:
+            reply = await harness.submit(caller, "symlink-1")
+            run_id = reply["run_id"]
+            run_dir = harness.run_dir(run_id)
+            target = run_dir / "real-events.jsonl"
+            target.write_text(
+                json.dumps({"seq": 1, "type": "message"}) + "\n", encoding="utf-8"
+            )
+            link = run_dir / "events.jsonl"
+            if link.exists():
+                link.unlink()
+            link.symlink_to(target)
+            with pytest.raises(protocol.ProtocolError) as err:
+                await call(
+                    harness,
+                    caller,
+                    "run_events",
+                    "symlink",
+                    {"run_id": run_id, "from_seq": 0, "limit": 10},
+                )
+            assert err.value.code == protocol.INTERNAL
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_r6_b4_corrupt_deep_and_int_json_typed_internal(tmp_path: Path) -> None:
+    async def case():
+        harness = Harness(tmp_path)
+        caller = caller_for(principal_a())
+        try:
+            reply = await harness.submit(caller, "corrupt-1")
+            run_id = reply["run_id"]
+            run_dir = harness.run_dir(run_id)
+            (run_dir / "events.jsonl").write_bytes(
+                b'{"seq":1,"n":' + b"1" + b"0" * 10000 + b"}\n"
+            )
+            with pytest.raises(protocol.ProtocolError) as err:
+                await call(
+                    harness,
+                    caller,
+                    "run_events",
+                    "corrupt-int",
+                    {"run_id": run_id, "from_seq": 0, "limit": 10},
+                )
+            assert err.value.code == protocol.INTERNAL
+            assert "10000" not in err.value.message
+
+            depth = 2000
+            nested = (
+                b'{"seq":2,"a":'
+                + b"{" * depth
+                + b'"x":1'
+                + b"}" * depth
+                + b"}\n"
+            )
+            if len(nested) <= handlers.MAX_EVENT_LINE_BYTES:
+                (run_dir / "events.jsonl").write_bytes(nested)
+                with pytest.raises(protocol.ProtocolError) as err2:
+                    await call(
+                        harness,
+                        caller,
+                        "run_events",
+                        "corrupt-deep",
+                        {"run_id": run_id, "from_seq": 0, "limit": 10},
+                    )
+                assert err2.value.code == protocol.INTERNAL
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_r6_b4_follow_frame_encodes_for_budget_marker(tmp_path: Path) -> None:
+    async def case():
+        harness = Harness(tmp_path, mode="pending")
+        caller = caller_for(principal_a())
+        stream = None
+        try:
+            reply = await harness.submit(caller, "follow-big-1")
+            run_id = reply["run_id"]
+            big = {
+                "seq": 1,
+                "type": "agent_message_delta",
+                "text": "x" * (1024 * 1024 - 128),
+            }
+            (harness.run_dir(run_id) / "events.jsonl").write_text(
+                json.dumps(big, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            stream = await call(
+                harness,
+                caller,
+                "run_events",
+                "follow-big",
+                {
+                    "run_id": run_id,
+                    "from_seq": 0,
+                    "follow": True,
+                    "follow_idle_seconds": 0.05,
+                },
+            )
+            stream.__aiter__()
+            item = await asyncio.wait_for(stream.__anext__(), 2.0)
+            assert item["events"][0]["truncated"] is True
+            frame = protocol.encode_frame(
+                protocol.build_result("x" * protocol.MAX_REQUEST_ID_CHARS, dict(item))
+            )
+            assert len(frame) <= protocol.MAX_FRAME_BYTES
+        finally:
+            if stream is not None:
+                await stream.aclose()
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_r6_residual_event_json_size_cyclic_is_sanitized_internal() -> None:
+    event: dict = {"seq": 1, "type": "message", "text": "secret-payload-xyz"}
+    event["self"] = event
+    with pytest.raises(protocol.ProtocolError) as err:
+        handlers._event_json_size(event)
+    assert err.value.code == protocol.INTERNAL
+    assert "secret-payload-xyz" not in err.value.message
+    assert "Circular" not in err.value.message
+
+
+def test_r6_residual_event_json_size_deep_is_sanitized_internal() -> None:
+    node: dict = {"leaf": "secret-deep-leaf"}
+    for _ in range(5000):
+        node = {"n": node}
+    event = {"seq": 1, "type": "message", "payload": node}
+    with pytest.raises(protocol.ProtocolError) as err:
+        handlers._event_json_size(event)
+    assert err.value.code == protocol.INTERNAL
+    assert "secret-deep-leaf" not in err.value.message
+    assert "Recursion" not in err.value.message
+
+
+def test_r6_residual_read_page_mutated_mapping_size_is_internal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def case():
+        harness = Harness(tmp_path)
+        caller = caller_for(principal_a())
+        try:
+            reply = await harness.submit(caller, "mut-size-1")
+            run_id = reply["run_id"]
+            seed_events(harness.run_dir(run_id), 1)
+
+            real_size = handlers._event_json_size
+
+            def boom_size(event):
+                # Simulate adversarial/mutated Mapping during framing calc.
+                raise RecursionError("injected deep structure")
+
+            monkeypatch.setattr(handlers, "_event_json_size", boom_size)
+            with pytest.raises(protocol.ProtocolError) as err:
+                await call(
+                    harness,
+                    caller,
+                    "run_events",
+                    "mut-size",
+                    {"run_id": run_id, "from_seq": 0, "limit": 10},
+                )
+            assert err.value.code == protocol.INTERNAL
+            assert "injected" not in err.value.message
+            assert "Recursion" not in err.value.message
+            del real_size
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_r6_residual_ensure_page_encodes_adversarial_is_internal() -> None:
+    cyclic: dict = {"seq": 1, "type": "message"}
+    cyclic["self"] = cyclic
+    with pytest.raises(protocol.ProtocolError) as err:
+        handlers._ensure_events_page_encodes(
+            run_id="run-x",
+            events=[cyclic],
+            next_from_seq=1,
+            exhausted=True,
+        )
+    assert err.value.code == protocol.INTERNAL
+    assert "Circular" not in err.value.message

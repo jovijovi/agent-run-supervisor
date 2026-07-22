@@ -1146,25 +1146,86 @@ def test_r5_b2_session_prompt_sent_enqueue_fail_skips_prompt(
 
     monkeypatch.setattr(NativeAcpDriver, "prompt_once", counting_prompt)
 
-    real_emit = EventWriter.emit_nowait
+    real_emit = EventWriter.emit_awaited
 
-    def emit_fail_prompt_sent(self, event):
+    async def emit_fail_prompt_sent(self, event):
         if event.get("type") == "session_prompt_sent":
             self.overflowed = True
             raise EventWriterOverflow("injected session_prompt_sent enqueue failure")
-        return real_emit(self, event)
+        return await real_emit(self, event)
 
-    monkeypatch.setattr(EventWriter, "emit_nowait", emit_fail_prompt_sent)
+    monkeypatch.setattr(EventWriter, "emit_awaited", emit_fail_prompt_sent)
     result = _run(harness.task())
     assert prompt_calls["n"] == 0
     assert "session/prompt" not in harness.methods_seen()
     assert (harness.run_dir() / "prompt-dispatch-started").exists()
     payload = json.loads((harness.run_dir() / "result.json").read_text())
-    # Marker written ⇒ conservative unknown/quarantine, never predispatch claim.
+    # Marker written ⇒ conservative unknown/quarantine, never overclaim predispatch.
     assert payload["status"] == "unknown"
     assert payload["retryable"] is False
     record = harness.session_store().open_session("sess-native-1")
     assert record.state == "quarantined"
+    assert result.status is AgentRunStatus.UNKNOWN
+
+
+def test_r6_b1_session_prompt_sent_persisted_before_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Await barrier: durable session_prompt_sent exists before prompt_once."""
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    seen: dict[str, object] = {}
+    original = NativeAcpDriver.prompt_once
+
+    async def prompt_after_barrier(self, text):
+        events_path = harness.run_dir() / "events.jsonl"
+        assert events_path.is_file()
+        lines = [
+            json.loads(line)
+            for line in events_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert any(row.get("type") == "session_prompt_sent" for row in lines)
+        seen["prompted"] = True
+        return await original(self, text)
+
+    monkeypatch.setattr(NativeAcpDriver, "prompt_once", prompt_after_barrier)
+    result = _run(harness.task())
+    assert seen.get("prompted") is True
+    assert result.status is AgentRunStatus.COMPLETED
+
+
+def test_r6_b1_append_failure_after_marker_skips_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Durable append failure after marker → prompt call count 0, unknown."""
+    from agent_run_supervisor.event_store import RunHandle
+
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    prompt_calls = {"n": 0}
+    original_prompt = NativeAcpDriver.prompt_once
+
+    async def counting_prompt(self, text):
+        prompt_calls["n"] += 1
+        return await original_prompt(self, text)
+
+    monkeypatch.setattr(NativeAcpDriver, "prompt_once", counting_prompt)
+
+    real_append = RunHandle.append_ndjson
+
+    def boom_prompt_sent(self, name, record):
+        if isinstance(record, dict) and record.get("type") == "session_prompt_sent":
+            raise OSError("injected session_prompt_sent append failure")
+        return real_append(self, name, record)
+
+    monkeypatch.setattr(RunHandle, "append_ndjson", boom_prompt_sent)
+
+    result = _run(harness.task())
+    assert prompt_calls["n"] == 0
+    assert "session/prompt" not in harness.methods_seen()
+    assert (harness.run_dir() / "prompt-dispatch-started").exists()
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    assert payload["status"] == "unknown"
+    assert payload["retryable"] is False
     assert result.status is AgentRunStatus.UNKNOWN
 
 

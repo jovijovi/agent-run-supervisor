@@ -23,6 +23,8 @@ from typing import Any
 from agent_run_supervisor.event_store import (
     FILE_MODE,
     atomic_write_json,
+    durable_atomic_write_json,
+    durable_unlink,
     exclusive_create_bytes,
     secure_mkdir,
 )
@@ -370,7 +372,7 @@ class SessionStore:
             "timestamp": moment,
         }
         with _session_lock_guard(session_dir):
-            atomic_write_json(session_dir / QUARANTINE_PENDING_JSON, payload)
+            durable_atomic_write_json(session_dir / QUARANTINE_PENDING_JSON, payload)
 
     def mark_quarantined(
         self,
@@ -407,20 +409,20 @@ class SessionStore:
                 quarantined_by_run_id=run_id,
                 updated_at=moment,
             )
-            atomic_write_json(
+            durable_atomic_write_json(
                 session_dir / SESSION_JSON, _record_to_dict(quarantined)
             )
             self._clear_quarantine_pending_unlocked(session_dir)
             return quarantined
 
     def _clear_quarantine_pending_unlocked(self, session_dir: Path) -> None:
-        """Clear the fence; caller must already hold the per-session guard."""
-        fence = session_dir / QUARANTINE_PENDING_JSON
-        try:
-            if fence.exists():
-                fence.unlink()
-        except FileNotFoundError:
-            return
+        """Clear the fence; caller must already hold the per-session guard.
+
+        Uses crash-durable unlink (unlink then parent directory fsync). Missing
+        fence is idempotent. Durability failures propagate — callers must not
+        claim terminal success or release the lease when clear fails.
+        """
+        durable_unlink(session_dir / QUARANTINE_PENDING_JSON)
 
     def commit_last_effective(
         self,

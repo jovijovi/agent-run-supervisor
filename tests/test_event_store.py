@@ -315,3 +315,200 @@ def test_event_store_permission_probe_round_trip(tmp_path: Path) -> None:
     assert probe["dir_mode_ok"] is True
     assert probe["file_mode_ok"] is True
     assert probe["atomic_write_ok"] is True
+
+
+def test_r6_b2_durable_atomic_write_order_and_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_run_supervisor.event_store import durable_atomic_write_bytes
+
+    path = tmp_path / "nested" / "record.bin"
+    payload = b"durable-secret"
+    order: list[str] = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+    real_write = os.write
+
+    def tracking_write(fd: int, data: bytes) -> int:
+        order.append("write")
+        return real_write(fd, data)
+
+    def tracking_fsync(fd: int) -> None:
+        st = os.fstat(fd)
+        if stat.S_ISREG(st.st_mode):
+            order.append("file_fsync")
+        elif stat.S_ISDIR(st.st_mode):
+            order.append("parent_fsync")
+        else:
+            order.append("other_fsync")
+        return real_fsync(fd)
+
+    def tracking_replace(src, dst):
+        order.append("replace")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "write", tracking_write)
+    monkeypatch.setattr(os, "fsync", tracking_fsync)
+    monkeypatch.setattr(os, "replace", tracking_replace)
+    durable_atomic_write_bytes(path, payload)
+    assert path.read_bytes() == payload
+    assert _mode_octal(path) == 0o600
+    assert "write" in order
+    assert "file_fsync" in order
+    assert "replace" in order
+    assert "parent_fsync" in order
+    assert order.index("write") < order.index("file_fsync")
+    assert order.index("file_fsync") < order.index("replace")
+    assert order.index("replace") < order.index("parent_fsync")
+    assert "durable-secret" not in "".join(order)
+
+
+def test_r6_b2_durable_atomic_write_partial_write_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_run_supervisor.event_store import durable_atomic_write_bytes
+
+    path = tmp_path / "artifact.bin"
+    monkeypatch.setattr(os, "write", lambda fd, data: 0)
+    with pytest.raises(EventStoreError) as err:
+        durable_atomic_write_bytes(path, b"secret-payload")
+    assert "secret-payload" not in str(err.value)
+    assert not path.exists()
+    assert not any(p.name.startswith(".tmp-durable-") for p in tmp_path.iterdir())
+
+
+def test_r6_b2_durable_atomic_write_file_fsync_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_run_supervisor.event_store import durable_atomic_write_bytes
+
+    path = tmp_path / "artifact.bin"
+    real_fsync = os.fsync
+
+    def boom_file(fd: int) -> None:
+        st = os.fstat(fd)
+        if stat.S_ISREG(st.st_mode):
+            raise OSError(5, "injected file fsync failure")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", boom_file)
+    with pytest.raises(EventStoreError) as err:
+        durable_atomic_write_bytes(path, b"secret-bytes")
+    assert "secret-bytes" not in str(err.value)
+    assert not path.exists()
+
+
+def test_r6_b2_durable_atomic_write_replace_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_run_supervisor.event_store import durable_atomic_write_bytes
+
+    path = tmp_path / "artifact.bin"
+
+    def boom_replace(src, dst):
+        raise OSError(5, "injected replace failure")
+
+    monkeypatch.setattr(os, "replace", boom_replace)
+    with pytest.raises(EventStoreError) as err:
+        durable_atomic_write_bytes(path, b"secret-bytes")
+    assert "secret-bytes" not in str(err.value)
+    assert not path.exists()
+    assert not any(p.name.startswith(".tmp-durable-") for p in tmp_path.iterdir())
+
+
+def test_r6_b2_durable_atomic_write_parent_fsync_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_run_supervisor.event_store import durable_atomic_write_bytes
+
+    path = tmp_path / "nested" / "artifact.bin"
+    real_fsync = os.fsync
+    parent = (tmp_path / "nested").resolve()
+
+    def boom_parent(fd: int) -> None:
+        st = os.fstat(fd)
+        if (
+            parent.exists()
+            and stat.S_ISDIR(st.st_mode)
+            and st.st_ino == parent.stat().st_ino
+        ):
+            raise OSError(5, "injected parent fsync failure")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", boom_parent)
+    with pytest.raises(EventStoreError):
+        durable_atomic_write_bytes(path, b"payload")
+    # Replace may have succeeded; failure is still fail-closed (no success return).
+
+
+def test_r6_b2_durable_unlink_idempotent_and_parent_fsync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_run_supervisor.event_store import durable_unlink
+
+    path = tmp_path / "fence.json"
+    path.write_text("{}", encoding="utf-8")
+    order: list[str] = []
+    real_fsync = os.fsync
+    real_unlink = os.unlink
+
+    def tracking_unlink(p):
+        order.append("unlink")
+        return real_unlink(p)
+
+    def tracking_fsync(fd: int) -> None:
+        st = os.fstat(fd)
+        if stat.S_ISDIR(st.st_mode):
+            order.append("parent_fsync")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "unlink", tracking_unlink)
+    monkeypatch.setattr(os, "fsync", tracking_fsync)
+    durable_unlink(path)
+    assert not path.exists()
+    assert order == ["unlink", "parent_fsync"]
+    durable_unlink(path)  # missing is idempotent — may probe unlink, no parent fsync
+    assert order.count("parent_fsync") == 1
+    assert order[0:2] == ["unlink", "parent_fsync"]
+
+
+def test_r6_b2_durable_unlink_parent_fsync_failure_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_run_supervisor.event_store import durable_unlink
+
+    path = tmp_path / "fence.json"
+    path.write_text("{}", encoding="utf-8")
+    real_fsync = os.fsync
+    parent = tmp_path.resolve()
+
+    def boom_parent(fd: int) -> None:
+        st = os.fstat(fd)
+        if stat.S_ISDIR(st.st_mode) and st.st_ino == parent.stat().st_ino:
+            raise OSError(5, "injected unlink parent fsync failure")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", boom_parent)
+    with pytest.raises(EventStoreError):
+        durable_unlink(path)
+    assert not path.exists()
+
+
+def test_r6_b2_durable_unlink_nofollow_symlink_leaf(tmp_path: Path) -> None:
+    from agent_run_supervisor.event_store import durable_unlink
+
+    target = tmp_path / "real.json"
+    target.write_text('{"ok":true}', encoding="utf-8")
+    link = tmp_path / "fence.json"
+    link.symlink_to(target)
+    durable_unlink(link)
+    assert not link.exists()
+    assert target.read_text(encoding="utf-8") == '{"ok":true}'
+
+
+def test_r6_b2_legacy_atomic_write_json_semantics_unchanged(tmp_path: Path) -> None:
+    """Broad legacy helper must not silently gain durable fsync requirements."""
+    path = tmp_path / "legacy.json"
+    atomic_write_json(path, {"a": 1})
+    assert json.loads(path.read_text(encoding="utf-8")) == {"a": 1}
+    assert _mode_octal(path) == 0o600

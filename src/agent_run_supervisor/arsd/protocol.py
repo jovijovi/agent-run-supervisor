@@ -179,7 +179,7 @@ def decode_frame(data: bytes | bytearray | memoryview | str) -> dict[str, Any]:
         raise ProtocolError(FRAME_TOO_LARGE, f"frame exceeds {MAX_FRAME_BYTES} bytes")
     try:
         payload = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
         raise ProtocolError(MALFORMED_FRAME, "frame is not one JSON object line") from None
     if not isinstance(payload, dict):
         raise ProtocolError(MALFORMED_FRAME, "frame is not one JSON object line")
@@ -289,10 +289,11 @@ def _parse_request_object(value: Any) -> AgentRunRequest:
             else:
                 kwargs[name] = item
         return AgentRunRequest(**kwargs)
-    except NativeSpecError as err:
-        # Spec validator text can repr caller values; only the class name is
-        # safe, and the chain is suppressed so exc_info logging cannot render
-        # the raw cause either.
+    except ProtocolError:
+        raise
+    except (NativeSpecError, OverflowError, ValueError, TypeError) as err:
+        # Spec validator / numeric malformed failures must stay INVALID_REQUEST;
+        # never INTERNAL. Only the exception class name is safe in the message.
         raise ProtocolError(
             INVALID_REQUEST,
             f"submit request failed spec validation ({type(err).__name__})",

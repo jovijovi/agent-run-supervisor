@@ -627,3 +627,43 @@ def test_parse_request_errors_preserve_valid_request_id_for_correlation() -> Non
     # Malformed / invalid request_id never correlates.
     assert protocol.correlated_request_id(envelope(request_id="bad id", op="bogus")) is None
     assert protocol.correlated_request_id(envelope(request_id=None, op="bogus")) is None
+
+
+def test_r6_b3_decode_frame_over_digit_integer_is_malformed() -> None:
+    # CPython raises ValueError when integer digit limit is exceeded.
+    data = b'{"n":' + b"1" + b"0" * 10000 + b"}\n"
+    assert len(data) <= protocol.MAX_FRAME_BYTES
+    err = _reject("MALFORMED_FRAME", protocol.decode_frame, data)
+    assert "10000" not in err.message
+    assert "1" + "0" * 20 not in err.message
+
+
+def test_r6_b3_decode_frame_deep_nesting_is_malformed() -> None:
+    depth = 5000
+    data = b"{" + b'"a":{' * depth + b'"x":1' + b"}" * depth + b"}\n"
+    # Keep under frame cap so nesting, not size, is the failure.
+    if len(data) > protocol.MAX_FRAME_BYTES:
+        depth = 2000
+        data = b"{" + b'"a":{' * depth + b'"x":1' + b"}" * depth + b"}\n"
+    assert len(data) <= protocol.MAX_FRAME_BYTES
+    err = _reject("MALFORMED_FRAME", protocol.decode_frame, data)
+    assert "Recursion" not in err.message
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "startup_timeout_seconds",
+        "turn_timeout_seconds",
+        "cancel_grace_seconds",
+    ],
+)
+def test_r6_b5_parse_submit_huge_float_limit_is_invalid_request(field: str) -> None:
+    payload = valid_submit_payload()
+    payload["request"] = dict(payload["request"])
+    payload["request"]["limits"] = {field: 10**10000}
+    err = _reject("INVALID_REQUEST", protocol.parse_submit, payload)
+    assert err.code == protocol.INVALID_REQUEST
+    # Must not become INTERNAL and must not leak the huge decimal.
+    assert "INTERNAL" not in err.message
+    assert "1" + "0" * 50 not in err.message

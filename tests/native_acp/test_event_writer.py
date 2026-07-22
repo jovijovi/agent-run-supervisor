@@ -396,3 +396,226 @@ def test_r5_b2_consumer_queue_healthy_ignores_reserved_budget() -> None:
         await writer.close()
 
     asyncio.run(case())
+
+
+def test_r6_b1_emit_awaited_persists_before_return() -> None:
+    async def case() -> None:
+        handle = RecordingHandle()
+        writer = EventWriter(handle, max_event_bytes=65536)
+        await writer.start()
+        await writer.emit_awaited({"type": "session_prompt_sent"})
+        assert any(
+            record.get("type") == "session_prompt_sent" for _, record in handle.records
+        )
+        await writer.close()
+
+    asyncio.run(case())
+
+
+def test_r6_b1_emit_awaited_consumer_failure_does_not_hang() -> None:
+    async def case() -> None:
+        import warnings
+
+        handle = FailingAppendHandle(fail_after=0)
+        writer = EventWriter(
+            handle, max_event_bytes=65536, queue_maxsize=2, producer_timeout_seconds=0.5
+        )
+        await writer.start()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(EventWriterOverflow):
+                await asyncio.wait_for(
+                    writer.emit_awaited({"type": "session_prompt_sent"}), 1.0
+                )
+            assert writer.overflowed is True
+            assert not any(issubclass(w.category, ResourceWarning) for w in caught)
+            pending = [
+                task
+                for task in asyncio.all_tasks()
+                if not task.done() and task is not asyncio.current_task()
+            ]
+            # Consumer task may still be referenced until close; close cleans it.
+            with pytest.raises(OSError, match="injected consumer append failure"):
+                await writer.close()
+            assert writer._consumer is None
+            pending = [
+                task
+                for task in asyncio.all_tasks()
+                if not task.done() and task is not asyncio.current_task()
+            ]
+            assert pending == []
+
+    asyncio.run(case())
+
+
+def test_r6_b1_emit_awaited_queue_timeout_overflow() -> None:
+    async def case() -> None:
+        handle = GatedHandle()
+        writer = EventWriter(
+            handle,
+            max_event_bytes=65536,
+            queue_maxsize=1,
+            producer_timeout_seconds=0.1,
+        )
+        await writer.start()
+        try:
+            # Live gated consumer holds the only queue slot after taking pad.
+            await writer.emit({"type": "pad"})
+            # Wait until consumer has dequeued pad and blocked in append.
+            for _ in range(50):
+                if writer._queue.empty():
+                    break
+                await asyncio.sleep(0.01)
+            # Refill the single slot while consumer is still blocked.
+            writer.emit_nowait({"type": "fill"})
+            assert writer._queue.full()
+            with pytest.raises(EventWriterOverflow):
+                await asyncio.wait_for(
+                    writer.emit_awaited({"type": "session_prompt_sent"}), 1.0
+                )
+            assert writer.overflowed is True
+        finally:
+            handle.gate.set()
+            await writer.close()
+
+    asyncio.run(case())
+
+
+def test_r6_b1_emit_awaited_respects_max_events() -> None:
+    async def case() -> None:
+        handle = RecordingHandle()
+        writer = EventWriter(handle, max_event_bytes=65536, max_events=1)
+        await writer.start()
+        await writer.emit_awaited({"type": "only"})
+        with pytest.raises(EventWriterOverflow):
+            await writer.emit_awaited({"type": "session_prompt_sent"})
+        assert writer.overflowed is True
+        await writer.close()
+
+    asyncio.run(case())
+
+
+def test_r6_b1_emit_awaited_cancellation_cleans_pending() -> None:
+    async def case() -> None:
+        import warnings
+
+        handle = GatedHandle()
+        writer = EventWriter(
+            handle,
+            max_event_bytes=65536,
+            queue_maxsize=1,
+            producer_timeout_seconds=5.0,
+        )
+        await writer.start()
+        await writer.emit({"type": "pad"})  # fill queue; consumer gated
+        task = asyncio.ensure_future(
+            writer.emit_awaited({"type": "session_prompt_sent"})
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            handle.gate.set()
+            await writer.close()
+            assert writer._consumer is None
+            assert not any(issubclass(w.category, ResourceWarning) for w in caught)
+            pending = [
+                t
+                for t in asyncio.all_tasks()
+                if not t.done() and t is not asyncio.current_task()
+            ]
+            assert pending == []
+
+    asyncio.run(case())
+
+
+def test_r6_b1_byte_cap_uses_utf8_encoded_bytes() -> None:
+    async def case() -> None:
+        handle = RecordingHandle()
+        # Three multi-byte characters: char count 3, UTF-8 byte count 9.
+        writer = EventWriter(handle, max_event_bytes=256)
+        await writer.start()
+        await writer.emit({"type": "agent_message_delta", "text": "你" * 200})
+        await writer.close()
+        record = handle.records[0][1]
+        assert record["truncated"] is True
+        assert record["truncate_reason"] == "max_event_bytes"
+        rendered = json.dumps(record, sort_keys=True, ensure_ascii=False)
+        assert len(rendered.encode("utf-8")) <= 256
+
+    asyncio.run(case())
+
+
+def test_r6_residual_emit_awaited_before_start_fails_promptly() -> None:
+    async def case() -> None:
+        import warnings
+
+        handle = RecordingHandle()
+        writer = EventWriter(handle, max_event_bytes=65536, max_events=3)
+        assert writer._consumer is None
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(EventWriterOverflow):
+                await asyncio.wait_for(
+                    writer.emit_awaited({"type": "session_prompt_sent"}), 0.5
+                )
+            assert writer.overflowed is True
+            # Reservation for the failed emit must be released (not enqueued).
+            assert writer._reserved == 0
+            assert writer._queue.empty()
+            assert not any(issubclass(w.category, ResourceWarning) for w in caught)
+            pending = [
+                task
+                for task in asyncio.all_tasks()
+                if not task.done() and task is not asyncio.current_task()
+            ]
+            assert pending == []
+        await writer.close()
+
+    asyncio.run(case())
+
+
+def test_r6_residual_emit_awaited_after_consumer_done_fails_promptly() -> None:
+    async def case() -> None:
+        import warnings
+
+        handle = FailingAppendHandle(fail_after=0)
+        writer = EventWriter(handle, max_event_bytes=65536, queue_maxsize=4)
+        await writer.start()
+        # Kill the consumer via a failed append, then clear overflow so the
+        # residual path is "consumer already done" rather than closed/overflowed.
+        with pytest.raises(EventWriterOverflow):
+            await writer.emit_awaited({"type": "first"})
+        consumer = writer._consumer
+        assert consumer is not None and consumer.done()
+        writer.overflowed = False
+        reserved_before = writer._reserved
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(EventWriterOverflow):
+                await asyncio.wait_for(
+                    writer.emit_awaited({"type": "session_prompt_sent"}), 0.5
+                )
+            assert writer.overflowed is True
+            assert writer._reserved == reserved_before  # not-enqueued reservation released
+            assert not any(issubclass(w.category, ResourceWarning) for w in caught)
+            pending = [
+                task
+                for task in asyncio.all_tasks()
+                if not task.done() and task is not asyncio.current_task()
+            ]
+            # Consumer task still referenced until close; no put/ack leaks.
+            assert all(task is consumer for task in pending) or pending == []
+        with pytest.raises(OSError, match="injected consumer append failure"):
+            await writer.close()
+        assert writer._consumer is None
+        pending = [
+            task
+            for task in asyncio.all_tasks()
+            if not task.done() and task is not asyncio.current_task()
+        ]
+        assert pending == []
+
+    asyncio.run(case())

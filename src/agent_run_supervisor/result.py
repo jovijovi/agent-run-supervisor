@@ -249,6 +249,15 @@ def validate_native_terminal_result(
     remain. Returns the validated payload, or ``None`` when evidence is
     untrusted. Fail-closed: never raises with raw field values.
     """
+    try:
+        return _validate_native_terminal_result_inner(payload, run_id=run_id)
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return None
+
+
+def _validate_native_terminal_result_inner(
+    payload: Any, *, run_id: str
+) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
     for key in _REQUIRED_NATIVE_RESULT_FIELDS:
@@ -314,6 +323,6 @@ def validate_native_terminal_result(
     try:
         if native_result_serialized_size(payload) > MAX_NATIVE_RESULT_SERIALIZED_BYTES:
             return None
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError, RecursionError):
         return None
     return payload

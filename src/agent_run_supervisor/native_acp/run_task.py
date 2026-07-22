@@ -675,15 +675,18 @@ class RunTask:
         driver.add_prompt_frame_hook(
             lambda: self._write_marker(ctx, PROMPT_ACCEPTED_MARKER)
         )
-        self._emit(ctx, {"type": "session_prompt_sent"})
-        # Re-check after marker + session_prompt_sent: emit failure or a
-        # queue/consumer that became unsafe must never call prompt. Marker
-        # already implies conservative unknown/quarantine — never overclaim
-        # predispatch after this point. Reserved max_events is intentionally
-        # not re-checked here (the prompt-sent slot may be the last reservation).
-        if ctx.pipeline_error is not None or (
-            ctx.writer is not None and not ctx.writer.consumer_queue_healthy
-        ):
+        # Persistence barrier: await durable session_prompt_sent before any
+        # prompt wire write. Marker already implies conservative
+        # unknown/quarantine — never overclaim predispatch after this point.
+        # Do not treat consumer_queue_healthy as this barrier.
+        if ctx.writer is not None:
+            try:
+                await ctx.writer.emit_awaited({"type": "session_prompt_sent"})
+            except Exception as exc:
+                if ctx.pipeline_error is None:
+                    ctx.pipeline_error = exc
+                return
+        if ctx.pipeline_error is not None:
             return
         try:
             outcome = await asyncio.wait_for(

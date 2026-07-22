@@ -193,7 +193,7 @@ def _validate_terminal_result(
     try:
         text = raw.decode("utf-8")
         payload = json.loads(text)
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
         return None
     return validate_native_terminal_result(payload, run_id=run_id)
 

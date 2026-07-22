@@ -1705,3 +1705,25 @@ def test_r5_b3_reconcile_converges_quarantine_pending_fence(
     result = json.loads((run_dir / "result.json").read_text())
     assert result["status"] == "unknown"
     assert result["retryable"] is False
+
+
+def test_r6_b3_secure_terminal_reader_maps_int_limit_and_nesting(
+    tmp_path: Path,
+) -> None:
+    from agent_run_supervisor.arsd import reconcile as reconcile_mod
+
+    run_dir = tmp_path / "run_malformed"
+    run_dir.mkdir()
+    path = run_dir / "result.json"
+    # Over-digit integer within 1 MiB cap.
+    path.write_bytes(b'{"n":' + b"1" + b"0" * 10000 + b"}")
+    assert reconcile_mod._validate_terminal_result(path, run_id="run_malformed") is None
+
+    depth = 3000
+    nested = b"{" + b'"a":{' * depth + b'"x":1' + b"}" * depth + b"}"
+    if len(nested) < reconcile_mod._MAX_TERMINAL_RESULT_BYTES:
+        path.write_bytes(nested)
+        assert (
+            reconcile_mod._validate_terminal_result(path, run_id="run_malformed")
+            is None
+        )

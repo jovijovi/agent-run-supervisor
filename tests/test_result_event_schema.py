@@ -221,3 +221,17 @@ def test_r5_b1_minimal_evidence_pipeline_fits_and_validates() -> None:
     assert payload["status"] == "failed"
     assert payload["retryable"] is False
     assert payload["detail_code"] == "EVIDENCE_PIPELINE"
+
+
+def test_r6_b3_validate_never_raises_on_cyclic_payload() -> None:
+    payload: dict = {"run_id": "run_probe"}
+    payload["self"] = payload
+    assert validate_native_terminal_result(payload, run_id="run_probe") is None
+
+
+def test_r6_b3_validate_never_raises_on_deep_payload() -> None:
+    node: dict = {"leaf": 1}
+    for _ in range(5000):
+        node = {"n": node}
+    payload = {"run_id": "run_probe", "deep": node}
+    assert validate_native_terminal_result(payload, run_id="run_probe") is None

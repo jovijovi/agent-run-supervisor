@@ -119,6 +119,134 @@ def atomic_write_json(path: Path, payload: Mapping[str, Any]) -> Path:
     return path
 
 
+def durable_atomic_write_json(path: Path, payload: Mapping[str, Any]) -> Path:
+    """Crash-durable atomic JSON write at ``FILE_MODE`` (0600).
+
+    Same canonical JSON bytes as :func:`atomic_write_json`, but durability is
+    proven through the narrowly named bytes helper (temp 0600, write-all, file
+    fsync, atomic replace, parent directory fsync). Uncertain failures raise
+    sanitized :class:`EventStoreError` and never claim success.
+    """
+    path = Path(path)
+    data = json.dumps(payload, sort_keys=True, indent=2).encode("utf-8")
+    return durable_atomic_write_bytes(path, data)
+
+
+def durable_atomic_write_bytes(path: Path, data: bytes) -> Path:
+    """Crash-durable atomic bytes write at ``FILE_MODE`` (0600).
+
+    Order: create temp (0600), write-all, file fsync, atomic replace, parent
+    directory fsync. Failures raise sanitized :class:`EventStoreError` and
+    fail closed — callers must not treat an exception as durable success.
+    Does not alter legacy :func:`_atomic_write_bytes` semantics.
+    """
+    path = Path(path)
+    parent = path.parent
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise EventStoreError("EventStore: durable atomic write failed") from exc
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    tmp_path: Path | None = None
+    fd = -1
+    last_open_error: BaseException | None = None
+    for _ in range(32):
+        candidate = parent / f".tmp-durable-{os.getpid()}-{os.urandom(8).hex()}"
+        try:
+            fd = os.open(candidate, flags, FILE_MODE)
+            tmp_path = candidate
+            break
+        except FileExistsError as exc:
+            last_open_error = exc
+            continue
+        except OSError as exc:
+            raise EventStoreError("EventStore: durable atomic write failed") from exc
+    if tmp_path is None or fd < 0:
+        raise EventStoreError(
+            "EventStore: durable atomic write failed"
+        ) from last_open_error
+
+    primary: BaseException | None = None
+    try:
+        try:
+            os.fchmod(fd, FILE_MODE)
+        except OSError as exc:
+            raise EventStoreError("EventStore: durable atomic write failed") from exc
+        _write_all_durable(fd, data)
+        try:
+            os.fsync(fd)
+        except OSError as exc:
+            raise EventStoreError(
+                "EventStore: durable atomic write durability failed"
+            ) from exc
+    except BaseException as exc:
+        primary = exc
+        raise
+    finally:
+        try:
+            os.close(fd)
+        except OSError as close_exc:
+            if primary is None:
+                raise EventStoreError(
+                    "EventStore: durable atomic write durability failed"
+                ) from close_exc
+        if primary is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    try:
+        os.replace(tmp_path, path)
+    except OSError as exc:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise EventStoreError("EventStore: durable atomic write failed") from exc
+
+    try:
+        os.chmod(path, FILE_MODE)
+    except OSError as exc:
+        raise EventStoreError("EventStore: durable atomic write failed") from exc
+
+    try:
+        _fsync_dir(parent)
+    except EventStoreError:
+        raise
+    except OSError as exc:
+        raise EventStoreError(
+            "EventStore: durable atomic write durability failed"
+        ) from exc
+    return path
+
+
+def durable_unlink(path: Path) -> None:
+    """Unlink ``path`` then fsync its parent directory.
+
+    Missing paths are idempotent (no error, no parent fsync). The unlink is
+    nofollow-safe for the final component (symlink leaf is removed, not its
+    target). Parent directory fsync failures propagate as sanitized
+    :class:`EventStoreError`.
+    """
+    path = Path(path)
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise EventStoreError("EventStore: durable unlink failed") from exc
+    try:
+        _fsync_dir(path.parent)
+    except EventStoreError:
+        raise
+    except OSError as exc:
+        raise EventStoreError("EventStore: durable unlink durability failed") from exc
+
+
 def exclusive_create_bytes(path: Path, data: bytes) -> Path:
     """Create ``path`` exclusively (``O_EXCL``) at ``FILE_MODE`` (0600).
 
@@ -212,6 +340,19 @@ def _write_all(fd: int, data: bytes) -> None:
             raise EventStoreError("EventStore: exclusive create write failed") from exc
         if written <= 0:
             raise EventStoreError("EventStore: exclusive create write failed")
+        offset += written
+
+
+def _write_all_durable(fd: int, data: bytes) -> None:
+    offset = 0
+    length = len(data)
+    while offset < length:
+        try:
+            written = os.write(fd, data[offset:])
+        except OSError as exc:
+            raise EventStoreError("EventStore: durable atomic write failed") from exc
+        if written <= 0:
+            raise EventStoreError("EventStore: durable atomic write failed")
         offset += written
 
 

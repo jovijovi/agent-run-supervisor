@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 from .spec import (
@@ -26,9 +27,18 @@ DEFAULT_QUEUE_MAXSIZE = 256
 DEFAULT_PRODUCER_TIMEOUT_SECONDS = 5.0
 DEFAULT_MAX_EVENTS = 10_000
 
+# Headroom for the ``seq`` key appended after bounding (UTF-8 JSON bytes).
+_SEQ_BYTE_HEADROOM = 32
+
 
 class EventWriterOverflow(RuntimeError):
     """Bounded-evidence violation: the Run must fail in a controlled way."""
+
+
+@dataclass
+class _QueueEntry:
+    event: dict[str, Any]
+    ack: asyncio.Future[None] | None = None
 
 
 class EventWriter:
@@ -59,7 +69,7 @@ class EventWriter:
         self._handle = handle
         self._max_event_bytes = max_event_bytes
         self._max_events = max_events
-        self._queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(
+        self._queue: asyncio.Queue[_QueueEntry | None] = asyncio.Queue(
             maxsize=queue_maxsize
         )
         self._producer_timeout = producer_timeout_seconds
@@ -134,13 +144,27 @@ class EventWriter:
         if self._reserved > 0:
             self._reserved -= 1
 
+    def _cancel_future(self, fut: asyncio.Future[None] | None) -> None:
+        if fut is not None and not fut.done():
+            fut.cancel()
+
+    async def _await_cancelled(self, task: asyncio.Task[Any] | None) -> None:
+        if task is None:
+            return
+        try:
+            await task
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+        except Exception:
+            pass
+
     async def emit(self, event: Mapping[str, Any]) -> None:
         """Enqueue one event; a full queue past the timeout is a controlled
         run-failure signal, never an unbounded buffer or a silent drop."""
         self._reserve_slot()
         try:
             await asyncio.wait_for(
-                self._queue.put(dict(event)), self._producer_timeout
+                self._queue.put(_QueueEntry(dict(event))), self._producer_timeout
             )
         except asyncio.TimeoutError:
             self._release_slot()
@@ -154,11 +178,119 @@ class EventWriter:
         immediate controlled failure signal instead of a wait."""
         self._reserve_slot()
         try:
-            self._queue.put_nowait(dict(event))
+            self._queue.put_nowait(_QueueEntry(dict(event)))
         except asyncio.QueueFull:
             self._release_slot()
             self.overflowed = True
             raise EventWriterOverflow("event queue is full") from None
+
+    async def emit_awaited(self, event: Mapping[str, Any]) -> None:
+        """Enqueue one event and await durable append acknowledgement.
+
+        The acknowledgement is fulfilled only after ``append_ndjson`` returns
+        successfully. Races that ack against consumer failure/cancellation so
+        the call never hangs; pending put/ack tasks are always cleaned. Queue
+        and ``max_events`` bounds raise :class:`EventWriterOverflow`; append
+        failures surface as sanitized evidence-pipeline errors.
+
+        A missing or already-finished consumer fails closed before enqueue:
+        any not-enqueued reservation is released and no put/ack tasks leak.
+        """
+        self._reserve_slot()
+        loop = asyncio.get_running_loop()
+        ack: asyncio.Future[None] = loop.create_future()
+        put_task: asyncio.Task[None] | None = None
+        try:
+            # Health before enqueue: without a live consumer the ack can never
+            # complete. Fail promptly; retain the put/ack race for the live path.
+            consumer = self._consumer
+            if consumer is None or consumer.done():
+                self._release_slot()
+                self._cancel_future(ack)
+                self.overflowed = True
+                await self._raise_consumer_failure(consumer)
+
+            entry = _QueueEntry(dict(event), ack)
+            put_task = asyncio.ensure_future(
+                asyncio.wait_for(self._queue.put(entry), self._producer_timeout)
+            )
+            wait_put: set[asyncio.Future[Any]] = {put_task}
+            # Re-read: consumer may have finished between the pre-check and put.
+            consumer = self._consumer
+            if consumer is not None:
+                wait_put.add(consumer)
+            done_put, _ = await asyncio.wait(
+                wait_put, return_when=asyncio.FIRST_COMPLETED
+            )
+            if put_task not in done_put:
+                put_task.cancel()
+                await self._await_cancelled(put_task)
+                self._release_slot()
+                self._cancel_future(ack)
+                self.overflowed = True
+                await self._raise_consumer_failure(consumer)
+            try:
+                await put_task
+            except asyncio.TimeoutError:
+                self._release_slot()
+                self._cancel_future(ack)
+                self.overflowed = True
+                raise EventWriterOverflow(
+                    "event queue stayed full past the producer timeout"
+                ) from None
+
+            wait_ack: set[asyncio.Future[Any]] = {ack}
+            consumer = self._consumer
+            if consumer is not None:
+                wait_ack.add(consumer)
+            done_ack, _ = await asyncio.wait(
+                wait_ack, return_when=asyncio.FIRST_COMPLETED
+            )
+            if ack in done_ack:
+                try:
+                    await ack
+                except EventWriterOverflow:
+                    self.overflowed = True
+                    raise
+                except Exception as exc:
+                    self.overflowed = True
+                    raise EventWriterOverflow(
+                        "event evidence append failed"
+                    ) from exc
+                return
+
+            self._cancel_future(ack)
+            self.overflowed = True
+            await self._raise_consumer_failure(consumer)
+        except asyncio.CancelledError:
+            if put_task is not None and not put_task.done():
+                put_task.cancel()
+                await self._await_cancelled(put_task)
+            self._cancel_future(ack)
+            raise
+
+    async def _raise_consumer_failure(
+        self, consumer: asyncio.Task[None] | None
+    ) -> None:
+        if consumer is None:
+            raise EventWriterOverflow(
+                "event writer consumer unavailable before persistence"
+            )
+        try:
+            await consumer
+        except asyncio.CancelledError:
+            if consumer.cancelled():
+                raise EventWriterOverflow(
+                    "event writer consumer cancelled"
+                ) from None
+            raise
+        except EventWriterOverflow:
+            raise
+        except Exception as exc:
+            raise EventWriterOverflow("event evidence append failed") from exc
+        raise EventWriterOverflow(
+            "event writer consumer ended before persistence"
+        )
 
     async def close(self) -> None:
         """Flush queued events and stop the consumer.
@@ -213,17 +345,26 @@ class EventWriter:
             item = await self._queue.get()
             if item is None:
                 return
+            event = item.event
+            ack = item.ack
             self._seq += 1
-            record = self._bounded(item)
+            record = self._bounded(event)
             record["seq"] = self._seq
-            await asyncio.to_thread(
-                self._handle.append_ndjson, self._filename, record
-            )
+            try:
+                await asyncio.to_thread(
+                    self._handle.append_ndjson, self._filename, record
+                )
+            except Exception as exc:
+                if ack is not None and not ack.done():
+                    ack.set_exception(exc)
+                raise
+            if ack is not None and not ack.done():
+                ack.set_result(None)
 
     def _bounded(self, event: dict[str, Any]) -> dict[str, Any]:
-        rendered = json.dumps(event, sort_keys=True)
-        # +32 headroom covers the seq key added after bounding.
-        if len(rendered) + 32 <= self._max_event_bytes:
+        rendered = json.dumps(event, sort_keys=True, ensure_ascii=False)
+        # +headroom covers the seq key added after bounding (UTF-8 bytes).
+        if len(rendered.encode("utf-8")) + _SEQ_BYTE_HEADROOM <= self._max_event_bytes:
             return event
         # Truncate to a marker while preserving the family, so lifecycle,
         # permission, and error events keep their meaning under the cap.
