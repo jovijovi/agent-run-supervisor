@@ -630,30 +630,27 @@ def test_s5_malformed_failing_isolation_then_success() -> None:
         with arsd_client.ArsdClient(deny) as cli:
             cli.server_info(request_id="deny-probe-" + secrets.token_hex(2))
 
-    # Outside-domain model must be INVALID_REQUEST at admission — not async accept.
+    # Outside-domain model: durable submit ACK precedes RunTask profile/config
+    # admission, so expect accepted then pre-prompt terminal failed/unknown.
     bad_req = "arsd-s5-bad-" + secrets.token_hex(4)
     bad_sess = "arsd-accept-s5-bad-" + secrets.token_hex(4)
     with arsd_client.ArsdClient(sock) as cli:
-        try:
-            accepted = cli.submit(
-                request_id=bad_req,
-                payload=_submit_payload(
-                    request=_wire_request(
-                        model="not-a-registered-model/zzz",
-                        effort=REQUIRED_EFFORT,
-                        session_id=bad_sess,
-                    ),
-                    prompt_text="should not run",
+        accepted = cli.submit(
+            request_id=bad_req,
+            payload=_submit_payload(
+                request=_wire_request(
+                    model="not-a-registered-model/zzz",
+                    effort=REQUIRED_EFFORT,
+                    session_id=bad_sess,
                 ),
-            )
-        except arsd_client.ArsdInvalidRequestError:
-            pass
-        else:
-            pytest.fail(
-                "outside-domain model was accepted "
-                f"(run_id={accepted.get('run_id')!r}); "
-                "A4 requires synchronous INVALID_REQUEST at admission"
-            )
+                prompt_text="should not run",
+            ),
+        )
+        bad_run_id = accepted["run_id"]
+        bad_result = _wait_result(cli, bad_run_id)
+    assert bad_result["status"] in {"failed", "unknown"}
+    bad_events = _events(_run_dir(bad_run_id))
+    assert sum(1 for e in bad_events if e.get("type") == "session_prompt_sent") == 0
 
     key = "arsd-s5-idem-" + secrets.token_hex(4)
     idem_sess = "arsd-accept-s5-idem-" + secrets.token_hex(4)
@@ -690,28 +687,25 @@ def test_s5_malformed_failing_isolation_then_success() -> None:
     events = _events(_run_dir(run_id))
     assert sum(1 for e in events if e.get("type") == "session_prompt_sent") == 1
 
-    fail_isolated = False
+    # Controllable pre-dispatch failure: unknown profile (not request credential_refs;
+    # spawn env comes from profile env_allowlist).
     with arsd_client.ArsdClient(sock) as cli:
-        try:
-            fail = cli.submit(
-                request_id="arsd-s5-fail-" + secrets.token_hex(4),
-                payload=_submit_payload(
-                    request=_wire_request(
-                        model=REQUIRED_MODEL,
-                        effort=REQUIRED_EFFORT,
-                        session_id="arsd-accept-s5-fail-" + secrets.token_hex(4),
-                        credential_refs=("credential-slot-absent-for-acceptance",),
-                    ),
-                    prompt_text="should fail closed at spawn",
+        fail = cli.submit(
+            request_id="arsd-s5-fail-" + secrets.token_hex(4),
+            payload=_submit_payload(
+                request=_wire_request(
+                    model=REQUIRED_MODEL,
+                    effort=REQUIRED_EFFORT,
+                    session_id="arsd-accept-s5-fail-" + secrets.token_hex(4),
+                    profile_id="profile-absent-for-acceptance",
                 ),
-            )
-        except arsd_client.ArsdClientError:
-            fail_isolated = True
-        else:
-            fail_result = _wait_result(cli, fail["run_id"])
-            assert fail_result["status"] in {"failed", "unknown"}
-            fail_isolated = True
-    assert fail_isolated
+                prompt_text="should fail closed before prompt",
+            ),
+        )
+        fail_result = _wait_result(cli, fail["run_id"])
+    assert fail_result["status"] in {"failed", "unknown"}
+    fail_events = _events(_run_dir(fail["run_id"]))
+    assert sum(1 for e in fail_events if e.get("type") == "session_prompt_sent") == 0
 
     ok_marker = "S5_OK"
     with arsd_client.ArsdClient(sock) as cli:
@@ -745,7 +739,7 @@ def test_s5_malformed_failing_isolation_then_success() -> None:
             "malformed_code": protocol.MALFORMED_FRAME,
             "oversize_code": protocol.FRAME_TOO_LARGE,
             "peer_uid_denied": True,
-            "outside_domain_invalid_request": True,
+            "outside_domain_pre_prompt_terminal": True,
             "idempotency_conflict": True,
             "duplicate_no_redispatch": True,
             "failing_run_isolated": True,

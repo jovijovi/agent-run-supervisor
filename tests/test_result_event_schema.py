@@ -235,3 +235,22 @@ def test_r6_b3_validate_never_raises_on_deep_payload() -> None:
         node = {"n": node}
     payload = {"run_id": "run_probe", "deep": node}
     assert validate_native_terminal_result(payload, run_id="run_probe") is None
+
+
+def test_r10_b3_sanitize_failure_reason_rejects_raw_hostile_text() -> None:
+    import secrets
+
+    from agent_run_supervisor.result import sanitize_failure_reason
+
+    canary_path = "/tmp/" + "leakcanary-" + secrets.token_hex(4)
+    canary_secret = "sk-" + secrets.token_hex(12)
+    hostile = f"OSError at {canary_path} token={canary_secret}"
+    cleaned = sanitize_failure_reason(hostile)
+    assert cleaned == "run failed"
+    assert canary_path not in cleaned
+    assert canary_secret not in cleaned
+    assert sanitize_failure_reason("spawn failed") == "spawn failed"
+    assert sanitize_failure_reason("supervisor cancellation") == (
+        "supervisor cancellation"
+    )
+    assert sanitize_failure_reason(None) is None

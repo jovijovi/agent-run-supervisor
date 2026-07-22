@@ -2219,3 +2219,514 @@ def test_r9_b1_invalid_terminal_waits_for_unregistration_before_refusal(
             await harness.aclose()
 
     run_async(case())
+
+
+def test_r10_b1_follow_invalid_waits_for_unregistration_before_refusal(
+    tmp_path: Path,
+) -> None:
+    """Follow INVALID must contain-before-refuse; iterator stays pending while live."""
+
+    async def case():
+        harness = Harness(tmp_path, mode="pending", cancel_wait_seconds=0.05)
+        seed_session(harness.session_store, session_id="sess-arsd-1")
+        caller = caller_for(principal_a())
+        contain_calls: list[str] = []
+        real_contain = harness.handlers._contain_invalid_terminal
+
+        async def tracking_contain(*, run_id, run_dir, submission):
+            contain_calls.append(run_id)
+            return await real_contain(
+                run_id=run_id, run_dir=run_dir, submission=submission
+            )
+
+        async def timeout_cancel(run_id, *, wait_seconds):
+            del run_id
+            await asyncio.sleep(min(float(wait_seconds), 0.05))
+            return False
+
+        stream = None
+        consumer = None
+        try:
+            reply = await harness.submit(caller, "r10-follow-1")
+            run_id = reply["run_id"]
+            await asyncio.sleep(0.05)
+            assert harness.handlers.registry.is_registered(run_id)
+            (harness.run_dir(run_id) / "result.json").write_bytes(b"[]")
+            harness.handlers._contain_invalid_terminal = tracking_contain  # type: ignore[method-assign]
+            harness.handlers.registry.cancel = timeout_cancel  # type: ignore[method-assign]
+
+            stream = await call(
+                harness,
+                caller,
+                "run_events",
+                "r10-follow",
+                {
+                    "run_id": run_id,
+                    "from_seq": 0,
+                    "follow": True,
+                    "follow_idle_seconds": handlers.DEFAULT_FOLLOW_IDLE_SECONDS,
+                },
+            )
+
+            async def consume():
+                async for _frame in stream:
+                    pass
+
+            consumer = asyncio.create_task(consume())
+            # Past the bounded cancel attempt: follow must still be pending.
+            await asyncio.sleep(0.2)
+            assert not consumer.done(), (
+                "follow must not refuse while the Run remains registered"
+            )
+            assert harness.handlers.registry.is_registered(run_id)
+            assert contain_calls == [run_id]
+            assert (
+                harness.session_store.open_session("sess-arsd-1").state == "quarantined"
+            )
+
+            reg_task = harness.handlers.registry.task_for(run_id)
+            assert reg_task is not None
+            reg_task.cancel()
+            with pytest.raises(protocol.ProtocolError) as err:
+                await asyncio.wait_for(consumer, 2.0)
+            assert err.value.code == protocol.INTERNAL
+            assert "untrusted" in err.value.message.lower() or (
+                "corrupt" in err.value.message.lower()
+            )
+            assert not harness.handlers.registry.is_registered(run_id)
+        finally:
+            if consumer is not None and not consumer.done():
+                consumer.cancel()
+                with contextlib.suppress(BaseException):
+                    await consumer
+            if stream is not None:
+                await stream.aclose()
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_r10_b1_follow_aclose_does_not_cancel_live_run(tmp_path: Path) -> None:
+    """Ordinary follow close must never cancel the registered Run."""
+
+    async def case():
+        harness = Harness(tmp_path, mode="pending")
+        caller = caller_for(principal_a())
+        stream = None
+        try:
+            reply = await harness.submit(caller, "r10-close-1")
+            run_id = reply["run_id"]
+            await asyncio.sleep(0.05)
+            assert harness.handlers.registry.is_registered(run_id)
+            stream = await call(
+                harness,
+                caller,
+                "run_events",
+                "r10-close",
+                {
+                    "run_id": run_id,
+                    "from_seq": 0,
+                    "follow": True,
+                    "follow_idle_seconds": handlers.DEFAULT_FOLLOW_IDLE_SECONDS,
+                },
+            )
+            await stream.aclose()
+            assert harness.handlers.registry.is_registered(run_id)
+            task = harness.handlers.registry.task_for(run_id)
+            assert task is not None
+            assert not task.done()
+        finally:
+            if stream is not None:
+                await stream.aclose()
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_r10b_b1a_aclose_awaits_active_containment_without_cancelling(
+    tmp_path: Path,
+) -> None:
+    """Once INVALID containment started, aclose must await it — never cancel it."""
+
+    async def case():
+        harness = Harness(tmp_path, mode="pending", cancel_wait_seconds=0.05)
+        seed_session(harness.session_store, session_id="sess-arsd-1")
+        caller = caller_for(principal_a())
+
+        async def timeout_cancel(run_id, *, wait_seconds):
+            del run_id
+            await asyncio.sleep(min(float(wait_seconds), 0.05))
+            return False
+
+        stream = None
+        close_task = None
+        try:
+            reply = await harness.submit(caller, "r10b-b1a-1")
+            run_id = reply["run_id"]
+            await asyncio.sleep(0.05)
+            assert harness.handlers.registry.is_registered(run_id)
+            (harness.run_dir(run_id) / "result.json").write_bytes(b"[]")
+            harness.handlers.registry.cancel = timeout_cancel  # type: ignore[method-assign]
+
+            stream = await call(
+                harness,
+                caller,
+                "run_events",
+                "r10b-b1a",
+                {
+                    "run_id": run_id,
+                    "from_seq": 0,
+                    "follow": True,
+                    "follow_idle_seconds": handlers.DEFAULT_FOLLOW_IDLE_SECONDS,
+                },
+            )
+
+            # Drive the watcher into INVALID containment (bounded cancel timeout).
+            async def poke():
+                with contextlib.suppress(protocol.ProtocolError, StopAsyncIteration):
+                    async for _frame in stream:
+                        pass
+
+            poke_task = asyncio.create_task(poke())
+            await asyncio.sleep(0.2)
+            assert harness.handlers.registry.is_registered(run_id)
+            assert (
+                harness.session_store.open_session("sess-arsd-1").state == "quarantined"
+            )
+            # Containment is in the post-timeout wait-for-unregistration phase.
+            assert getattr(stream, "_containment_active", False) is True
+
+            close_task = asyncio.create_task(stream.aclose())
+            await asyncio.sleep(0.1)
+            assert not close_task.done(), (
+                "aclose must remain pending while containment awaits unregistration"
+            )
+            assert harness.handlers.registry.is_registered(run_id)
+            watcher = getattr(stream, "_watcher", None)
+            assert watcher is not None
+            assert not watcher.cancelled()
+            assert not watcher.done()
+
+            reg_task = harness.handlers.registry.task_for(run_id)
+            assert reg_task is not None
+            reg_task.cancel()
+            await asyncio.wait_for(close_task, 2.0)
+            assert not harness.handlers.registry.is_registered(run_id)
+            with contextlib.suppress(BaseException):
+                await asyncio.wait_for(poke_task, 1.0)
+        finally:
+            if close_task is not None and not close_task.done():
+                close_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await close_task
+            if stream is not None:
+                with contextlib.suppress(BaseException):
+                    await stream.aclose()
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_r10c_b1a_cancel_aclose_during_containment_keeps_containment_alive(
+    tmp_path: Path,
+) -> None:
+    """Cancelling aclose must not cancel active INVALID containment.
+
+    Close-caller cancellation is remembered; containment/unregistration continue;
+    aclose finishes bookkeeping then propagates CancelledError only after the
+    Run has unregistered. Ordinary pre-containment close remains covered by
+    test_r10_b1_follow_aclose_does_not_cancel_live_run.
+    """
+
+    async def case():
+        harness = Harness(tmp_path, mode="pending", cancel_wait_seconds=0.05)
+        seed_session(harness.session_store, session_id="sess-arsd-1")
+        caller = caller_for(principal_a())
+
+        async def timeout_cancel(run_id, *, wait_seconds):
+            del run_id
+            await asyncio.sleep(min(float(wait_seconds), 0.05))
+            return False
+
+        stream = None
+        close_task = None
+        try:
+            reply = await harness.submit(caller, "r10c-b1a-1")
+            run_id = reply["run_id"]
+            await asyncio.sleep(0.05)
+            assert harness.handlers.registry.is_registered(run_id)
+            (harness.run_dir(run_id) / "result.json").write_bytes(b"[]")
+            harness.handlers.registry.cancel = timeout_cancel  # type: ignore[method-assign]
+
+            stream = await call(
+                harness,
+                caller,
+                "run_events",
+                "r10c-b1a",
+                {
+                    "run_id": run_id,
+                    "from_seq": 0,
+                    "follow": True,
+                    "follow_idle_seconds": handlers.DEFAULT_FOLLOW_IDLE_SECONDS,
+                },
+            )
+
+            async def poke():
+                with contextlib.suppress(protocol.ProtocolError, StopAsyncIteration):
+                    async for _frame in stream:
+                        pass
+
+            poke_task = asyncio.create_task(poke())
+            await asyncio.sleep(0.2)
+            assert harness.handlers.registry.is_registered(run_id)
+            assert (
+                harness.session_store.open_session("sess-arsd-1").state == "quarantined"
+            )
+            assert getattr(stream, "_containment_active", False) is True
+
+            close_task = asyncio.create_task(stream.aclose())
+            await asyncio.sleep(0.1)
+            assert not close_task.done()
+            watcher = getattr(stream, "_watcher", None)
+            assert watcher is not None
+            assert not watcher.done()
+            assert not watcher.cancelled()
+
+            close_task.cancel()
+            await asyncio.sleep(0.1)
+            assert not close_task.done(), (
+                "cancelled aclose must stay pending until containment finishes"
+            )
+            assert harness.handlers.registry.is_registered(run_id)
+            watcher = getattr(stream, "_watcher", None)
+            assert watcher is not None
+            assert not watcher.done(), "containment watcher must remain pending"
+            assert not watcher.cancelled(), (
+                "close-caller cancel must not cancel active containment"
+            )
+            assert (
+                harness.session_store.open_session("sess-arsd-1").state == "quarantined"
+            )
+
+            reg_task = harness.handlers.registry.task_for(run_id)
+            assert reg_task is not None
+            reg_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(close_task, 2.0)
+            assert not harness.handlers.registry.is_registered(run_id)
+            with contextlib.suppress(BaseException):
+                await asyncio.wait_for(poke_task, 1.0)
+        finally:
+            if close_task is not None and not close_task.done():
+                close_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await close_task
+            if stream is not None:
+                with contextlib.suppress(BaseException):
+                    await stream.aclose()
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_r10d_b1a_cancel_aclose_when_watcher_already_done_still_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Caller cancel + containment watcher already done must absorb then propagate.
+
+    Same-turn race: shielded watcher completion must not be classified as
+    target-only cancellation when the aclose caller is cancelling().
+    """
+    real_shield = handlers.asyncio.shield
+    real_event_set = asyncio.Event.set
+    race = {
+        "armed": True,
+        "fired": False,
+        "cancelling_at_stop": None,
+        "close_task": None,
+    }
+
+    def racing_shield(aw):
+        async def _race():
+            fut = aw if isinstance(aw, asyncio.Future) else asyncio.ensure_future(aw)
+            if not race["armed"]:
+                return await real_shield(fut)
+            while not fut.done():
+                try:
+                    await real_shield(fut)
+                    break
+                except asyncio.CancelledError:
+                    if fut.done():
+                        break
+                    raise
+            assert fut.done()
+            race["armed"] = False
+            race["fired"] = True
+            me = asyncio.current_task()
+            assert me is not None
+            me.cancel()
+            assert me.cancelling() > 0
+            raise asyncio.CancelledError()
+
+        return _race()
+
+    def tracking_event_set(self):
+        close_task = race["close_task"]
+        me = asyncio.current_task()
+        if (
+            race["fired"]
+            and close_task is not None
+            and me is close_task
+            and race["cancelling_at_stop"] is None
+        ):
+            race["cancelling_at_stop"] = me.cancelling()
+        return real_event_set(self)
+
+    monkeypatch.setattr(handlers.asyncio, "shield", racing_shield)
+    monkeypatch.setattr(asyncio.Event, "set", tracking_event_set)
+
+    async def case():
+        harness = Harness(tmp_path, mode="pending", cancel_wait_seconds=0.05)
+        seed_session(harness.session_store, session_id="sess-arsd-1")
+        caller = caller_for(principal_a())
+
+        async def timeout_cancel(run_id, *, wait_seconds):
+            del run_id
+            await asyncio.sleep(min(float(wait_seconds), 0.05))
+            return False
+
+        stream = None
+        close_task = None
+        try:
+            reply = await harness.submit(caller, "r10d-b1a-1")
+            run_id = reply["run_id"]
+            await asyncio.sleep(0.05)
+            assert harness.handlers.registry.is_registered(run_id)
+            (harness.run_dir(run_id) / "result.json").write_bytes(b"[]")
+            harness.handlers.registry.cancel = timeout_cancel  # type: ignore[method-assign]
+
+            stream = await call(
+                harness,
+                caller,
+                "run_events",
+                "r10d-b1a",
+                {
+                    "run_id": run_id,
+                    "from_seq": 0,
+                    "follow": True,
+                    "follow_idle_seconds": handlers.DEFAULT_FOLLOW_IDLE_SECONDS,
+                },
+            )
+
+            async def poke():
+                with contextlib.suppress(protocol.ProtocolError, StopAsyncIteration):
+                    async for _frame in stream:
+                        pass
+
+            poke_task = asyncio.create_task(poke())
+            await asyncio.sleep(0.2)
+            assert getattr(stream, "_containment_active", False) is True
+            assert harness.handlers.registry.is_registered(run_id)
+
+            close_task = asyncio.create_task(stream.aclose())
+            race["close_task"] = close_task
+            await asyncio.sleep(0.05)
+            assert not close_task.done()
+
+            reg_task = harness.handlers.registry.task_for(run_id)
+            assert reg_task is not None
+            reg_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(close_task, 2.0)
+            assert race["fired"] is True
+            assert race["cancelling_at_stop"] == 0, (
+                "caller cancel must be absorbed before aclose bookkeeping continues"
+            )
+            assert not harness.handlers.registry.is_registered(run_id)
+            with contextlib.suppress(BaseException):
+                await asyncio.wait_for(poke_task, 1.0)
+        finally:
+            if close_task is not None and not close_task.done():
+                close_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await close_task
+            if stream is not None:
+                with contextlib.suppress(BaseException):
+                    await stream.aclose()
+            await harness.aclose()
+
+    run_async(case())
+
+
+@pytest.mark.parametrize(
+    "idle",
+    [
+        1e-9,
+        1e-323,
+        0.049,
+        0.049999,
+    ],
+    ids=["1e-9", "subnormalish", "just_below_min", "below_min_float"],
+)
+def test_r10_b4_follow_idle_seconds_rejects_below_minimum(
+    tmp_path: Path, idle
+) -> None:
+    async def case():
+        harness = Harness(tmp_path)
+        caller = caller_for(principal_a())
+        try:
+            reply = await harness.submit(caller, "idle-min-bad-1")
+            before = set(harness.handlers._follow_streams)
+            with pytest.raises(protocol.ProtocolError) as err:
+                await call(
+                    harness,
+                    caller,
+                    "run_events",
+                    "idle-min-bad",
+                    {
+                        "run_id": reply["run_id"],
+                        "from_seq": 0,
+                        "follow": True,
+                        "follow_idle_seconds": idle,
+                    },
+                )
+            assert err.value.code == protocol.INVALID_REQUEST
+            message = err.value.message
+            assert "follow_idle" in message
+            assert f"{handlers.MIN_FOLLOW_IDLE_SECONDS:g}" in message
+            assert f"{int(handlers.MAX_FOLLOW_IDLE_SECONDS)}" in message
+            assert set(harness.handlers._follow_streams) == before
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_r10_b4_follow_idle_seconds_accepts_minimum_boundary(
+    tmp_path: Path,
+) -> None:
+    async def case():
+        harness = Harness(tmp_path)
+        caller = caller_for(principal_a())
+        stream = None
+        try:
+            reply = await harness.submit(caller, "idle-min-ok-1")
+            stream = await call(
+                harness,
+                caller,
+                "run_events",
+                "idle-min-ok",
+                {
+                    "run_id": reply["run_id"],
+                    "from_seq": 0,
+                    "follow": True,
+                    "follow_idle_seconds": handlers.MIN_FOLLOW_IDLE_SECONDS,
+                },
+            )
+            assert float(stream._idle) == float(handlers.MIN_FOLLOW_IDLE_SECONDS)
+        finally:
+            if stream is not None:
+                await stream.aclose()
+            await harness.aclose()
+
+    run_async(case())

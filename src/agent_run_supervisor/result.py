@@ -57,16 +57,32 @@ def sanitize_usage(usage: Any) -> dict[str, Any] | None:
     return usage
 
 
+# Caller-visible/persisted failure_reason values are fixed categorical phrases.
+# detail_code remains the diagnostic contract; never pass through raw exception
+# text, paths, class names, or credential-shaped material.
+ALLOWED_FAILURE_REASONS = frozenset(
+    {
+        "admission failed",
+        "spawn failed",
+        "startup timed out",
+        "session load unavailable",
+        "silent session recreation",
+        "config fidelity failed",
+        "evidence pipeline failed",
+        "supervisor cancellation",
+        "run exception",
+        "run failed",
+    }
+)
+
+
 def sanitize_failure_reason(reason: Any) -> str | None:
-    """Bound optional ``failure_reason`` to a UTF-8 byte budget."""
+    """Emit only allow-listed categorical ``failure_reason`` phrases."""
     if reason is None:
         return None
-    if not isinstance(reason, str):
-        reason = str(reason)
-    raw = reason.encode("utf-8")
-    if len(raw) <= MAX_FAILURE_REASON_BYTES:
+    if isinstance(reason, str) and reason in ALLOWED_FAILURE_REASONS:
         return reason
-    return truncate_utf8_bytes(raw, MAX_FAILURE_REASON_BYTES).decode("utf-8")
+    return "run failed"
 
 
 def native_result_serialized_size(payload: Mapping[str, Any]) -> int:

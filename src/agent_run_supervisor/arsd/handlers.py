@@ -13,7 +13,7 @@ import os
 import stat
 import weakref
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Iterator, Mapping
+from typing import Any, AsyncIterator, Awaitable, Callable, Iterator, Mapping
 
 from agent_run_supervisor import __version__ as PACKAGE_VERSION
 from agent_run_supervisor.event_store import EventStore, EventStoreError
@@ -36,8 +36,14 @@ DEFAULT_EVENTS_PAGE_LIMIT = 100
 MAX_EVENTS_PAGE_LIMIT = 1000
 DEFAULT_EVENT_FOLLOW_QUEUE = 256
 DEFAULT_FOLLOW_IDLE_SECONDS = 0.25
+# Conservative floor against near-zero follow rescan DoS (seconds).
+MIN_FOLLOW_IDLE_SECONDS = 0.05
 # Production ceiling for run_events follow idle (seconds). Documented max.
 MAX_FOLLOW_IDLE_SECONDS = 3600.0
+_FOLLOW_IDLE_RANGE_MESSAGE = (
+    "follow_idle_seconds must be a finite number in "
+    f"[{MIN_FOLLOW_IDLE_SECONDS:g}, {int(MAX_FOLLOW_IDLE_SECONDS)}] seconds"
+)
 EVENTS_FILENAME = "events.jsonl"
 # Align stored-line bound with admitted max_event_bytes (up to 1 MiB) plus
 # small deterministic envelope headroom for seq/JSON framing on disk.
@@ -323,7 +329,11 @@ class RunRegistry:
 
 
 class EventFollowStream:
-    """Bounded per-subscription follow stream; never cancels the Run."""
+    """Bounded per-subscription follow stream.
+
+    Ordinary close never cancels the Run. INVALID terminals route through the
+    shared containment-before-refusal lifecycle (cancel/await unregistration).
+    """
 
     def __init__(
         self,
@@ -333,8 +343,7 @@ class EventFollowStream:
         from_seq: int,
         idle_seconds: float,
         queue_size: int,
-        session_store: SessionStore | None = None,
-        submission: Mapping[str, Any] | None = None,
+        contain_invalid: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._run_dir = run_dir
         self._run_id = run_id
@@ -349,8 +358,8 @@ class EventFollowStream:
         self._watcher: asyncio.Task[Any] | None = None
         self._closed = False
         self._wait_tasks: set[asyncio.Task[Any]] = set()
-        self._session_store = session_store
-        self._submission = submission
+        self._contain_invalid = contain_invalid
+        self._containment_active = False
 
     def __aiter__(self) -> EventFollowStream:
         if self._watcher is None and not self._closed:
@@ -395,6 +404,43 @@ class EventFollowStream:
     async def aclose(self) -> None:
         if self._closed:
             return
+        caller_cancelled = False
+
+        def _absorb_caller_cancel() -> None:
+            nonlocal caller_cancelled
+            caller_cancelled = True
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                task.uncancel()
+
+        watcher = self._watcher
+        if watcher is not None and self._containment_active:
+            # Invalid-terminal containment owns the watcher lifecycle: close
+            # must await that same cancel/unregister path through shield so
+            # cancelling the close caller cannot cancel containment.
+            while True:
+                try:
+                    await asyncio.shield(watcher)
+                    break
+                except asyncio.CancelledError:
+                    # Classify by caller cancelling() first: same-turn watcher
+                    # completion must not be mistaken for target-only cancel.
+                    me = asyncio.current_task()
+                    if me is not None and me.cancelling():
+                        _absorb_caller_cancel()
+                        if watcher.done():
+                            break
+                        continue
+                    if watcher.done():
+                        # Watcher's own terminal cancellation — observe and
+                        # continue close bookkeeping.
+                        break
+                    _absorb_caller_cancel()
+                except protocol.ProtocolError:
+                    break
+                except Exception:
+                    break
+            self._watcher = None
         self._closed = True
         self._stop.set()
         watcher = self._watcher
@@ -412,6 +458,8 @@ class EventFollowStream:
         if owner is not None:
             owner.discard(self)
             self._owner_set = None
+        if caller_cancelled:
+            raise asyncio.CancelledError()
 
     def _fail(self, err: protocol.ProtocolError) -> None:
         if self._failure is None:
@@ -456,11 +504,23 @@ class EventFollowStream:
                     await self._queue.put(None)
                     return
                 if terminal.kind is storage.NativeTerminalKind.INVALID:
-                    _quarantine_bound_session(
-                        self._session_store,
-                        run_id=self._run_id,
-                        submission=self._submission,
-                    )
+                    # Same containment-before-refusal lifecycle as status/cancel/
+                    # idempotent submit — never a weaker sync quarantine+refuse.
+                    self._containment_active = True
+                    if self._contain_invalid is None:
+                        self._fail(
+                            protocol.ProtocolError(
+                                protocol.INTERNAL, _UNTRUSTED_TERMINAL_MESSAGE
+                            )
+                        )
+                        return
+                    try:
+                        await self._contain_invalid()
+                    except protocol.ProtocolError as err:
+                        self._fail(err)
+                        return
+                    except asyncio.CancelledError:
+                        raise
                     self._fail(
                         protocol.ProtocolError(
                             protocol.INTERNAL, _UNTRUSTED_TERMINAL_MESSAGE
@@ -1102,35 +1162,38 @@ class ArsdHandlers:
         idle = payload.get("follow_idle_seconds", DEFAULT_FOLLOW_IDLE_SECONDS)
         if isinstance(idle, bool) or not isinstance(idle, (int, float)):
             raise protocol.ProtocolError(
-                protocol.INVALID_REQUEST,
-                "follow_idle_seconds must be a positive finite number "
-                f"at most {int(MAX_FOLLOW_IDLE_SECONDS)} seconds",
+                protocol.INVALID_REQUEST, _FOLLOW_IDLE_RANGE_MESSAGE
             )
         # Integers: exact numeric compare — never float() huge decoded JSON ints.
         if type(idle) is int:
-            if idle <= 0 or idle > MAX_FOLLOW_IDLE_SECONDS:
+            if idle < MIN_FOLLOW_IDLE_SECONDS or idle > MAX_FOLLOW_IDLE_SECONDS:
                 raise protocol.ProtocolError(
-                    protocol.INVALID_REQUEST,
-                    "follow_idle_seconds must be a positive finite number "
-                    f"at most {int(MAX_FOLLOW_IDLE_SECONDS)} seconds",
+                    protocol.INVALID_REQUEST, _FOLLOW_IDLE_RANGE_MESSAGE
                 )
             idle_seconds = float(idle)
         else:
-            if not math.isfinite(idle) or idle <= 0 or idle > MAX_FOLLOW_IDLE_SECONDS:
+            if (
+                not math.isfinite(idle)
+                or idle < MIN_FOLLOW_IDLE_SECONDS
+                or idle > MAX_FOLLOW_IDLE_SECONDS
+            ):
                 raise protocol.ProtocolError(
-                    protocol.INVALID_REQUEST,
-                    "follow_idle_seconds must be a positive finite number "
-                    f"at most {int(MAX_FOLLOW_IDLE_SECONDS)} seconds",
+                    protocol.INVALID_REQUEST, _FOLLOW_IDLE_RANGE_MESSAGE
                 )
             idle_seconds = float(idle)
+
+        async def _contain_invalid() -> None:
+            await self._contain_invalid_terminal(
+                run_id=run_id, run_dir=run_dir, submission=submission
+            )
+
         stream = EventFollowStream(
             run_dir=run_dir,
             run_id=run_id,
             from_seq=from_seq,
             idle_seconds=idle_seconds,
             queue_size=self._follow_queue,
-            session_store=self._session_store,
-            submission=submission,
+            contain_invalid=_contain_invalid,
         )
         stream._owner_set = self._follow_streams
         self._follow_streams.add(stream)

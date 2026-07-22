@@ -20,6 +20,7 @@ fact, never a remote acceptance, and never an upgrade of certainty.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as _dt
 import os
 from dataclasses import dataclass, field
@@ -187,6 +188,25 @@ class _PreDispatchFailure(Exception):
         super().__init__(reason)
         self.reason = reason
         self.detail_code = detail_code
+
+
+_CATEGORICAL_FAILURE_REASON_BY_DETAIL: dict[str, str] = {
+    "ADMISSION": "admission failed",
+    "SPAWN_FAILED": "spawn failed",
+    "STARTUP_TIMEOUT": "startup timed out",
+    "LOAD_SESSION_UNADVERTISED": "session load unavailable",
+    "SILENT_SESSION_RECREATION": "silent session recreation",
+    "CONFIG_FIDELITY": "config fidelity failed",
+    "EVIDENCE_PIPELINE": "evidence pipeline failed",
+    "SUPERVISOR_CANCELLED": "supervisor cancellation",
+    "RUN_EXCEPTION": "run exception",
+}
+
+
+def _categorical_failure_reason(detail_code: str | None) -> str:
+    if detail_code is None:
+        return "run failed"
+    return _CATEGORICAL_FAILURE_REASON_BY_DETAIL.get(detail_code, "run failed")
 
 
 @dataclass
@@ -827,36 +847,176 @@ class RunTask:
     # -- finalization ------------------------------------------------------
 
     _FINALIZE_TIMEOUT_SECONDS = 60.0
+    # Bounded backoff between fail-closed emergency reap retries (no busy spin).
+    _EMERGENCY_REAP_RETRY_DELAY_SECONDS = 0.05
 
     async def _finalize_bounded(self, ctx: _RunContext) -> NativeRunResult:
         """Finalization is bounded and cancellation-safe: a repeated
-        cancellation or a hung finalization triggers last-resort synchronous
-        cleanup instead of hanging or leaking, and repeated cancellation is
-        always propagated."""
+        cancellation or a hung finalization triggers last-resort emergency
+        cleanup (shielded kill+reap, then disposition) instead of hanging or
+        leaking, and repeated cancellation is always propagated."""
         try:
             return await asyncio.wait_for(
                 self._finalize(ctx), self._FINALIZE_TIMEOUT_SECONDS
             )
         except asyncio.CancelledError:
-            self._emergency_cleanup(ctx)
+            await self._emergency_cleanup(ctx)
             raise
         except asyncio.TimeoutError:
-            self._emergency_cleanup(ctx)
+            await self._emergency_cleanup(ctx)
             return self._result_after_emergency(ctx)
 
-    def _emergency_cleanup(self, ctx: _RunContext) -> None:
-        """Sync-only last resort: kill the group, persist one conservative
+    async def _emergency_cleanup(self, ctx: _RunContext) -> None:
+        """Last resort: SIGKILL, await reap, then persist one conservative
         terminal fact if none exists, quarantine a dispatched-uncertain
         session, and release the lease only after a TRUSTED terminal exists.
+
+        Child exit/reap completes before any lease release, terminal/result
+        return that permits registry deregistration, or propagated cancellation
+        return from this helper. Each dedicated ``ManagedProcess.wait()`` task is
+        awaited through ``asyncio.shield`` so caller cancellation cannot cancel
+        the underlying reap. Ordinary/transient wait failures fail closed and
+        retry after a small bounded delay until one shielded reap proves exit;
+        every failed/done reap task is observed (never detached). Cancellation
+        during retry delay/reap is absorbed and remembered, then propagated only
+        after proven reap plus emergency disposition.
 
         INVALID/uncertain existing terminals must fence+quarantine and return
         without lease release. Fence/quarantine failure also refuses release.
         """
-        try:
-            if ctx.proc is not None:
+        cancelled = False
+
+        def _absorb_cancel() -> None:
+            nonlocal cancelled
+            cancelled = True
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                task.uncancel()
+
+        def _propagate_if_cancelled() -> None:
+            if cancelled:
+                raise asyncio.CancelledError()
+
+        async def _retry_delay() -> None:
+            delay = asyncio.create_task(
+                asyncio.sleep(self._EMERGENCY_REAP_RETRY_DELAY_SECONDS),
+                name=f"emergency-reap-delay:{self._run_id}",
+            )
+
+            def _observe_delay_done() -> None:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    delay.result()
+
+            try:
+                while True:
+                    try:
+                        await asyncio.shield(delay)
+                        return
+                    except asyncio.CancelledError:
+                        # Classify source by caller cancelling() first: a same-turn
+                        # race can leave the delay done while this task is cancelling.
+                        me = asyncio.current_task()
+                        if me is not None and me.cancelling():
+                            _absorb_cancel()
+                            if delay.done():
+                                _observe_delay_done()
+                                return
+                            continue
+                        if delay.done():
+                            _observe_delay_done()
+                            return
+                        _absorb_cancel()
+            finally:
+                if not delay.done():
+                    while not delay.done():
+                        try:
+                            await asyncio.shield(delay)
+                        except asyncio.CancelledError:
+                            me = asyncio.current_task()
+                            if me is not None and me.cancelling():
+                                _absorb_cancel()
+                                if delay.done():
+                                    _observe_delay_done()
+                                    return
+                                continue
+                            if delay.done():
+                                _observe_delay_done()
+                                return
+                            _absorb_cancel()
+                        except Exception:
+                            return
+
+        if ctx.proc is not None:
+            try:
                 ctx.proc.kill_group(reason="emergency_finalize")
-        except Exception:
-            pass
+            except Exception:
+                pass
+            # kill_group signals only; proven wait()/reap must precede
+            # release/return. Retry fail-closed on ordinary wait failures.
+            while True:
+                reap_task = asyncio.create_task(
+                    ctx.proc.wait(), name=f"emergency-reap:{self._run_id}"
+                )
+                reaped = False
+
+                def _observe_reap_done() -> bool:
+                    try:
+                        ctx.exit_state = reap_task.result()
+                        return True
+                    except (asyncio.CancelledError, Exception):
+                        return False
+
+                try:
+                    while True:
+                        try:
+                            ctx.exit_state = await asyncio.shield(reap_task)
+                            reaped = True
+                            break
+                        except asyncio.CancelledError:
+                            # Caller cancelling() wins over reap_task.done(): same-turn
+                            # completion must not swallow the delivered cancellation.
+                            me = asyncio.current_task()
+                            if me is not None and me.cancelling():
+                                _absorb_cancel()
+                                if reap_task.done():
+                                    reaped = _observe_reap_done()
+                                    break
+                                continue
+                            if reap_task.done():
+                                # Reap task itself ended cancelled — observe.
+                                with contextlib.suppress(asyncio.CancelledError):
+                                    reap_task.result()
+                                break
+                            _absorb_cancel()
+                        except Exception:
+                            # Failed wait observed via the await above.
+                            break
+                finally:
+                    if not reap_task.done():
+                        # Observe through shield so a detach never leaves an
+                        # unobserved reap task if this coroutine aborts early.
+                        while not reap_task.done():
+                            try:
+                                ctx.exit_state = await asyncio.shield(reap_task)
+                                reaped = True
+                            except asyncio.CancelledError:
+                                me = asyncio.current_task()
+                                if me is not None and me.cancelling():
+                                    _absorb_cancel()
+                                    if reap_task.done():
+                                        reaped = _observe_reap_done()
+                                        break
+                                    continue
+                                if reap_task.done():
+                                    with contextlib.suppress(asyncio.CancelledError):
+                                        reap_task.result()
+                                    break
+                                _absorb_cancel()
+                            except Exception:
+                                break
+                if reaped:
+                    break
+                await _retry_delay()
 
         existing = storage.NativeTerminalState(storage.NativeTerminalKind.ABSENT)
         if ctx.handle is not None:
@@ -880,7 +1040,9 @@ class RunTask:
                         ctx.session_id, reason=reason, run_id=self._run_id
                     )
                 except Exception:
+                    _propagate_if_cancelled()
                     return
+            _propagate_if_cancelled()
             return
 
         if existing.kind is storage.NativeTerminalKind.TRUSTED:
@@ -890,6 +1052,7 @@ class RunTask:
                     ctx.lock = None
             except Exception:
                 pass
+            _propagate_if_cancelled()
             return
 
         # ABSENT: quarantine when dispatch is uncertain, then write one terminal.
@@ -912,6 +1075,7 @@ class RunTask:
                 )
             except Exception:
                 # Required quarantine failed: no terminal result, no lease release.
+                _propagate_if_cancelled()
                 return
         written_trusted = False
         try:
@@ -957,6 +1121,7 @@ class RunTask:
         except Exception:
             written_trusted = False
         if not written_trusted:
+            _propagate_if_cancelled()
             return
         try:
             if ctx.lock is not None and ctx.session_id is not None:
@@ -964,6 +1129,7 @@ class RunTask:
                 ctx.lock = None
         except Exception:
             pass
+        _propagate_if_cancelled()
 
     def _result_after_emergency(self, ctx: _RunContext) -> NativeRunResult:
         """Return only a TRUSTED Native terminal; never raw/forged evidence."""
@@ -1011,7 +1177,7 @@ class RunTask:
             # before any result that lets registry deregistration proceed.
             # Caller-visible payload stays fixed/sanitized — never interpolate
             # exception text, paths, secrets, or exception class names.
-            self._emergency_cleanup(ctx)
+            await self._emergency_cleanup(ctx)
             payload = {
                 "run_id": self._run_id,
                 "status": "failed",
@@ -1176,14 +1342,16 @@ class RunTask:
             payload["session_id"] = ctx.session_id
         if ctx.pre_dispatch is not None:
             payload["failure_reason"] = sanitize_failure_reason(
-                ctx.pre_dispatch.reason
+                _categorical_failure_reason(ctx.pre_dispatch.detail_code)
             )
         elif ctx.supervisor_cancelled:
             payload["failure_reason"] = sanitize_failure_reason(
                 "supervisor cancellation"
             )
         elif ctx.error is not None:
-            payload["failure_reason"] = sanitize_failure_reason(str(ctx.error))
+            payload["failure_reason"] = sanitize_failure_reason(
+                _categorical_failure_reason(detail_code)
+            )
 
         before_ceiling = payload
         payload = enforce_native_result_ceiling(

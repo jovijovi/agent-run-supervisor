@@ -5,6 +5,7 @@ vertical (the L2 half of the C6 regression)."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -1418,7 +1419,7 @@ def test_r8_b2_emergency_invalid_forged_result_no_release(
         (ctx.handle.run_dir / "result.json").write_text(
             json.dumps(forged), encoding="utf-8"
         )
-        task_obj._emergency_cleanup(ctx)
+        await task_obj._emergency_cleanup(ctx)
         result = task_obj._result_after_emergency(ctx)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -1487,7 +1488,7 @@ def test_r8_b2_emergency_trusted_releases_once(
         assert isinstance(ctx, _RunContext)
         # ABSENT path: emergency writes TRUSTED unknown then releases once.
         assert not (ctx.handle.run_dir / "result.json").exists()
-        task_obj._emergency_cleanup(ctx)
+        await task_obj._emergency_cleanup(ctx)
         result = task_obj._result_after_emergency(ctx)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -1562,7 +1563,7 @@ def test_r8_b2_emergency_quarantine_failure_keeps_lease(
             ),
             encoding="utf-8",
         )
-        task_obj._emergency_cleanup(ctx)
+        await task_obj._emergency_cleanup(ctx)
         result = task_obj._result_after_emergency(ctx)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -1617,9 +1618,9 @@ def test_r9_b2_finalize_inner_failure_invokes_emergency_cleanup(
     cleanup_calls: list[str] = []
     real_emergency = RunTask._emergency_cleanup
 
-    def tracking_emergency(self, ctx):
+    async def tracking_emergency(self, ctx):
         cleanup_calls.append("emergency")
-        return real_emergency(self, ctx)
+        return await real_emergency(self, ctx)
 
     async def boom_inner(self, ctx):
         # Fail before driver close / child reap — the pre-reap gap.
@@ -1673,3 +1674,652 @@ def test_r8_residual_disposition_failure_payload_omits_exception_text(
     session_dir = harness.root / "native-sessions" / "sess-native-1"
     assert (session_dir / QUARANTINE_PENDING_JSON).is_file()
     assert (session_dir / "lock.json").is_file()
+
+
+def test_r10_b2_emergency_wait_reaps_before_release_and_return(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Emergency SIGKILL must await ManagedProcess.wait/reap before release/return."""
+    from agent_run_supervisor.managed_process import ManagedProcess
+    from agent_run_supervisor.native_acp.driver import NativeAcpDriver
+    from agent_run_supervisor.native_acp.run_task import _RunContext
+
+    script = dict(HAPPY_SCRIPT)
+    script["hang_prompt_until_cancel"] = True
+    harness = Harness(tmp_path, monkeypatch, script)
+    spawned = _recording_spawn(monkeypatch)
+    marker = harness.run_dir() / "prompt-dispatch-started"
+    order: list[str] = []
+    real_wait = ManagedProcess.wait
+    real_release = SessionStore.release_lock
+    real_kill = ManagedProcess.kill_group
+    captured: dict[str, object] = {}
+
+    async def tracking_wait(self):
+        order.append("wait")
+        return await real_wait(self)
+
+    def tracking_release(self, session_id, token):
+        order.append("release")
+        return real_release(self, session_id, token)
+
+    def tracking_kill(self, *, reason: str = "kill_group") -> None:
+        order.append("kill")
+        return real_kill(self, reason=reason)
+
+    monkeypatch.setattr(ManagedProcess, "wait", tracking_wait)
+    monkeypatch.setattr(SessionStore, "release_lock", tracking_release)
+    monkeypatch.setattr(ManagedProcess, "kill_group", tracking_kill)
+
+    async def case():
+        entered_close = asyncio.Event()
+
+        async def hanging_driver_close(self) -> None:
+            # Hang before finalize's terminate/wait so emergency reaps a live child.
+            entered_close.set()
+            await asyncio.sleep(3600)
+
+        monkeypatch.setattr(NativeAcpDriver, "close", hanging_driver_close)
+        task_obj = harness.task()
+        real_finalize = task_obj._finalize
+
+        async def capture_and_hang(ctx):
+            captured["ctx"] = ctx
+            return await real_finalize(ctx)
+
+        monkeypatch.setattr(task_obj, "_finalize", capture_and_hang)
+        task = asyncio.ensure_future(task_obj.run())
+        await _wait_until(marker.exists, message="dispatch marker never appeared")
+        task.cancel()
+        await asyncio.wait_for(entered_close.wait(), 30)
+        ctx = captured["ctx"]
+        assert isinstance(ctx, _RunContext)
+        assert not (ctx.handle.run_dir / "result.json").exists()
+        assert ctx.proc is not None
+        live_pid = ctx.proc.pid
+        # Child must still be alive before emergency containment.
+        import os
+
+        os.kill(live_pid, 0)
+        order.clear()
+        await task_obj._emergency_cleanup(ctx)
+        order.append("returned")
+        result = task_obj._result_after_emergency(ctx)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 30)
+        return result, live_pid
+
+    result, live_pid = asyncio.run(case())
+    assert "kill" in order
+    assert "wait" in order
+    assert "release" in order
+    assert "returned" in order
+    assert order.index("kill") < order.index("wait")
+    assert order.index("wait") < order.index("release")
+    assert order.index("wait") < order.index("returned")
+    assert result.payload.get("detail_code") == "EMERGENCY_FINALIZE"
+    assert spawned, "child process was never spawned"
+    _assert_pid_gone_sync(live_pid)
+
+
+def test_r10b_b2a_cancel_while_dedicated_reap_pending_keeps_reap_alive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Caller cancel during shielded reap must not cancel the dedicated wait task.
+
+    Proves the real ManagedProcess.wait() operation stays live under a dedicated
+    task, release/return happen only after reap, and CancelledError propagates
+    only after emergency cleanup completes.
+    """
+    from agent_run_supervisor.managed_process import ManagedProcess
+    from agent_run_supervisor.native_acp.driver import NativeAcpDriver
+    from agent_run_supervisor.native_acp.run_task import _RunContext
+
+    script = dict(HAPPY_SCRIPT)
+    script["hang_prompt_until_cancel"] = True
+    harness = Harness(tmp_path, monkeypatch, script)
+    spawned = _recording_spawn(monkeypatch)
+    marker = harness.run_dir() / "prompt-dispatch-started"
+    real_wait = ManagedProcess.wait
+    real_release = SessionStore.release_lock
+    order: list[str] = []
+    entered_wait = asyncio.Event()
+    release_wait = asyncio.Event()
+    reap_task_box: dict[str, asyncio.Task | None] = {"task": None}
+    captured: dict[str, object] = {}
+    in_direct_emergency = {"active": False}
+
+    async def gated_wait(self):
+        if in_direct_emergency["active"]:
+            reap_task_box["task"] = asyncio.current_task()
+            order.append("wait_entered")
+            entered_wait.set()
+            await release_wait.wait()
+            order.append("wait_finished")
+        return await real_wait(self)
+
+    def tracking_release(self, session_id, token):
+        if in_direct_emergency["active"]:
+            order.append("release")
+        return real_release(self, session_id, token)
+
+    monkeypatch.setattr(ManagedProcess, "wait", gated_wait)
+    monkeypatch.setattr(SessionStore, "release_lock", tracking_release)
+
+    async def case():
+        entered_close = asyncio.Event()
+        release_close = asyncio.Event()
+
+        async def hanging_driver_close(self) -> None:
+            entered_close.set()
+            await release_close.wait()
+
+        monkeypatch.setattr(NativeAcpDriver, "close", hanging_driver_close)
+        task_obj = harness.task()
+        real_finalize = task_obj._finalize
+
+        async def capture_and_hang(ctx):
+            captured["ctx"] = ctx
+            return await real_finalize(ctx)
+
+        monkeypatch.setattr(task_obj, "_finalize", capture_and_hang)
+        run_task = asyncio.ensure_future(task_obj.run())
+        await _wait_until(marker.exists, message="dispatch marker never appeared")
+        # First cancel exits drive; finalize then parks in driver.close so this
+        # test can own a direct emergency_cleanup observation.
+        run_task.cancel()
+        await asyncio.wait_for(entered_close.wait(), 30)
+        ctx = captured["ctx"]
+        assert isinstance(ctx, _RunContext)
+        assert ctx.proc is not None
+        live_pid = ctx.proc.pid
+
+        in_direct_emergency["active"] = True
+        cleanup = asyncio.ensure_future(task_obj._emergency_cleanup(ctx))
+        await asyncio.wait_for(entered_wait.wait(), 30)
+        reap = reap_task_box["task"]
+        assert reap is not None
+        assert reap is not cleanup
+        assert not reap.done()
+        assert not reap.cancelled()
+        assert "release" not in order
+
+        cleanup.cancel()
+        await asyncio.sleep(0.05)
+        assert not reap.done(), "dedicated reap task must survive caller cancellation"
+        assert not reap.cancelled()
+        assert not cleanup.done(), "cleanup must stay pending until reap finishes"
+        assert "release" not in order
+
+        release_wait.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(cleanup, 30)
+        order.append("cleanup_cancelled")
+        in_direct_emergency["active"] = False
+
+        assert reap.done()
+        assert not reap.cancelled()
+        assert "wait_finished" in order
+        assert "release" in order
+        assert order.index("wait_finished") < order.index("release")
+        assert order.index("release") < order.index("cleanup_cancelled")
+
+        release_close.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(run_task, 30)
+        return live_pid
+
+    live_pid = asyncio.run(case())
+    assert spawned
+    _assert_pid_gone_sync(live_pid)
+
+
+def test_r10c_b2a_wait_exception_retries_until_proven_reap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ordinary wait failure must retry fail-closed until a proven reap.
+
+    First wait raises; the replacement wait stays blocked → cleanup remains
+    pending with no release/result. Caller cancellation during that wait is
+    absorbed. Only after the replacement wait succeeds may disposition run,
+    and CancelledError propagates only after cleanup completes.
+    """
+    from agent_run_supervisor.managed_process import ManagedProcess
+    from agent_run_supervisor.native_acp.driver import NativeAcpDriver
+    from agent_run_supervisor.native_acp.run_task import _RunContext
+
+    script = dict(HAPPY_SCRIPT)
+    script["hang_prompt_until_cancel"] = True
+    harness = Harness(tmp_path, monkeypatch, script)
+    spawned = _recording_spawn(monkeypatch)
+    marker = harness.run_dir() / "prompt-dispatch-started"
+    real_wait = ManagedProcess.wait
+    real_release = SessionStore.release_lock
+    order: list[str] = []
+    wait_calls = {"n": 0}
+    second_entered = asyncio.Event()
+    release_second = asyncio.Event()
+    in_direct_emergency = {"active": False}
+    captured: dict[str, object] = {}
+
+    async def flaky_wait(self):
+        if not in_direct_emergency["active"]:
+            return await real_wait(self)
+        wait_calls["n"] += 1
+        if wait_calls["n"] == 1:
+            order.append("wait1_failed")
+            raise OSError("injected transient wait failure")
+        order.append("wait2_entered")
+        second_entered.set()
+        await release_second.wait()
+        order.append("wait2_finished")
+        return await real_wait(self)
+
+    def tracking_release(self, session_id, token):
+        if in_direct_emergency["active"]:
+            order.append("release")
+        return real_release(self, session_id, token)
+
+    monkeypatch.setattr(ManagedProcess, "wait", flaky_wait)
+    monkeypatch.setattr(SessionStore, "release_lock", tracking_release)
+
+    async def case():
+        entered_close = asyncio.Event()
+        release_close = asyncio.Event()
+        cleanup = None
+        run_task = None
+        live_pid = None
+
+        async def hanging_driver_close(self) -> None:
+            entered_close.set()
+            await release_close.wait()
+
+        monkeypatch.setattr(NativeAcpDriver, "close", hanging_driver_close)
+        task_obj = harness.task()
+        real_finalize = task_obj._finalize
+
+        async def capture_and_hang(ctx):
+            captured["ctx"] = ctx
+            return await real_finalize(ctx)
+
+        monkeypatch.setattr(task_obj, "_finalize", capture_and_hang)
+        try:
+            run_task = asyncio.ensure_future(task_obj.run())
+            await _wait_until(marker.exists, message="dispatch marker never appeared")
+            run_task.cancel()
+            await asyncio.wait_for(entered_close.wait(), 30)
+            ctx = captured["ctx"]
+            assert isinstance(ctx, _RunContext)
+            assert ctx.proc is not None
+            assert ctx.lock is not None
+            live_pid = ctx.proc.pid
+
+            in_direct_emergency["active"] = True
+            cleanup = asyncio.ensure_future(task_obj._emergency_cleanup(ctx))
+            await asyncio.wait_for(second_entered.wait(), 30)
+            assert wait_calls["n"] == 2
+            assert "wait1_failed" in order
+            assert not cleanup.done(), (
+                "cleanup must remain pending until replacement wait proves reap"
+            )
+            assert "release" not in order
+            assert not (ctx.handle.run_dir / "result.json").exists()
+            assert ctx.lock is not None
+
+            cleanup.cancel()
+            await asyncio.sleep(0.05)
+            assert not cleanup.done(), (
+                "caller cancel during retry/reap must not return cleanup early"
+            )
+            assert "release" not in order
+            assert not (ctx.handle.run_dir / "result.json").exists()
+
+            release_second.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(cleanup, 30)
+            order.append("cleanup_cancelled")
+
+            assert "wait2_finished" in order
+            assert "release" in order
+            assert (ctx.handle.run_dir / "result.json").exists()
+            assert order.index("wait1_failed") < order.index("wait2_entered")
+            assert order.index("wait2_finished") < order.index("release")
+            assert order.index("release") < order.index("cleanup_cancelled")
+
+            release_close.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(run_task, 30)
+            return live_pid
+        finally:
+            in_direct_emergency["active"] = False
+            release_second.set()
+            release_close.set()
+            if cleanup is not None and not cleanup.done():
+                cleanup.cancel()
+                with contextlib.suppress(BaseException):
+                    await asyncio.wait_for(cleanup, 5)
+            if run_task is not None and not run_task.done():
+                run_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await asyncio.wait_for(run_task, 5)
+
+    live_pid = asyncio.run(case())
+    assert spawned
+    assert live_pid is not None
+    _assert_pid_gone_sync(live_pid)
+
+
+def _install_caller_cancel_when_target_done_race(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    module,
+    task_name_prefix: str,
+) -> dict[str, object]:
+    """Test seam: when a named shielded task is already done, deliver caller cancel.
+
+    Forces the CancelledError source-race where ``target.done()`` and
+    ``current_task().cancelling()`` are both true in the same except arm.
+    """
+    real_shield = module.asyncio.shield
+    state: dict[str, object] = {"armed": True, "fired": False}
+
+    def racing_shield(aw):
+        async def _race():
+            fut = aw if isinstance(aw, asyncio.Future) else asyncio.ensure_future(aw)
+            name = fut.get_name() if isinstance(fut, asyncio.Task) else ""
+            if not (state["armed"] and name.startswith(task_name_prefix)):
+                return await real_shield(fut)
+            while not fut.done():
+                try:
+                    await real_shield(fut)
+                    break
+                except asyncio.CancelledError:
+                    if fut.done():
+                        break
+                    raise
+            assert fut.done()
+            state["armed"] = False
+            state["fired"] = True
+            me = asyncio.current_task()
+            assert me is not None
+            me.cancel()
+            assert me.cancelling() > 0
+            # Yield once so the except arm runs; snapshot whether absorb/uncancel
+            # cleared this delivered cancellation before further awaits.
+            raise asyncio.CancelledError()
+
+        return _race()
+
+    monkeypatch.setattr(module.asyncio, "shield", racing_shield)
+    return state
+
+
+def test_r10d_b2a_caller_cancel_when_reap_already_done_still_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Caller cancel + reap already done must absorb/observe success, not retry."""
+    import agent_run_supervisor.native_acp.run_task as run_task_mod
+    from agent_run_supervisor.managed_process import ManagedProcess
+    from agent_run_supervisor.native_acp.driver import NativeAcpDriver
+    from agent_run_supervisor.native_acp.run_task import _RunContext
+
+    script = dict(HAPPY_SCRIPT)
+    script["hang_prompt_until_cancel"] = True
+    harness = Harness(tmp_path, monkeypatch, script)
+    spawned = _recording_spawn(monkeypatch)
+    marker = harness.run_dir() / "prompt-dispatch-started"
+    real_wait = ManagedProcess.wait
+    real_release = SessionStore.release_lock
+    order: list[str] = []
+    wait_calls = {"n": 0}
+    in_direct_emergency = {"active": False}
+    captured: dict[str, object] = {}
+    cleanup_box: dict[str, asyncio.Task | None] = {"task": None}
+    race = _install_caller_cancel_when_target_done_race(
+        monkeypatch,
+        module=run_task_mod,
+        task_name_prefix="emergency-reap:",
+    )
+
+    async def instant_wait(self):
+        if not in_direct_emergency["active"]:
+            return await real_wait(self)
+        wait_calls["n"] += 1
+        order.append("wait_finished")
+        return await real_wait(self)
+
+    def tracking_release(self, session_id, token):
+        if in_direct_emergency["active"]:
+            cleanup = cleanup_box["task"]
+            if cleanup is not None and race["fired"]:
+                race["cancelling_at_release"] = cleanup.cancelling()
+            order.append("release")
+        return real_release(self, session_id, token)
+
+    monkeypatch.setattr(ManagedProcess, "wait", instant_wait)
+    monkeypatch.setattr(SessionStore, "release_lock", tracking_release)
+
+    async def case():
+        entered_close = asyncio.Event()
+        release_close = asyncio.Event()
+
+        async def hanging_driver_close(self) -> None:
+            entered_close.set()
+            await release_close.wait()
+
+        monkeypatch.setattr(NativeAcpDriver, "close", hanging_driver_close)
+        task_obj = harness.task()
+        real_finalize = task_obj._finalize
+
+        async def capture_and_hang(ctx):
+            captured["ctx"] = ctx
+            return await real_finalize(ctx)
+
+        monkeypatch.setattr(task_obj, "_finalize", capture_and_hang)
+        run_task = asyncio.ensure_future(task_obj.run())
+        await _wait_until(marker.exists, message="dispatch marker never appeared")
+        run_task.cancel()
+        await asyncio.wait_for(entered_close.wait(), 30)
+        ctx = captured["ctx"]
+        assert isinstance(ctx, _RunContext)
+        assert ctx.proc is not None
+        live_pid = ctx.proc.pid
+
+        in_direct_emergency["active"] = True
+        cleanup = asyncio.ensure_future(task_obj._emergency_cleanup(ctx))
+        cleanup_box["task"] = cleanup
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(cleanup, 30)
+        order.append("cleanup_cancelled")
+        in_direct_emergency["active"] = False
+
+        assert race["fired"] is True
+        assert wait_calls["n"] == 1, (
+            "successful reap misclassified as target-cancel must not be retried"
+        )
+        assert race.get("cancelling_at_release") == 0, (
+            "caller cancel must be absorbed before disposition/release"
+        )
+        assert "wait_finished" in order
+        assert "release" in order
+        assert order.index("wait_finished") < order.index("release")
+        assert order.index("release") < order.index("cleanup_cancelled")
+        assert (ctx.handle.run_dir / "result.json").exists()
+
+        release_close.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(run_task, 30)
+        return live_pid
+
+    live_pid = asyncio.run(case())
+    assert spawned
+    _assert_pid_gone_sync(live_pid)
+
+
+def test_r10d_b2a_caller_cancel_when_retry_delay_already_done_still_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Caller cancel + retry-delay already done must absorb before continuing."""
+    import agent_run_supervisor.native_acp.run_task as run_task_mod
+    from agent_run_supervisor.managed_process import ManagedProcess
+    from agent_run_supervisor.native_acp.driver import NativeAcpDriver
+    from agent_run_supervisor.native_acp.run_task import _RunContext
+
+    script = dict(HAPPY_SCRIPT)
+    script["hang_prompt_until_cancel"] = True
+    harness = Harness(tmp_path, monkeypatch, script)
+    spawned = _recording_spawn(monkeypatch)
+    marker = harness.run_dir() / "prompt-dispatch-started"
+    real_wait = ManagedProcess.wait
+    real_release = SessionStore.release_lock
+    order: list[str] = []
+    wait_calls = {"n": 0}
+    in_direct_emergency = {"active": False}
+    captured: dict[str, object] = {}
+    cleanup_box: dict[str, asyncio.Task | None] = {"task": None}
+    race = _install_caller_cancel_when_target_done_race(
+        monkeypatch,
+        module=run_task_mod,
+        task_name_prefix="emergency-reap-delay:",
+    )
+
+    async def flaky_wait(self):
+        if not in_direct_emergency["active"]:
+            return await real_wait(self)
+        wait_calls["n"] += 1
+        if wait_calls["n"] == 1:
+            order.append("wait1_failed")
+            raise OSError("injected transient wait failure")
+        cleanup = cleanup_box["task"]
+        if cleanup is not None and race["fired"]:
+            race["cancelling_at_wait2"] = cleanup.cancelling()
+        order.append("wait2_finished")
+        return await real_wait(self)
+
+    def tracking_release(self, session_id, token):
+        if in_direct_emergency["active"]:
+            order.append("release")
+        return real_release(self, session_id, token)
+
+    monkeypatch.setattr(ManagedProcess, "wait", flaky_wait)
+    monkeypatch.setattr(SessionStore, "release_lock", tracking_release)
+
+    async def case():
+        entered_close = asyncio.Event()
+        release_close = asyncio.Event()
+
+        async def hanging_driver_close(self) -> None:
+            entered_close.set()
+            await release_close.wait()
+
+        monkeypatch.setattr(NativeAcpDriver, "close", hanging_driver_close)
+        task_obj = harness.task()
+        real_finalize = task_obj._finalize
+
+        async def capture_and_hang(ctx):
+            captured["ctx"] = ctx
+            return await real_finalize(ctx)
+
+        monkeypatch.setattr(task_obj, "_finalize", capture_and_hang)
+        run_task = asyncio.ensure_future(task_obj.run())
+        await _wait_until(marker.exists, message="dispatch marker never appeared")
+        run_task.cancel()
+        await asyncio.wait_for(entered_close.wait(), 30)
+        ctx = captured["ctx"]
+        assert isinstance(ctx, _RunContext)
+        assert ctx.proc is not None
+        live_pid = ctx.proc.pid
+
+        in_direct_emergency["active"] = True
+        cleanup = asyncio.ensure_future(task_obj._emergency_cleanup(ctx))
+        cleanup_box["task"] = cleanup
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(cleanup, 30)
+        order.append("cleanup_cancelled")
+        in_direct_emergency["active"] = False
+
+        assert race["fired"] is True
+        assert race.get("cancelling_at_wait2") == 0, (
+            "caller cancel must be absorbed during delay race before the next reap"
+        )
+        assert wait_calls["n"] == 2
+        assert "wait1_failed" in order
+        assert "wait2_finished" in order
+        assert "release" in order
+        assert order.index("wait1_failed") < order.index("wait2_finished")
+        assert order.index("wait2_finished") < order.index("release")
+        assert order.index("release") < order.index("cleanup_cancelled")
+        assert (ctx.handle.run_dir / "result.json").exists()
+
+        release_close.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(run_task, 30)
+        return live_pid
+
+    live_pid = asyncio.run(case())
+    assert spawned
+    _assert_pid_gone_sync(live_pid)
+
+
+def test_r10_b3_pre_dispatch_failure_reason_is_categorical_not_raw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Persisted failure_reason must not carry paths/secrets/exception text."""
+    import secrets
+
+    canary_dir = "/tmp/" + "leakcanary-dir-" + secrets.token_hex(4)
+    canary_secret = "sk-" + secrets.token_hex(12)
+    canary_cls = "Hostile" + "SpawnError"
+    hostile = f"{canary_cls}: missing binary under {canary_dir}; token={canary_secret}"
+
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+
+    async def boom_spawn(**kwargs):
+        del kwargs
+        raise OSError(hostile)
+
+    monkeypatch.setattr(
+        "agent_run_supervisor.native_acp.run_task.spawn_managed_process",
+        boom_spawn,
+    )
+    result = _run(harness.task())
+    assert result.status is AgentRunStatus.FAILED
+    payload = json.loads((harness.run_dir() / "result.json").read_text(encoding="utf-8"))
+    assert payload.get("detail_code") == "SPAWN_FAILED"
+    reason = payload.get("failure_reason")
+    assert isinstance(reason, str) and reason
+    blob = json.dumps(payload)
+    assert canary_dir not in blob
+    assert canary_secret not in blob
+    assert canary_cls not in blob
+    assert hostile not in blob
+    assert "OSError" not in blob
+    assert reason == "spawn failed"
+
+
+def test_r10_b3_run_exception_failure_reason_is_categorical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import secrets
+
+    canary_path = "/var/" + "leakcanary-" + secrets.token_hex(4) + "/cred.json"
+    canary = f"boom at {canary_path}"
+
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+
+    async def boom_drive(self, ctx):
+        del ctx
+        raise RuntimeError(canary)
+
+    monkeypatch.setattr(RunTask, "_drive", boom_drive)
+    result = _run(harness.task())
+    assert result.status is AgentRunStatus.FAILED
+    payload = json.loads((harness.run_dir() / "result.json").read_text(encoding="utf-8"))
+    assert payload.get("detail_code") == "RUN_EXCEPTION"
+    reason = payload.get("failure_reason")
+    assert reason == "run exception"
+    blob = json.dumps(payload)
+    assert canary_path not in blob
+    assert canary not in blob
+    assert "RuntimeError" not in blob
