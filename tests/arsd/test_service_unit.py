@@ -902,3 +902,374 @@ def test_harness_dry_validate_no_mutation(monkeypatch, tmp_path: Path, capsys) -
     assert calls == []
     plan = json.loads(capsys.readouterr().out)
     assert plan["mutates_host"] is False
+
+
+# --- A1 Codex-review repair R3: AGENT identity gates (hermetic) -------------
+
+
+def _write_effective(
+    run_dir: Path,
+    *,
+    pid: object,
+    process_start: object,
+    host: object = "testhost",
+    boot_id: object = "boot-1",
+) -> Path:
+    path = run_dir / "effective.json"
+    path.write_text(
+        json.dumps(
+            {
+                "process_identity": {
+                    "pid": pid,
+                    "process_start": process_start,
+                    "host": host,
+                    "boot_id": boot_id,
+                },
+                "effective_model": "kimi-for-coding/k3",
+                "effective_effort": "max",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_r3_old_harness_falsely_accepted_mainpid_plus_unrelated_helper(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """RED regression: [MainPID, unrelated helper] is not AGENT containment.
+
+    The pre-R3 harness treated any cgroup descendant beyond MainPID as evidence.
+    With AGENT PID outside the unit cgroup, that must now fail closed.
+    """
+    harness = _load_harness()
+    run_dir = tmp_path / "native-runs" / "run-crash"
+    run_dir.mkdir(parents=True)
+    main_pid = 4100
+    helper_pid = 4200
+    agent_pid = 4300  # not in cgroup
+    agent_start = "9001"
+    _write_effective(run_dir, pid=agent_pid, process_start=agent_start)
+
+    monkeypatch.setattr(
+        harness,
+        "_process_start_identity",
+        lambda pid: {
+            main_pid: (main_pid, 111),
+            helper_pid: (helper_pid, 222),
+            agent_pid: (agent_pid, int(agent_start)),
+        }.get(pid),
+    )
+
+    # Document the false-positive criterion the old harness used.
+    cgroup_pids = [main_pid, helper_pid]
+    old_descendants = [pid for pid in cgroup_pids if pid != main_pid]
+    assert old_descendants == [helper_pid]  # old harness would have accepted
+
+    with pytest.raises(harness.HarnessGateError) as err:
+        harness._require_agent_identity_before_sigkill(
+            run_dir=run_dir,
+            main_pid=main_pid,
+            cgroup_pids=cgroup_pids,
+        )
+    msg = str(err.value).lower()
+    assert "agent" in msg or "cgroup" in msg or "identity" in msg
+    assert "mapping" not in msg
+    assert "sk-" not in msg
+
+
+def test_r3_agent_identity_in_cgroup_accepted(monkeypatch, tmp_path: Path) -> None:
+    harness = _load_harness()
+    run_dir = tmp_path / "native-runs" / "run-ok"
+    run_dir.mkdir(parents=True)
+    main_pid = 5100
+    agent_pid = 5200
+    agent_start = "4242"
+    _write_effective(run_dir, pid=agent_pid, process_start=agent_start, boot_id=None)
+    monkeypatch.setattr(
+        harness,
+        "_process_start_identity",
+        lambda pid: {
+            main_pid: (main_pid, 11),
+            agent_pid: (agent_pid, int(agent_start)),
+        }.get(pid),
+    )
+    ident = harness._require_agent_identity_before_sigkill(
+        run_dir=run_dir,
+        main_pid=main_pid,
+        cgroup_pids=[main_pid, agent_pid],
+    )
+    assert ident == (agent_pid, int(agent_start))
+
+
+def test_r3_rejects_effective_pid_equal_mainpid(monkeypatch, tmp_path: Path) -> None:
+    harness = _load_harness()
+    run_dir = tmp_path / "native-runs" / "run-main"
+    run_dir.mkdir(parents=True)
+    main_pid = 6100
+    _write_effective(run_dir, pid=main_pid, process_start="77")
+    monkeypatch.setattr(
+        harness,
+        "_process_start_identity",
+        lambda pid: (main_pid, 77) if pid == main_pid else None,
+    )
+    with pytest.raises(harness.HarnessGateError) as err:
+        harness._require_agent_identity_before_sigkill(
+            run_dir=run_dir,
+            main_pid=main_pid,
+            cgroup_pids=[main_pid],
+        )
+    assert "mainpid" in str(err.value).lower() or "agent" in str(err.value).lower()
+
+
+def test_r3_rejects_live_start_mismatch(monkeypatch, tmp_path: Path) -> None:
+    harness = _load_harness()
+    run_dir = tmp_path / "native-runs" / "run-mismatch"
+    run_dir.mkdir(parents=True)
+    main_pid = 7100
+    agent_pid = 7200
+    _write_effective(run_dir, pid=agent_pid, process_start="100")
+    monkeypatch.setattr(
+        harness,
+        "_process_start_identity",
+        lambda pid: (agent_pid, 999) if pid == agent_pid else (main_pid, 1),
+    )
+    with pytest.raises(harness.HarnessGateError) as err:
+        harness._require_agent_identity_before_sigkill(
+            run_dir=run_dir,
+            main_pid=main_pid,
+            cgroup_pids=[main_pid, agent_pid],
+        )
+    assert "identity" in str(err.value).lower() or "start" in str(err.value).lower()
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        "missing",
+        "symlink",
+        "oversized",
+        "not_object",
+        "pid_bool",
+        "pid_one",
+        "pid_str",
+        "start_empty",
+        "start_int",
+        "host_empty",
+        "boot_id_int",
+        "identity_missing",
+    ],
+)
+def test_r3_rejects_malformed_symlink_oversized_effective(
+    mutate: str, tmp_path: Path
+) -> None:
+    harness = _load_harness()
+    run_dir = tmp_path / "native-runs" / f"run-{mutate}"
+    run_dir.mkdir(parents=True)
+    path = run_dir / "effective.json"
+    if mutate == "missing":
+        pass
+    elif mutate == "symlink":
+        target = tmp_path / "elsewhere.json"
+        target.write_text("{}", encoding="utf-8")
+        path.symlink_to(target)
+    elif mutate == "oversized":
+        # Just over the harness bound.
+        pad = "x" * (harness._MAX_EFFECTIVE_JSON_BYTES + 8)
+        path.write_text(json.dumps({"process_identity": {"pad": pad}}), encoding="utf-8")
+    elif mutate == "not_object":
+        path.write_text("[1,2,3]", encoding="utf-8")
+    elif mutate == "pid_bool":
+        _write_effective(run_dir, pid=True, process_start="1")
+    elif mutate == "pid_one":
+        _write_effective(run_dir, pid=1, process_start="1")
+    elif mutate == "pid_str":
+        _write_effective(run_dir, pid="99", process_start="1")
+    elif mutate == "start_empty":
+        _write_effective(run_dir, pid=99, process_start="")
+    elif mutate == "start_int":
+        _write_effective(run_dir, pid=99, process_start=123)
+    elif mutate == "host_empty":
+        _write_effective(run_dir, pid=99, process_start="1", host="")
+    elif mutate == "boot_id_int":
+        _write_effective(run_dir, pid=99, process_start="1", boot_id=1)
+    elif mutate == "identity_missing":
+        path.write_text(json.dumps({"effective_model": "x"}), encoding="utf-8")
+    with pytest.raises(harness.HarnessGateError) as err:
+        harness._require_agent_identity_before_sigkill(
+            run_dir=run_dir,
+            main_pid=100,
+            cgroup_pids=[100, 200],
+        )
+    msg = str(err.value).lower()
+    assert "effective" in msg or "identity" in msg or "process" in msg
+    assert "mapping" not in msg
+    assert "sk-" not in msg
+
+
+def test_r3_pid_reuse_after_crash_is_original_identity_dead(monkeypatch) -> None:
+    harness = _load_harness()
+    agent_ident = (8300, 555)
+    # Same PID reused under a new starttime — original identity is dead.
+    monkeypatch.setattr(
+        harness, "_process_start_identity", lambda pid: (8300, 999) if pid == 8300 else None
+    )
+    assert harness._identity_alive(agent_ident) is False
+    harness._require_agent_identity_dead_after_crash(agent_ident)
+
+
+def test_r3_agent_still_alive_after_crash_rejected(monkeypatch) -> None:
+    harness = _load_harness()
+    agent_ident = (8400, 555)
+    monkeypatch.setattr(
+        harness, "_process_start_identity", lambda pid: (8400, 555) if pid == 8400 else None
+    )
+    with pytest.raises(harness.HarnessGateError):
+        harness._require_agent_identity_dead_after_crash(agent_ident)
+
+
+def test_r3_report_fields_cannot_be_true_without_gates() -> None:
+    harness = _load_harness()
+    report = harness._s4_evidence_payload(
+        unit_name="arsd-r3.service",
+        crashed_run_id="run-x",
+        original_cgroup_pids=[1, 2],
+        agent_identity_from_effective=False,
+        agent_pid_in_cgroup_before_crash=False,
+        agent_identity_dead_after_crash=False,
+        fresh_run_id="run-y",
+        prompt_sent=1,
+    )
+    assert report["agent_identity_from_effective"] is False
+    assert report["agent_pid_in_cgroup_before_crash"] is False
+    assert report["agent_identity_dead_after_crash"] is False
+    with pytest.raises(harness.HarnessGateError):
+        harness._require_s4_evidence_success(report)
+
+    ok = harness._s4_evidence_payload(
+        unit_name="arsd-r3.service",
+        crashed_run_id="run-x",
+        original_cgroup_pids=[1, 2],
+        agent_identity_from_effective=True,
+        agent_pid_in_cgroup_before_crash=True,
+        agent_identity_dead_after_crash=True,
+        fresh_run_id="run-y",
+        prompt_sent=1,
+    )
+    harness._require_s4_evidence_success(ok)
+    assert ok["agent_identity_from_effective"] is True
+    assert ok["agent_pid_in_cgroup_before_crash"] is True
+    assert ok["agent_identity_dead_after_crash"] is True
+
+
+def _assert_no_host_mutation(monkeypatch, harness) -> None:
+    """Snapshot helper tests must never kill, systemctl, or run the harness."""
+
+    def boom_kill(*_a, **_k):
+        raise AssertionError("os.kill must not run in snapshot helper tests")
+
+    def boom_systemctl(*_a, **_k):
+        raise AssertionError("systemctl must not run in snapshot helper tests")
+
+    def boom_run_s4(*_a, **_k):
+        raise AssertionError("run_s4 must not run in snapshot helper tests")
+
+    def boom_main(*_a, **_k):
+        raise AssertionError("harness.main must not run in snapshot helper tests")
+
+    monkeypatch.setattr(harness.os, "kill", boom_kill)
+    monkeypatch.setattr(harness, "_systemctl_user", boom_systemctl)
+    monkeypatch.setattr(harness, "run_s4", boom_run_s4)
+    monkeypatch.setattr(harness, "main", boom_main)
+
+
+def test_r3_final_snapshot_keeps_exact_agent_identity(monkeypatch) -> None:
+    """Unchanged AGENT identity must remain in the final pre-SIGKILL snapshot."""
+    harness = _load_harness()
+    _assert_no_host_mutation(monkeypatch, harness)
+    main_pid = 9100
+    agent_ident = (9200, 4242)
+    helper_ident = (9300, 111)
+    cgroup_pids = [main_pid, agent_ident[0], helper_ident[0]]
+    live = {
+        main_pid: (main_pid, 7),
+        agent_ident[0]: agent_ident,
+        helper_ident[0]: helper_ident,
+    }
+    monkeypatch.setattr(harness, "_process_start_identity", lambda pid: live.get(pid))
+    snap = harness._capture_original_cgroup_identities_for_sigkill(
+        cgroup_pids=cgroup_pids,
+        agent_ident=agent_ident,
+    )
+    assert agent_ident in snap
+    assert snap == [live[main_pid], agent_ident, helper_ident]
+
+
+def test_r3_final_snapshot_rejects_missing_agent_on_second_read(monkeypatch) -> None:
+    """If AGENT exits between first check and snapshot, refuse before SIGKILL."""
+    harness = _load_harness()
+    _assert_no_host_mutation(monkeypatch, harness)
+    main_pid = 9100
+    agent_ident = (9200, 4242)
+    helper_ident = (9300, 111)
+    # Second read: AGENT PID gone from readable identities (natural exit).
+    live = {
+        main_pid: (main_pid, 7),
+        helper_ident[0]: helper_ident,
+        # agent pid unreadable / exited
+    }
+    monkeypatch.setattr(harness, "_process_start_identity", lambda pid: live.get(pid))
+    with pytest.raises(harness.HarnessGateError) as err:
+        harness._capture_original_cgroup_identities_for_sigkill(
+            cgroup_pids=[main_pid, agent_ident[0], helper_ident[0]],
+            agent_ident=agent_ident,
+        )
+    msg = str(err.value).lower()
+    assert "agent" in msg or "identity" in msg or "snapshot" in msg
+    assert "mapping" not in msg
+    assert "sk-" not in msg
+
+
+def test_r3_final_snapshot_rejects_pid_reuse_different_starttime(monkeypatch) -> None:
+    """Same PID with a new starttime is not the exact AGENT identity."""
+    harness = _load_harness()
+    _assert_no_host_mutation(monkeypatch, harness)
+    main_pid = 9100
+    agent_ident = (9200, 4242)
+    reused = (9200, 9999)
+    live = {
+        main_pid: (main_pid, 7),
+        9200: reused,
+    }
+    monkeypatch.setattr(harness, "_process_start_identity", lambda pid: live.get(pid))
+    with pytest.raises(harness.HarnessGateError) as err:
+        harness._capture_original_cgroup_identities_for_sigkill(
+            cgroup_pids=[main_pid, 9200],
+            agent_ident=agent_ident,
+        )
+    msg = str(err.value).lower()
+    assert "agent" in msg or "identity" in msg or "snapshot" in msg
+    assert "mapping" not in msg
+
+
+def test_r3_final_snapshot_unrelated_identities_do_not_substitute(monkeypatch) -> None:
+    """Another descendant identity must not stand in for the exact AGENT tuple."""
+    harness = _load_harness()
+    _assert_no_host_mutation(monkeypatch, harness)
+    main_pid = 9100
+    agent_ident = (9200, 4242)
+    other_ident = (9300, 4242)  # same starttime digits, different pid
+    live = {
+        main_pid: (main_pid, 7),
+        other_ident[0]: other_ident,
+        # agent pid absent from snapshot identities
+    }
+    monkeypatch.setattr(harness, "_process_start_identity", lambda pid: live.get(pid))
+    with pytest.raises(harness.HarnessGateError) as err:
+        harness._capture_original_cgroup_identities_for_sigkill(
+            cgroup_pids=[main_pid, other_ident[0]],
+            agent_ident=agent_ident,
+        )
+    msg = str(err.value).lower()
+    assert "agent" in msg or "identity" in msg or "snapshot" in msg
+    assert "mapping" not in msg

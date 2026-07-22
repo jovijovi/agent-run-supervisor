@@ -17,11 +17,13 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 _A3_ENV = "ARS_ARSD_A3_CRASH_HARNESS"
 _A3_FLAG = "--i-acknowledge-a3-crash-harness"
@@ -30,6 +32,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _REQUIRED_MODEL = "kimi-for-coding/k3"
 _REQUIRED_EFFORT = "max"
 _FRESH_MARKER = "S4_FRESH_OK"
+# Conservative bound for crash-run effective.json evidence (1 MiB).
+_MAX_EFFECTIVE_JSON_BYTES = 1 * 1024 * 1024
+_DECIMAL_START_RE = re.compile(r"^[0-9]+$")
 
 
 class HarnessGateError(RuntimeError):
@@ -421,6 +426,200 @@ def _identity_alive(identity: tuple[int, int]) -> bool:
     return current == identity
 
 
+def _read_fd_capped(fd: int, limit: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while total < limit:
+        chunk = os.read(fd, min(65_536, limit - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
+def _read_crash_run_effective(run_dir: Path) -> dict[str, Any]:
+    """Load crash-run ``effective.json`` as a regular, non-symlink, bounded object."""
+    path = run_dir / "effective.json"
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(str(path), flags)
+    except FileNotFoundError as exc:
+        raise HarnessGateError("crash-run effective.json missing") from exc
+    except OSError as exc:
+        raise HarnessGateError("crash-run effective.json unreadable") from exc
+
+    raw: bytes | None = None
+    primary: BaseException | None = None
+    try:
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise HarnessGateError("crash-run effective.json is not a regular file")
+            if st.st_size > _MAX_EFFECTIVE_JSON_BYTES:
+                raise HarnessGateError("crash-run effective.json exceeds size bound")
+            raw = _read_fd_capped(fd, _MAX_EFFECTIVE_JSON_BYTES + 1)
+            if len(raw) > _MAX_EFFECTIVE_JSON_BYTES:
+                raise HarnessGateError("crash-run effective.json exceeds size bound")
+        except HarnessGateError as exc:
+            primary = exc
+            raise
+        except OSError as exc:
+            primary = HarnessGateError("crash-run effective.json unreadable")
+            raise primary from exc
+    finally:
+        try:
+            os.close(fd)
+        except OSError as exc:
+            if primary is None:
+                raise HarnessGateError("crash-run effective.json unreadable") from exc
+
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HarnessGateError("crash-run effective.json is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise HarnessGateError("crash-run effective.json must be a JSON object")
+    return payload
+
+
+def _parse_agent_harness_identity(effective: dict[str, Any]) -> tuple[int, int]:
+    """Extract ``process_identity`` into harness ``(pid, starttime)`` form."""
+    identity = effective.get("process_identity")
+    if not isinstance(identity, dict):
+        raise HarnessGateError("crash-run process_identity missing or malformed")
+
+    pid = identity.get("pid")
+    if type(pid) is not int or isinstance(pid, bool) or pid <= 1:
+        raise HarnessGateError("crash-run process_identity pid invalid")
+
+    process_start = identity.get("process_start")
+    if (
+        not isinstance(process_start, str)
+        or not process_start
+        or _DECIMAL_START_RE.fullmatch(process_start) is None
+    ):
+        raise HarnessGateError("crash-run process_identity process_start invalid")
+
+    host = identity.get("host")
+    if not isinstance(host, str) or not host:
+        raise HarnessGateError("crash-run process_identity host invalid")
+
+    boot_id = identity.get("boot_id")
+    if boot_id is not None and not isinstance(boot_id, str):
+        raise HarnessGateError("crash-run process_identity boot_id invalid")
+
+    return (pid, int(process_start))
+
+
+def _require_agent_identity_before_sigkill(
+    *,
+    run_dir: Path,
+    main_pid: int,
+    cgroup_pids: list[int],
+) -> tuple[int, int]:
+    """Prove crash-run AGENT identity from effective.json and unit cgroup membership.
+
+    An unrelated second PID in ``cgroup.procs`` is never evidence of AGENT
+    containment. The recorded identity must match live ``/proc`` identity, differ
+    from MainPID, and have its PID in this unit's cgroup before SIGKILL.
+    """
+    effective = _read_crash_run_effective(run_dir)
+    agent_ident = _parse_agent_harness_identity(effective)
+    live = _process_start_identity(agent_ident[0])
+    if live is None or live != agent_ident:
+        raise HarnessGateError("crash-run agent identity does not match live /proc")
+    if agent_ident[0] == main_pid:
+        raise HarnessGateError("crash-run agent pid must differ from MainPID")
+    if agent_ident[0] not in cgroup_pids:
+        raise HarnessGateError(
+            "crash-run agent pid is not a member of the unit cgroup"
+        )
+    return agent_ident
+
+
+def _capture_original_cgroup_identities_for_sigkill(
+    *,
+    cgroup_pids: list[int],
+    agent_ident: tuple[int, int],
+) -> list[tuple[int, int]]:
+    """Final pre-SIGKILL identity snapshot; exact AGENT identity must still be present.
+
+    Captures every cgroup PID identity fail-closed. The exact ``agent_ident``
+    returned by the earlier effective.json gate must appear byte/value-exact in
+    this snapshot; missing, unreadable, or PID-reused AGENT identity refuses
+    before ``os.kill``. Unrelated identities never substitute.
+    """
+    original_idents: list[tuple[int, int]] = []
+    for pid in cgroup_pids:
+        ident = _process_start_identity(pid)
+        if ident is None:
+            raise HarnessGateError("failed to read process start identity")
+        original_idents.append(ident)
+    if agent_ident not in original_idents:
+        raise HarnessGateError(
+            "crash-run agent identity missing from final pre-SIGKILL snapshot"
+        )
+    return original_idents
+
+
+def _require_agent_identity_dead_after_crash(agent_ident: tuple[int, int]) -> None:
+    """Require the exact pre-crash AGENT identity is dead (PID-reuse safe)."""
+    if _identity_alive(agent_ident):
+        raise HarnessGateError("crash-run agent identity still alive after SIGKILL")
+
+
+def _s4_evidence_payload(
+    *,
+    unit_name: str,
+    crashed_run_id: str,
+    original_cgroup_pids: list[int],
+    agent_identity_from_effective: bool,
+    agent_pid_in_cgroup_before_crash: bool,
+    agent_identity_dead_after_crash: bool,
+    fresh_run_id: str,
+    prompt_sent: int,
+) -> dict[str, Any]:
+    return {
+        "unit_name": unit_name,
+        "crashed_run_id": crashed_run_id,
+        "original_cgroup_pids": original_cgroup_pids,
+        "original_identities_gone": True,
+        "had_descendant_beyond_mainpid": True,
+        "agent_identity_from_effective": agent_identity_from_effective,
+        "agent_pid_in_cgroup_before_crash": agent_pid_in_cgroup_before_crash,
+        "agent_identity_dead_after_crash": agent_identity_dead_after_crash,
+        "new_main_pid_observed": True,
+        "reconciled_status": "unknown",
+        "reconciled_detail_code": "RECONCILED_UNKNOWN",
+        "retryable": False,
+        "session_quarantined": True,
+        "prompt_sent_events": prompt_sent,
+        "dispatch_marker_preserved": True,
+        "fresh_run_id": fresh_run_id,
+        "fresh_status": "completed",
+        "fresh_marker_matched": True,
+        "fresh_effective_model": _REQUIRED_MODEL,
+        "fresh_effective_effort": _REQUIRED_EFFORT,
+        "workspace_empty": True,
+        "primary_model": _REQUIRED_MODEL,
+        "primary_effort": _REQUIRED_EFFORT,
+    }
+
+
+def _require_s4_evidence_success(payload: dict[str, Any]) -> None:
+    if (
+        payload.get("agent_identity_from_effective") is not True
+        or payload.get("agent_pid_in_cgroup_before_crash") is not True
+        or payload.get("agent_identity_dead_after_crash") is not True
+    ):
+        raise HarnessGateError(
+            "refusing success: agent identity evidence gates are not all true"
+        )
+
+
 def _cleanup_created_unit(*, unit_name: str, unit_path: Path, created: bool) -> None:
     """Stop → unlink this run's unit → daemon-reload. Raise if anything remains."""
     if not created:
@@ -550,18 +749,17 @@ def run_s4(inputs: dict[str, str]) -> int:
         if main_pid <= 1:
             raise HarnessGateError("could not resolve MainPID for SIGKILL")
         before_pids = _cgroup_procs_for_unit(unit_name)
-        descendants = [pid for pid in before_pids if pid != main_pid]
-        if not descendants:
-            raise HarnessGateError(
-                "no AGENT descendant beyond MainPID before SIGKILL"
-            )
-        original_idents: list[tuple[int, int]] = []
-        for pid in before_pids:
-            ident = _process_start_identity(pid)
-            if ident is None:
-                raise HarnessGateError("failed to read process start identity")
-            original_idents.append(ident)
-
+        agent_ident = _require_agent_identity_before_sigkill(
+            run_dir=run_dir,
+            main_pid=main_pid,
+            cgroup_pids=before_pids,
+        )
+        agent_identity_from_effective = True
+        agent_pid_in_cgroup_before_crash = True
+        original_idents = _capture_original_cgroup_identities_for_sigkill(
+            cgroup_pids=before_pids,
+            agent_ident=agent_ident,
+        )
         os.kill(main_pid, signal.SIGKILL)
 
         deadline = time.monotonic() + 30
@@ -573,6 +771,8 @@ def run_s4(inputs: dict[str, str]) -> int:
             raise HarnessGateError(
                 "original cgroup process identities still alive after SIGKILL"
             )
+        _require_agent_identity_dead_after_crash(agent_ident)
+        agent_identity_dead_after_crash = True
 
         deadline = time.monotonic() + 60
         new_main = 0
@@ -670,31 +870,21 @@ def run_s4(inputs: dict[str, str]) -> int:
         if sorted(entry.name for entry in workspace.iterdir()) != []:
             raise HarnessGateError("workspace not empty after fresh success")
 
+        evidence = _s4_evidence_payload(
+            unit_name=unit_name,
+            crashed_run_id=run_id,
+            original_cgroup_pids=before_pids,
+            agent_identity_from_effective=agent_identity_from_effective,
+            agent_pid_in_cgroup_before_crash=agent_pid_in_cgroup_before_crash,
+            agent_identity_dead_after_crash=agent_identity_dead_after_crash,
+            fresh_run_id=fresh_run,
+            prompt_sent=prompt_sent,
+        )
+        _require_s4_evidence_success(evidence)
         _write_evidence(
             evidence_dir,
             "s4-crash-containment",
-            {
-                "unit_name": unit_name,
-                "crashed_run_id": run_id,
-                "original_cgroup_pids": before_pids,
-                "original_identities_gone": True,
-                "had_descendant_beyond_mainpid": True,
-                "new_main_pid_observed": True,
-                "reconciled_status": "unknown",
-                "reconciled_detail_code": "RECONCILED_UNKNOWN",
-                "retryable": False,
-                "session_quarantined": True,
-                "prompt_sent_events": prompt_sent,
-                "dispatch_marker_preserved": True,
-                "fresh_run_id": fresh_run,
-                "fresh_status": "completed",
-                "fresh_marker_matched": True,
-                "fresh_effective_model": _REQUIRED_MODEL,
-                "fresh_effective_effort": _REQUIRED_EFFORT,
-                "workspace_empty": True,
-                "primary_model": _REQUIRED_MODEL,
-                "primary_effort": _REQUIRED_EFFORT,
-            },
+            evidence,
         )
         print("S4 crash containment harness completed successfully")
     except BaseException as exc:
