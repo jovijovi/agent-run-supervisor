@@ -622,9 +622,10 @@ def test_cancellation_after_dispatch_is_conservative_and_cleans_up(
 
     run_dir = harness.run_dir()
     payload = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
-    # Dispatched with no reliable ACP terminal: conservative, never completed.
-    assert payload["status"] == "cancelled"
-    assert payload["status"] != "completed"
+    # Dispatched with no reliable ACP terminal: PRD R5 — unknown, never a
+    # cancelled/completed overclaim.
+    assert payload["status"] == "unknown"
+    assert payload["status"] not in ("cancelled", "completed")
     assert payload["detail_code"] == "SUPERVISOR_CANCELLED"
     assert payload["retryable"] is False
     assert (run_dir / "prompt-dispatch-started").exists()

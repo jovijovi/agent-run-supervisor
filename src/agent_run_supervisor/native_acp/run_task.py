@@ -120,7 +120,9 @@ def finalize_run_state(
         if obs.supervisor_timed_out:
             return (AgentRunStatus.TIMED_OUT, "quarantined")
         if obs.supervisor_cancelled:
-            return (AgentRunStatus.CANCELLED, "quarantined")
+            # PRD R5: no trustworthy ACP terminal exists on this row — the
+            # prompt may have executed, so cancelled-class would overclaim.
+            return (AgentRunStatus.UNKNOWN, "quarantined")
         return (AgentRunStatus.FAILED, "quarantined")
     if obs.child_exit_without_terminal:
         return (AgentRunStatus.FAILED, "quarantined")

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_run_supervisor.exit_classifier import AgentRunStatus
+from agent_run_supervisor.exit_classifier import _RETRYABLE_DEFAULT, AgentRunStatus
 from agent_run_supervisor.native_acp.run_task import (
     FinalizationObservations,
     finalize_run_state,
@@ -97,7 +97,7 @@ def test_permission_violation_fails_the_turn_despite_terminal() -> None:
     ("flags", "expected_status"),
     [
         ({"supervisor_timed_out": True}, AgentRunStatus.TIMED_OUT),
-        ({"supervisor_cancelled": True}, AgentRunStatus.CANCELLED),
+        ({"supervisor_cancelled": True}, AgentRunStatus.UNKNOWN),
         ({}, AgentRunStatus.FAILED),
     ],
 )
@@ -107,6 +107,30 @@ def test_escalated_kill_after_dispatch_quarantines(flags, expected_status) -> No
     )
     assert status is expected_status
     assert disposition == "quarantined"
+
+
+def test_supervisor_cancelled_escalated_kill_without_terminal_is_unknown() -> None:
+    # PRD R5: the prompt may have executed; without a trustworthy ACP
+    # terminal, cancelled-class would overclaim. UNKNOWN is hard-nonretryable.
+    status, disposition = _finalize(
+        dispatch_started=True,
+        escalated_kill_after_dispatch=True,
+        supervisor_cancelled=True,
+    )
+    assert status is AgentRunStatus.UNKNOWN
+    assert disposition == "quarantined"
+    assert _RETRYABLE_DEFAULT[AgentRunStatus.UNKNOWN] is False
+
+
+def test_trustworthy_cancel_terminal_wins_over_escalated_kill() -> None:
+    status, disposition = _finalize(
+        dispatch_started=True,
+        acp_stop_reason="cancelled",
+        escalated_kill_after_dispatch=True,
+        supervisor_cancelled=True,
+    )
+    assert status is AgentRunStatus.CANCELLED
+    assert disposition == "active"
 
 
 def test_child_exit_without_terminal_is_failed_quarantined() -> None:
