@@ -26,6 +26,16 @@ _CWD_TOKEN = "<effective_cwd>"
 _REUSE_MODES = ("none", "reuse")
 _MAX_FIELD_LENGTH = 512
 
+# Finite operational ceilings for sealed RunLimits (Codex-review R2 / B4).
+LIMIT_STARTUP_TIMEOUT_SECONDS_MAX = 3600.0
+LIMIT_TURN_TIMEOUT_SECONDS_MAX = 86400.0
+LIMIT_CANCEL_GRACE_SECONDS_MAX = 300.0
+LIMIT_MAX_STDERR_BYTES_MAX = 64 * 1024 * 1024
+LIMIT_MAX_EVENT_BYTES_MAX = 1024 * 1024
+LIMIT_MAX_EVENTS_MAX = 1_000_000
+LIMIT_MAX_EVENT_BYTES_MIN = 256
+LIMIT_EVENT_BUDGET_BYTES = 1024 * 1024 * 1024
+
 
 class NativeSpecError(ValueError):
     """Base class for admission/spec failures."""
@@ -65,6 +75,41 @@ def _require_text(value: str, name: str, *, max_length: int = _MAX_FIELD_LENGTH)
     )
 
 
+def _is_finite_number(value: Any) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and value == value
+        and value not in (float("inf"), float("-inf"))
+    )
+
+
+def _validate_limit_float(name: str, value: Any, maximum: float) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SpecValidationError(f"limit {name} must be a finite number")
+    # Integers: exact compare against positivity/maximum BEFORE float() so huge
+    # decoded JSON ints never OverflowError inside validation.
+    if type(value) is int:
+        _require(value > 0, f"limit {name} must be positive")
+        _require(value <= maximum, f"limit {name} exceeds maximum")
+        return
+    _require(
+        value == value and value not in (float("inf"), float("-inf")),
+        f"limit {name} must be a finite number",
+    )
+    _require(value > 0, f"limit {name} must be positive")
+    _require(value <= maximum, f"limit {name} exceeds maximum")
+
+
+def _validate_limit_int(name: str, value: Any, maximum: int, *, minimum: int = 1) -> None:
+    _require(
+        not isinstance(value, bool) and isinstance(value, int),
+        f"limit {name} must be an integer",
+    )
+    _require(value >= minimum, f"limit {name} must be at least {minimum}")
+    _require(value <= maximum, f"limit {name} exceeds maximum")
+
+
 @dataclass(frozen=True)
 class InputRef:
     ref: str
@@ -85,15 +130,36 @@ class RunLimits:
     max_events: int = 10_000
 
     def __post_init__(self) -> None:
-        for name in (
+        _validate_limit_float(
             "startup_timeout_seconds",
+            self.startup_timeout_seconds,
+            LIMIT_STARTUP_TIMEOUT_SECONDS_MAX,
+        )
+        _validate_limit_float(
             "turn_timeout_seconds",
+            self.turn_timeout_seconds,
+            LIMIT_TURN_TIMEOUT_SECONDS_MAX,
+        )
+        _validate_limit_float(
             "cancel_grace_seconds",
-            "max_stderr_bytes",
+            self.cancel_grace_seconds,
+            LIMIT_CANCEL_GRACE_SECONDS_MAX,
+        )
+        _validate_limit_int(
+            "max_stderr_bytes", self.max_stderr_bytes, LIMIT_MAX_STDERR_BYTES_MAX
+        )
+        _validate_limit_int(
             "max_event_bytes",
-            "max_events",
-        ):
-            _require(getattr(self, name) > 0, f"limit {name} must be positive")
+            self.max_event_bytes,
+            LIMIT_MAX_EVENT_BYTES_MAX,
+            minimum=LIMIT_MAX_EVENT_BYTES_MIN,
+        )
+        _validate_limit_int("max_events", self.max_events, LIMIT_MAX_EVENTS_MAX)
+        budget = self.max_event_bytes * self.max_events
+        _require(
+            budget <= LIMIT_EVENT_BUDGET_BYTES,
+            "limit event budget exceeds maximum (max_event_bytes * max_events)",
+        )
 
 
 @dataclass(frozen=True)
@@ -122,6 +188,12 @@ class AgentRunRequest:
     schema_version: int = SPEC_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        _require(
+            not isinstance(self.schema_version, bool)
+            and isinstance(self.schema_version, int)
+            and self.schema_version == SPEC_SCHEMA_VERSION,
+            f"schema_version must be exactly {SPEC_SCHEMA_VERSION}",
+        )
         _require_text(self.owner, "owner")
         _require_text(self.namespace, "namespace")
         _require_text(self.profile_id, "profile_id")

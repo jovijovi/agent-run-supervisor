@@ -23,6 +23,8 @@ from typing import Any
 from agent_run_supervisor.event_store import (
     FILE_MODE,
     atomic_write_json,
+    durable_atomic_write_json,
+    durable_unlink,
     exclusive_create_bytes,
     secure_mkdir,
 )
@@ -44,6 +46,12 @@ SCHEMA_VERSION = 1
 SESSION_JSON = "session.json"
 LOCK_JSON = "lock.json"
 LIFECYCLE_GUARD = ".lifecycle.guard"
+# Durable fence written before required quarantine; cleared only after the
+# session state is durably quarantined. Not a new state vocabulary — open
+# sessions carrying this fence still refuse STATE_OPEN lease acquisition.
+QUARANTINE_PENDING_JSON = "quarantine-pending.json"
+QUARANTINE_PENDING_SCHEMA = "ars.quarantine_pending"
+QUARANTINE_PENDING_VERSION = 1
 
 STATE_OPEN = "open"
 STATE_CLOSED = "closed"
@@ -340,6 +348,32 @@ class SessionStore:
             atomic_write_json(session_dir / SESSION_JSON, _record_to_dict(bound))
             return bound
 
+    def write_quarantine_pending(
+        self,
+        session_id: str,
+        *,
+        reason: str,
+        run_id: str,
+        now: _dt.datetime | None = None,
+    ) -> None:
+        """Persist the durable quarantine-pending fence under the session guard.
+
+        Must precede a required :meth:`mark_quarantined` attempt. The fence
+        alone (even while ``session.json`` still says open) blocks
+        ``acquire_lock(required_state=STATE_OPEN)``.
+        """
+        session_dir = self._require_session_dir(session_id)
+        moment = _ensure_aware(now or _utc_now()).isoformat()
+        payload = {
+            "schema": QUARANTINE_PENDING_SCHEMA,
+            "version": QUARANTINE_PENDING_VERSION,
+            "run_id": run_id,
+            "reason": reason,
+            "timestamp": moment,
+        }
+        with _session_lock_guard(session_dir):
+            durable_atomic_write_json(session_dir / QUARANTINE_PENDING_JSON, payload)
+
     def mark_quarantined(
         self,
         session_id: str,
@@ -355,11 +389,17 @@ class SessionStore:
         serialized decision. Never unlinks an existing ``lock.json``: the
         quarantining finalizer's already-held lease stays valid for its own
         finalization writes. There is no un-quarantine API (v1 contract).
+
+        After the quarantined state is durably written, any
+        ``quarantine-pending.json`` fence is cleared under the same guard so
+        startup reconciliation can converge an interrupted fence by calling
+        this method.
         """
         session_dir = self._require_session_dir(session_id)
         with _session_lock_guard(session_dir):
             record = _record_from_dict(_read_json(session_dir / SESSION_JSON))
             if record.state == STATE_QUARANTINED:
+                self._clear_quarantine_pending_unlocked(session_dir)
                 return record
             moment = _ensure_aware(now or _utc_now()).isoformat()
             quarantined = replace(
@@ -369,10 +409,20 @@ class SessionStore:
                 quarantined_by_run_id=run_id,
                 updated_at=moment,
             )
-            atomic_write_json(
+            durable_atomic_write_json(
                 session_dir / SESSION_JSON, _record_to_dict(quarantined)
             )
+            self._clear_quarantine_pending_unlocked(session_dir)
             return quarantined
+
+    def _clear_quarantine_pending_unlocked(self, session_dir: Path) -> None:
+        """Clear the fence; caller must already hold the per-session guard.
+
+        Uses crash-durable unlink (unlink then parent directory fsync). Missing
+        fence is idempotent. Durability failures propagate — callers must not
+        claim terminal success or release the lease when clear fails.
+        """
+        durable_unlink(session_dir / QUARANTINE_PENDING_JSON)
 
     def commit_last_effective(
         self,
@@ -704,6 +754,16 @@ class SessionStore:
                     raise SessionClosedError(
                         f"session {session_id!r} is {current.state!r}; lease "
                         f"acquisition requires state {required_state!r}",
+                    )
+                # Fence check is independent of session.json state and of lock
+                # TTL/expiry: an interrupted quarantine still fails closed.
+                if (
+                    required_state == STATE_OPEN
+                    and (session_dir / QUARANTINE_PENDING_JSON).exists()
+                ):
+                    raise SessionQuarantinedError(
+                        f"session {session_id!r} has a quarantine-pending fence; "
+                        "no new lease is ever minted until quarantine converges",
                     )
             moment = _ensure_aware(now or _utc_now())
             lock_path = session_dir / LOCK_JSON

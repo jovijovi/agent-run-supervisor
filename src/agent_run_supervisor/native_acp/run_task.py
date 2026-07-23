@@ -20,12 +20,14 @@ fact, never a remote acceptance, and never an upgrade of certainty.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as _dt
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from agent_run_supervisor.event_store import RunHandle
 from agent_run_supervisor.exit_classifier import _RETRYABLE_DEFAULT, AgentRunStatus
 from agent_run_supervisor.managed_process import (
     ManagedExit,
@@ -34,7 +36,15 @@ from agent_run_supervisor.managed_process import (
     spawn_managed_process,
 )
 from agent_run_supervisor.redaction import RedactionReport, redact_text
-from agent_run_supervisor.result import build_result_payload
+from agent_run_supervisor.result import (
+    COMPLETED_ACP_STOP_REASONS,
+    MAX_FINAL_MESSAGE_BYTES,
+    build_result_payload,
+    enforce_native_result_ceiling,
+    sanitize_failure_reason,
+    sanitize_usage,
+    truncate_utf8_bytes,
+)
 from agent_run_supervisor.session import (
     STATE_OPEN,
     SessionLock,
@@ -83,11 +93,8 @@ class FinalizationObservations:
     permission_violation: bool = False
     # A partial between-Run switch whose exact rollback could not be proven.
     rollback_unproven: bool = False
-
-
-_COMPLETED_STOP_REASONS = frozenset(
-    {"end_turn", "max_tokens", "max_turn_requests", "refusal"}
-)
+    # Bounded evidence writer overflow / close / consumer failure.
+    evidence_pipeline_failure: bool = False
 
 
 def finalize_run_state(
@@ -99,6 +106,12 @@ def finalize_run_state(
     Exit-code classification is subordinate by construction: no exit code is
     consulted, so a dispatched Turn without a reliable ACP terminal can never
     finalize completed/cancelled-class.
+
+    Evidence-pipeline failure is modeled explicitly: an existing durable result
+    remains irreversible; ``unknown`` uncertainty remains the strongest status;
+    otherwise a post-dispatch evidence-pipeline failure yields ``failed`` and
+    keeps any already-required quarantine disposition (overriding
+    completed/cancelled/timed_out).
     """
     obs = observations
     if obs.result_exists:
@@ -110,6 +123,21 @@ def finalize_run_state(
         # exact readback proof.
         disposition = "quarantined" if obs.rollback_unproven else "active"
         return (AgentRunStatus.FAILED, disposition)
+
+    status, disposition = _post_dispatch_finalize(obs)
+    if obs.evidence_pipeline_failure and status is not AgentRunStatus.UNKNOWN:
+        if status in (
+            AgentRunStatus.COMPLETED,
+            AgentRunStatus.CANCELLED,
+            AgentRunStatus.TIMED_OUT,
+        ):
+            return (AgentRunStatus.FAILED, disposition)
+    return (status, disposition)
+
+
+def _post_dispatch_finalize(
+    obs: FinalizationObservations,
+) -> tuple[AgentRunStatus, str]:
     if obs.acp_stop_reason is not None:
         if obs.permission_violation:
             return (AgentRunStatus.FAILED, "active")
@@ -120,7 +148,9 @@ def finalize_run_state(
         if obs.supervisor_timed_out:
             return (AgentRunStatus.TIMED_OUT, "quarantined")
         if obs.supervisor_cancelled:
-            return (AgentRunStatus.CANCELLED, "quarantined")
+            # PRD R5: no trustworthy ACP terminal exists on this row — the
+            # prompt may have executed, so cancelled-class would overclaim.
+            return (AgentRunStatus.UNKNOWN, "quarantined")
         return (AgentRunStatus.FAILED, "quarantined")
     if obs.child_exit_without_terminal:
         return (AgentRunStatus.FAILED, "quarantined")
@@ -132,7 +162,7 @@ def finalize_run_state(
 def _status_for_stop_reason(stop_reason: str) -> AgentRunStatus:
     if stop_reason == "cancelled":
         return AgentRunStatus.CANCELLED
-    if stop_reason in _COMPLETED_STOP_REASONS:
+    if stop_reason in COMPLETED_ACP_STOP_REASONS:
         return AgentRunStatus.COMPLETED
     return AgentRunStatus.FAILED
 
@@ -154,6 +184,67 @@ class _PreDispatchFailure(Exception):
         super().__init__(reason)
         self.reason = reason
         self.detail_code = detail_code
+
+
+_CATEGORICAL_FAILURE_REASON_BY_DETAIL: dict[str, str] = {
+    "ADMISSION": "admission failed",
+    "SPAWN_FAILED": "spawn failed",
+    "STARTUP_TIMEOUT": "startup timed out",
+    "LOAD_SESSION_UNADVERTISED": "session load unavailable",
+    "SILENT_SESSION_RECREATION": "silent session recreation",
+    "CONFIG_FIDELITY": "config fidelity failed",
+    "EVIDENCE_PIPELINE": "evidence pipeline failed",
+    "SUPERVISOR_CANCELLED": "supervisor cancellation",
+    "RUN_EXCEPTION": "run exception",
+}
+
+
+def _categorical_failure_reason(detail_code: str | None) -> str:
+    if detail_code is None:
+        return "run failed"
+    return _CATEGORICAL_FAILURE_REASON_BY_DETAIL.get(detail_code, "run failed")
+
+
+@dataclass
+class FinalMessageAccumulator:
+    """Bounded agent-message accumulation at ingestion (not only finalization).
+
+    Keeps only accepted UTF-8 parts under ``max_bytes`` plus a discarded-chunk
+    count and truncation flag — never retains unbounded discarded chunk bodies.
+    """
+
+    max_bytes: int = MAX_FINAL_MESSAGE_BYTES
+    _parts: list[str] = field(default_factory=list)
+    _byte_len: int = 0
+    truncated: bool = False
+    discarded_chunks: int = 0
+
+    def ingest(self, text: str) -> None:
+        if not isinstance(text, str) or not text:
+            return
+        raw = text.encode("utf-8")
+        if self._byte_len >= self.max_bytes:
+            self.truncated = True
+            self.discarded_chunks += 1
+            return
+        remaining = self.max_bytes - self._byte_len
+        if len(raw) <= remaining:
+            self._parts.append(text)
+            self._byte_len += len(raw)
+            return
+        kept = truncate_utf8_bytes(raw, remaining)
+        if kept:
+            self._parts.append(kept.decode("utf-8"))
+            self._byte_len += len(kept)
+        self.truncated = True
+        self.discarded_chunks += 1
+
+    def text(self) -> str:
+        return "".join(self._parts)
+
+    @property
+    def retained_bytes(self) -> int:
+        return self._byte_len
 
 
 @dataclass
@@ -186,10 +277,15 @@ class _RunContext:
     observation_interrupted: bool = False
     pre_dispatch: _PreDispatchFailure | None = None
     pipeline_error: BaseException | None = None
-    agent_texts: list[str] = field(default_factory=list)
+    final_message_acc: FinalMessageAccumulator = field(
+        default_factory=FinalMessageAccumulator
+    )
     exit_state: ManagedExit | None = None
     redaction: RedactionReport = field(default_factory=RedactionReport)
     error: BaseException | None = None
+    # When True, required quarantine/disposition failed: retain lease and
+    # refuse to publish a terminal result.
+    disposition_failed: bool = False
 
 
 def _utc_now_iso() -> str:
@@ -211,6 +307,7 @@ class RunTask:
         submitted_at: str | None = None,
         retry_of_run_id: str | None = None,
         cwd: str | None = None,
+        prepared_handle: RunHandle | None = None,
     ) -> None:
         if supervisor_root is not None:
             session_store = storage.native_session_store(supervisor_root)
@@ -231,6 +328,38 @@ class RunTask:
                 f"session store root {session_store.base_dir} is not a "
                 f"{storage.NATIVE_SESSIONS_DIRNAME} root"
             )
+        if prepared_handle is not None:
+            # arsd admission handoff: only the exact reserved directory of
+            # this run in this event store may be adopted — never an
+            # arbitrary injected path.
+            if not isinstance(prepared_handle, RunHandle):
+                raise NativeRunTaskError(
+                    "prepared_handle must be an event_store.RunHandle"
+                )
+            if prepared_handle.run_id != run_id:
+                raise NativeRunTaskError(
+                    "prepared_handle run_id does not match this RunTask run_id"
+                )
+            # Resolve ancestors only: resolving the final run-id entry would
+            # let a symlink planted there collapse both comparison sides onto
+            # the same foreign target and bypass the injection guard.
+            handed_dir = Path(prepared_handle.run_dir)
+            expected_dir = Path(event_store.base_dir).resolve() / run_id
+            if handed_dir.parent.resolve() / handed_dir.name != expected_dir:
+                raise NativeRunTaskError(
+                    "prepared_handle run_dir is not the configured native "
+                    "event-store run directory for this run_id"
+                )
+            if expected_dir.is_symlink():
+                raise NativeRunTaskError(
+                    "prepared_handle run_dir is a symlink, not the reserved "
+                    "event-store run directory"
+                )
+            if not expected_dir.is_dir():
+                raise NativeRunTaskError(
+                    "prepared_handle run_dir is missing or not a directory"
+                )
+        self._prepared_handle = prepared_handle
         self._request = request
         self._prompt_text = prompt_text
         self._run_id = run_id
@@ -246,18 +375,28 @@ class RunTask:
 
     async def run(self) -> NativeRunResult:
         ctx = _RunContext()
-        try:
-            ctx.handle = self._event_store.create_run(self._run_id)
-        except Exception as exc:
-            payload = {"run_id": self._run_id, "status": "failed", "error": str(exc)}
-            return NativeRunResult(
-                run_id=self._run_id,
-                status=AgentRunStatus.FAILED,
-                payload=payload,
-                run_dir=None,
-                session_id=None,
-                session_state=None,
-            )
+        if self._prepared_handle is not None:
+            # The admission side already performed the single exclusive
+            # create_run for this key; repeating it here would break the
+            # at-most-one-reservation contract.
+            ctx.handle = self._prepared_handle
+        else:
+            try:
+                ctx.handle = self._event_store.create_run(self._run_id)
+            except Exception as exc:
+                payload = {
+                    "run_id": self._run_id,
+                    "status": "failed",
+                    "error": str(exc),
+                }
+                return NativeRunResult(
+                    run_id=self._run_id,
+                    status=AgentRunStatus.FAILED,
+                    payload=payload,
+                    run_dir=None,
+                    session_id=None,
+                    session_state=None,
+                )
         cancelled = False
         try:
             await self._drive(ctx)
@@ -317,7 +456,10 @@ class RunTask:
 
         # Architecture §8 native layout: the Run's event stream is events.jsonl.
         ctx.writer = EventWriter(
-            ctx.handle, max_event_bytes=limits.max_event_bytes, filename="events.jsonl"
+            ctx.handle,
+            max_event_bytes=limits.max_event_bytes,
+            max_events=limits.max_events,
+            filename="events.jsonl",
         )
         await ctx.writer.start()
         normalizer = NativeAcpEventNormalizer()
@@ -533,6 +675,15 @@ class RunTask:
     async def _dispatch(self, ctx: _RunContext, turn_timeout: float) -> None:
         driver = ctx.driver
         assert driver is not None
+        # Evidence overflow before the prompt wire write: fail closed with no
+        # prompt, never invent an uncertain post-dispatch row.
+        if ctx.writer is not None and (
+            ctx.pipeline_error is not None or not ctx.writer.can_accept
+        ):
+            raise _PreDispatchFailure(
+                "event writer overflow before prompt dispatch",
+                "EVIDENCE_PIPELINE",
+            )
         # Conservative uncertainty boundary: created immediately before the
         # wire write attempt.
         self._write_marker(ctx, DISPATCH_STARTED_MARKER)
@@ -540,7 +691,19 @@ class RunTask:
         driver.add_prompt_frame_hook(
             lambda: self._write_marker(ctx, PROMPT_ACCEPTED_MARKER)
         )
-        self._emit(ctx, {"type": "session_prompt_sent"})
+        # Persistence barrier: await durable session_prompt_sent before any
+        # prompt wire write. Marker already implies conservative
+        # unknown/quarantine — never overclaim predispatch after this point.
+        # Do not treat consumer_queue_healthy as this barrier.
+        if ctx.writer is not None:
+            try:
+                await ctx.writer.emit_awaited({"type": "session_prompt_sent"})
+            except Exception as exc:
+                if ctx.pipeline_error is None:
+                    ctx.pipeline_error = exc
+                return
+        if ctx.pipeline_error is not None:
+            return
         try:
             outcome = await asyncio.wait_for(
                 driver.prompt_once(self._prompt_text), turn_timeout
@@ -556,7 +719,7 @@ class RunTask:
                 ctx.observation_interrupted = True
             return
         ctx.stop_reason = outcome.stop_reason
-        ctx.usage = outcome.usage
+        ctx.usage = sanitize_usage(outcome.usage)
         if ctx.stop_reason is not None:
             self._emit(
                 ctx, {"type": "run_completed", "stop_reason": ctx.stop_reason}
@@ -604,7 +767,7 @@ class RunTask:
                     content = update.get("content") or {}
                     text = content.get("text")
                     if isinstance(text, str):
-                        ctx.agent_texts.append(text)
+                        ctx.final_message_acc.ingest(text)
                 self._emit(ctx, normalizer.normalize_update(update))
             except Exception as exc:
                 if ctx.pipeline_error is None:
@@ -680,36 +843,239 @@ class RunTask:
     # -- finalization ------------------------------------------------------
 
     _FINALIZE_TIMEOUT_SECONDS = 60.0
+    # Bounded backoff between fail-closed emergency reap retries (no busy spin).
+    _EMERGENCY_REAP_RETRY_DELAY_SECONDS = 0.05
 
     async def _finalize_bounded(self, ctx: _RunContext) -> NativeRunResult:
         """Finalization is bounded and cancellation-safe: a repeated
-        cancellation or a hung finalization triggers last-resort synchronous
-        cleanup instead of hanging or leaking, and repeated cancellation is
-        always propagated."""
+        cancellation or a hung finalization triggers last-resort emergency
+        cleanup (shielded kill+reap, then disposition) instead of hanging or
+        leaking, and repeated cancellation is always propagated."""
         try:
             return await asyncio.wait_for(
                 self._finalize(ctx), self._FINALIZE_TIMEOUT_SECONDS
             )
         except asyncio.CancelledError:
-            self._emergency_cleanup(ctx)
+            await self._emergency_cleanup(ctx)
             raise
         except asyncio.TimeoutError:
-            self._emergency_cleanup(ctx)
+            await self._emergency_cleanup(ctx)
             return self._result_after_emergency(ctx)
 
-    def _emergency_cleanup(self, ctx: _RunContext) -> None:
-        """Sync-only last resort: kill the group, persist one conservative
+    async def _emergency_cleanup(self, ctx: _RunContext) -> None:
+        """Last resort: SIGKILL, await reap, then persist one conservative
         terminal fact if none exists, quarantine a dispatched-uncertain
-        session, and release the lease. Every step is independent."""
-        try:
-            if ctx.proc is not None:
+        session, and release the lease only after a TRUSTED terminal exists.
+
+        Child exit/reap completes before any lease release, terminal/result
+        return that permits registry deregistration, or propagated cancellation
+        return from this helper. Each dedicated ``ManagedProcess.wait()`` task is
+        awaited through ``asyncio.shield`` so caller cancellation cannot cancel
+        the underlying reap. Ordinary/transient wait failures fail closed and
+        retry after a small bounded delay until one shielded reap proves exit;
+        every failed/done reap task is observed (never detached). Cancellation
+        during retry delay/reap is absorbed and remembered, then propagated only
+        after proven reap plus emergency disposition.
+
+        INVALID/uncertain existing terminals must fence+quarantine and return
+        without lease release. Fence/quarantine failure also refuses release.
+        """
+        cancelled = False
+
+        def _absorb_cancel() -> None:
+            nonlocal cancelled
+            cancelled = True
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                task.uncancel()
+
+        def _propagate_if_cancelled() -> None:
+            if cancelled:
+                raise asyncio.CancelledError()
+
+        async def _retry_delay() -> None:
+            delay = asyncio.create_task(
+                asyncio.sleep(self._EMERGENCY_REAP_RETRY_DELAY_SECONDS),
+                name=f"emergency-reap-delay:{self._run_id}",
+            )
+
+            def _observe_delay_done() -> None:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    delay.result()
+
+            try:
+                while True:
+                    try:
+                        await asyncio.shield(delay)
+                        return
+                    except asyncio.CancelledError:
+                        # Classify source by caller cancelling() first: a same-turn
+                        # race can leave the delay done while this task is cancelling.
+                        me = asyncio.current_task()
+                        if me is not None and me.cancelling():
+                            _absorb_cancel()
+                            if delay.done():
+                                _observe_delay_done()
+                                return
+                            continue
+                        if delay.done():
+                            _observe_delay_done()
+                            return
+                        _absorb_cancel()
+            finally:
+                if not delay.done():
+                    while not delay.done():
+                        try:
+                            await asyncio.shield(delay)
+                        except asyncio.CancelledError:
+                            me = asyncio.current_task()
+                            if me is not None and me.cancelling():
+                                _absorb_cancel()
+                                if delay.done():
+                                    _observe_delay_done()
+                                    return
+                                continue
+                            if delay.done():
+                                _observe_delay_done()
+                                return
+                            _absorb_cancel()
+                        except Exception:
+                            return
+
+        if ctx.proc is not None:
+            try:
                 ctx.proc.kill_group(reason="emergency_finalize")
-        except Exception:
-            pass
+            except Exception:
+                pass
+            # kill_group signals only; proven wait()/reap must precede
+            # release/return. Retry fail-closed on ordinary wait failures.
+            while True:
+                reap_task = asyncio.create_task(
+                    ctx.proc.wait(), name=f"emergency-reap:{self._run_id}"
+                )
+                reaped = False
+
+                def _observe_reap_done() -> bool:
+                    try:
+                        ctx.exit_state = reap_task.result()
+                        return True
+                    except (asyncio.CancelledError, Exception):
+                        return False
+
+                try:
+                    while True:
+                        try:
+                            ctx.exit_state = await asyncio.shield(reap_task)
+                            reaped = True
+                            break
+                        except asyncio.CancelledError:
+                            # Caller cancelling() wins over reap_task.done(): same-turn
+                            # completion must not swallow the delivered cancellation.
+                            me = asyncio.current_task()
+                            if me is not None and me.cancelling():
+                                _absorb_cancel()
+                                if reap_task.done():
+                                    reaped = _observe_reap_done()
+                                    break
+                                continue
+                            if reap_task.done():
+                                # Reap task itself ended cancelled — observe.
+                                with contextlib.suppress(asyncio.CancelledError):
+                                    reap_task.result()
+                                break
+                            _absorb_cancel()
+                        except Exception:
+                            # Failed wait observed via the await above.
+                            break
+                finally:
+                    if not reap_task.done():
+                        # Observe through shield so a detach never leaves an
+                        # unobserved reap task if this coroutine aborts early.
+                        while not reap_task.done():
+                            try:
+                                ctx.exit_state = await asyncio.shield(reap_task)
+                                reaped = True
+                            except asyncio.CancelledError:
+                                me = asyncio.current_task()
+                                if me is not None and me.cancelling():
+                                    _absorb_cancel()
+                                    if reap_task.done():
+                                        reaped = _observe_reap_done()
+                                        break
+                                    continue
+                                if reap_task.done():
+                                    with contextlib.suppress(asyncio.CancelledError):
+                                        reap_task.result()
+                                    break
+                                _absorb_cancel()
+                            except Exception:
+                                break
+                if reaped:
+                    break
+                await _retry_delay()
+
+        existing = storage.NativeTerminalState(storage.NativeTerminalKind.ABSENT)
+        if ctx.handle is not None:
+            try:
+                existing = storage.read_native_terminal_result(
+                    ctx.handle.run_dir / "result.json", run_id=self._run_id
+                )
+            except Exception:
+                existing = storage.NativeTerminalState(
+                    storage.NativeTerminalKind.INVALID
+                )
+
+        if existing.kind is storage.NativeTerminalKind.INVALID:
+            if ctx.session_id is not None:
+                try:
+                    reason = "existing terminal evidence is untrusted"
+                    self._session_store.write_quarantine_pending(
+                        ctx.session_id, reason=reason, run_id=self._run_id
+                    )
+                    self._session_store.mark_quarantined(
+                        ctx.session_id, reason=reason, run_id=self._run_id
+                    )
+                except Exception:
+                    _propagate_if_cancelled()
+                    return
+            _propagate_if_cancelled()
+            return
+
+        if existing.kind is storage.NativeTerminalKind.TRUSTED:
+            try:
+                if ctx.lock is not None and ctx.session_id is not None:
+                    self._session_store.release_lock(ctx.session_id, ctx.lock.token)
+                    ctx.lock = None
+            except Exception:
+                pass
+            _propagate_if_cancelled()
+            return
+
+        # ABSENT: quarantine when dispatch is uncertain, then write one terminal.
+        need_quarantine = (
+            ctx.session_id is not None
+            and ctx.dispatch_started
+            and ctx.stop_reason is None
+        )
+        if need_quarantine:
+            try:
+                reason = (
+                    "emergency finalization: dispatched turn without a "
+                    "reliable terminal"
+                )
+                self._session_store.write_quarantine_pending(
+                    ctx.session_id, reason=reason, run_id=self._run_id
+                )
+                self._session_store.mark_quarantined(
+                    ctx.session_id, reason=reason, run_id=self._run_id
+                )
+            except Exception:
+                # Required quarantine failed: no terminal result, no lease release.
+                _propagate_if_cancelled()
+                return
+        written_trusted = False
         try:
-            if ctx.handle is not None and not (
-                ctx.handle.run_dir / "result.json"
-            ).exists():
+            if ctx.handle is not None:
                 status = (
                     AgentRunStatus.UNKNOWN
                     if ctx.dispatch_started and ctx.stop_reason is None
@@ -724,7 +1090,7 @@ class RunTask:
                     exit_code=None,
                     signal=None,
                     stop_reason=ctx.stop_reason,
-                    usage=ctx.usage,
+                    usage=sanitize_usage(ctx.usage),
                     final_message="",
                     truncated=False,
                     truncate_reason=None,
@@ -733,66 +1099,86 @@ class RunTask:
                 )
                 if ctx.session_id is not None:
                     payload["session_id"] = ctx.session_id
+                payload = enforce_native_result_ceiling(
+                    payload,
+                    run_id=self._run_id,
+                    run_dir=ctx.handle.run_dir,
+                    session_id=ctx.session_id,
+                )
                 storage.write_once_json(
                     ctx.handle.run_dir / "result.json", payload
                 )
-        except Exception:
-            pass
-        try:
-            if (
-                ctx.session_id is not None
-                and ctx.dispatch_started
-                and ctx.stop_reason is None
-            ):
-                self._session_store.mark_quarantined(
-                    ctx.session_id,
-                    reason="emergency finalization: dispatched turn without a "
-                    "reliable terminal",
-                    run_id=self._run_id,
+                written = storage.read_native_terminal_result(
+                    ctx.handle.run_dir / "result.json", run_id=self._run_id
+                )
+                written_trusted = (
+                    written.kind is storage.NativeTerminalKind.TRUSTED
                 )
         except Exception:
-            pass
+            written_trusted = False
+        if not written_trusted:
+            _propagate_if_cancelled()
+            return
         try:
             if ctx.lock is not None and ctx.session_id is not None:
                 self._session_store.release_lock(ctx.session_id, ctx.lock.token)
+                ctx.lock = None
         except Exception:
             pass
+        _propagate_if_cancelled()
 
     def _result_after_emergency(self, ctx: _RunContext) -> NativeRunResult:
+        """Return only a TRUSTED Native terminal; never raw/forged evidence."""
+        failed = NativeRunResult(
+            run_id=self._run_id,
+            status=AgentRunStatus.FAILED,
+            payload={
+                "run_id": self._run_id,
+                "status": "failed",
+                "error": "finalization timed out",
+            },
+            run_dir=getattr(ctx.handle, "run_dir", None),
+            session_id=ctx.session_id,
+            session_state=None,
+        )
+        if ctx.handle is None:
+            return failed
         try:
-            payload = ctx.handle.read_json("result.json")
+            state = storage.read_native_terminal_result(
+                ctx.handle.run_dir / "result.json", run_id=self._run_id
+            )
+        except Exception:
+            return failed
+        if (
+            state.kind is storage.NativeTerminalKind.TRUSTED
+            and state.payload is not None
+        ):
             return NativeRunResult(
                 run_id=self._run_id,
-                status=AgentRunStatus(payload["status"]),
-                payload=payload,
+                status=AgentRunStatus(state.payload["status"]),
+                payload=state.payload,
                 run_dir=ctx.handle.run_dir,
                 session_id=ctx.session_id,
                 session_state=self._session_state(ctx),
             )
-        except Exception:
-            return NativeRunResult(
-                run_id=self._run_id,
-                status=AgentRunStatus.FAILED,
-                payload={
-                    "run_id": self._run_id,
-                    "status": "failed",
-                    "error": "finalization timed out",
-                },
-                run_dir=getattr(ctx.handle, "run_dir", None),
-                session_id=ctx.session_id,
-                session_state=None,
-            )
+        return failed
 
     async def _finalize(self, ctx: _RunContext) -> NativeRunResult:
         try:
             return await self._finalize_inner(ctx)
         except asyncio.CancelledError:
             raise
-        except BaseException as exc:
+        except BaseException:
+            # Pre-reap / unexpected inner failure: contain the child and lease
+            # before any result that lets registry deregistration proceed.
+            # Caller-visible payload stays fixed/sanitized — never interpolate
+            # exception text, paths, secrets, or exception class names.
+            await self._emergency_cleanup(ctx)
             payload = {
                 "run_id": self._run_id,
                 "status": "failed",
-                "error": f"finalization failed: {exc}",
+                "error": "finalization failed",
+                "detail_code": "FINALIZATION_FAILED",
             }
             return NativeRunResult(
                 run_id=self._run_id,
@@ -815,23 +1201,58 @@ class RunTask:
                 ctx.proc.kill_group(reason="finalize_force_kill")
                 ctx.exit_state = await ctx.proc.wait()
 
-        observations = FinalizationObservations(
-            result_exists=(ctx.handle.run_dir / "result.json").exists(),
-            dispatch_started=ctx.dispatch_started,
-            acp_stop_reason=ctx.stop_reason,
-            supervisor_cancelled=ctx.supervisor_cancelled,
-            supervisor_timed_out=ctx.supervisor_timed_out,
-            child_exit_without_terminal=ctx.child_exit_without_terminal,
-            observation_interrupted=ctx.observation_interrupted,
-            escalated_kill_after_dispatch=ctx.escalated_kill,
-            permission_violation=(
-                ctx.bridge.turn_failed if ctx.bridge is not None else False
-            ),
-            rollback_unproven=ctx.rollback_unproven,
-        )
+        # Provisional state only as needed to enqueue final failure evidence
+        # before the writer is closed. Close/drain next; capture close failure
+        # into the evidence pipeline; then freeze final state/payload once.
+        # Never emit after close.
+        if ctx.writer is not None:
+            provisional = self._observations(ctx)
+            provisional_status, _ = finalize_run_state(provisional)
+            if (
+                provisional_status is not None
+                and provisional_status is not AgentRunStatus.COMPLETED
+            ):
+                self._emit(
+                    ctx,
+                    {
+                        "type": "run_failed",
+                        "code": {
+                            AgentRunStatus.FAILED: "FAILED",
+                            AgentRunStatus.CANCELLED: "CANCELLED",
+                            AgentRunStatus.TIMED_OUT: "TIMED_OUT",
+                            AgentRunStatus.UNKNOWN: "UNKNOWN",
+                        }.get(provisional_status, "FAILED"),
+                    },
+                )
+            try:
+                await ctx.writer.close()
+            except Exception as exc:
+                if ctx.pipeline_error is None:
+                    ctx.pipeline_error = exc
+
+        observations = self._observations(ctx)
         status, disposition = finalize_run_state(observations)
         if status is None:
-            payload = ctx.handle.read_json("result.json")
+            # Early-result branch: only a TRUSTED Native terminal may stand.
+            existing_state = storage.read_native_terminal_result(
+                ctx.handle.run_dir / "result.json", run_id=self._run_id
+            )
+            if (
+                existing_state.kind is not storage.NativeTerminalKind.TRUSTED
+                or existing_state.payload is None
+            ):
+                if ctx.session_id is not None:
+                    reason = "existing terminal evidence is untrusted"
+                    self._session_store.write_quarantine_pending(
+                        ctx.session_id, reason=reason, run_id=self._run_id
+                    )
+                    self._session_store.mark_quarantined(
+                        ctx.session_id, reason=reason, run_id=self._run_id
+                    )
+                raise RuntimeError(
+                    "untrusted existing terminal evidence; refusing release"
+                )
+            payload = existing_state.payload
             return NativeRunResult(
                 run_id=self._run_id,
                 status=AgentRunStatus(payload["status"]),
@@ -841,16 +1262,10 @@ class RunTask:
                 session_state=self._session_state(ctx),
             )
 
-        # Evidence-pipeline failure is the top-level boundary applied to
-        # evidence: a completed-class turn with broken evidence is failed.
         detail_code: str | None = None
         if ctx.pre_dispatch is not None:
             detail_code = ctx.pre_dispatch.detail_code
-        elif ctx.pipeline_error is not None and status in (
-            AgentRunStatus.COMPLETED,
-            AgentRunStatus.CANCELLED,
-        ):
-            status = AgentRunStatus.FAILED
+        elif ctx.pipeline_error is not None and status is AgentRunStatus.FAILED:
             detail_code = "EVIDENCE_PIPELINE"
         elif ctx.supervisor_cancelled:
             detail_code = "SUPERVISOR_CANCELLED"
@@ -878,10 +1293,15 @@ class RunTask:
                 pass
 
         final_message = ""
-        if ctx.agent_texts:
-            joined = "".join(ctx.agent_texts)
+        truncated = False
+        truncate_reason: str | None = None
+        if ctx.final_message_acc.retained_bytes or ctx.final_message_acc.truncated:
+            joined = ctx.final_message_acc.text()
             final_message, report = redact_text(joined, location="final_message")
             ctx.redaction.merge(report)
+            if ctx.final_message_acc.truncated:
+                truncated = True
+                truncate_reason = "max_final_message_bytes"
         stderr_text = ""
         if ctx.proc is not None:
             raw_stderr = ctx.proc.stderr_bytes().decode("utf-8", errors="replace")
@@ -907,44 +1327,60 @@ class RunTask:
             exit_code=ctx.exit_state.exit_code if ctx.exit_state else None,
             signal=ctx.exit_state.signal if ctx.exit_state else None,
             stop_reason=ctx.stop_reason,
-            usage=ctx.usage,
+            usage=sanitize_usage(ctx.usage),
             final_message=final_message,
-            truncated=False,
-            truncate_reason=None,
+            truncated=truncated,
+            truncate_reason=truncate_reason,
             run_dir=ctx.handle.run_dir,
             raw_event_path="events.jsonl",
         )
         if ctx.session_id is not None:
             payload["session_id"] = ctx.session_id
         if ctx.pre_dispatch is not None:
-            payload["failure_reason"] = ctx.pre_dispatch.reason
+            payload["failure_reason"] = sanitize_failure_reason(
+                _categorical_failure_reason(ctx.pre_dispatch.detail_code)
+            )
         elif ctx.supervisor_cancelled:
-            payload["failure_reason"] = "supervisor cancellation"
+            payload["failure_reason"] = sanitize_failure_reason(
+                "supervisor cancellation"
+            )
         elif ctx.error is not None:
-            payload["failure_reason"] = str(ctx.error)
+            payload["failure_reason"] = sanitize_failure_reason(
+                _categorical_failure_reason(detail_code)
+            )
 
-        if ctx.writer is not None:
-            if status is not AgentRunStatus.COMPLETED:
-                self._emit(
-                    ctx,
-                    {"type": "run_failed", "code": payload.get("error_code")},
-                )
-            try:
-                await ctx.writer.close()
-            except Exception:
-                pass
+        before_ceiling = payload
+        payload = enforce_native_result_ceiling(
+            payload,
+            run_id=self._run_id,
+            run_dir=ctx.handle.run_dir,
+            session_id=ctx.session_id,
+        )
+        if payload is not before_ceiling and payload.get("status") == "failed":
+            status = AgentRunStatus.FAILED
 
         try:
-            storage.write_once_json(ctx.handle.run_dir / "result.json", payload)
-        except FileExistsError:
-            # A concurrent finalizer won the write-once race; the first
-            # terminal fact stands, irreversibly.
-            payload = ctx.handle.read_json("result.json")
-            status = AgentRunStatus(payload["status"])
-        self._write_progress(ctx, status.value)
+            session_state = self._publish_terminal_with_disposition(
+                ctx, status=status, disposition=disposition, payload=payload
+            )
+        except Exception:
+            ctx.disposition_failed = True
+            # In-memory refusal only — no durable terminal, no lease release.
+            return NativeRunResult(
+                run_id=self._run_id,
+                status=AgentRunStatus.FAILED,
+                payload={
+                    "run_id": self._run_id,
+                    "status": "failed",
+                    "error": "session disposition failed",
+                    "detail_code": "SESSION_DISPOSITION_FAILED",
+                },
+                run_dir=ctx.handle.run_dir,
+                session_id=ctx.session_id,
+                session_state=self._session_state(ctx),
+            )
 
-        session_state = self._apply_session_disposition(ctx, status, disposition)
-
+        status = AgentRunStatus(payload["status"])
         return NativeRunResult(
             run_id=self._run_id,
             status=status,
@@ -954,33 +1390,92 @@ class RunTask:
             session_state=session_state,
         )
 
-    def _apply_session_disposition(
-        self, ctx: _RunContext, status: AgentRunStatus, disposition: str
+    def _observations(self, ctx: _RunContext) -> FinalizationObservations:
+        trusted_terminal = False
+        if ctx.handle is not None:
+            state = storage.read_native_terminal_result(
+                ctx.handle.run_dir / "result.json", run_id=self._run_id
+            )
+            trusted_terminal = state.kind is storage.NativeTerminalKind.TRUSTED
+        return FinalizationObservations(
+            result_exists=trusted_terminal,
+            dispatch_started=ctx.dispatch_started,
+            acp_stop_reason=ctx.stop_reason,
+            supervisor_cancelled=ctx.supervisor_cancelled,
+            supervisor_timed_out=ctx.supervisor_timed_out,
+            child_exit_without_terminal=ctx.child_exit_without_terminal,
+            observation_interrupted=ctx.observation_interrupted,
+            escalated_kill_after_dispatch=ctx.escalated_kill,
+            permission_violation=(
+                ctx.bridge.turn_failed if ctx.bridge is not None else False
+            ),
+            rollback_unproven=ctx.rollback_unproven,
+            evidence_pipeline_failure=ctx.pipeline_error is not None,
+        )
+
+    def _publish_terminal_with_disposition(
+        self,
+        ctx: _RunContext,
+        *,
+        status: AgentRunStatus,
+        disposition: str,
+        payload: dict[str, Any],
     ) -> str | None:
-        if ctx.session_id is None:
-            return None
+        """Quarantine-before-result when required; release lease only after both."""
+        if disposition == "quarantined" and ctx.session_id is not None:
+            reason = (
+                "observation lost after dispatch"
+                if status is AgentRunStatus.UNKNOWN
+                else f"run finalized {status.value} without a reliable terminal"
+            )
+            # Never swallow: fence + quarantine must succeed before result.
+            self._session_store.write_quarantine_pending(
+                ctx.session_id, reason=reason, run_id=self._run_id
+            )
+            self._session_store.mark_quarantined(
+                ctx.session_id, reason=reason, run_id=self._run_id
+            )
+
         try:
-            if disposition == "quarantined":
-                reason = (
-                    "observation lost after dispatch"
-                    if status is AgentRunStatus.UNKNOWN
-                    else f"run finalized {status.value} without a reliable terminal"
-                )
-                self._session_store.mark_quarantined(
-                    ctx.session_id, reason=reason, run_id=self._run_id
-                )
-            elif ctx.ephemeral:
-                self._session_store.mark_closed(ctx.session_id)
-        except Exception:
-            pass
-        finally:
-            if ctx.lock is not None:
-                try:
-                    self._session_store.release_lock(
-                        ctx.session_id, ctx.lock.token
+            storage.write_once_json(ctx.handle.run_dir / "result.json", payload)
+        except FileExistsError:
+            # A concurrent finalizer won the write-once race; only a TRUSTED
+            # first fact may stand. Invalid/forged evidence fences the Session
+            # and never releases the lease.
+            existing_state = storage.read_native_terminal_result(
+                ctx.handle.run_dir / "result.json", run_id=self._run_id
+            )
+            if existing_state.kind is not storage.NativeTerminalKind.TRUSTED:
+                if ctx.session_id is not None:
+                    reason = "existing terminal evidence is untrusted"
+                    self._session_store.write_quarantine_pending(
+                        ctx.session_id, reason=reason, run_id=self._run_id
                     )
-                except Exception:
-                    pass
+                    self._session_store.mark_quarantined(
+                        ctx.session_id, reason=reason, run_id=self._run_id
+                    )
+                raise RuntimeError(
+                    "untrusted existing terminal evidence; refusing release"
+                )
+            existing = existing_state.payload
+            assert existing is not None
+            payload.clear()
+            payload.update(existing)
+            status = AgentRunStatus(payload["status"])
+        self._write_progress(ctx, status.value)
+
+        if disposition != "quarantined" and ctx.ephemeral and ctx.session_id is not None:
+            try:
+                self._session_store.mark_closed(ctx.session_id)
+            except Exception:
+                pass
+
+        if ctx.lock is not None and ctx.session_id is not None:
+            try:
+                self._session_store.release_lock(ctx.session_id, ctx.lock.token)
+            except Exception:
+                pass
+            ctx.lock = None
         return self._session_state(ctx)
 
     def _session_state(self, ctx: _RunContext) -> str | None:

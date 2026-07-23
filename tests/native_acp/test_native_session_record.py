@@ -458,3 +458,225 @@ def test_commit_last_effective_updates_atomically(tmp_path: Path) -> None:
     store.mark_quarantined("native-1", reason="r", run_id="run-5", now=later)
     with pytest.raises(SessionQuarantinedError):
         store.commit_last_effective("native-1", model="a/b", effort="low", now=later)
+
+
+def test_r5_b3_quarantine_pending_fence_blocks_acquire_even_after_ttl(
+    tmp_path: Path,
+) -> None:
+    import datetime as dt
+
+    from agent_run_supervisor.session import (
+        QUARANTINE_PENDING_JSON,
+        STATE_OPEN,
+        SessionQuarantinedError,
+    )
+
+    store = _store(tmp_path)
+    _native(store)
+    lock = store.acquire_lock(
+        "native-1", "owner", required_state=STATE_OPEN, now=T0, lease_seconds=1
+    )
+    assert lock.token
+    store.write_quarantine_pending(
+        "native-1", reason="interrupted", run_id="run-fence", now=T0
+    )
+    session_dir = tmp_path / "native-root" / "native-1"
+    assert (session_dir / QUARANTINE_PENDING_JSON).is_file()
+    assert store.open_session("native-1").state == "open"
+    later = T0 + dt.timedelta(seconds=3600)
+    with pytest.raises(SessionQuarantinedError):
+        store.acquire_lock(
+            "native-1", "other", required_state=STATE_OPEN, now=later
+        )
+    # Successful quarantine clears fence.
+    store.mark_quarantined(
+        "native-1", reason="converged", run_id="run-fence", now=later
+    )
+    assert not (session_dir / QUARANTINE_PENDING_JSON).exists()
+    assert store.open_session("native-1").state == "quarantined"
+
+
+def test_r5_b3_mark_quarantined_clears_preexisting_fence_when_already_quarantined(
+    tmp_path: Path,
+) -> None:
+    from agent_run_supervisor.session import QUARANTINE_PENDING_JSON
+
+    store = _store(tmp_path)
+    _native(store)
+    store.mark_quarantined("native-1", reason="first", run_id="run-1", now=T0)
+    session_dir = tmp_path / "native-root" / "native-1"
+    # Simulate a stale fence left beside an already-quarantined record.
+    (session_dir / QUARANTINE_PENDING_JSON).write_text(
+        '{"schema":"ars.quarantine_pending","version":1,"run_id":"run-1",'
+        '"reason":"stale","timestamp":"t"}',
+        encoding="utf-8",
+    )
+    again = store.mark_quarantined(
+        "native-1", reason="ignored", run_id="run-2", now=T0
+    )
+    assert again.quarantine_reason == "first"
+    assert not (session_dir / QUARANTINE_PENDING_JSON).exists()
+
+
+def test_r6_b2_write_quarantine_pending_uses_durable_helper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    import stat
+
+    from agent_run_supervisor.event_store import EventStoreError
+    from agent_run_supervisor.session import QUARANTINE_PENDING_JSON
+
+    store = _store(tmp_path)
+    _native(store)
+    real_fsync = os.fsync
+    session_dir = (tmp_path / "native-root" / "native-1").resolve()
+
+    def boom_parent(fd: int) -> None:
+        st = os.fstat(fd)
+        if (
+            session_dir.exists()
+            and stat.S_ISDIR(st.st_mode)
+            and st.st_ino == session_dir.stat().st_ino
+        ):
+            raise OSError(5, "injected fence parent fsync failure")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", boom_parent)
+    with pytest.raises(EventStoreError):
+        store.write_quarantine_pending(
+            "native-1", reason="boom", run_id="run-x", now=T0
+        )
+
+
+def test_r6_b2_mark_quarantined_clears_fence_only_after_state_durable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    import stat
+
+    from agent_run_supervisor.event_store import EventStoreError
+    from agent_run_supervisor.session import QUARANTINE_PENDING_JSON, SESSION_JSON
+
+    store = _store(tmp_path)
+    _native(store)
+    store.write_quarantine_pending(
+        "native-1", reason="pending", run_id="run-x", now=T0
+    )
+    session_dir = (tmp_path / "native-root" / "native-1").resolve()
+    fence = session_dir / QUARANTINE_PENDING_JSON
+    assert fence.is_file()
+    order: list[str] = []
+    real_replace = os.replace
+    real_unlink = os.unlink
+    real_fsync = os.fsync
+
+    def tracking_replace(src, dst):
+        dst_path = Path(dst)
+        if dst_path.name == SESSION_JSON:
+            order.append("session_replace")
+        elif dst_path.name == QUARANTINE_PENDING_JSON:
+            order.append("fence_replace")
+        else:
+            order.append("other_replace")
+        return real_replace(src, dst)
+
+    def tracking_unlink(p):
+        if Path(p).name == QUARANTINE_PENDING_JSON:
+            order.append("fence_unlink")
+        else:
+            order.append("other_unlink")
+        return real_unlink(p)
+
+    def tracking_fsync(fd: int) -> None:
+        st = os.fstat(fd)
+        if stat.S_ISDIR(st.st_mode) and st.st_ino == session_dir.stat().st_ino:
+            order.append("session_dir_fsync")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "replace", tracking_replace)
+    monkeypatch.setattr(os, "unlink", tracking_unlink)
+    monkeypatch.setattr(os, "fsync", tracking_fsync)
+    store.mark_quarantined("native-1", reason="done", run_id="run-x", now=T0)
+    assert store.open_session("native-1").state == "quarantined"
+    assert not fence.exists()
+    assert "session_replace" in order
+    assert "fence_unlink" in order
+    assert order.index("session_replace") < order.index("fence_unlink")
+
+
+def test_r6_b2_mark_quarantined_session_fsync_failure_keeps_fence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    import stat
+
+    from agent_run_supervisor.event_store import EventStoreError
+    from agent_run_supervisor.session import QUARANTINE_PENDING_JSON, SESSION_JSON
+
+    store = _store(tmp_path)
+    _native(store)
+    store.write_quarantine_pending(
+        "native-1", reason="pending", run_id="run-x", now=T0
+    )
+    session_dir = (tmp_path / "native-root" / "native-1").resolve()
+    real_fsync = os.fsync
+    state = {"session_file_fsync_done": False}
+
+    def boom_after_session_file(fd: int) -> None:
+        st = os.fstat(fd)
+        if not state["session_file_fsync_done"] and stat.S_ISREG(st.st_mode):
+            # First regular-file fsync during mark is the session.json temp.
+            state["session_file_fsync_done"] = True
+            raise OSError(5, "injected session file fsync failure")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", boom_after_session_file)
+    with pytest.raises(EventStoreError):
+        store.mark_quarantined("native-1", reason="done", run_id="run-x", now=T0)
+    assert (session_dir / QUARANTINE_PENDING_JSON).is_file()
+    assert store.open_session("native-1").state == "open"
+
+
+def test_r6_b2_fence_clear_unlink_parent_fsync_failure_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    import stat
+
+    from agent_run_supervisor.event_store import EventStoreError
+    from agent_run_supervisor.session import QUARANTINE_PENDING_JSON
+
+    store = _store(tmp_path)
+    _native(store)
+    store.write_quarantine_pending(
+        "native-1", reason="pending", run_id="run-x", now=T0
+    )
+    session_dir = (tmp_path / "native-root" / "native-1").resolve()
+    real_fsync = os.fsync
+    real_unlink = os.unlink
+    unlinked = {"n": 0}
+
+    def tracking_unlink(p):
+        result = real_unlink(p)
+        if Path(p).name == QUARANTINE_PENDING_JSON:
+            unlinked["n"] += 1
+        return result
+
+    def boom_after_fence_unlink(fd: int) -> None:
+        st = os.fstat(fd)
+        if (
+            unlinked["n"]
+            and session_dir.exists()
+            and stat.S_ISDIR(st.st_mode)
+            and st.st_ino == session_dir.stat().st_ino
+        ):
+            raise OSError(5, "injected fence unlink parent fsync failure")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "unlink", tracking_unlink)
+    monkeypatch.setattr(os, "fsync", boom_after_fence_unlink)
+    with pytest.raises(EventStoreError):
+        store.mark_quarantined("native-1", reason="done", run_id="run-x", now=T0)
+    # Session may already be quarantined on disk; fence clear durability failed.
+    assert store.open_session("native-1").state == "quarantined"

@@ -32,4 +32,16 @@ assert data["fixture_replay"]["final_message"] == "CODEX_ACPX_OK"
 PY
 rm -f "$doctor_json"
 
+# Slice 6a: arsd package + --print-service-unit ship in the wheel with no
+# pyproject.toml change (subpackage discovery). Never activates a service or
+# calls a real AGENT.
+"$VENV/bin/python" - <<'PY'
+import agent_run_supervisor.arsd  # noqa: F401
+import agent_run_supervisor.arsd.service_unit  # noqa: F401
+PY
+"$VENV/bin/python" -m agent_run_supervisor.arsd --help >/dev/null
+unit="$("$VENV/bin/python" -m agent_run_supervisor.arsd --print-service-unit)"
+printf '%s\n' "$unit" | grep -F 'Restart=on-failure' >/dev/null
+printf '%s\n' "$unit" | grep -F 'KillMode=control-group' >/dev/null
+
 echo "Installed wheel smoke passed."
