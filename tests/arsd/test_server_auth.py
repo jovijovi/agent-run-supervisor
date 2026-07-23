@@ -480,7 +480,13 @@ def test_graceful_shutdown(sock_root: Path) -> None:
             reader, writer = await connect(path)
             assert "result" in await roundtrip(reader, writer, info_frame("pre"))
 
-            await srv.shutdown()
+            # shutdown() must return while this client is still connected;
+            # unbounded, Python 3.12 wait_closed() blocks on active clients.
+            try:
+                await asyncio.wait_for(srv.shutdown(), timeout=2)
+            except TimeoutError:
+                await close(writer)  # unblock aclose() before failing
+                pytest.fail("shutdown() blocked on an active client connection")
             assert not path.exists()  # socket unlinked
 
             writer.write(protocol.encode_frame(info_frame("late")))

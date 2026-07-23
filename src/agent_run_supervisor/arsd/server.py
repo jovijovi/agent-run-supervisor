@@ -216,9 +216,10 @@ class ArsdServer:
     async def shutdown(self) -> None:
         self._shutting_down = True
         if self._server is not None:
+            # Close admission only; wait_closed() belongs to aclose().
+            # On Python 3.12+ it blocks until every active connection
+            # ends, and shutdown() must return while clients are open.
             self._server.close()
-            await self._server.wait_closed()
-            self._server = None
         if self._listening:
             self._listening = False
             try:
@@ -234,6 +235,11 @@ class ArsdServer:
         tasks = [task for task in self._tasks if task is not current]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        if self._server is not None:
+            # Cleared only after the wait succeeds so a cancelled or
+            # failed aclose() retains wait_closed() ownership for retry.
+            await self._server.wait_closed()
+            self._server = None
 
     def _replace_stale_socket(self) -> None:
         path = self._socket_path

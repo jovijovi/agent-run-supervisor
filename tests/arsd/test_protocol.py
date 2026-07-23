@@ -8,6 +8,7 @@ dataclasses. No sockets, no server, no I/O.
 
 from __future__ import annotations
 
+import collections.abc
 import dataclasses
 import traceback
 
@@ -648,6 +649,158 @@ def test_r6_b3_decode_frame_deep_nesting_is_malformed() -> None:
     assert len(data) <= protocol.MAX_FRAME_BYTES
     err = _reject("MALFORMED_FRAME", protocol.decode_frame, data)
     assert "Recursion" not in err.message
+
+
+def test_r6_b3_frame_nesting_boundary_accepts_bound_rejects_over() -> None:
+    at_bound: dict = {"a": 1}
+    for _ in range(protocol.MAX_JSON_NESTING_DEPTH - 1):
+        at_bound = {"a": at_bound}
+    assert protocol.decode_frame(protocol.encode_frame(at_bound)) == at_bound
+
+    over = {"a": at_bound}
+    err = _reject("MALFORMED_FRAME", protocol.encode_frame, over)
+    assert "Recursion" not in err.message
+
+    raw_over = (
+        b"{"
+        + b'"a":{' * protocol.MAX_JSON_NESTING_DEPTH
+        + b'"x":1'
+        + b"}" * protocol.MAX_JSON_NESTING_DEPTH
+        + b"}\n"
+    )
+    err = _reject("MALFORMED_FRAME", protocol.decode_frame, raw_over)
+    assert "Recursion" not in err.message
+
+
+def test_r6_b3_frame_nesting_bound_covers_arrays() -> None:
+    deep: object = 1
+    for _ in range(protocol.MAX_JSON_NESTING_DEPTH - 1):
+        deep = [deep]
+    at_bound = {"a": deep}
+    assert protocol.decode_frame(protocol.encode_frame(at_bound)) == at_bound
+    _reject("MALFORMED_FRAME", protocol.encode_frame, {"a": [deep]})
+
+    raw_over = (
+        b'{"a":'
+        + b"[" * protocol.MAX_JSON_NESTING_DEPTH
+        + b"1"
+        + b"]" * protocol.MAX_JSON_NESTING_DEPTH
+        + b"}\n"
+    )
+    _reject("MALFORMED_FRAME", protocol.decode_frame, raw_over)
+
+
+def test_r6_b3_encode_frame_cyclic_payload_is_malformed() -> None:
+    cyclic: dict = {"k": "secret-cyclic-xyz"}
+    cyclic["self"] = cyclic
+    err = _reject("MALFORMED_FRAME", protocol.encode_frame, cyclic)
+    assert "Circular" not in err.message
+    assert "secret-cyclic-xyz" not in err.message
+
+
+def test_r6_b3_encode_frame_unencodable_payload_is_malformed() -> None:
+    err = _reject("MALFORMED_FRAME", protocol.encode_frame, {"k": object()})
+    assert "serializable" not in err.message
+
+    err = _reject("MALFORMED_FRAME", protocol.encode_frame, {"n": 10**10000})
+    assert "10000" not in err.message
+
+
+class HostileValuesMapping(collections.abc.Mapping):
+    """Honors the public Mapping ABC; traversal via values() raises."""
+
+    def __getitem__(self, key):
+        raise KeyError(key)
+
+    def __iter__(self):
+        return iter(())
+
+    def __len__(self) -> int:
+        return 0
+
+    def values(self):
+        raise RuntimeError("secret-hostile-values")
+
+
+class HostileMaterializeMapping(collections.abc.Mapping):
+    """Nesting walk sees no children; dict() materialization raises."""
+
+    def __getitem__(self, key):
+        raise RuntimeError("secret-hostile-getitem")
+
+    def __iter__(self):
+        raise RuntimeError("secret-hostile-iter")
+
+    def __len__(self) -> int:
+        return 1
+
+    def keys(self):
+        raise RuntimeError("secret-hostile-keys")
+
+    def values(self):
+        return ()
+
+
+class InterruptingMapping(collections.abc.Mapping):
+    """values() raises a BaseException that must never be converted."""
+
+    def __getitem__(self, key):
+        raise KeyError(key)
+
+    def __iter__(self):
+        return iter(())
+
+    def __len__(self) -> int:
+        return 0
+
+    def values(self):
+        raise KeyboardInterrupt
+
+
+def test_r6_b3_nesting_check_fails_closed_on_hostile_traversal() -> None:
+    assert protocol.json_nesting_exceeds_bound(HostileValuesMapping()) is True
+    assert (
+        protocol.json_nesting_exceeds_bound({"deep": [HostileValuesMapping()]})
+        is True
+    )
+
+
+def test_r6_b3_encode_frame_hostile_mapping_traversal_is_malformed() -> None:
+    err = _reject("MALFORMED_FRAME", protocol.encode_frame, HostileValuesMapping())
+    assert "secret-hostile-values" not in "".join(traceback.format_exception(err))
+
+    err = _reject(
+        "MALFORMED_FRAME",
+        protocol.encode_frame,
+        {"payload": {"deep": HostileValuesMapping()}},
+    )
+    assert "secret-hostile-values" not in "".join(traceback.format_exception(err))
+
+
+def test_r6_b3_encode_frame_hostile_sequence_traversal_is_malformed() -> None:
+    class HostileIterList(list):
+        def __iter__(self):
+            raise RuntimeError("secret-hostile-list-iter")
+
+    err = _reject("MALFORMED_FRAME", protocol.encode_frame, {"a": HostileIterList()})
+    assert "secret-hostile-list-iter" not in "".join(traceback.format_exception(err))
+
+
+def test_r6_b3_encode_frame_hostile_materialization_is_malformed() -> None:
+    err = _reject(
+        "MALFORMED_FRAME", protocol.encode_frame, HostileMaterializeMapping()
+    )
+    assert "secret-hostile" not in "".join(traceback.format_exception(err))
+
+
+def test_r6_b3_encode_frame_unpaired_surrogate_is_malformed() -> None:
+    err = _reject("MALFORMED_FRAME", protocol.encode_frame, {"k": "\ud800"})
+    assert "surrogate" not in "".join(traceback.format_exception(err))
+
+
+def test_r6_b3_encode_frame_never_converts_base_exceptions() -> None:
+    with pytest.raises(KeyboardInterrupt):
+        protocol.encode_frame(InterruptingMapping())
 
 
 @pytest.mark.parametrize(

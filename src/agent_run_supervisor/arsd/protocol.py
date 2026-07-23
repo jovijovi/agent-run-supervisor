@@ -23,6 +23,17 @@ MAX_PROMPT_BYTES = 262_144
 MAX_REQUEST_ID_CHARS = 128
 MAX_ERROR_MESSAGE_CHARS = 512
 
+# Product bound on JSON container nesting for every v1 frame (both
+# directions) and for event evidence sized into frames. Explicit and
+# interpreter-independent: json.loads/json.dumps raising RecursionError
+# on deep input varies across CPython versions and is never the bound.
+MAX_JSON_NESTING_DEPTH = 64
+
+# Visit budget for the iterative nesting walk: a serialized container
+# costs at least two bytes, so any value that could fit one frame holds
+# fewer containers; exceeding this proves pathological sharing/cycles.
+_NESTING_CHECK_MAX_CONTAINERS = MAX_FRAME_BYTES // 2
+
 UNSUPPORTED_API_VERSION = "UNSUPPORTED_API_VERSION"
 UNKNOWN_OP = "UNKNOWN_OP"
 MALFORMED_FRAME = "MALFORMED_FRAME"
@@ -161,13 +172,57 @@ def correlated_request_id(frame: Mapping[str, Any] | Any) -> str | None:
     return _validated_request_id(frame.get("request_id"))
 
 
+def json_nesting_exceeds_bound(value: Any) -> bool:
+    """True when JSON container nesting exceeds ``MAX_JSON_NESTING_DEPTH``.
+
+    Iterative walk so the bound is a protocol invariant, not a function of
+    interpreter recursion behavior. Cycles keep deepening and exceed the
+    depth bound; pathologically shared containers exceed the visit budget.
+    Custom Mapping/sequence traversal that raises an ordinary exception is
+    unverifiable input and also reports as exceeded (fail closed). Never a
+    hang, a raw interpreter error, or a leaked traversal exception; only
+    BaseExceptions such as KeyboardInterrupt propagate.
+    """
+    if not isinstance(value, (Mapping, list, tuple)):
+        return False
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    visited = 0
+    try:
+        while stack:
+            node, depth = stack.pop()
+            if depth > MAX_JSON_NESTING_DEPTH:
+                return True
+            visited += 1
+            if visited > _NESTING_CHECK_MAX_CONTAINERS:
+                return True
+            children = node.values() if isinstance(node, Mapping) else node
+            for child in children:
+                if isinstance(child, (Mapping, list, tuple)):
+                    stack.append((child, depth + 1))
+    except Exception:
+        return True
+    return False
+
+
 def encode_frame(payload: Mapping[str, Any]) -> bytes:
     if not isinstance(payload, Mapping):
         raise ProtocolError(MALFORMED_FRAME, "frame payload must be a JSON object")
-    text = json.dumps(
-        dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    )
-    data = text.encode("utf-8") + b"\n"
+    if json_nesting_exceeds_bound(payload):
+        raise ProtocolError(
+            MALFORMED_FRAME, f"frame exceeds nesting depth {MAX_JSON_NESTING_DEPTH}"
+        )
+    try:
+        text = json.dumps(
+            dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
+        data = text.encode("utf-8") + b"\n"
+    except Exception:
+        # Any ordinary exception here comes from payload-controlled Mapping
+        # materialization, key comparison, or serialization (including lone
+        # surrogates at encode); its text must never reach a frame or log.
+        raise ProtocolError(
+            MALFORMED_FRAME, "frame payload is not JSON-encodable"
+        ) from None
     if len(data) > MAX_FRAME_BYTES:
         raise ProtocolError(FRAME_TOO_LARGE, f"frame exceeds {MAX_FRAME_BYTES} bytes")
     return data
@@ -183,6 +238,10 @@ def decode_frame(data: bytes | bytearray | memoryview | str) -> dict[str, Any]:
         raise ProtocolError(MALFORMED_FRAME, "frame is not one JSON object line") from None
     if not isinstance(payload, dict):
         raise ProtocolError(MALFORMED_FRAME, "frame is not one JSON object line")
+    if json_nesting_exceeds_bound(payload):
+        raise ProtocolError(
+            MALFORMED_FRAME, f"frame exceeds nesting depth {MAX_JSON_NESTING_DEPTH}"
+        )
     return payload
 
 

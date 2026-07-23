@@ -2045,9 +2045,12 @@ def _install_caller_cancel_when_target_done_race(
             assert me is not None
             me.cancel()
             assert me.cancelling() > 0
-            # Yield once so the except arm runs; snapshot whether absorb/uncancel
-            # cleared this delivered cancellation before further awaits.
-            raise asyncio.CancelledError()
+            # Suspend once so the loop delivers the queued cancellation at this
+            # checkpoint — exactly one CancelledError reaches the except arm.
+            # Raising CancelledError by hand here would leave the queued
+            # delivery pending and double-deliver on some CPython versions.
+            await asyncio.sleep(0)
+            raise AssertionError("queued caller cancellation was not delivered")
 
         return _race()
 

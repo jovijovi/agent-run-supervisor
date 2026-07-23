@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import json
 import os
+import traceback
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,11 @@ from tests.arsd.test_admission import (
     run_async,
     submit_payload,
     valid_wire_request,
+)
+from tests.arsd.test_protocol import (
+    HostileMaterializeMapping,
+    HostileValuesMapping,
+    InterruptingMapping,
 )
 
 
@@ -1585,6 +1591,42 @@ def test_r6_residual_event_json_size_deep_is_sanitized_internal() -> None:
     assert err.value.code == protocol.INTERNAL
     assert "secret-deep-leaf" not in err.value.message
     assert "Recursion" not in err.value.message
+
+
+def test_r6_residual_event_json_size_nesting_boundary() -> None:
+    node: dict = {"leaf": 1}
+    for _ in range(protocol.MAX_JSON_NESTING_DEPTH - 2):
+        node = {"n": node}
+    at_bound = {"seq": 1, "type": "message", "payload": node}
+    # Event dict + nested payload sit exactly at the protocol nesting bound.
+    assert handlers._event_json_size(at_bound) > 0
+
+    over = {"seq": 1, "type": "message", "payload": {"n": node}}
+    with pytest.raises(protocol.ProtocolError) as err:
+        handlers._event_json_size(over)
+    assert err.value.code == protocol.INTERNAL
+    assert "Recursion" not in err.value.message
+
+
+def test_r6_residual_event_json_size_hostile_mapping_is_internal() -> None:
+    with pytest.raises(protocol.ProtocolError) as err:
+        handlers._event_json_size(HostileValuesMapping())
+    assert err.value.code == protocol.INTERNAL
+    assert "secret-hostile-values" not in "".join(
+        traceback.format_exception(err.value)
+    )
+
+
+def test_r6_residual_event_json_size_hostile_materialization_is_internal() -> None:
+    with pytest.raises(protocol.ProtocolError) as err:
+        handlers._event_json_size(HostileMaterializeMapping())
+    assert err.value.code == protocol.INTERNAL
+    assert "secret-hostile" not in "".join(traceback.format_exception(err.value))
+
+
+def test_r6_residual_event_json_size_never_converts_base_exceptions() -> None:
+    with pytest.raises(KeyboardInterrupt):
+        handlers._event_json_size(InterruptingMapping())
 
 
 def test_r6_residual_read_page_mutated_mapping_size_is_internal(

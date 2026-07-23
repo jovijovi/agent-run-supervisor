@@ -601,6 +601,13 @@ class EventFollowStream:
 
 
 def _event_json_size(event: Mapping[str, Any]) -> int:
+    # Same explicit nesting bound as the frame protocol: evidence nested
+    # deeper than any encodable frame is corrupt, whatever the interpreter
+    # would tolerate in json.dumps.
+    if protocol.json_nesting_exceeds_bound(event):
+        raise protocol.ProtocolError(
+            protocol.INTERNAL, "event evidence is corrupt"
+        )
     try:
         return len(
             json.dumps(
@@ -610,7 +617,10 @@ def _event_json_size(event: Mapping[str, Any]) -> int:
                 ensure_ascii=False,
             ).encode("utf-8")
         )
-    except (TypeError, ValueError, OverflowError, RecursionError):
+    except Exception:
+        # Any ordinary exception here comes from evidence-controlled Mapping
+        # materialization or serialization; its text must never reach a
+        # frame or log. BaseExceptions still propagate.
         raise protocol.ProtocolError(
             protocol.INTERNAL, "event evidence is corrupt"
         ) from None
@@ -801,9 +811,15 @@ def _ensure_events_page_encodes(
             protocol.build_result("x" * protocol.MAX_REQUEST_ID_CHARS, body)
         )
     except protocol.ProtocolError as err:
+        if err.code == protocol.FRAME_TOO_LARGE:
+            raise protocol.ProtocolError(
+                protocol.INTERNAL, "event page exceeds frame bound"
+            ) from err
+        # encode_frame now types depth/cycle/serialization failures as
+        # MALFORMED_FRAME; for evidence pages that means corrupt evidence.
         raise protocol.ProtocolError(
-            protocol.INTERNAL, "event page exceeds frame bound"
-        ) from err
+            protocol.INTERNAL, "event evidence is corrupt"
+        ) from None
     except (TypeError, ValueError, OverflowError, RecursionError):
         raise protocol.ProtocolError(
             protocol.INTERNAL, "event evidence is corrupt"
