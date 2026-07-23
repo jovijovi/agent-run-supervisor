@@ -266,7 +266,7 @@ def test_r4_b3_close_when_consumer_failed_queue_full_terminates_promptly() -> No
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            with pytest.raises(OSError, match="injected consumer append failure"):
+            with pytest.raises(EventWriterOverflow, match="event evidence append failed"):
                 await asyncio.wait_for(writer.close(), 1.0)
             # Deterministic cleanup: no pending consumer task reference.
             assert writer._consumer is None
@@ -297,7 +297,7 @@ def test_r4_b3_close_when_consumer_failed_queue_not_full_surfaces_error() -> Non
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            with pytest.raises(OSError, match="injected consumer append failure"):
+            with pytest.raises(EventWriterOverflow, match="event evidence append failed"):
                 await asyncio.wait_for(writer.close(), 1.0)
             assert writer._consumer is None
             assert not any(issubclass(w.category, ResourceWarning) for w in caught)
@@ -435,7 +435,7 @@ def test_r6_b1_emit_awaited_consumer_failure_does_not_hang() -> None:
                 if not task.done() and task is not asyncio.current_task()
             ]
             # Consumer task may still be referenced until close; close cleans it.
-            with pytest.raises(OSError, match="injected consumer append failure"):
+            with pytest.raises(EventWriterOverflow, match="event evidence append failed"):
                 await writer.close()
             assert writer._consumer is None
             pending = [
@@ -608,7 +608,7 @@ def test_r6_residual_emit_awaited_after_consumer_done_fails_promptly() -> None:
             ]
             # Consumer task still referenced until close; no put/ack leaks.
             assert all(task is consumer for task in pending) or pending == []
-        with pytest.raises(OSError, match="injected consumer append failure"):
+        with pytest.raises(EventWriterOverflow, match="event evidence append failed"):
             await writer.close()
         assert writer._consumer is None
         pending = [
@@ -617,5 +617,229 @@ def test_r6_residual_emit_awaited_after_consumer_done_fails_promptly() -> None:
             if not task.done() and task is not asyncio.current_task()
         ]
         assert pending == []
+
+    asyncio.run(case())
+
+
+# -- R14: EventWriter.close ownership under cancellation ----------------------
+
+
+def test_r14_close_cancel_while_sentinel_pending_retains_ownership() -> None:
+    """Full queue + blocked append: cancel close once/repeatedly; ownership holds."""
+
+    async def case() -> None:
+        import warnings
+
+        handle = GatedHandle()
+        writer = EventWriter(
+            handle,
+            max_event_bytes=65536,
+            queue_maxsize=1,
+            producer_timeout_seconds=5.0,
+        )
+        await writer.start()
+        await writer.emit({"type": "blocked-append"})
+        # Wait until consumer is inside the gated to_thread append.
+        for _ in range(200):
+            if not handle.gate.is_set() and writer._queue.empty():
+                # Consumer dequeued; may still be racing into append.
+                await asyncio.sleep(0.01)
+                break
+            await asyncio.sleep(0.01)
+        # Refill so sentinel enqueue must wait behind a full queue.
+        writer.emit_nowait({"type": "queued-behind-append"})
+        assert writer._queue.full()
+        consumer = writer._consumer
+        assert consumer is not None and not consumer.done()
+
+        close_task = asyncio.ensure_future(writer.close())
+        await asyncio.sleep(0.05)
+        assert not close_task.done()
+        close_task.cancel()
+        await asyncio.sleep(0.05)
+        assert not close_task.done(), "owned close must remain pending under cancel"
+        assert writer._consumer is consumer
+        assert not consumer.done()
+        close_task.cancel()  # repeated cancellation
+        await asyncio.sleep(0.05)
+        assert not close_task.done()
+        assert writer._consumer is consumer
+
+        # No terminal/release surrogate can proceed while ownership is live:
+        # the close task and consumer are still pending (join not settled).
+        assert writer._close_task is not None and not writer._close_task.done()
+
+        handle.gate.set()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(asyncio.CancelledError):
+                await close_task
+            assert writer._consumer is None
+            assert writer._close_task is not None and writer._close_task.done()
+            types = [record["type"] for _, record in handle.records]
+            assert "blocked-append" in types
+            assert "queued-behind-append" in types
+            assert not any(issubclass(w.category, ResourceWarning) for w in caught)
+            pending = [
+                task
+                for task in asyncio.all_tasks()
+                if not task.done() and task is not asyncio.current_task()
+            ]
+            assert pending == []
+
+        # Idempotent second close observes settled success; no second sentinel.
+        await writer.close()
+        assert writer._consumer is None
+
+    asyncio.run(case())
+
+
+def test_r14_close_cancel_while_consumer_in_to_thread_append() -> None:
+    """Cancel while consumer is inside controlled blocking append (to_thread)."""
+
+    async def case() -> None:
+        import warnings
+
+        handle = GatedHandle()
+        writer = EventWriter(handle, max_event_bytes=65536, queue_maxsize=4)
+        await writer.start()
+        await writer.emit({"type": "in-flight-append"})
+        for _ in range(200):
+            if writer._queue.empty():
+                break
+            await asyncio.sleep(0.01)
+
+        close_task = asyncio.ensure_future(writer.close())
+        await asyncio.sleep(0.05)
+        assert not close_task.done()
+        consumer = writer._consumer
+        assert consumer is not None and not consumer.done()
+        close_task.cancel()
+        close_task.cancel()
+        await asyncio.sleep(0.05)
+        assert not close_task.done()
+        assert writer._consumer is consumer
+
+        before = len(handle.records)
+        handle.gate.set()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(asyncio.CancelledError):
+                await close_task
+            assert writer._consumer is None
+            assert len(handle.records) >= before + 0  # append settled
+            assert any(
+                record.get("type") == "in-flight-append" for _, record in handle.records
+            )
+            # No post-close append after cancellation propagated.
+            after = len(handle.records)
+            await asyncio.sleep(0.05)
+            assert len(handle.records) == after
+            assert not any(issubclass(w.category, ResourceWarning) for w in caught)
+            pending = [
+                task
+                for task in asyncio.all_tasks()
+                if not task.done() and task is not asyncio.current_task()
+            ]
+            assert pending == []
+
+    asyncio.run(case())
+
+
+def test_r14_close_consumer_failure_race_is_controlled_overflow() -> None:
+    async def case() -> None:
+        import warnings
+
+        handle = FailingAppendHandle(fail_after=0)
+        writer = EventWriter(
+            handle, max_event_bytes=65536, queue_maxsize=2, producer_timeout_seconds=0.5
+        )
+        await writer.start()
+        await writer.emit({"type": "first"})
+        consumer = writer._consumer
+        assert consumer is not None
+        await asyncio.wait({consumer}, timeout=2.0)
+        assert consumer.done()
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(EventWriterOverflow, match="event evidence append failed"):
+                await asyncio.wait_for(writer.close(), 1.0)
+            assert "injected consumer append failure" not in str(
+                caught
+            )  # no raw text via warnings
+            assert writer._consumer is None
+            assert not any(issubclass(w.category, ResourceWarning) for w in caught)
+            pending = [
+                task
+                for task in asyncio.all_tasks()
+                if not task.done() and task is not asyncio.current_task()
+            ]
+            assert pending == []
+
+        # Idempotent second close re-raises the settled failure; no new consumer.
+        with pytest.raises(EventWriterOverflow, match="event evidence append failed"):
+            await writer.close()
+        assert writer._consumer is None
+        assert writer._close_task is not None
+        # Still a single owned close task.
+        first = writer._close_task
+        with pytest.raises(EventWriterOverflow, match="event evidence append failed"):
+            await writer.close()
+        assert writer._close_task is first
+
+    asyncio.run(case())
+
+
+def test_r14_close_cancel_races_failure_still_propagates_cancel() -> None:
+    """Caller cancel racing a close failure: observe failure, raise CancelledError."""
+
+    class GatedFailingHandle:
+        """Block in append, then raise — cancel can land while ownership is live."""
+
+        def __init__(self) -> None:
+            self.gate = threading.Event()
+            self.entered = threading.Event()
+
+        def append_ndjson(self, name: str, record: dict) -> None:
+            del name, record
+            self.entered.set()
+            assert self.gate.wait(timeout=30)
+            raise OSError("injected consumer append failure")
+
+    async def case() -> None:
+        import warnings
+
+        handle = GatedFailingHandle()
+        writer = EventWriter(handle, max_event_bytes=65536, queue_maxsize=4)
+        await writer.start()
+        await writer.emit({"type": "will-fail"})
+        for _ in range(200):
+            if handle.entered.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert handle.entered.is_set()
+
+        close_task = asyncio.ensure_future(writer.close())
+        for _ in range(100):
+            if writer._close_task is not None:
+                break
+            await asyncio.sleep(0)
+        assert writer._close_task is not None
+        assert not close_task.done()
+        close_task.cancel()
+        await asyncio.sleep(0.05)
+        assert not close_task.done(), "close must stay pending while append blocked"
+        handle.gate.set()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(asyncio.CancelledError):
+                await close_task
+            # Owned close settled a pipeline failure (observed via task result).
+            assert writer._close_task.done()
+            with pytest.raises(EventWriterOverflow, match="event evidence append failed"):
+                writer._close_task.result()
+            assert writer._consumer is None
+            assert not any(issubclass(w.category, ResourceWarning) for w in caught)
 
     asyncio.run(case())

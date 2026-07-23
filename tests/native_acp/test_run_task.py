@@ -2323,3 +2323,96 @@ def test_r10_b3_run_exception_failure_reason_is_categorical(
     assert canary_path not in blob
     assert canary not in blob
     assert "RuntimeError" not in blob
+
+
+# -- R14: finalize cancel/timeout waits for EventWriter close ownership --------
+
+
+def test_r14_finalize_cancel_waits_for_event_writer_close_before_emergency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finalize cancellation must not emergency-publish/release while append lives.
+
+    EventWriter.close ownership alone must keep emergency terminal + Session
+    lease release from proceeding until the controlled append unblocks and
+    close settles; then conservative emergency disposition completes.
+    """
+    import threading
+
+    from agent_run_supervisor.native_acp.event_writer import EventWriter
+
+    script = dict(HAPPY_SCRIPT)
+    script["hang_prompt_until_cancel"] = True
+    harness = Harness(tmp_path, monkeypatch, script)
+    spawned = _recording_spawn(monkeypatch)
+    marker = harness.run_dir() / "prompt-dispatch-started"
+    result_path = harness.run_dir() / "result.json"
+    lock_path = harness.root / "native-sessions" / "sess-native-1" / "lock.json"
+
+    release_append = threading.Event()
+    entered_append = threading.Event()
+    entered_close = asyncio.Event()
+    real_close = EventWriter.close
+    real_append = RunHandle.append_ndjson
+    closing = {"on": False}
+
+    def gated_append(self, name, record):
+        if closing["on"] and name == "events.jsonl":
+            entered_append.set()
+            assert release_append.wait(timeout=60), "append gate was not released"
+        return real_append(self, name, record)
+
+    async def close_with_blocked_append(self):
+        closing["on"] = True
+        # Ensure the consumer must perform a gated append before sentinel drain.
+        pad = asyncio.ensure_future(self.emit({"type": "r14_finalize_pad"}))
+        for _ in range(400):
+            if entered_append.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert entered_append.is_set(), "controlled append never entered"
+        entered_close.set()
+        try:
+            return await real_close(self)
+        finally:
+            if not pad.done():
+                pad.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await pad
+
+    monkeypatch.setattr(RunHandle, "append_ndjson", gated_append)
+    monkeypatch.setattr(EventWriter, "close", close_with_blocked_append)
+
+    async def case() -> None:
+        task = asyncio.ensure_future(harness.task().run())
+        await _wait_until(marker.exists, message="dispatch marker never appeared")
+        task.cancel()
+        await asyncio.wait_for(entered_close.wait(), 30)
+        await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(None, entered_append.wait),
+            30,
+        )
+        # While append/close ownership is live: no emergency terminal, lease held.
+        assert not result_path.exists()
+        assert lock_path.exists()
+        task.cancel()
+        task.cancel()
+        await asyncio.sleep(0.1)
+        assert not result_path.exists()
+        assert lock_path.exists()
+        assert not task.done()
+
+        release_append.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 60)
+
+    asyncio.run(case())
+
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "unknown"
+    assert payload["retryable"] is False
+    assert payload["detail_code"] == "EMERGENCY_FINALIZE"
+    record = harness.session_store().open_session("sess-native-1")
+    assert record.state == "quarantined"
+    assert not lock_path.exists()
+    _assert_pid_gone_sync(spawned[0].pid)

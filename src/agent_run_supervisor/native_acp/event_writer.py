@@ -11,6 +11,7 @@ the run handle it is given — it constructs no store.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -75,6 +76,7 @@ class EventWriter:
         self._producer_timeout = producer_timeout_seconds
         self._filename = filename
         self._consumer: asyncio.Task[None] | None = None
+        self._close_task: asyncio.Task[None] | None = None
         self._seq = 0
         self._reserved = 0
         self._closed = False
@@ -295,16 +297,89 @@ class EventWriter:
     async def close(self) -> None:
         """Flush queued events and stop the consumer.
 
-        If the consumer has already failed and the queue is full, awaiting
-        ``queue.put(None)`` alone would hang forever. Race the sentinel enqueue
-        against consumer completion: a finished/failed consumer cancels any
-        pending put and surfaces its exception promptly; a successful sentinel
-        enqueue awaits the consumer normally. The consumer reference is always
-        cleared; append failures are never swallowed.
+        Exactly one owned close task performs sentinel enqueue + consumer
+        drain. Callers join that task under ``asyncio.shield``: caller
+        cancellation is classified by ``current_task().cancelling()``, absorbed
+        while ownership continues, and re-raised only after sentinel enqueue,
+        consumer, and in-flight ``to_thread`` append have settled and every
+        task result is observed. ``_consumer`` is cleared only after the
+        consumer task is done.
+
+        If the consumer has already failed and the queue is full, the owned
+        close races sentinel enqueue against consumer completion so it cannot
+        hang on ``queue.put(None)``. Consumer/append failures surface as
+        :class:`EventWriterOverflow` (never raw append text). A close failure
+        observed under caller cancellation still propagates
+        ``CancelledError`` after ownership settles so RunTask emergency
+        containment runs.
         """
-        if self._closed:
-            return
-        self._closed = True
+        if self._close_task is None:
+            self._closed = True
+            self._close_task = asyncio.create_task(
+                self._close_owned(), name="event-writer-close"
+            )
+        await self._join_close(self._close_task)
+
+    async def _join_close(self, close_task: asyncio.Task[None]) -> None:
+        caller_cancelled = False
+
+        def _absorb_cancel() -> None:
+            nonlocal caller_cancelled
+            caller_cancelled = True
+            me = asyncio.current_task()
+            if me is not None and me.cancelling():
+                me.uncancel()
+
+        def _observe_close_outcome() -> BaseException | None:
+            try:
+                close_task.result()
+            except EventWriterOverflow as exc:
+                return exc
+            except asyncio.CancelledError as exc:
+                # Owned close must not be cancelled; treat as pipeline failure.
+                if close_task.cancelled():
+                    return EventWriterOverflow("event writer consumer cancelled")
+                return exc
+            except Exception:
+                return EventWriterOverflow("event evidence append failed")
+            return None
+
+        async def _await_owned() -> None:
+            """Await ownership under shield; never let task failure bypass join."""
+            while not close_task.done():
+                try:
+                    await asyncio.shield(close_task)
+                except asyncio.CancelledError:
+                    me = asyncio.current_task()
+                    if me is not None and me.cancelling():
+                        _absorb_cancel()
+                        if close_task.done():
+                            return
+                        continue
+                    if close_task.done():
+                        return
+                    _absorb_cancel()
+                except Exception:
+                    # Owned close failed: settle via result() below so caller
+                    # cancellation can still win after the failure is observed.
+                    if close_task.done():
+                        return
+                    raise
+
+        try:
+            await _await_owned()
+        finally:
+            if not close_task.done():
+                await _await_owned()
+
+        failure = _observe_close_outcome()
+        if caller_cancelled:
+            raise asyncio.CancelledError()
+        if failure is not None:
+            raise failure
+
+    async def _close_owned(self) -> None:
+        """Single owned close body: settle sentinel + consumer, then clear ref."""
         consumer = self._consumer
         if consumer is None:
             return
@@ -318,27 +393,37 @@ class EventWriter:
             if consumer in done:
                 if put_task is not None and not put_task.done():
                     put_task.cancel()
-                    try:
-                        await put_task
-                    except asyncio.CancelledError:
-                        pass
-                # Re-raise consumer failure (or complete successfully).
-                # A cancelled consumer is an evidence-pipeline failure, never
-                # an outer task cancellation signal for the Run finalizer.
-                try:
-                    await consumer
-                except asyncio.CancelledError:
-                    if consumer.cancelled():
-                        raise EventWriterOverflow(
-                            "event writer consumer cancelled"
-                        ) from None
-                    raise
+                    await self._await_cancelled(put_task)
+                await self._observe_consumer(consumer)
                 return
-            # Sentinel enqueue won: finish put, then drain/await consumer.
             await put_task
-            await consumer
+            await self._observe_consumer(consumer)
         finally:
-            self._consumer = None
+            if put_task is not None and not put_task.done():
+                put_task.cancel()
+                await self._await_cancelled(put_task)
+            if consumer.done():
+                # Observe any residual consumer outcome so it cannot become an
+                # unretrieved task exception after we drop the reference.
+                with contextlib.suppress(Exception):
+                    if not consumer.cancelled():
+                        consumer.exception()
+                self._consumer = None
+
+    async def _observe_consumer(self, consumer: asyncio.Task[None]) -> None:
+        """Surface consumer completion as clean close or EventWriterOverflow."""
+        try:
+            await consumer
+        except asyncio.CancelledError:
+            if consumer.cancelled():
+                raise EventWriterOverflow(
+                    "event writer consumer cancelled"
+                ) from None
+            raise
+        except EventWriterOverflow:
+            raise
+        except Exception as exc:
+            raise EventWriterOverflow("event evidence append failed") from exc
 
     async def _drain(self) -> None:
         while True:
