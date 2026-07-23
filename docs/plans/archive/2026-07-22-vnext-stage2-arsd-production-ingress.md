@@ -1,14 +1,29 @@
 ---
 title: "vNext Stage 2 — arsd production ingress implementation plan"
-status: active
+status: archived
 created_at: 2026-07-22
 last_validated_at: 2026-07-23
+archived_at: 2026-07-23
 ---
 # Implementation plan — vNext Stage 2: `arsd` production ingress
 
-Board-linked active implementation plan. The A1 source/default-closed foundation is merged, but
-this file remains `status: active` until A2–A5 and real S1–S5 production acceptance close; it is
-not archived at source merge. Derived from `GOAL.md`, PRD R6/R10 (plus R1–R5/R7–R9
+> **Closed and archived (2026-07-23).** A1–A5 are closed; A5 production/default-on enablement
+> completed on 2026-07-23. The `arsd` user unit is enabled+active as a local supervision
+> service for trusted callers under the closed A2 caller policy, on the versioned CPython
+> 3.12.3 runtime (ARS 0.2.0, ACP SDK 0.11.0, pidfd present), built from source commit
+> `b7f38eb0553786ec594c78a72ce62f33bdc57ae1` (tree
+> `5bc3e13bad9f8ee6a39f9e747d07fd49ed07e5f9`). Sanitized runtime closure digest (SHA-256):
+> `78a75a2d0d3c8a967d974598bdbb77d138a9ff94dc6fb9654797993d7a5dd6cb`; pre-enable evidence
+> tree: `11723d37a09211f1219d320c10ced647affe32fbc16fe2b8e86d20d320631e91`; post-enable
+> evidence tree: `7dcbd7b0ed57ab3c98502fdef8eeb13d0781c451de456a05aba47ba8aa025d7b`. Evidence
+> is sanitized and operator-held outside Git; exact CallerPolicy and credential values remain
+> controller-only. This closure authorized and performed **no** push/PR/merge, tag/GitHub
+> Release/PyPI, Sachima, Gateway/IM, public ingress, or branch cleanup. Everything below —
+> including the §3 gate/timing narrative — is retained historical implementation detail, not
+> living authority. Living board: `docs/roadmap/current-status.md`; phase record:
+> `docs/roadmap/archive/phases/vnext-stage2-arsd-production-ingress.md`.
+
+Archived Stage 2 execution plan. Derived from `GOAL.md`, PRD R6/R10 (plus R1–R5/R7–R9
 as already-implemented constraints), `docs/design/architecture.md` §§1–2/5–8, and
 `docs/design/technical-solution.md` §§1.3/6/9/11. This plan redefines no product goal, widens
 no scope, and approves nothing by its existence.
@@ -36,10 +51,10 @@ socket-path acceptance on OpenCode 1.18.4.
 2. Real S1–S5 socket-path acceptance executed and recorded as sanitized, operator-held
    C-grade evidence covering G9/G10/G11 (§11).
 3. The T1 G12-timing decision that unblocked A1 is recorded (§3); production enablement
-   remains unapproved until A5.
+   remained unapproved until A5 closed (archive notice above).
 4. Post-merge documentation sync records A1 source completion on the board and in
-   `features.md` (including the F-VNEXT-PERMISSION-001 canary remainder). This plan remains
-   active and is neither archived nor phase-closed until A2–A5 and real S1–S5 close.
+   `features.md` (including the F-VNEXT-PERMISSION-001 canary remainder). The plan remained
+   active until A2–A5 and real S1–S5 closed; it is now archived with the Stage 2 phase record.
 
 **Hard constraints.**
 
@@ -70,9 +85,9 @@ socket-path acceptance on OpenCode 1.18.4.
 **Explicit non-approvals restated** (each requires its own operator approval; see §3 and
 `docs/roadmap/non-approvals.md`): any Stage 2 source expansion or repair beyond the merged
 source line; follow-on push/PR creation/merge; tag, GitHub Release, PyPI publication;
-Sachima `ArsdBackend` or pin changes; Gateway/IM/live traffic; public ingress. A2/G12, A3,
-and A4 are closed and A5 is approved/in progress by the operator records in §3; those records
-authorize the A5 enablement runbook only, nothing else.
+Sachima `ArsdBackend` or pin changes; Gateway/IM/live-traffic expansion; public ingress.
+A2/G12, A3, A4, and A5 are closed by the operator records in §3 and the archive notice;
+those records authorized the A5 enablement runbook only, nothing else.
 
 ## 2. Baseline and authority trace
 
@@ -149,7 +164,7 @@ authorize the A5 enablement runbook only, nothing else.
 | A2 | G12 caller policy: policy owner + exact real UID→principal/owner/namespace mapping | **Closed 2026-07-23** by recorded operator policy decision | exact values are controller-only and never enter docs, code, or tests; closure digest in the §3 closure status below |
 | A3 | User-service/cgroup harness | **Closed 2026-07-23** for user-service/restart readiness (no real Run in A3 scope) | rendering the unit was A1 source-lane; keeping it installed/enabled for real callers is A5 |
 | A4 | Real external-AGENT acceptance | **Closed 2026-07-23:** real OpenCode S1–S5 socket-path runs passed | accepted runtime CPython 3.12.3; sanitized C-grade evidence operator-held; fakes never substituted |
-| A5 | Production enablement | **Approved 2026-07-23; in progress — not yet enabled** | governed by the controller-held A5 production-enablement runbook; default-on only after its canary and independent review gates |
+| A5 | Production enablement | **Closed 2026-07-23: production/default-on enabled** | executed under the controller-held A5 production-enablement runbook; canary + independent review PASS; runtime closure digests in the archive notice |
 
 Future push, PR creation, merge, tag/Release/PyPI each additionally remain Hermes-owned
 separate approvals and are not granted by any row above.
@@ -181,11 +196,12 @@ Basis: current `main` `b7f38eb0553786ec594c78a72ce62f33bdc57ae1` (tree
   that carried A4. Its build provides `os.pidfd_open`/`signal.pidfd_send_signal`, which the
   S4 crash-containment harness requires for its PID-reuse-safe kill; the standalone Python
   3.11.15 build lacks them and is not an equivalent runtime.
-- **A5 approved and in progress — not production-enabled.** Enablement follows the
+- **A5 closed 2026-07-23 — production/default-on enabled.** Enablement followed the
   controller-held Git-external `A5_PRODUCTION_ENABLEMENT_RUNBOOK.md` (exact-main wheel,
   commit-versioned CPython 3.12.3 runtime, disabled unit install, manual-start production
-  canary, independent fresh-context blocker review, then `enable --now`). This plan stays
-  `status: active` and Stage 2 stays open until A5 closes.
+  canary, independent fresh-context blocker review, then `enable --now`). Runtime closure and
+  evidence tree digests are recorded in the archive notice; Stage 2 is closed and this plan
+  is archived.
 
 Push/PR/merge, tag/Release/PyPI, Sachima `ArsdBackend`, Gateway/IM, and public ingress remain
 separately unapproved.
@@ -205,7 +221,7 @@ foundation is merged:** §11's "G12 resolution" did not require G12 closure befo
 start. The second T1 half — the exact policy owner and UID→principal/owner/namespace mapping
 values — was deferred to A2, blocked A4 real acceptance and A5 production enablement while
 open, and **closed 2026-07-23 with the A2 operator record above**. Current state: A2 closed,
-A3 closed, A4 closed, A5 approved/in progress and not yet enabled.
+A3 closed, A4 closed, A5 closed 2026-07-23 — production/default-on enabled.
 
 The recorded ruling required no redesign: the caller policy is injected configuration (§6);
 code, tests, and docs never record production values; the daemon has no implicit default
@@ -228,8 +244,8 @@ time, with current closure state in brackets:
 - A2 policy owner and exact UID→principal/owner/namespace mapping values were unresolved at
   ruling time [closed 2026-07-23 by the A2 operator record above].
 - A4 real external-AGENT acceptance and A5 production enablement were blocked pending
-  explicit A2/G12 resolution and separate approval [A4 closed 2026-07-23; A5 approved and
-  in progress, not yet enabled].
+  explicit A2/G12 resolution and separate approval [A4 closed 2026-07-23; A5 closed
+  2026-07-23 — production/default-on enabled].
 - A3 service/cgroup harness execution was separately blocked [closed 2026-07-23].
 - Push/PR/merge/release/deploy/Sachima/Gateway/IM/public ingress were — and still remain —
   separately unapproved.
@@ -830,7 +846,7 @@ the real module skipped.
 6b (A3 + A4 execution) is closed: A2/G12 was explicitly resolved, A3/A4 were separately
 approved, and §11 ran with sanitized operator-held evidence (§3 closure status). 6b itself
 changed no source; the permission-mediation repair (PR #74) was its own separately approved
-fix lane. Neither this plan nor the phase closes until A5.
+fix lane. The plan and the phase closed with A5 (archive notice).
 
 ## 11. G9–G12 and real S1–S5 acceptance matrix
 
@@ -951,7 +967,7 @@ for any future re-run.
 | T1 | G12: (a) sequencing ruling for the §3 authority conflict — **recorded 2026-07-22 (§3)**; (b) policy owner + exact real UID→principal/owner/namespace mapping — **closed 2026-07-23 by the A2 record (§3)** | operator (Hermes controller) | nothing — both halves closed | (a) §3 recorded ruling; (b) §3 A2 closure record; exact values stay controller-only |
 | T2 | Acceptance-host service manager facts: systemd --user availability, linger, or documented equivalent | operator | nothing — **closed 2026-07-23 with A3** (§3) | recorded A3 closure with host facts |
 | T3 | Real-acceptance credential/window availability for OpenCode 1.18.4 (K3 + registered second model) | operator | nothing — **closed 2026-07-23 with A4** (§3) | recorded A4 closure; credential values stay controller-only |
-| T4 | A5 live-enablement blocker review verdict (independent, fresh-context, read-only) | operator (Hermes controller) + independent reviewer | the default-on `enable --now` step of the A5 runbook | closes only by a recorded PASS verdict bound to the frozen sanitized A5 evidence tree |
+| T4 | A5 live-enablement blocker review verdict (independent, fresh-context, read-only) | operator (Hermes controller) + independent reviewer | nothing — **closed 2026-07-23**: PASS recorded, enablement completed | recorded PASS verdict bound to the frozen sanitized A5 evidence trees (digests in the archive notice) |
 
 Nothing else is a governance decision. Remaining choices (exact numeric bound defaults,
 default socket path, the caller-mapping flag shape, exact seam/class names such as
@@ -964,10 +980,11 @@ in §§5–8 are binding regardless of final names.
 
 This plan's existence authorizes nothing. The T1 sequencing decision enabled A1; the A1
 source/default-closed foundation (Slices 1–5 and 6a) is merged in PR #72; the permission-
-mediation repair is merged in PR #74; and A2/G12, A3, and A4 are closed by the operator
-records in §3. Still separately and explicitly required: completing A5 production/default-on
-enablement under the controller-held runbook and its T4 review gate; and every follow-on
-source change, push, PR, merge, tag, GitHub Release, PyPI publication, deployment, Sachima
-`ArsdBackend` change, Gateway/IM wiring, or live-traffic decision. This plan remains active
-until A5 closes; it grants no successor implementation. Hermes retains scope control,
-deterministic gates, evidence arbitration, and all side-effect authority.
+mediation repair is merged in PR #74; and A2/G12, A3, A4, and A5 are closed by the operator
+records in §3 and the archive notice — A5 production/default-on enablement completed
+2026-07-23 under the controller-held runbook and its T4 review gate. Still separately and
+explicitly required: every follow-on source change, push, PR, merge, tag, GitHub Release,
+PyPI publication, deployment, Sachima `ArsdBackend` change, Gateway/IM wiring, or
+live-traffic expansion decision. This plan is archived history and grants no successor
+implementation. Hermes retains scope control, deterministic gates, evidence arbitration, and
+all side-effect authority.

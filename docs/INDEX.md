@@ -2,11 +2,10 @@
 
 # Documentation Index
 
-Total: 62 documents tracked across 2 statuses.
+Total: 63 documents tracked across 2 statuses.
 
-## Active (16)
+## Active (15)
 
-- [vNext Stage 2 — arsd production ingress implementation plan](plans/active/2026-07-22-vnext-stage2-arsd-production-ingress.md) — created 2026-07-22
 - [agent-run-supervisor vNext System Architecture](design/architecture.md) — created 2026-07-21
 - [agent-run-supervisor vNext Technical Solution](design/technical-solution.md) — created 2026-07-21
 - [agent-run-supervisor vNext PRD](product/prd.md) — created 2026-07-21
@@ -23,8 +22,10 @@ Total: 62 documents tracked across 2 statuses.
 - [Engineering practices](practices/README.md) — created 2026-05-28
 - [Verification gates for implementation PRs](roadmap/verification.md) — created 2026-05-28
 
-## Archived (46)
+## Archived (48)
 
+- [vNext Stage 2 — arsd production ingress](roadmap/archive/phases/vnext-stage2-arsd-production-ingress.md) — created 2026-07-23
+- [vNext Stage 2 — arsd production ingress implementation plan](plans/archive/2026-07-22-vnext-stage2-arsd-production-ingress.md) — created 2026-07-22
 - [vNext Stage 0/1 — Native ACP core through ars-core](roadmap/archive/phases/vnext-stage01-native-acp.md) — created 2026-07-22
 - [Pre-vNext-reset GOAL snapshot](archive/pre-vnext-reset-2026-07-21/GOAL.md) — created 2026-07-21
 - [Pre-vNext-reset authority archive](archive/pre-vnext-reset-2026-07-21/README.md) — created 2026-07-21
