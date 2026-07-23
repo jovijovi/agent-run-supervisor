@@ -33,8 +33,13 @@ _LOGGER = logging.getLogger("agent_run_supervisor.arsd")
 
 DEFAULT_SHUTDOWN_TIMEOUT = 90.0
 DEFAULT_CANCEL_WAIT_SECONDS = 30.0
+# Finite nonzero delay between ordinary lifecycle retries (no busy spin).
+_SHUTDOWN_LIFECYCLE_RETRY_DELAY = 0.05
 _DAEMON_LOCK_DIRNAME = "arsd"
 _DAEMON_LOCK_FILENAME = "daemon.lock"
+_SHUTDOWN_LIFECYCLE_FAIL_LOG = (
+    "arsd: shutdown lifecycle failed; holding lease and retrying"
+)
 
 
 class DaemonStartupError(RuntimeError):
@@ -307,18 +312,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-async def _release_lease_after_registry_idle(
-    registry: handlers.RunRegistry,
+async def _shutdown_and_release_lease(
+    srv: server.ArsdServer | None,
+    arsd_handlers: handlers.ArsdHandlers,
     lease: DaemonInstanceLease,
+    *,
+    shutdown_timeout: float,
 ) -> None:
-    """Retain the singleton lease until the registry is idle; cancel-resistant.
+    """Owned cancel-resistant shutdown: admission → listener → drain → idle → lease.
 
-    Shields one owned ``wait_until_idle`` lifecycle so cancelling the
-    ``serve_daemon`` task cannot cancel the drain or release ownership while a
-    Run remains registered. Caller cancellation is absorbed/reconciled
-    (``uncancel``) and re-raised only after idle + lease release. Caller
-    ``cancelling()`` is classified before target-done race. No detached task,
-    polling, or swallowed cancellation.
+    Every exit after handlers exist — normal stop, timeout, failure, or
+    cancellation during ``local_stop.wait()`` — runs this single lifecycle.
+    Caller cancellation is classified before target-done race, absorbed via
+    ``uncancel``, and re-raised only after successful shutdown + idle + lease
+    release. Ordinary lifecycle/phase failure never authorizes release: admission
+    stays closed, the lease stays held, a fixed categorical error is logged, and
+    the idempotent lifecycle retries with a finite nonzero delay until every
+    phase completes (or the external process is killed). Bounded timeout is an
+    escalation log only; it never cancels this lifecycle or releases the lease
+    early. No detached task, busy spin, or swallowed ordinary failure.
     """
     cancelled = False
 
@@ -329,53 +341,100 @@ async def _release_lease_after_registry_idle(
         if task is not None and task.cancelling():
             task.uncancel()
 
-    def _observe_drain_done() -> None:
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            drain.result()
+    def _observe_owned_done() -> None:
+        # owned completes only after positive lifecycle success; never convert
+        # an ordinary failure into release authorization.
+        owned.result()
 
-    drain = asyncio.create_task(
-        registry.wait_until_idle(),
-        name="arsd:wait-until-idle",
-    )
+    async def _run_lifecycle_once() -> None:
+        # 1) Close registry admission before any later reserve/register.
+        await arsd_handlers.registry.close_admission()
+        # 2) Close listener / accepted connections (SHUTTING_DOWN on late frames).
+        if srv is not None:
+            await srv.shutdown()
+            # Short straggler window for already-accepted connections.
+            await asyncio.sleep(0.15)
+            await srv.aclose()
+        # 3) Cancel/drain handlers and Run tasks.
+        await arsd_handlers.aclose()
+        # 4) Wait until the registry is idle before lease release.
+        await arsd_handlers.registry.wait_until_idle()
+
+    async def _owned() -> None:
+        # Retry until the ordered lifecycle completes successfully. Timeout
+        # observes only — never cancels the lifecycle or releases the lease.
+        bound_logged = False
+        while True:
+            lifecycle = asyncio.create_task(
+                _run_lifecycle_once(), name="arsd:shutdown-lifecycle"
+            )
+            try:
+                if not bound_logged:
+                    await asyncio.wait_for(
+                        asyncio.shield(lifecycle), timeout=shutdown_timeout
+                    )
+                else:
+                    await asyncio.shield(lifecycle)
+            except asyncio.TimeoutError:
+                _LOGGER.error("arsd: shutdown exceeded bound; forcing exit path")
+                bound_logged = True
+            except (Exception, asyncio.CancelledError):
+                # Ordinary/cancel outcomes are evaluated via lifecycle.result()
+                # below — never treated as success here.
+                pass
+            while not lifecycle.done():
+                try:
+                    await asyncio.shield(lifecycle)
+                except (Exception, asyncio.CancelledError):
+                    pass
+            try:
+                lifecycle.result()
+            except (Exception, asyncio.CancelledError):
+                _LOGGER.error(_SHUTDOWN_LIFECYCLE_FAIL_LOG)
+                await asyncio.sleep(_SHUTDOWN_LIFECYCLE_RETRY_DELAY)
+                continue
+            return
+
+    owned = asyncio.create_task(_owned(), name="arsd:shutdown-owned")
     try:
         while True:
             try:
-                await asyncio.shield(drain)
+                await asyncio.shield(owned)
                 break
             except asyncio.CancelledError:
-                # Classify by caller cancelling() first: same-turn drain
+                # Classify by caller cancelling() first: same-turn owned
                 # completion must not be mistaken for target-only cancel.
                 me = asyncio.current_task()
                 if me is not None and me.cancelling():
                     _absorb_cancel()
-                    if drain.done():
-                        _observe_drain_done()
+                    if owned.done():
+                        _observe_owned_done()
                         break
                     continue
-                if drain.done():
-                    _observe_drain_done()
+                if owned.done():
+                    _observe_owned_done()
                     break
                 _absorb_cancel()
     finally:
-        # Never detach: keep shielding the owned drain until it finishes.
-        while not drain.done():
+        # Never detach: keep shielding the owned lifecycle until it finishes.
+        while not owned.done():
             try:
-                await asyncio.shield(drain)
+                await asyncio.shield(owned)
             except asyncio.CancelledError:
                 me = asyncio.current_task()
                 if me is not None and me.cancelling():
                     _absorb_cancel()
-                    if drain.done():
-                        _observe_drain_done()
+                    if owned.done():
+                        _observe_owned_done()
                         break
                     continue
-                if drain.done():
-                    _observe_drain_done()
+                if owned.done():
+                    _observe_owned_done()
                     break
                 _absorb_cancel()
-            except Exception:
-                break
 
+    # Positive proof: owned returned only after full successful lifecycle.
+    _observe_owned_done()
     lease.release()
     if cancelled:
         raise asyncio.CancelledError()
@@ -410,6 +469,7 @@ async def serve_daemon(
     # Exclusive ownership before any reconciliation mutation or listen.
     lease = acquire_daemon_instance_lease(root)
     arsd_handlers: handlers.ArsdHandlers | None = None
+    srv: server.ArsdServer | None = None
     try:
         # Startup reconciliation must complete successfully before bind/listen.
         try:
@@ -465,43 +525,25 @@ async def serve_daemon(
                     raise DaemonStartupError(str(err)) from err
 
                 await local_stop.wait()
-
-                try:
-                    await asyncio.wait_for(
-                        _graceful_shutdown(srv, arsd_handlers),
-                        timeout=shutdown_timeout,
-                    )
-                except asyncio.TimeoutError:
-                    _LOGGER.error("arsd: shutdown exceeded bound; forcing exit path")
-                    with contextlib.suppress(Exception):
-                        await srv.aclose()
-                    with contextlib.suppress(Exception):
-                        await arsd_handlers.aclose()
                 return 0
             finally:
                 for sig in handlers_installed:
                     with contextlib.suppress(Exception):
                         loop.remove_signal_handler(sig)
         finally:
-            # Fail-closed: once the registry exists, every exit path — including
-            # serve-task cancellation — retains the lease until idle. Shutdown
-            # timeout must not bypass this drain; process kill is the bound.
-            await _release_lease_after_registry_idle(arsd_handlers.registry, lease)
+            # Fail-closed: once handlers/registry exist, every exit path —
+            # including cancellation during stop wait — owns one shutdown
+            # lifecycle before lease release. Timeout cannot bypass it.
+            await _shutdown_and_release_lease(
+                srv,
+                arsd_handlers,
+                lease,
+                shutdown_timeout=shutdown_timeout,
+            )
     finally:
         # Startup failures before registry creation may release normally.
         if arsd_handlers is None:
             lease.release()
-
-
-async def _graceful_shutdown(
-    srv: server.ArsdServer, arsd_handlers: handlers.ArsdHandlers
-) -> None:
-    # Stop accepting first so late frames can still observe SHUTTING_DOWN.
-    await srv.shutdown()
-    # Short straggler window for already-accepted connections.
-    await asyncio.sleep(0.15)
-    await arsd_handlers.aclose()
-    await srv.aclose()
 
 
 def main(argv: list[str] | None = None) -> int:

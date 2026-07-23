@@ -1766,6 +1766,378 @@ def test_r11b_serve_task_cancel_holds_lease_until_registry_idle(
     run_async(case())
 
 
+def test_r12_cancel_during_stop_wait_closes_admission_before_lease_release(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancel while blocked on stop must close admission before idle/lease release.
+
+    Holds an accepted submit at a pre-reserve seam (stop never set). Proves the
+    owned shutdown closes admission, rejects late reserve/register/dispatch, keeps
+    the lease until shutdown settles, then propagates cancellation.
+    """
+
+    async def case():
+        path = sock_path(sock_root)
+        root = supervisor_root(sock_root)
+        stop = asyncio.Event()
+        release_order: list[str] = []
+        at_seam = asyncio.Event()
+        release_seam = asyncio.Event()
+        factory = PendingFactory()
+        real_acquire = arsd_main.acquire_daemon_instance_lease
+
+        def tracking_acquire(supervisor_root_path):
+            lease = real_acquire(supervisor_root_path)
+            real_release = lease.release
+
+            def tracking_release():
+                release_order.append("release")
+                return real_release()
+
+            lease.release = tracking_release  # type: ignore[method-assign]
+            return lease
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", tracking_acquire)
+
+        serve_task = asyncio.create_task(
+            arsd_main.serve_daemon(
+                socket_path=path,
+                supervisor_root=root,
+                policy=same_uid_policy(),
+                run_task_factory=factory,
+                cancel_wait_seconds=0.05,
+                shutdown_timeout=0.2,
+                stop_event=stop,
+                install_signals=False,
+            )
+        )
+        await wait_for_socket(path)
+        assert factory.handlers is not None
+        registry = factory.handlers.registry
+        real_reserve = registry.reserve
+
+        async def gated_reserve(*, session_id):
+            at_seam.set()
+            await release_seam.wait()
+            return await real_reserve(session_id=session_id)
+
+        registry.reserve = gated_reserve  # type: ignore[method-assign]
+
+        submit_error: list[BaseException] = []
+        submit_done = threading.Event()
+
+        def submit_once() -> None:
+            try:
+                with arsd_client.ArsdClient(path) as cli:
+                    cli.submit(
+                        request_id="r12-pre-reserve-1",
+                        payload=submit_payload(
+                            request=valid_wire_request(
+                                ars_session_id=None, session_reuse="none"
+                            )
+                        ),
+                    )
+            except BaseException as exc:  # noqa: BLE001 — capture for assertions
+                submit_error.append(exc)
+            finally:
+                submit_done.set()
+
+        probe = threading.Thread(target=submit_once, daemon=True)
+        probe.start()
+        await asyncio.wait_for(at_seam.wait(), 2.0)
+        # Still blocked on stop_event — R11b covered cancel after stop-triggered
+        # shutdown; this proves cancel before stop.set().
+        assert not stop.is_set()
+        assert registry.admission_open is True
+        assert factory.calls == []
+
+        serve_task.cancel()
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and registry.admission_open:
+            await asyncio.sleep(0.01)
+        assert registry.admission_open is False
+        assert not serve_task.done()
+        assert release_order == []
+        with pytest.raises(arsd_main.DaemonStartupError) as held:
+            arsd_main.acquire_daemon_instance_lease(root)
+        held_msg = str(held.value).lower()
+        assert "already" in held_msg or "lease" in held_msg or "lock" in held_msg
+
+        release_seam.set()
+        await asyncio.to_thread(submit_done.wait, 5.0)
+        assert submit_done.is_set()
+        assert factory.calls == []
+        assert registry.active_count() == 0
+        assert registry._reservations == {}
+        assert submit_error
+        err = submit_error[0]
+        if isinstance(err, arsd_client.ArsdClientError):
+            code = getattr(err, "code", None)
+            if code is not None:
+                assert code in {
+                    protocol.SHUTTING_DOWN,
+                    protocol.INTERNAL,
+                    protocol.SUBMISSION_INDETERMINATE,
+                }
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(serve_task, 2.0)
+        assert release_order == ["release"]
+        probe.join(timeout=2.0)
+
+        lease = arsd_main.acquire_daemon_instance_lease(root)
+        lease.release()
+
+    run_async(case())
+
+
+def test_r12b_lifecycle_ordinary_failure_retries_before_lease_release(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One-shot critical-phase failure must hold lease, retry, then release once."""
+
+    async def case():
+        path = sock_path(sock_root)
+        root = supervisor_root(sock_root)
+        stop = asyncio.Event()
+        release_order: list[str] = []
+        idle_calls: list[float] = []
+        factory = PendingFactory()
+        real_acquire = arsd_main.acquire_daemon_instance_lease
+
+        def tracking_acquire(supervisor_root_path):
+            lease = real_acquire(supervisor_root_path)
+            real_release = lease.release
+
+            def tracking_release():
+                release_order.append("release")
+                return real_release()
+
+            lease.release = tracking_release  # type: ignore[method-assign]
+            return lease
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", tracking_acquire)
+
+        serve_task = asyncio.create_task(
+            arsd_main.serve_daemon(
+                socket_path=path,
+                supervisor_root=root,
+                policy=same_uid_policy(),
+                run_task_factory=factory,
+                cancel_wait_seconds=0.05,
+                shutdown_timeout=0.2,
+                stop_event=stop,
+                install_signals=False,
+            )
+        )
+        await wait_for_socket(path)
+        assert factory.handlers is not None
+        registry = factory.handlers.registry
+        real_idle = registry.wait_until_idle
+
+        async def one_shot_fail_idle():
+            idle_calls.append(time.monotonic())
+            if len(idle_calls) == 1:
+                raise RuntimeError("injected-r12b-ordinary-lifecycle-failure")
+            return await real_idle()
+
+        registry.wait_until_idle = one_shot_fail_idle  # type: ignore[method-assign]
+
+        with caplog.at_level("ERROR", logger="agent_run_supervisor.arsd"):
+            stop.set()
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and len(idle_calls) < 2:
+                await asyncio.sleep(0.01)
+            assert len(idle_calls) >= 2
+            assert release_order == []
+            assert not serve_task.done()
+            assert registry.admission_open is False
+            gap = idle_calls[1] - idle_calls[0]
+            assert gap + 1e-3 >= arsd_main._SHUTDOWN_LIFECYCLE_RETRY_DELAY
+            assert any(
+                arsd_main._SHUTDOWN_LIFECYCLE_FAIL_LOG in rec.message
+                for rec in caplog.records
+            )
+            assert "injected-r12b-ordinary-lifecycle-failure" not in caplog.text
+            assert SECRET_SENTINEL not in caplog.text
+
+            with pytest.raises(arsd_main.DaemonStartupError) as held:
+                arsd_main.acquire_daemon_instance_lease(root)
+            held_msg = str(held.value).lower()
+            assert "already" in held_msg or "lease" in held_msg or "lock" in held_msg
+
+            rc = await asyncio.wait_for(serve_task, 2.0)
+            assert rc == 0
+            assert release_order == ["release"]
+
+        lease = arsd_main.acquire_daemon_instance_lease(root)
+        lease.release()
+
+    run_async(case())
+
+
+def test_r12b_cancel_during_lifecycle_retry_propagates_after_release(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Caller cancel racing one-shot lifecycle failure releases only after success."""
+
+    async def case():
+        path = sock_path(sock_root)
+        root = supervisor_root(sock_root)
+        stop = asyncio.Event()
+        release_order: list[str] = []
+        idle_calls = 0
+        gate = asyncio.Event()
+        factory = PendingFactory()
+        real_acquire = arsd_main.acquire_daemon_instance_lease
+
+        def tracking_acquire(supervisor_root_path):
+            lease = real_acquire(supervisor_root_path)
+            real_release = lease.release
+
+            def tracking_release():
+                release_order.append("release")
+                return real_release()
+
+            lease.release = tracking_release  # type: ignore[method-assign]
+            return lease
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", tracking_acquire)
+
+        serve_task = asyncio.create_task(
+            arsd_main.serve_daemon(
+                socket_path=path,
+                supervisor_root=root,
+                policy=same_uid_policy(),
+                run_task_factory=factory,
+                cancel_wait_seconds=0.05,
+                shutdown_timeout=0.2,
+                stop_event=stop,
+                install_signals=False,
+            )
+        )
+        await wait_for_socket(path)
+        assert factory.handlers is not None
+        registry = factory.handlers.registry
+        real_idle = registry.wait_until_idle
+
+        async def gated_one_shot_fail_idle():
+            nonlocal idle_calls
+            idle_calls += 1
+            if idle_calls == 1:
+                raise RuntimeError("injected-r12b-cancel-race-failure")
+            await gate.wait()
+            return await real_idle()
+
+        registry.wait_until_idle = gated_one_shot_fail_idle  # type: ignore[method-assign]
+
+        stop.set()
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and idle_calls < 2:
+            await asyncio.sleep(0.01)
+        assert idle_calls >= 2
+        assert release_order == []
+        assert not serve_task.done()
+
+        serve_task.cancel()
+        await asyncio.sleep(0.2)
+        assert not serve_task.done()
+        assert release_order == []
+        with pytest.raises(arsd_main.DaemonStartupError) as held:
+            arsd_main.acquire_daemon_instance_lease(root)
+        held_msg = str(held.value).lower()
+        assert "already" in held_msg or "lease" in held_msg or "lock" in held_msg
+
+        gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(serve_task, 2.0)
+        assert release_order == ["release"]
+
+        lease = arsd_main.acquire_daemon_instance_lease(root)
+        lease.release()
+
+    run_async(case())
+
+
+def test_r12b_permanent_lifecycle_failure_holds_lease_until_unblocked(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Permanent ordinary failure keeps serve pending and lease held until unblocked."""
+
+    async def case():
+        path = sock_path(sock_root)
+        root = supervisor_root(sock_root)
+        stop = asyncio.Event()
+        release_order: list[str] = []
+        idle_calls = 0
+        allow_success = asyncio.Event()
+        factory = PendingFactory()
+        real_acquire = arsd_main.acquire_daemon_instance_lease
+
+        def tracking_acquire(supervisor_root_path):
+            lease = real_acquire(supervisor_root_path)
+            real_release = lease.release
+
+            def tracking_release():
+                release_order.append("release")
+                return real_release()
+
+            lease.release = tracking_release  # type: ignore[method-assign]
+            return lease
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", tracking_acquire)
+
+        serve_task = asyncio.create_task(
+            arsd_main.serve_daemon(
+                socket_path=path,
+                supervisor_root=root,
+                policy=same_uid_policy(),
+                run_task_factory=factory,
+                cancel_wait_seconds=0.05,
+                shutdown_timeout=0.2,
+                stop_event=stop,
+                install_signals=False,
+            )
+        )
+        await wait_for_socket(path)
+        assert factory.handlers is not None
+        registry = factory.handlers.registry
+        real_idle = registry.wait_until_idle
+
+        async def permanent_fail_idle():
+            nonlocal idle_calls
+            idle_calls += 1
+            if not allow_success.is_set():
+                raise RuntimeError("injected-r12b-permanent-lifecycle-failure")
+            return await real_idle()
+
+        registry.wait_until_idle = permanent_fail_idle  # type: ignore[method-assign]
+
+        stop.set()
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and idle_calls < 3:
+            await asyncio.sleep(0.01)
+        assert idle_calls >= 3
+        assert not serve_task.done()
+        assert release_order == []
+        assert registry.admission_open is False
+        with pytest.raises(arsd_main.DaemonStartupError) as held:
+            arsd_main.acquire_daemon_instance_lease(root)
+        held_msg = str(held.value).lower()
+        assert "already" in held_msg or "lease" in held_msg or "lock" in held_msg
+
+        allow_success.set()
+        rc = await asyncio.wait_for(serve_task, 2.0)
+        assert rc == 0
+        assert release_order == ["release"]
+
+        lease = arsd_main.acquire_daemon_instance_lease(root)
+        lease.release()
+
+    run_async(case())
+
+
 def test_follow_list_terminates_after_terminal_stream_exhaustion(
     sock_root: Path,
 ) -> None:

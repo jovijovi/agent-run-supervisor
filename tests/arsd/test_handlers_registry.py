@@ -2853,3 +2853,156 @@ def test_r11_b3_cancel_all_awaits_sticky_after_bound(tmp_path: Path) -> None:
         assert registry._reservations == {}
 
     run_async(case())
+
+
+# -- R12: monotonic admission close vs reserve/register races ----------------
+
+
+def test_r12_reserve_after_close_admission_fails_closed(tmp_path: Path) -> None:
+    """After close_admission, reserve must fail closed with SHUTTING_DOWN."""
+
+    async def case():
+        _ = tmp_path
+        registry = handlers.RunRegistry(max_concurrent_runs=2)
+        assert registry.admission_open is True
+        token = await registry.reserve(session_id=None)
+        await registry.release(token)
+
+        await registry.close_admission()
+        assert registry.admission_open is False
+        await registry.close_admission()  # idempotent; never reopens
+        assert registry.admission_open is False
+
+        with pytest.raises(protocol.ProtocolError) as err:
+            await registry.reserve(session_id=None)
+        assert err.value.code == protocol.SHUTTING_DOWN
+        assert registry._reservations == {}
+        assert registry.active_count() == 0
+
+    run_async(case())
+
+
+def test_r12_register_after_close_invalidates_reservation_no_dispatch(
+    tmp_path: Path,
+) -> None:
+    """Reservation/register racing close must not dispatch or leak capacity."""
+
+    async def case():
+        _ = tmp_path
+        registry = handlers.RunRegistry(max_concurrent_runs=2)
+        token = await registry.reserve(session_id=None)
+        assert token in registry._reservations
+
+        await registry.close_admission()
+        assert registry.admission_open is False
+        assert registry._reservations == {}
+
+        dispatched = False
+
+        async def should_not_run():
+            nonlocal dispatched
+            dispatched = True
+            await asyncio.Event().wait()
+
+        coro = should_not_run()
+        with pytest.raises(protocol.ProtocolError) as err:
+            await registry.register(
+                "run-r12-late",
+                coro,
+                reservation=token,
+                principal_id="p",
+                owner="hermes",
+                namespace="hermes/doc-check",
+                session_id=None,
+                submitted_at="2026-07-22T00:00:00+00:00",
+            )
+        assert err.value.code == protocol.SHUTTING_DOWN
+        assert dispatched is False
+        assert not registry.is_registered("run-r12-late")
+        assert registry._reservations == {}
+        assert registry.active_count() == 0
+
+        # Second close/reserve remain fail-closed; capacity not permanently held.
+        await registry.close_admission()
+        with pytest.raises(protocol.ProtocolError) as err2:
+            await registry.reserve(session_id=None)
+        assert err2.value.code == protocol.SHUTTING_DOWN
+
+    run_async(case())
+
+
+def test_r12_register_vs_close_admission_atomic_no_orphan_dispatch(
+    tmp_path: Path,
+) -> None:
+    """Concurrent register/close: either drain a registered task or fail closed."""
+
+    async def case():
+        _ = tmp_path
+        registry = handlers.RunRegistry(max_concurrent_runs=2)
+        token = await registry.reserve(session_id=None)
+        release = asyncio.Event()
+        started = asyncio.Event()
+        outcomes: list[str] = []
+
+        async def sticky():
+            started.set()
+            while not release.is_set():
+                try:
+                    await asyncio.wait_for(release.wait(), 0.01)
+                except asyncio.TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    task = asyncio.current_task()
+                    if task is not None:
+                        task.uncancel()
+                    continue
+
+        async def do_close() -> None:
+            await registry.close_admission()
+            outcomes.append("closed")
+
+        async def do_register() -> None:
+            try:
+                await registry.register(
+                    "run-r12-race",
+                    sticky(),
+                    reservation=token,
+                    principal_id="p",
+                    owner="hermes",
+                    namespace="hermes/doc-check",
+                    session_id=None,
+                    submitted_at="2026-07-22T00:00:00+00:00",
+                )
+                outcomes.append("registered")
+            except protocol.ProtocolError as exc:
+                outcomes.append(exc.code)
+
+        try:
+            await asyncio.gather(do_close(), do_register())
+            assert "closed" in outcomes
+            assert registry.admission_open is False
+            assert registry._reservations == {}
+
+            if "registered" in outcomes:
+                assert registry.is_registered("run-r12-race")
+                await started.wait()
+                await registry.cancel_all(wait_seconds=0.05)
+                release.set()
+                await registry.wait_until_idle()
+            else:
+                assert protocol.SHUTTING_DOWN in outcomes
+                assert not registry.is_registered("run-r12-race")
+                release.set()
+
+            assert registry.active_count() == 0
+            with pytest.raises(protocol.ProtocolError) as err:
+                await registry.reserve(session_id=None)
+            assert err.value.code == protocol.SHUTTING_DOWN
+        finally:
+            release.set()
+            with contextlib.suppress(Exception):
+                await registry.cancel_all(wait_seconds=0.05)
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(registry.wait_until_idle(), 1.0)
+
+    run_async(case())

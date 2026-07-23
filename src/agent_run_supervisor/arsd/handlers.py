@@ -169,11 +169,17 @@ class RunRegistry:
         self._max = max_concurrent_runs
         self._entries: dict[str, _RegistryEntry] = {}
         self._reservations: dict[object, str | None] = {}
+        self._admission_open = True
         self._lock = asyncio.Lock()
 
     @property
     def max_concurrent_runs(self) -> int:
         return self._max
+
+    @property
+    def admission_open(self) -> bool:
+        """Monotonic admission gate; False after ``close_admission`` (never reopens)."""
+        return self._admission_open
 
     def is_registered(self, run_id: str) -> bool:
         return run_id in self._entries
@@ -203,9 +209,28 @@ class RunRegistry:
             or any(value == session_id for value in self._reservations.values())
         )
 
+    @staticmethod
+    def _abandon_coro(coro) -> None:
+        if asyncio.iscoroutine(coro):
+            coro.close()
+
+    async def close_admission(self) -> None:
+        """Close admission permanently; invalidate outstanding reservations.
+
+        Atomic under the registry lock. Later ``reserve``/``register`` fail closed
+        with ``SHUTTING_DOWN``. Already-registered tasks remain for drain.
+        """
+        async with self._lock:
+            self._admission_open = False
+            self._reservations.clear()
+
     async def reserve(self, *, session_id: str | None) -> object:
         """Atomically reserve capacity + optional session slot before create_run."""
         async with self._lock:
+            if not self._admission_open:
+                raise protocol.ProtocolError(
+                    protocol.SHUTTING_DOWN, "server is shutting down"
+                )
             if self._occupied_locked() >= self._max:
                 raise protocol.ProtocolError(
                     protocol.CAPACITY_EXHAUSTED, "run capacity exhausted"
@@ -238,9 +263,16 @@ class RunRegistry:
     ) -> asyncio.Task[Any]:
         """Consume a reservation and start the guarded Run task."""
         async with self._lock:
+            if not self._admission_open:
+                self._abandon_coro(coro)
+                raise protocol.ProtocolError(
+                    protocol.SHUTTING_DOWN, "server is shutting down"
+                )
             if reservation not in self._reservations:
+                self._abandon_coro(coro)
                 raise RuntimeError("run registration requires a live reservation")
             if run_id in self._entries:
+                self._abandon_coro(coro)
                 raise RuntimeError("run already registered")
             task = asyncio.create_task(
                 self._run_guarded(run_id, coro), name=f"arsd:{run_id}"
@@ -845,6 +877,9 @@ class ArsdHandlers:
         return None
 
     async def aclose(self) -> None:
+        # Close admission before cancelling/draining so late submit cannot
+        # reserve/register after shutdown begins.
+        await self.registry.close_admission()
         await self.registry.cancel_all(wait_seconds=self._cancel_wait)
         streams = list(self._follow_streams)
         for stream in streams:
