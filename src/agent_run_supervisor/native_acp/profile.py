@@ -35,12 +35,32 @@ _REGISTERED_EXECUTABLES: dict[str, Path] = {
     "opencode": Path("/home/linuxbrew/.linuxbrew/bin/opencode"),
 }
 
+# Registered agent-side permission mediation binding, keyed like the
+# installation mapping and injected only at spawn by the supervisor — never
+# caller input and never a credential value. OpenCode's default build agent
+# permission base is "*": allow, so without this binding its in-process
+# write/edit tools complete with zero client mediation (the A4-S2 blocker).
+# Forcing edit/bash/webfetch to "ask" routes every privileged tool family
+# through session/request_permission, making the frozen-grant
+# PermissionBridge the deciding authority before any side effect.
+_REGISTERED_PERMISSION_ENV: dict[str, tuple[tuple[str, str], ...]] = {
+    "opencode": (
+        ("OPENCODE_PERMISSION", '{"bash":"ask","edit":"ask","webfetch":"ask"}'),
+    ),
+}
+
 
 def resolve_registered_executable(key: str) -> Path:
     try:
         return _REGISTERED_EXECUTABLES[key]
     except KeyError:
         raise UnknownProfileError(f"unregistered executable key: {key!r}") from None
+
+
+def resolve_registered_permission_env(key: str) -> tuple[tuple[str, str], ...]:
+    """Registered permission-mediation env pairs for an executable key;
+    executables without a registered binding launch with none."""
+    return _REGISTERED_PERMISSION_ENV.get(key, ())
 
 
 @dataclass(frozen=True)

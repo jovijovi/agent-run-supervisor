@@ -104,3 +104,20 @@ def test_profile_rejects_unknown_construction_surface() -> None:
 def test_registry_refuses_duplicate_ids() -> None:
     with pytest.raises(ValueError):
         ProfileRegistry((OPENCODE_1_18_4, OPENCODE_1_18_4))
+
+
+def test_opencode_permission_mediation_env_is_registered() -> None:
+    # A4-S2 repair: the registered OpenCode launch binding must force the
+    # privileged tool families (edit/bash/webfetch) through client-mediated
+    # session/request_permission — OpenCode's default build agent otherwise
+    # auto-allows in-process writes with zero mediation.
+    from agent_run_supervisor.native_acp.profile import (
+        resolve_registered_permission_env,
+    )
+
+    pairs = resolve_registered_permission_env(OPENCODE_1_18_4.executable_key)
+    assert pairs == (
+        ("OPENCODE_PERMISSION", '{"bash":"ask","edit":"ask","webfetch":"ask"}'),
+    )
+    # Unregistered executables carry no binding (nothing invented).
+    assert resolve_registered_permission_env("unregistered-agent") == ()

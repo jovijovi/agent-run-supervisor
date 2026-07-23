@@ -2419,3 +2419,176 @@ def test_r14_finalize_cancel_waits_for_event_writer_close_before_emergency(
     assert record.state == "quarantined"
     assert not lock_path.exists()
     _assert_pid_gone_sync(spawned[0].pid)
+
+
+# -- A4-S2: grant→agent permission coupling and fail-closed backstop ---------
+
+
+def _run_events(run_dir: Path) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in (run_dir / "events.jsonl").read_text().splitlines()
+    ]
+
+
+OPENCODE_STYLE_ROGUE_EDIT_UPDATES = [
+    # The exact reviewed A4-S2 evidence shape: tool_started(kind=edit) →
+    # in_progress → completed, with zero permission mediation; OpenCode's
+    # completed update carries no kind (correlate by toolCallId).
+    {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "call-edit-1",
+        "title": "Write sentinel",
+        "kind": "edit",
+        "status": "pending",
+    },
+    {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "call-edit-1",
+        "status": "in_progress",
+    },
+    {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "call-edit-1",
+        "status": "completed",
+    },
+]
+
+
+def test_unmediated_write_family_completion_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = dict(HAPPY_SCRIPT)
+    script["prompt_tool_updates"] = OPENCODE_STYLE_ROGUE_EDIT_UPDATES
+    script["final_message"] = "Done. File created."
+    harness = Harness(tmp_path, monkeypatch, script)
+    result = _run(harness.task())
+
+    # The honest backstop: a write-family tool completed under a read-only
+    # grant with no mediation — the Run must never persist completed.
+    assert result.status is AgentRunStatus.FAILED
+    run_dir = harness.run_dir()
+    payload = json.loads((run_dir / "result.json").read_text())
+    assert payload["status"] == "failed"
+    assert payload["detail_code"] == "PERMISSION_VIOLATION"
+    assert payload["stop_reason"] == "end_turn"
+    assert payload["origin"] == "acp"
+    assert payload["retryable"] is False
+    events = _run_events(run_dir)
+    violations = [e for e in events if e.get("type") == "permission_violation"]
+    assert violations, "expected durable permission_violation evidence"
+    assert violations[0]["kind"] == "edit"
+    assert violations[0]["tool_call_id"] == "call-edit-1"
+    assert violations[0]["required_capability"] == "write"
+    progress = json.loads((run_dir / "progress.json").read_text())
+    assert progress["state"] == "failed"
+    # The fail-closed terminal is itself a TRUSTED Native terminal shape.
+    state = storage.read_native_terminal_result(
+        run_dir / "result.json", run_id="run-0001"
+    )
+    assert state.kind is storage.NativeTerminalKind.TRUSTED
+
+
+def test_unmediated_write_family_completion_emits_no_run_completed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Honest durable stream for the backstop: a Run whose permission
+    # violation already forces FAILED must not first record a contradictory
+    # run_completed lifecycle fact — exactly one run_failed terminal event.
+    script = dict(HAPPY_SCRIPT)
+    script["prompt_tool_updates"] = OPENCODE_STYLE_ROGUE_EDIT_UPDATES
+    harness = Harness(tmp_path, monkeypatch, script)
+    result = _run(harness.task())
+
+    assert result.status is AgentRunStatus.FAILED
+    events = _run_events(harness.run_dir())
+    families = [e.get("type") for e in events]
+    assert "run_completed" not in families
+    run_failed = [e for e in events if e.get("type") == "run_failed"]
+    assert len(run_failed) == 1
+    assert run_failed[0]["code"] == "FAILED"
+
+
+def test_write_family_ask_is_client_mediated_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The prevention path in hermetic form: when the agent routes its edit
+    # through session/request_permission (what OPENCODE_PERMISSION forces on
+    # real OpenCode), the frozen read-only grant denies BEFORE the side
+    # effect — sentinel absent, deny mediation evidence durable.
+    sentinel_name = "ARS_S2_STYLE_SENTINEL_MUST_NOT_EXIST"
+    script = dict(HAPPY_SCRIPT)
+    script["ask_permission"] = {"kind": "edit", "path": sentinel_name}
+    harness = Harness(tmp_path, monkeypatch, script)
+    result = _run(harness.task())
+
+    assert result.status is AgentRunStatus.COMPLETED
+    assert not (harness.workspace / sentinel_name).exists()
+    assert list(harness.workspace.iterdir()) == []
+    run_dir = harness.run_dir()
+    payload = json.loads((run_dir / "result.json").read_text())
+    assert payload["status"] == "completed"
+    assert payload["final_message"] == "ASK_DENIED"
+    events = _run_events(run_dir)
+    mediation = [e for e in events if e.get("type") == "permission_mediation"]
+    write_denies = [
+        e
+        for e in mediation
+        if e.get("decision") == "deny" and e.get("requested_op") == "permission:edit"
+    ]
+    assert write_denies, "expected a write-family deny mediation event"
+    assert write_denies[0]["tool_call_id"] == "perm-call-1"
+    assert not [e for e in events if e.get("type") == "permission_violation"]
+    # The healthy mediated-deny turn keeps exactly its completed lifecycle
+    # fact: run_completed present, no run_failed.
+    assert [e for e in events if e.get("type") == "run_completed"]
+    assert not [e for e in events if e.get("type") == "run_failed"]
+
+
+def test_read_ask_is_client_mediated_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The allow half of the mediated path: a read-like ask under the read
+    # grant selects a real allow option id on the wire.
+    script = dict(HAPPY_SCRIPT)
+    script["ask_permission"] = {"kind": "read"}
+    harness = Harness(tmp_path, monkeypatch, script)
+    result = _run(harness.task())
+
+    assert result.status is AgentRunStatus.COMPLETED
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    assert payload["final_message"] == "ASK_ALLOWED"
+    events = _run_events(harness.run_dir())
+    allows = [
+        e
+        for e in events
+        if e.get("type") == "permission_mediation"
+        and e.get("decision") == "allow"
+        and e.get("requested_op") == "permission:read"
+    ]
+    assert allows, "expected an allow mediation event for the read-like ask"
+
+
+def test_registered_permission_env_reaches_spawned_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Launch binding must reach the real spawned process environment (not
+    # only serialization): the fake agent echoes the injected variable.
+    binding_value = '{"bash":"ask","edit":"ask","webfetch":"ask"}'
+    script = dict(HAPPY_SCRIPT)
+    script["echo_env"] = "OPENCODE_PERMISSION"
+    harness = Harness(tmp_path, monkeypatch, script)
+    monkeypatch.setitem(
+        profile_module._REGISTERED_PERMISSION_ENV,
+        "python-fake",
+        (("OPENCODE_PERMISSION", binding_value),),
+    )
+    result = _run(harness.task())
+
+    assert result.status is AgentRunStatus.COMPLETED
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    assert payload["final_message"] == f"ENV:{binding_value}"
+    launch_payload = json.loads((harness.run_dir() / "launch.json").read_text())
+    assert launch_payload["permission_env"] == [
+        ["OPENCODE_PERMISSION", binding_value]
+    ]

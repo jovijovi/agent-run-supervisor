@@ -222,3 +222,112 @@ def test_every_decision_emits_a_mediation_event(tmp_path: Path) -> None:
         set(payload) >= {"type", "requested_op", "decision", "reason"}
         for payload in payloads
     )
+
+
+# -- write-family completion backstop (A4-S2 grant-violation detection) ------
+
+
+def _update(update_type: str, **fields):
+    payload = {"sessionUpdate": update_type}
+    payload.update(fields)
+    return payload
+
+
+def test_write_family_completion_without_grant_flags_violation(
+    tmp_path: Path,
+) -> None:
+    bridge, _, _ = _bridge(tmp_path, capabilities=("read",))
+    assert (
+        bridge.observe_tool_update(
+            _update("tool_call", toolCallId="call-1", kind="edit", status="pending")
+        )
+        is None
+    )
+    assert (
+        bridge.observe_tool_update(
+            _update("tool_call_update", toolCallId="call-1", status="in_progress")
+        )
+        is None
+    )
+    violation = bridge.observe_tool_update(
+        _update("tool_call_update", toolCallId="call-1", status="completed")
+    )
+    assert violation is not None
+    assert violation["type"] == "permission_violation"
+    assert violation["tool_call_id"] == "call-1"
+    assert violation["kind"] == "edit"
+    assert violation["required_capability"] == "write"
+    assert bridge.grant_violation is True
+
+
+@pytest.mark.parametrize(
+    ("kind", "required"),
+    [("edit", "write"), ("delete", "delete"), ("move", "move"), ("execute", "execute")],
+)
+def test_every_write_family_kind_maps_to_its_capability(
+    tmp_path: Path, kind: str, required: str
+) -> None:
+    bridge, _, _ = _bridge(tmp_path, capabilities=("read",))
+    violation = bridge.observe_tool_update(
+        _update("tool_call", toolCallId="call-9", kind=kind, status="completed")
+    )
+    assert violation is not None
+    assert violation["required_capability"] == required
+    assert bridge.grant_violation is True
+
+
+def test_read_like_completion_never_flags(tmp_path: Path) -> None:
+    bridge, _, _ = _bridge(tmp_path, capabilities=("read",))
+    bridge.observe_tool_update(
+        _update("tool_call", toolCallId="call-2", kind="read", status="pending")
+    )
+    assert (
+        bridge.observe_tool_update(
+            _update("tool_call_update", toolCallId="call-2", status="completed")
+        )
+        is None
+    )
+    assert bridge.grant_violation is False
+
+
+def test_failed_write_family_tool_is_the_healthy_deny_shape(tmp_path: Path) -> None:
+    # A denied/errored write tool never reached its side effect; only a
+    # *completed* write-family tool without the capability is a violation.
+    bridge, _, _ = _bridge(tmp_path, capabilities=("read",))
+    bridge.observe_tool_update(
+        _update("tool_call", toolCallId="call-3", kind="edit", status="pending")
+    )
+    assert (
+        bridge.observe_tool_update(
+            _update("tool_call_update", toolCallId="call-3", status="failed")
+        )
+        is None
+    )
+    assert bridge.grant_violation is False
+
+
+def test_granted_capability_suppresses_violation(tmp_path: Path) -> None:
+    bridge, _, _ = _bridge(tmp_path, capabilities=("read", "write"))
+    assert (
+        bridge.observe_tool_update(
+            _update("tool_call", toolCallId="call-4", kind="edit", status="completed")
+        )
+        is None
+    )
+    assert bridge.grant_violation is False
+
+
+def test_completion_of_unknown_tool_id_without_kind_does_not_flag(
+    tmp_path: Path,
+) -> None:
+    # Documented residual: a completion whose kind was never observed cannot
+    # be proven write-family; the mediated ask/deny launch binding is the
+    # prevention layer for those.
+    bridge, _, _ = _bridge(tmp_path, capabilities=("read",))
+    assert (
+        bridge.observe_tool_update(
+            _update("tool_call_update", toolCallId="call-never-seen", status="completed")
+        )
+        is None
+    )
+    assert bridge.grant_violation is False
