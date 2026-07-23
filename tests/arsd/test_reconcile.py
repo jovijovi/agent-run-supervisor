@@ -252,15 +252,24 @@ def _seed_result(
     session_id: str | None = None,
 ) -> bytes:
     status_enum = AgentRunStatus(status)
+    if status_enum is AgentRunStatus.COMPLETED:
+        origin, stop_reason = "acp", "end_turn"
+        resolved_detail = detail_code
+    elif status_enum is AgentRunStatus.CANCELLED:
+        origin, stop_reason = "acp", "cancelled"
+        resolved_detail = detail_code
+    else:
+        origin, stop_reason = "supervisor", None
+        resolved_detail = detail_code
     payload = build_result_payload(
         run_id=run_id,
         status=status_enum,
-        origin="supervisor",
-        detail_code=detail_code,
+        origin=origin,
+        detail_code=resolved_detail,
         retryable=_RETRYABLE_DEFAULT[status_enum],
         exit_code=None,
         signal=None,
-        stop_reason=None,
+        stop_reason=stop_reason,
         usage=None,
         final_message="",
         truncated=False,
@@ -1599,6 +1608,7 @@ def test_r4_b1_minimal_runner_error_is_untrusted_and_refuses_startup(
 
 
 def _complete_terminal(run_dir: Path, run_id: str, status: AgentRunStatus) -> dict:
+    """Build a structurally complete payload; may still be semantically INVALID."""
     return build_result_payload(
         run_id=run_id,
         status=status,
@@ -1608,6 +1618,46 @@ def _complete_terminal(run_dir: Path, run_id: str, status: AgentRunStatus) -> di
         exit_code=None,
         signal=None,
         stop_reason=None,
+        usage=None,
+        final_message="",
+        truncated=False,
+        truncate_reason=None,
+        run_dir=run_dir,
+        raw_event_path="events.jsonl",
+    )
+
+
+def _legal_trusted_terminal(
+    run_dir: Path, run_id: str, status: AgentRunStatus
+) -> dict:
+    """Legal trusted Native terminal matching real emitter grammar."""
+    if status is AgentRunStatus.COMPLETED:
+        origin, stop_reason, detail_code = "acp", "end_turn", None
+    elif status is AgentRunStatus.CANCELLED:
+        origin, stop_reason, detail_code = "acp", "cancelled", None
+    elif status is AgentRunStatus.UNKNOWN:
+        origin, stop_reason, detail_code = (
+            "supervisor",
+            None,
+            "RECONCILED_UNKNOWN",
+        )
+    elif status is AgentRunStatus.TIMED_OUT:
+        origin, stop_reason, detail_code = "supervisor", None, None
+    else:
+        origin, stop_reason, detail_code = (
+            "supervisor",
+            None,
+            "RECONCILED_PRE_DISPATCH",
+        )
+    return build_result_payload(
+        run_id=run_id,
+        status=status,
+        origin=origin,
+        detail_code=detail_code,
+        retryable=_RETRYABLE_DEFAULT[status],
+        exit_code=None,
+        signal=None,
+        stop_reason=stop_reason,
         usage=None,
         final_message="",
         truncated=False,
@@ -1670,6 +1720,80 @@ def test_r4_b1_incomplete_or_mistyped_terminal_is_untrusted(
     assert "cli" not in str(err.value)
     assert sessions.open_session(session_id).state == STATE_QUARANTINED
     assert not (run_dir / "progress.json").exists()
+
+
+def test_r13_b2_semantically_invalid_terminal_is_invalid_and_quarantines(
+    tmp_path: Path,
+) -> None:
+    """Forged completed+supervisor+no-stop is INVALID; reconcile fences uncertainty."""
+    from agent_run_supervisor.native_acp.storage import NativeTerminalKind
+
+    reconcile = _import_reconcile()
+    root = tmp_path / "sv"
+    sessions = storage.native_session_store(root)
+    events = storage.native_event_store(root)
+    run_id = "run-semantic-invalid"
+    session_id = "sess-reuse-1"
+    _seed_session(sessions, session_id)
+    run_dir = events.create_run(run_id).run_dir
+    _seed_submission(run_dir, request_id="semantic-invalid", run_id=run_id)
+    _seed_marker(run_dir, run_id)
+    # Structurally complete but semantically forged overclaim.
+    payload = _complete_terminal(run_dir, run_id, AgentRunStatus.COMPLETED)
+    assert payload["origin"] == "supervisor"
+    assert payload["stop_reason"] is None
+    raw = json.dumps(payload).encode("utf-8")
+    (run_dir / "result.json").write_bytes(raw)
+
+    terminal = storage.read_native_terminal_result(
+        run_dir / "result.json", run_id=run_id
+    )
+    assert terminal.kind is NativeTerminalKind.INVALID
+
+    with pytest.raises(reconcile.ReconciliationError) as err:
+        reconcile.reconcile(root)
+    message = str(err.value).lower()
+    assert "untrusted" in message or "terminal" in message
+    assert "completed" not in message
+    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert not (run_dir / "progress.json").exists()
+    # First-fact preserved; no rewrite/reuse of the forged terminal.
+    assert (run_dir / "result.json").read_bytes() == raw
+
+
+def test_r13_b2_legal_trusted_terminals_remain_trusted_through_reconcile(
+    tmp_path: Path,
+) -> None:
+    """Valid emitter-shaped terminals stay TRUSTED and are not quarantined away."""
+    from agent_run_supervisor.native_acp.storage import NativeTerminalKind
+
+    reconcile = _import_reconcile()
+    root = tmp_path / "sv"
+    sessions = storage.native_session_store(root)
+    events = storage.native_event_store(root)
+    run_id = "run-semantic-legal"
+    session_id = "sess-reuse-1"
+    _seed_session(sessions, session_id)
+    run_dir = events.create_run(run_id).run_dir
+    _seed_submission(run_dir, request_id="semantic-legal", run_id=run_id)
+    # No dispatch marker: completed ACP terminal must not force quarantine.
+    payload = _legal_trusted_terminal(run_dir, run_id, AgentRunStatus.COMPLETED)
+    raw = json.dumps(payload, sort_keys=True, indent=2).encode("utf-8")
+    (run_dir / "result.json").write_bytes(raw)
+
+    terminal = storage.read_native_terminal_result(
+        run_dir / "result.json", run_id=run_id
+    )
+    assert terminal.kind is NativeTerminalKind.TRUSTED
+
+    reconcile.reconcile(root)
+    assert sessions.open_session(session_id).state == STATE_OPEN
+    assert (
+        storage.read_native_terminal_result(
+            run_dir / "result.json", run_id=run_id
+        ).kind
+        is NativeTerminalKind.TRUSTED
+    )
 
 
 def test_r5_b3_reconcile_converges_quarantine_pending_fence(

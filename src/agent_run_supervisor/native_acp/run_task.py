@@ -37,6 +37,7 @@ from agent_run_supervisor.managed_process import (
 )
 from agent_run_supervisor.redaction import RedactionReport, redact_text
 from agent_run_supervisor.result import (
+    COMPLETED_ACP_STOP_REASONS,
     MAX_FINAL_MESSAGE_BYTES,
     build_result_payload,
     enforce_native_result_ceiling,
@@ -94,11 +95,6 @@ class FinalizationObservations:
     rollback_unproven: bool = False
     # Bounded evidence writer overflow / close / consumer failure.
     evidence_pipeline_failure: bool = False
-
-
-_COMPLETED_STOP_REASONS = frozenset(
-    {"end_turn", "max_tokens", "max_turn_requests", "refusal"}
-)
 
 
 def finalize_run_state(
@@ -166,7 +162,7 @@ def _post_dispatch_finalize(
 def _status_for_stop_reason(stop_reason: str) -> AgentRunStatus:
     if stop_reason == "cancelled":
         return AgentRunStatus.CANCELLED
-    if stop_reason in _COMPLETED_STOP_REASONS:
+    if stop_reason in COMPLETED_ACP_STOP_REASONS:
         return AgentRunStatus.COMPLETED
     return AgentRunStatus.FAILED
 

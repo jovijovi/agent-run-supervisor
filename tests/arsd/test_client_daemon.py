@@ -2138,6 +2138,166 @@ def test_r12b_permanent_lifecycle_failure_holds_lease_until_unblocked(
     run_async(case())
 
 
+@pytest.mark.parametrize("mode", ("getter", "setter"))
+def test_r13_b1_handlers_descriptor_raise_cleans_lifecycle_once(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """Raising handlers getter/setter must not leak singleton lease ownership."""
+
+    async def case():
+        path = sock_path(sock_root)
+        root = supervisor_root(sock_root)
+        release_order: list[str] = []
+        lifecycle_calls = 0
+        real_acquire = arsd_main.acquire_daemon_instance_lease
+        real_shutdown = arsd_main._shutdown_and_release_lease
+
+        def tracking_acquire(supervisor_root_path):
+            lease = real_acquire(supervisor_root_path)
+            real_release = lease.release
+
+            def tracking_release():
+                release_order.append("release")
+                return real_release()
+
+            lease.release = tracking_release  # type: ignore[method-assign]
+            return lease
+
+        async def tracking_shutdown(*args, **kwargs):
+            nonlocal lifecycle_calls
+            lifecycle_calls += 1
+            return await real_shutdown(*args, **kwargs)
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", tracking_acquire)
+        monkeypatch.setattr(
+            arsd_main, "_shutdown_and_release_lease", tracking_shutdown
+        )
+
+        if mode == "getter":
+
+            class _HostileFactory:
+                @property
+                def handlers(self):
+                    raise RuntimeError(
+                        f"injected-r13-getter-raise {SECRET_SENTINEL}"
+                    )
+
+                def __call__(self, *, command, run_id, prepared_handle, submitted_at):
+                    raise AssertionError("factory must not construct a Run")
+
+        else:
+
+            class _HostileFactory:
+                def __init__(self) -> None:
+                    self._handlers = None
+
+                @property
+                def handlers(self):
+                    return self._handlers
+
+                @handlers.setter
+                def handlers(self, value) -> None:
+                    raise RuntimeError(
+                        f"injected-r13-setter-raise {SECRET_SENTINEL}"
+                    )
+
+                def __call__(self, *, command, run_id, prepared_handle, submitted_at):
+                    raise AssertionError("factory must not construct a Run")
+
+        factory = _HostileFactory()
+        with pytest.raises(arsd_main.DaemonStartupError) as err:
+            await arsd_main.serve_daemon(
+                socket_path=path,
+                supervisor_root=root,
+                policy=same_uid_policy(),
+                run_task_factory=factory,
+                cancel_wait_seconds=0.05,
+                shutdown_timeout=0.2,
+                stop_event=asyncio.Event(),
+                install_signals=False,
+            )
+        message = str(err.value)
+        assert "failed to attach run task factory" in message
+        assert SECRET_SENTINEL not in message
+        assert "injected-r13" not in message
+        assert err.value.__cause__ is None
+        assert lifecycle_calls == 1
+        assert release_order == ["release"]
+        assert not path.exists()
+        # No orphan arsd lifecycle/serve tasks after owned cleanup.
+        pending = [
+            t
+            for t in asyncio.all_tasks()
+            if t is not asyncio.current_task()
+            and not t.done()
+            and str(t.get_name()).startswith("arsd:")
+        ]
+        assert pending == []
+        # Lease must be reacquirable only after the lifecycle release.
+        lease = arsd_main.acquire_daemon_instance_lease(root)
+        lease.release()
+
+    run_async(case())
+
+
+def test_r13_b1_startup_before_handlers_still_releases_lease(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Failures before ArsdHandlers exist keep the normal outer lease release."""
+
+    async def case():
+        path = sock_path(sock_root)
+        root = supervisor_root(sock_root)
+        release_order: list[str] = []
+        lifecycle_calls = 0
+        real_acquire = arsd_main.acquire_daemon_instance_lease
+        real_shutdown = arsd_main._shutdown_and_release_lease
+
+        def tracking_acquire(supervisor_root_path):
+            lease = real_acquire(supervisor_root_path)
+            real_release = lease.release
+
+            def tracking_release():
+                release_order.append("release")
+                return real_release()
+
+            lease.release = tracking_release  # type: ignore[method-assign]
+            return lease
+
+        async def tracking_shutdown(*args, **kwargs):
+            nonlocal lifecycle_calls
+            lifecycle_calls += 1
+            return await real_shutdown(*args, **kwargs)
+
+        def failing_reconcile(_root):
+            raise arsd_main.reconcile.ReconciliationError(
+                "untrusted or corrupt terminal evidence; refusing reconciliation"
+            )
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", tracking_acquire)
+        monkeypatch.setattr(
+            arsd_main, "_shutdown_and_release_lease", tracking_shutdown
+        )
+        monkeypatch.setattr(arsd_main.reconcile, "reconcile", failing_reconcile)
+
+        with pytest.raises(arsd_main.DaemonStartupError) as err:
+            await arsd_main.serve_daemon(
+                socket_path=path,
+                supervisor_root=root,
+                policy=same_uid_policy(),
+                run_task_factory=CompletingFactory(),
+                install_signals=False,
+            )
+        assert SECRET_SENTINEL not in str(err.value)
+        assert lifecycle_calls == 0
+        assert release_order == ["release"]
+        assert not path.exists()
+        lease = arsd_main.acquire_daemon_instance_lease(root)
+        lease.release()
+
+    run_async(case())
+
+
 def test_follow_list_terminates_after_terminal_stream_exhaustion(
     sock_root: Path,
 ) -> None:

@@ -15,6 +15,7 @@ import pytest
 
 from agent_run_supervisor.exit_classifier import _RETRYABLE_DEFAULT, AgentRunStatus
 from agent_run_supervisor.result import (
+    COMPLETED_ACP_STOP_REASONS,
     build_result_payload,
     validate_native_terminal_result,
 )
@@ -68,22 +69,60 @@ def _actual_result_keys() -> set[str]:
     return set(payload.keys())
 
 
+def _legal_native_defaults(status: AgentRunStatus) -> dict:
+    """Per-status legal trusted Native shape from real emitters (not broad fixtures)."""
+    if status is AgentRunStatus.COMPLETED:
+        return {
+            "origin": "acp",
+            "stop_reason": "end_turn",
+            "detail_code": None,
+        }
+    if status is AgentRunStatus.CANCELLED:
+        return {
+            "origin": "acp",
+            "stop_reason": "cancelled",
+            "detail_code": None,
+        }
+    if status is AgentRunStatus.TIMED_OUT:
+        # Escalated-kill-after-timeout row (supervisor, no ACP stop).
+        return {
+            "origin": "supervisor",
+            "stop_reason": None,
+            "detail_code": None,
+        }
+    if status is AgentRunStatus.UNKNOWN:
+        return {
+            "origin": "supervisor",
+            "stop_reason": None,
+            "detail_code": "RECONCILED_UNKNOWN",
+        }
+    # FAILED: admission/reconcile/pre-dispatch supervisor row.
+    return {
+        "origin": "supervisor",
+        "stop_reason": None,
+        "detail_code": "REGISTRATION_FAILED",
+    }
+
+
 def _native_payload(
     status: AgentRunStatus,
     *,
     run_id: str = "run_probe",
-    origin: str = "supervisor",
+    origin: str | None = None,
     **overrides,
 ) -> dict:
+    defaults = _legal_native_defaults(status)
+    if origin is not None:
+        defaults["origin"] = origin
     payload = build_result_payload(
         run_id=run_id,
         status=status,
-        origin=origin,
-        detail_code="PROBE" if status is not AgentRunStatus.COMPLETED else None,
+        origin=defaults["origin"],
+        detail_code=defaults["detail_code"],
         retryable=_RETRYABLE_DEFAULT[status],
         exit_code=None,
         signal=None,
-        stop_reason=None,
+        stop_reason=defaults["stop_reason"],
         usage=None,
         final_message="",
         truncated=False,
@@ -113,7 +152,7 @@ def test_documented_result_keys_match_build_result_payload() -> None:
 
 
 @pytest.mark.parametrize("status", _NATIVE_STATUSES)
-def test_validate_native_terminal_accepts_all_supported_statuses(
+def test_validate_native_terminal_accepts_legal_per_status_payloads(
     status: AgentRunStatus,
 ) -> None:
     payload = _native_payload(status)
@@ -123,6 +162,56 @@ def test_validate_native_terminal_accepts_all_supported_statuses(
     assert validated is not None
     assert validated["status"] == status.value
     assert validated["retryable"] is _RETRYABLE_DEFAULT[status]
+
+
+@pytest.mark.parametrize("stop_reason", sorted(COMPLETED_ACP_STOP_REASONS))
+def test_validate_native_terminal_accepts_each_completed_acp_stop_reason(
+    stop_reason: str,
+) -> None:
+    payload = _native_payload(AgentRunStatus.COMPLETED, stop_reason=stop_reason)
+    assert validate_native_terminal_result(payload, run_id="run_probe") is not None
+
+
+def test_validate_native_terminal_accepts_legal_emitter_variants() -> None:
+    # timed_out + ACP stop (supervisor timed out after ACP terminal).
+    assert (
+        validate_native_terminal_result(
+            _native_payload(
+                AgentRunStatus.TIMED_OUT,
+                origin="acp",
+                stop_reason="end_turn",
+                detail_code=None,
+            ),
+            run_id="run_probe",
+        )
+        is not None
+    )
+    # failed + ACP stop (non-completed / permission path).
+    assert (
+        validate_native_terminal_result(
+            _native_payload(
+                AgentRunStatus.FAILED,
+                origin="acp",
+                stop_reason="end_turn",
+                detail_code=None,
+            ),
+            run_id="run_probe",
+        )
+        is not None
+    )
+    # Emergency-failed with supervisor origin + ACP stop evidence.
+    assert (
+        validate_native_terminal_result(
+            _native_payload(
+                AgentRunStatus.FAILED,
+                origin="supervisor",
+                stop_reason="end_turn",
+                detail_code="EMERGENCY_FINALIZE",
+            ),
+            run_id="run_probe",
+        )
+        is not None
+    )
 
 
 def test_validate_native_terminal_rejects_runner_error_compat_status() -> None:
@@ -161,6 +250,9 @@ def test_validate_native_terminal_rejects_invalid_origin_and_error_code_rules() 
     payload["error_code"] = None
     assert validate_native_terminal_result(payload, run_id="run_probe") is None
     payload = _native_payload(AgentRunStatus.FAILED)
+    payload["error_code"] = "TIMED_OUT"  # wrong status-derived code
+    assert validate_native_terminal_result(payload, run_id="run_probe") is None
+    payload = _native_payload(AgentRunStatus.FAILED)
     payload["run_id"] = "other"
     assert validate_native_terminal_result(payload, run_id="run_probe") is None
 
@@ -184,12 +276,132 @@ def test_r4_residual_origin_malformed_types_never_raise(
     """Unhashable/malformed origin must return None — never TypeError."""
     payload = _native_payload(AgentRunStatus.FAILED, origin="supervisor")
     payload["origin"] = origin
+    if origin == "acp":
+        # ACP origin requires non-null stop evidence for a trusted failed row.
+        payload["stop_reason"] = "end_turn"
     validated = validate_native_terminal_result(payload, run_id="run_probe")
     if trusted:
         assert validated is not None
         assert validated["origin"] == origin
     else:
         assert validated is None
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        # completed/cancelled forged with supervisor + no stop
+        {
+            "status": AgentRunStatus.COMPLETED,
+            "origin": "supervisor",
+            "stop_reason": None,
+            "detail_code": None,
+            "error_code": None,
+        },
+        {
+            "status": AgentRunStatus.CANCELLED,
+            "origin": "supervisor",
+            "stop_reason": None,
+            "detail_code": None,
+            "error_code": "CANCELLED",
+        },
+        # ACP origin without stop reason
+        {
+            "status": AgentRunStatus.FAILED,
+            "origin": "acp",
+            "stop_reason": None,
+            "detail_code": None,
+            "error_code": "FAILED",
+        },
+        {
+            "status": AgentRunStatus.TIMED_OUT,
+            "origin": "acp",
+            "stop_reason": None,
+            "detail_code": None,
+            "error_code": "TIMED_OUT",
+        },
+        # completed without completed-class stop / cancelled mismatch
+        {
+            "status": AgentRunStatus.COMPLETED,
+            "origin": "acp",
+            "stop_reason": "cancelled",
+            "detail_code": None,
+            "error_code": None,
+        },
+        {
+            "status": AgentRunStatus.COMPLETED,
+            "origin": "acp",
+            "stop_reason": "not_a_stop",
+            "detail_code": None,
+            "error_code": None,
+        },
+        {
+            "status": AgentRunStatus.CANCELLED,
+            "origin": "acp",
+            "stop_reason": "end_turn",
+            "detail_code": None,
+            "error_code": "CANCELLED",
+        },
+        # unknown requires supervisor + no stop
+        {
+            "status": AgentRunStatus.UNKNOWN,
+            "origin": "acp",
+            "stop_reason": "end_turn",
+            "detail_code": None,
+            "error_code": "UNKNOWN",
+        },
+        {
+            "status": AgentRunStatus.UNKNOWN,
+            "origin": "supervisor",
+            "stop_reason": "end_turn",
+            "detail_code": "EMERGENCY_FINALIZE",
+            "error_code": "UNKNOWN",
+        },
+        # supervisor + stop only legal for emergency-failed
+        {
+            "status": AgentRunStatus.FAILED,
+            "origin": "supervisor",
+            "stop_reason": "end_turn",
+            "detail_code": "REGISTRATION_FAILED",
+            "error_code": "FAILED",
+        },
+        {
+            "status": AgentRunStatus.TIMED_OUT,
+            "origin": "supervisor",
+            "stop_reason": "end_turn",
+            "detail_code": "EMERGENCY_FINALIZE",
+            "error_code": "TIMED_OUT",
+        },
+        # arbitrary non-null error code for non-completed
+        {
+            "status": AgentRunStatus.FAILED,
+            "origin": "supervisor",
+            "stop_reason": None,
+            "detail_code": "REGISTRATION_FAILED",
+            "error_code": "RUNNER_ERROR",
+        },
+        {
+            "status": AgentRunStatus.TIMED_OUT,
+            "origin": "supervisor",
+            "stop_reason": None,
+            "detail_code": None,
+            "error_code": "FAILED",
+        },
+    ],
+)
+def test_r13_b2_hostile_status_origin_stop_error_detail_never_trusted(
+    hostile: dict,
+) -> None:
+    """Cross-product incoherence fails closed — None, never raise/echo."""
+    status = hostile["status"]
+    payload = _native_payload(status)
+    payload["origin"] = hostile["origin"]
+    payload["stop_reason"] = hostile["stop_reason"]
+    payload["detail_code"] = hostile["detail_code"]
+    payload["error_code"] = hostile["error_code"]
+    # Canary in an unused extension must never surface via exceptions.
+    payload["hostile_canary"] = "sk-live-" + "LEAKCANARY-grammar"
+    assert validate_native_terminal_result(payload, run_id="run_probe") is None
 
 
 def test_r5_b1_validate_rejects_over_exact_serialized_ceiling() -> None:

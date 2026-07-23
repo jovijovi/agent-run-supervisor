@@ -490,10 +490,19 @@ async def serve_daemon(
         else:
             handler_kwargs["supervisor_root"] = root
         arsd_handlers = handlers.ArsdHandlers(**handler_kwargs)
-        if run_task_factory is not None and hasattr(run_task_factory, "handlers"):
-            run_task_factory.handlers = arsd_handlers
-
         try:
+            # Descriptor lookup/setter and server construction are inside the
+            # lifecycle-owning try: a raising handlers property must still run
+            # close-admission/drain/idle/release exactly once.
+            if run_task_factory is not None:
+                try:
+                    if hasattr(run_task_factory, "handlers"):
+                        run_task_factory.handlers = arsd_handlers
+                except Exception:
+                    raise DaemonStartupError(
+                        "failed to attach run task factory"
+                    ) from None
+
             srv = server.ArsdServer(
                 socket_path=path,
                 policy=policy,
@@ -532,8 +541,9 @@ async def serve_daemon(
                         loop.remove_signal_handler(sig)
         finally:
             # Fail-closed: once handlers/registry exist, every exit path —
-            # including cancellation during stop wait — owns one shutdown
-            # lifecycle before lease release. Timeout cannot bypass it.
+            # including descriptor attach failure, cancellation during stop
+            # wait — owns one shutdown lifecycle before lease release.
+            # Timeout cannot bypass it.
             await _shutdown_and_release_lease(
                 srv,
                 arsd_handlers,

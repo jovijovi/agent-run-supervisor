@@ -204,6 +204,13 @@ def _default_error_code(status: AgentRunStatus) -> str | None:
     return _ERROR_CODE_FOR_STATUS.get(status)
 
 
+# Completed-class ACP stop reasons (Native finalization table authority).
+# Consumed by RunTask and trusted Native terminal validation — single source.
+COMPLETED_ACP_STOP_REASONS = frozenset(
+    {"end_turn", "max_tokens", "max_turn_requests", "refusal"}
+)
+_EMERGENCY_FINALIZE_DETAIL = "EMERGENCY_FINALIZE"
+
 # Native ACP terminal vocabulary (PRD R5). Compat/acpx statuses are never trusted here.
 _NATIVE_TERMINAL_STATUSES = frozenset(
     {
@@ -260,10 +267,12 @@ def validate_native_terminal_result(
     """Validate a persisted Native ACP terminal ``result.json`` object.
 
     Requires the complete base shape emitted by :func:`build_result_payload`,
-    exact ``run_id``, supported Native statuses only, exact retryability, and
-    strict types (``bool`` is not ``int``). Optional Native extension fields may
-    remain. Returns the validated payload, or ``None`` when evidence is
-    untrusted. Fail-closed: never raises with raw field values.
+    exact ``run_id``, supported Native statuses only, exact status-derived
+    ``error_code``, exact retryability, trusted status/origin/stop/detail
+    grammar from Native emitters, and strict types (``bool`` is not ``int``).
+    Optional Native extension fields may remain. Returns the validated
+    payload, or ``None`` when evidence is untrusted. Fail-closed: never
+    raises with raw field values.
     """
     try:
         return _validate_native_terminal_result_inner(payload, run_id=run_id)
@@ -299,18 +308,20 @@ def _validate_native_terminal_result_inner(
     if not isinstance(origin, str) or origin not in _NATIVE_ORIGINS:
         return None
     error_code = payload.get("error_code")
-    if status is AgentRunStatus.COMPLETED:
-        if error_code is not None:
-            return None
-    elif not isinstance(error_code, str):
+    # Trusted Native rows use the exact status-derived code (None only for
+    # completed). Arbitrary non-null codes for non-completed statuses are
+    # untrusted — never echo the hostile value.
+    if error_code != _default_error_code(status):
         return None
-    if not _is_optional_str(payload.get("detail_code")):
+    detail_code = payload.get("detail_code")
+    if not _is_optional_str(detail_code):
         return None
     if not _is_optional_int(payload.get("acpx_exit_code")):
         return None
     if not _is_optional_int(payload.get("signal")):
         return None
-    if not _is_optional_str(payload.get("stop_reason")):
+    stop_reason = payload.get("stop_reason")
+    if not _is_optional_str(stop_reason):
         return None
     if not _is_optional_dict(payload.get("usage")):
         return None
@@ -343,6 +354,13 @@ def _validate_native_terminal_result_inner(
             not isinstance(reason, str) or reason not in ALLOWED_FAILURE_REASONS
         ):
             return None
+    if not _native_terminal_semantic_grammar_ok(
+        status=status,
+        origin=origin,
+        stop_reason=stop_reason,
+        detail_code=detail_code,
+    ):
+        return None
     # Exact serialized ceiling: a terminal that cannot be framed/queried is
     # untrusted evidence (fail closed).
     try:
@@ -351,3 +369,48 @@ def _validate_native_terminal_result_inner(
     except (TypeError, ValueError, OverflowError, RecursionError):
         return None
     return payload
+
+
+def _native_terminal_semantic_grammar_ok(
+    *,
+    status: AgentRunStatus,
+    origin: str,
+    stop_reason: str | None,
+    detail_code: str | None,
+) -> bool:
+    """Exact trusted Native status/origin/stop/detail grammar from emitters.
+
+    Derived from RunTask finalization, emergency finalize, admission
+    registration-failure, and reconcile durable rows — not generic
+    ``build_result_payload`` compatibility fixtures.
+    """
+    # origin=acp always requires ACP stop evidence.
+    if origin == "acp" and stop_reason is None:
+        return False
+
+    if status is AgentRunStatus.COMPLETED:
+        return (
+            origin == "acp" and stop_reason in COMPLETED_ACP_STOP_REASONS
+        )
+    if status is AgentRunStatus.CANCELLED:
+        return origin == "acp" and stop_reason == "cancelled"
+    if status is AgentRunStatus.UNKNOWN:
+        return origin == "supervisor" and stop_reason is None
+    if status is AgentRunStatus.TIMED_OUT:
+        if origin == "acp":
+            return stop_reason is not None
+        # Escalated-kill-after-timeout: supervisor, no ACP stop.
+        return origin == "supervisor" and stop_reason is None
+    if status is AgentRunStatus.FAILED:
+        if origin == "acp":
+            # Permission-violation / non-completed ACP stop / emergency path
+            # may carry any non-null stop reason including completed-class.
+            return stop_reason is not None
+        if origin != "supervisor":
+            return False
+        if stop_reason is None:
+            # Pre-dispatch, admission, reconcile, child-exit, evidence, etc.
+            return True
+        # Supervisor + non-null ACP stop: only the emergency-failed shape.
+        return detail_code == _EMERGENCY_FINALIZE_DETAIL
+    return False
