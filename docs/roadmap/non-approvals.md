@@ -2,17 +2,24 @@
 title: "ARS vNext Current Explicit Non-Approvals"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-21
+last_validated_at: 2026-07-23
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/non-approvals.md"
 ---
 # ARS vNext Current Explicit Non-Approvals
 
-The vNext authority reset is documentation-only. It does not approve:
+The merged A1 `arsd` source/default-closed foundation does not approve further work. This
+document does not approve:
 
-- Stage 0/1 C1–C10 source, dependency, lock, test, or CI implementation;
-- creation of an implementation branch/worktree before the active plan's explicit approval;
-- push, PR creation, merge, release tag, GitHub Release, PyPI publication, or CHANGELOG release work;
-- Stage 2 `arsd` source, UDS service enablement, caller UID policy activation, cgroup/service harness or deployment;
+- any source expansion or repair beyond merged A1 `arsd` scope, including source, test, script,
+  dependency, lockfile, `pyproject.toml`, or CI/workflow changes;
+- A2/G12 policy ownership or exact real UID→principal/owner/namespace mappings, including any
+  production caller-policy/configuration value or activation;
+- A3 user-service/cgroup harness installation, activation, or execution;
+- A4 real external-AGENT S1–S5 acceptance, including use of real credentials;
+- A5 production/default-on enablement, production config writes, deployment, or live traffic;
+- follow-on source work and Git/GitHub side effects, including commits, pushes, PR creation,
+  merge, or other GitHub mutation, without separate operator authorization;
+- release metadata, release tag, GitHub Release, PyPI publication, or CHANGELOG release work;
 - Sachima `ArsdBackend`, supervisor pin changes, Gateway/IM/Feishu behavior, delivery, automatic replies, or live/default-on wiring;
 - public ingress, TCP/root service, distributed scheduling, multi-tenant control plane, participant UI, `@all`, or agent-to-agent auto-routing;
 - arbitrary executable/command/argv/env/JSON/config/credential passthrough;
