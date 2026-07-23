@@ -1903,6 +1903,8 @@ def test_r12b_lifecycle_ordinary_failure_retries_before_lease_release(
         stop = asyncio.Event()
         release_order: list[str] = []
         idle_calls: list[float] = []
+        at_second_idle = asyncio.Event()
+        release_second_idle = asyncio.Event()
         factory = PendingFactory()
         real_acquire = arsd_main.acquire_daemon_instance_lease
 
@@ -1940,34 +1942,51 @@ def test_r12b_lifecycle_ordinary_failure_retries_before_lease_release(
             idle_calls.append(time.monotonic())
             if len(idle_calls) == 1:
                 raise RuntimeError("injected-r12b-ordinary-lifecycle-failure")
+            # The real idle wait returns without suspending on an empty
+            # registry, so the retry could otherwise complete and release the
+            # lease before this test task wakes. Hold the retry attempt at a
+            # seam until the mid-flight assertions have run.
+            at_second_idle.set()
+            await release_second_idle.wait()
             return await real_idle()
 
         registry.wait_until_idle = one_shot_fail_idle  # type: ignore[method-assign]
 
         with caplog.at_level("ERROR", logger="agent_run_supervisor.arsd"):
             stop.set()
-            deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline and len(idle_calls) < 2:
-                await asyncio.sleep(0.01)
-            assert len(idle_calls) >= 2
-            assert release_order == []
-            assert not serve_task.done()
-            assert registry.admission_open is False
-            gap = idle_calls[1] - idle_calls[0]
-            assert gap + 1e-3 >= arsd_main._SHUTDOWN_LIFECYCLE_RETRY_DELAY
-            assert any(
-                arsd_main._SHUTDOWN_LIFECYCLE_FAIL_LOG in rec.message
-                for rec in caplog.records
-            )
-            assert "injected-r12b-ordinary-lifecycle-failure" not in caplog.text
-            assert SECRET_SENTINEL not in caplog.text
+            try:
+                await asyncio.wait_for(at_second_idle.wait(), 5.0)
+                # Second idle attempt is provably in progress (held at the
+                # seam), so these observations cannot race a legal completion.
+                assert len(idle_calls) == 2
+                assert release_order == []
+                assert not serve_task.done()
+                assert registry.admission_open is False
+                gap = idle_calls[1] - idle_calls[0]
+                assert gap + 1e-3 >= arsd_main._SHUTDOWN_LIFECYCLE_RETRY_DELAY
+                assert any(
+                    arsd_main._SHUTDOWN_LIFECYCLE_FAIL_LOG in rec.message
+                    for rec in caplog.records
+                )
+                assert "injected-r12b-ordinary-lifecycle-failure" not in caplog.text
+                assert SECRET_SENTINEL not in caplog.text
 
-            with pytest.raises(arsd_main.DaemonStartupError) as held:
-                arsd_main.acquire_daemon_instance_lease(root)
-            held_msg = str(held.value).lower()
-            assert "already" in held_msg or "lease" in held_msg or "lock" in held_msg
+                with pytest.raises(arsd_main.DaemonStartupError) as held:
+                    arsd_main.acquire_daemon_instance_lease(root)
+                held_msg = str(held.value).lower()
+                assert (
+                    "already" in held_msg
+                    or "lease" in held_msg
+                    or "lock" in held_msg
+                )
+            finally:
+                # Always unblock the held lifecycle and join the daemon task,
+                # so a failed mid-flight assertion cannot orphan serve_task in
+                # loop shutdown; the bare finally re-raises that original
+                # assertion failure once the join succeeds.
+                release_second_idle.set()
+                rc = await asyncio.wait_for(serve_task, 2.0)
 
-            rc = await asyncio.wait_for(serve_task, 2.0)
             assert rc == 0
             assert release_order == ["release"]
 
