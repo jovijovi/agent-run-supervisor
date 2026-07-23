@@ -391,6 +391,43 @@ def test_launch_serialization_carries_slot_names_never_values(
     assert isinstance(launch, ResolvedLaunchSpec)
 
 
+def test_launch_carries_registered_opencode_permission_mediation_env(
+    tmp_path: Path,
+) -> None:
+    # A4-S2 repair: admission must bind the OpenCode launch to client-mediated
+    # permission asks; the binding is registered supervisor policy, never
+    # caller input, and it is durable launch evidence (launch.json).
+    assembler = RunSpecAssembler(_request())
+    assembler.resolve_profile(DEFAULT_REGISTRY)
+    assembler.bind_workspace(root=tmp_path)
+    launch = assembler.resolve_launch()
+    expected = (
+        ("OPENCODE_PERMISSION", '{"bash":"ask","edit":"ask","webfetch":"ask"}'),
+    )
+    assert launch.permission_env == expected
+    payload = launch.to_dict()
+    assert payload["permission_env"] == [list(pair) for pair in expected]
+
+
+def test_launch_hash_binds_permission_env(tmp_path: Path) -> None:
+    def _launch(permission_env) -> ResolvedLaunchSpec:
+        return ResolvedLaunchSpec(
+            executable="/registered/agent",
+            argv=("/registered/agent", "acp"),
+            env_allowlist=("HOME", "PATH"),
+            credential_refs=(),
+            profile_id="synthetic-agent-1.0",
+            profile_revision=1,
+            profile_hash="0" * 64,
+            config_schema_hash="1" * 64,
+            permission_env=permission_env,
+        )
+
+    bound = _launch((("OPENCODE_PERMISSION", '{"edit":"ask"}'),))
+    unbound = _launch(())
+    assert bound.launch_hash() != unbound.launch_hash()
+
+
 # -- effective state --------------------------------------------------------
 
 

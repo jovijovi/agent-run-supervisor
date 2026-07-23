@@ -18,7 +18,12 @@ from typing import Any, Mapping
 from agent_run_supervisor.process_liveness import ProcessIdentity
 from agent_run_supervisor.role import PERMISSION_KINDS
 
-from .profile import AgentProfile, ProfileRegistry, resolve_registered_executable
+from .profile import (
+    AgentProfile,
+    ProfileRegistry,
+    resolve_registered_executable,
+    resolve_registered_permission_env,
+)
 
 SPEC_SCHEMA_VERSION = 1
 
@@ -253,7 +258,13 @@ def resolve_workspace_binding(*, root: Path, cwd: str | None = None) -> Workspac
 
 @dataclass(frozen=True)
 class ResolvedLaunchSpec:
-    """Controlled launch material: fixed argv, slot names only, stdio."""
+    """Controlled launch material: fixed argv, slot names only, stdio.
+
+    ``permission_env`` carries the registered agent-side permission mediation
+    binding (name/value pairs injected at spawn): supervisor policy resolved
+    from the closed profile registry, never caller input and never a
+    credential value — serialized here as durable launch evidence.
+    """
 
     executable: str
     argv: tuple[str, ...]
@@ -263,6 +274,7 @@ class ResolvedLaunchSpec:
     profile_revision: int
     profile_hash: str
     config_schema_hash: str
+    permission_env: tuple[tuple[str, str], ...] = ()
     transport: str = "stdio"
 
     def to_dict(self) -> dict[str, Any]:
@@ -275,6 +287,7 @@ class ResolvedLaunchSpec:
             "profile_revision": self.profile_revision,
             "profile_hash": self.profile_hash,
             "config_schema_hash": self.config_schema_hash,
+            "permission_env": [list(pair) for pair in self.permission_env],
             "transport": self.transport,
         }
 
@@ -496,6 +509,9 @@ class RunSpecAssembler:
             profile_revision=self._profile.revision,
             profile_hash=self._profile.profile_hash(),
             config_schema_hash=self._profile.config_schema_hash(),
+            permission_env=resolve_registered_permission_env(
+                self._profile.executable_key
+            ),
         )
         return self._launch
 

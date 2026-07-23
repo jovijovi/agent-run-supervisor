@@ -720,7 +720,14 @@ class RunTask:
             return
         ctx.stop_reason = outcome.stop_reason
         ctx.usage = sanitize_usage(outcome.usage)
-        if ctx.stop_reason is not None:
+        # The durable completed lifecycle fact is recorded only when this ACP
+        # terminal can actually finalize completed permission-wise: a known
+        # permission violation already forces FAILED, and a completed→failed
+        # stream would contradict the terminal (finalization emits run_failed).
+        permission_violated = ctx.bridge is not None and (
+            ctx.bridge.turn_failed or ctx.bridge.grant_violation
+        )
+        if ctx.stop_reason is not None and not permission_violated:
             self._emit(
                 ctx, {"type": "run_completed", "stop_reason": ctx.stop_reason}
             )
@@ -769,6 +776,10 @@ class RunTask:
                     if isinstance(text, str):
                         ctx.final_message_acc.ingest(text)
                 self._emit(ctx, normalizer.normalize_update(update))
+                if ctx.bridge is not None:
+                    violation = ctx.bridge.observe_tool_update(update)
+                    if violation is not None:
+                        self._emit(ctx, violation)
             except Exception as exc:
                 if ctx.pipeline_error is None:
                     ctx.pipeline_error = exc
@@ -834,11 +845,15 @@ class RunTask:
     def _spawn_env(self, launch) -> dict[str, str]:
         # Credential/env values enter only here, at spawn, from the allowlist
         # slot names — never through spec/launch serialization.
-        return {
+        env = {
             name: os.environ[name]
             for name in launch.env_allowlist
             if name in os.environ
         }
+        # Registered permission-mediation binding: supervisor policy wins
+        # over any same-named allowlist passthrough.
+        env.update(dict(launch.permission_env))
+        return env
 
     # -- finalization ------------------------------------------------------
 
@@ -1265,6 +1280,14 @@ class RunTask:
         detail_code: str | None = None
         if ctx.pre_dispatch is not None:
             detail_code = ctx.pre_dispatch.detail_code
+        elif (
+            ctx.bridge is not None
+            and ctx.bridge.grant_violation
+            and status is AgentRunStatus.FAILED
+        ):
+            # Stable A4-S2 classification: a write-family tool completed
+            # without the required mediation under a non-write grant.
+            detail_code = "PERMISSION_VIOLATION"
         elif ctx.pipeline_error is not None and status is AgentRunStatus.FAILED:
             detail_code = "EVIDENCE_PIPELINE"
         elif ctx.supervisor_cancelled:
@@ -1407,7 +1430,8 @@ class RunTask:
             observation_interrupted=ctx.observation_interrupted,
             escalated_kill_after_dispatch=ctx.escalated_kill,
             permission_violation=(
-                ctx.bridge.turn_failed if ctx.bridge is not None else False
+                ctx.bridge is not None
+                and (ctx.bridge.turn_failed or ctx.bridge.grant_violation)
             ),
             rollback_unproven=ctx.rollback_unproven,
             evidence_pipeline_failure=ctx.pipeline_error is not None,

@@ -34,6 +34,19 @@ _REGISTERED_KINDS = frozenset(
     }
 )
 
+# Write-family ACP tool kinds and the grant capability each one requires. A
+# write-family tool call that reaches ``completed`` without that capability in
+# the frozen grant is a grant violation: the agent performed a side effect the
+# grant never allowed and no mediation could have legitimately approved. This
+# is the honest fail-closed backstop behind the client-mediated ask/deny
+# launch binding — detection, never prevention (the tool already ran).
+_WRITE_FAMILY_REQUIRED_CAPABILITY: dict[str, str] = {
+    "edit": "write",
+    "delete": "delete",
+    "move": "move",
+    "execute": "execute",
+}
+
 
 @dataclass(frozen=True)
 class MediationEvent:
@@ -73,6 +86,11 @@ class PermissionBridge:
         self._evidence_sink = evidence_sink
         self.turn_failed = False
         self.turn_failure_reason: str | None = None
+        # A4-S2 backstop state: a write-family tool completed without the
+        # grant capability that could ever have allowed it.
+        self.grant_violation = False
+        self.grant_violation_reason: str | None = None
+        self._tool_kinds: dict[str, str] = {}
 
     # -- initialize-time declaration ---------------------------------------
 
@@ -210,6 +228,52 @@ class PermissionBridge:
             tool_call_id=tool_call_id,
             options=options,
         )
+
+    # -- write-family completion backstop ------------------------------------
+
+    def observe_tool_update(
+        self, update: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        """Watch raw session updates for write-family tool completions the
+        frozen grant never allowed (A4-S2 backstop).
+
+        Kind is correlated by ``toolCallId`` because completed updates may
+        omit it (real OpenCode does). Returns a durable ``permission_violation``
+        event dict on detection, else ``None``. A completion whose kind was
+        never observed cannot be proven write-family and does not flag — the
+        mediated ask/deny launch binding is the prevention layer.
+        """
+        update_type = update.get("sessionUpdate")
+        if update_type not in ("tool_call", "tool_call_update"):
+            return None
+        tool_call_id = update.get("toolCallId")
+        kind = update.get("kind")
+        if isinstance(tool_call_id, str) and isinstance(kind, str):
+            self._tool_kinds[tool_call_id] = kind
+        if update.get("status") != "completed":
+            return None
+        if not isinstance(kind, str) and isinstance(tool_call_id, str):
+            kind = self._tool_kinds.get(tool_call_id)
+        required = (
+            _WRITE_FAMILY_REQUIRED_CAPABILITY.get(kind)
+            if isinstance(kind, str)
+            else None
+        )
+        if required is None or required in self._capabilities:
+            return None
+        self.grant_violation = True
+        reason = (
+            f"write-family tool kind {kind!r} completed without the required "
+            f"{required!r} capability in the frozen grant"
+        )
+        self.grant_violation_reason = reason
+        return {
+            "type": "permission_violation",
+            "tool_call_id": tool_call_id if isinstance(tool_call_id, str) else None,
+            "kind": kind,
+            "required_capability": required,
+            "reason": reason,
+        }
 
     def _deny_with_option(
         self,

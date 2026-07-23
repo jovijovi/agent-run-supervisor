@@ -26,6 +26,15 @@ Script keys (all optional):
 - ``fs_read_path``: during the prompt, send a client-bound
   ``fs/read_text_file`` request for that path and echo the outcome in the
   final message (``FS_CONTENT:<text>`` on success, ``FS_DENIED`` on error).
+- ``prompt_tool_updates``: raw session-update dicts notified during the
+  prompt before the final message (models agent-owned tool activity that
+  never asked for permission — the A4-S2 rogue-write shape).
+- ``ask_permission``: ``{"kind":..., "path":..., "content":...}`` — during
+  the prompt, send ``session/request_permission`` with OpenCode-shaped
+  options (once/always/reject); on an allow outcome write ``path`` and
+  answer ``ASK_ALLOWED``, otherwise write nothing and answer ``ASK_DENIED``.
+- ``echo_env``: final message becomes ``ENV:<value>`` of that environment
+  variable (``ENV_MISSING`` when unset) — proves spawn-env injection.
 """
 
 from __future__ import annotations
@@ -80,6 +89,7 @@ class FakeAgent:
         self.options = {option["id"]: dict(option) for option in initial}
         self.pending_prompt_id: Any = None
         self.pending_fs_prompt_id: Any = None
+        self.pending_permission_prompt_id: Any = None
         self.update_session_id: str | None = None
         self.remembered: list[str] = []
 
@@ -112,6 +122,11 @@ class FakeAgent:
         if method is None:
             if message.get("id") == "fs-req-1" and self.pending_fs_prompt_id is not None:
                 self._on_fs_response(message)
+            elif (
+                message.get("id") == "perm-req-1"
+                and self.pending_permission_prompt_id is not None
+            ):
+                self._on_permission_response(message)
             return
         self._trace(method)
         params = message.get("params") or {}
@@ -201,6 +216,33 @@ class FakeAgent:
             text = block.get("text")
             if isinstance(text, str):
                 self.remembered.append(text)
+        for update in self.script.get("prompt_tool_updates", []):
+            self._notify_update(update)
+        if self.script.get("ask_permission"):
+            ask = self.script["ask_permission"]
+            self.pending_permission_prompt_id = request_id
+            _emit(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "perm-req-1",
+                    "method": "session/request_permission",
+                    "params": {
+                        "sessionId": self.update_session_id or self.session_id,
+                        "toolCall": {
+                            "toolCallId": "perm-call-1",
+                            "title": "Scripted permission ask",
+                            "kind": ask.get("kind", "edit"),
+                            "status": "pending",
+                        },
+                        "options": [
+                            {"optionId": "once", "name": "Allow once", "kind": "allow_once"},
+                            {"optionId": "always", "name": "Always allow", "kind": "allow_always"},
+                            {"optionId": "reject", "name": "Reject", "kind": "reject_once"},
+                        ],
+                    },
+                }
+            )
+            return
         if self.script.get("fs_read_path"):
             self.pending_fs_prompt_id = request_id
             _emit(
@@ -219,6 +261,9 @@ class FakeAgent:
             self.pending_prompt_id = request_id
             return
         message = self.script.get("final_message", "FAKE_AGENT_OK")
+        if self.script.get("echo_env"):
+            value = os.environ.get(self.script["echo_env"])
+            message = f"ENV:{value}" if value is not None else "ENV_MISSING"
         if self.script.get("nonce_memory"):
             message = " ".join(self.remembered[:-1]) or message
         self._notify_update(
@@ -243,6 +288,37 @@ class FakeAgent:
             text = f"FS_CONTENT:{result['content']}"
         else:
             text = "FS_DENIED"
+        self._notify_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": text},
+            }
+        )
+        _result(
+            prompt_id,
+            {
+                "stopReason": "end_turn",
+                "usage": {"totalTokens": 30, "inputTokens": 20, "outputTokens": 10},
+            },
+        )
+
+    def _on_permission_response(self, message: dict[str, Any]) -> None:
+        prompt_id = self.pending_permission_prompt_id
+        self.pending_permission_prompt_id = None
+        ask = self.script.get("ask_permission") or {}
+        result = message.get("result") or {}
+        outcome = result.get("outcome") or {}
+        allowed = outcome.get("outcome") == "selected" and outcome.get(
+            "optionId"
+        ) in ("once", "always")
+        if allowed:
+            path = ask.get("path")
+            if path:
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(ask.get("content", "DENIED_CANARY"))
+            text = "ASK_ALLOWED"
+        else:
+            text = "ASK_DENIED"
         self._notify_update(
             {
                 "sessionUpdate": "agent_message_chunk",
