@@ -2,7 +2,7 @@
 title: "ARS vNext Feature and Capability Tracker"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-22
+last_validated_at: 2026-07-23
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/features.md"
 ---
 # ARS vNext Feature and Capability Tracker
@@ -20,9 +20,9 @@ Status legend: **Done** · **Planned** · **Parked** · **Non-goal**
 | F-NATIVE-ACP-001 | Native ACP exact-config core through ars-core | Required | Done | PRD R2–R3; archived plan C1–C10; real B-grade acceptance incl. registered-second-model switch | merged; production claim only via Stage 2 |
 | F-VNEXT-SESSION-001 | process-per-Run, session/load continuity, cross-Run switching | Required | Done | PRD R4; archived plan C6/C9/C10; real nonce continuity + exact switch/rollback | merged; in the 0.2.0 source line |
 | F-VNEXT-STATE-001 | unknown/quarantined/retryable=false, markers, no replay | Required | Done | PRD R5; archived plan C2/C8; terminal-table + write-once + cancellation suites | merged; in the 0.2.0 source line |
-| F-VNEXT-PERMISSION-001 | frozen grant, default-deny mediation, real canary | Required | Planned | PRD R7; archived plan C7; Stage-1 default-deny bridge done at L1/L2 | Stage 2 real denied-action canary |
+| F-VNEXT-PERMISSION-001 | frozen grant, default-deny mediation, real canary | Required | Planned | PRD R7; archived plan C7; Stage-1 default-deny bridge done at L1/L2 | A4 real denied-action canary evidence |
 | F-VNEXT-EVIDENCE-001 | isolated Native stores and bounded runtime ledger | Required | Done | PRD R8–R9; archived plan C6–C8; poisoned-legacy isolation + bounded-writer suites | merged; in the 0.2.0 source line |
-| F-ARSD-001 | local UDS production ingress, ownership, reconciliation, cgroup containment | Required | Planned | PRD R6/R10; architecture §§1/6; technical §§1.3/9 | Stage 2 authorization, G12, S1–S5 |
+| F-ARSD-001 | local UDS production ingress, ownership, reconciliation, cgroup containment | Required | Planned | PRD R6/R10; A1 source/default-closed foundation (Slices 1–5 and 6a) merged in `main` | A2 G12 policy owner + exact real UID mappings; A3 user-service/cgroup activation/execution; A4 real external-AGENT S1–S5; A5 production/default-on enablement |
 | F-SACHIMA-ARSD-001 | Sachima socket backend | Later integration | Parked | GOAL/PRD stage boundary | only after ARS production acceptance |
 | F-NONGOAL-001 | public/root/TCP/multi-tenant/business-orchestration surfaces | Non-goal | Non-goal | GOAL; PRD §6; non-approvals | separate product decision only |
 
