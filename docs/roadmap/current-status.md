@@ -11,7 +11,7 @@ supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 
 ```text
 base_branch: main
-active_plan: docs/plans/active/2026-07-22-vnext-stage2-arsd-production-ingress.md
+active_plan: none
 ```
 
 ## Authority chain
@@ -30,10 +30,10 @@ and cannot direct new work.
 - **Product target:** one local supervision plane: `trusted caller → arsd UDS → ars-core/Native ACP → registered external AGENT`.
 - **Released baseline:** v0.1.7 acpx behavior remains compatibility-only; it is not the new-development architecture.
 - **Stage 0/1:** the Native ACP core is closed and remains the compatibility baseline for the vNext supervision architecture.
-- **Stage 2 — `arsd`:** the A1 source/default-closed foundation is merged into `main`. This establishes source-level, fail-closed ingress foundations only; it does not enable production or default-on operation.
-- **Open Stage 2 approvals:** A2/G12 caller UID policy owner and exact values, A3 user-service/cgroup harness, A4 real S1–S5 external-AGENT acceptance, and A5 production/default-on enablement remain separately unapproved.
+- **Stage 2 — `arsd` (closed 2026-07-23):** A1–A5 are closed. `arsd` is production/default-on enabled as a local user service for trusted local callers under the closed A2 caller policy. This is an enabled local supervision service only — not a release/publication, Sachima, Gateway/IM, or public-ingress approval. Closure detail lives in the Stage 2 phase archive and the archived execution plan.
+- **Runtime invariant:** production `arsd` runs on CPython 3.12.3 — the interpreter that carried A4/A5 acceptance and whose build provides the pidfd APIs the crash-containment harness requires. Standalone Python 3.11.15 lacks those APIs and is not an equivalent runtime.
 - **Release/publication:** v0.2.0 predates A1. A follow-on release or publication is not approved.
-- **Later integration:** Sachima `ArsdBackend` remains parked until ARS production acceptance and separate approval.
+- **Later integration:** Sachima `ArsdBackend` remains parked; ARS production acceptance is closed, and the integration still requires its own separate approval.
 
 ## Phase board
 
@@ -41,23 +41,20 @@ and cannot direct new work.
 |---|---|---|---|
 | vNext authority reset | Documentation complete | GOAL/PRD/design/roadmap + cold archive | no implementation authority |
 | Stage 0/1 — Native ACP core | Closed | [phase archive](archive/phases/vnext-stage01-native-acp.md) | production claims require Stage 2 acceptance |
-| Stage 2 A1 — `arsd` source/default-closed foundation | Merged into `main`; not production-enabled | [active plan](../plans/active/2026-07-22-vnext-stage2-arsd-production-ingress.md) · PRD/architecture/technical solution | A1 does not approve A2–A5 or default-on operation |
-| Stage 2 A2/G12 — caller policy | Unapproved | active plan · PRD/architecture/technical solution | approved policy owner and exact UID→principal/owner-namespace mapping values |
-| Stage 2 A3 — service/cgroup harness | Unapproved | active plan · PRD/architecture/technical solution | separate authorization and acceptance |
-| Stage 2 A4 — real S1–S5 | Unapproved | active plan · PRD/architecture/technical solution | real external-AGENT acceptance after its prerequisite approvals |
-| Stage 2 A5 — production/default-on | Unapproved | active plan · PRD/architecture/technical solution | separate production-enable decision after A2–A4 |
+| Stage 2 — `arsd` production ingress (A1–A5) | Closed; production/default-on enabled 2026-07-23 | [phase archive](archive/phases/vnext-stage2-arsd-production-ingress.md) · [archived plan](../plans/archive/2026-07-22-vnext-stage2-arsd-production-ingress.md) | enabled local supervision service under the closed A2 caller policy; release/publication and external integration remain separately unapproved |
 | Sachima integration | Parked | boundary only | after ARS production acceptance and separate approval |
 
-## Open gates
+## Gates
 
-| Gate | Blocks | Required fact |
+| Gate | State | Fact |
 |---|---|---|
-| G9/G10/G11 | Stage 2 production | cgroup containment, real denied-action canary, and robustness; Stage 2 re-proves real credential/model usability inside S1–S5 |
-| G12 caller UID/ownership policy | A4 real external-AGENT acceptance and A5 production/default-on | approved policy owner and exact UID→principal/owner-namespace mapping values (A2) |
+| G9/G10/G11 | Closed by A4 | real S1–S5 socket-path acceptance: cgroup crash containment, real denied-action canary, robustness, and re-proven real credential/model usability; sanitized evidence operator-held |
+| G12 caller UID/ownership policy | Closed by A2 | recorded operator policy decision; exact mapping values controller-only, delivered to the daemon only as `--caller-mapping` arguments in the mode-0600 user unit |
+| A5 live enablement | Closed 2026-07-23 | enabled+active user unit after exact-main runtime install, production canary, and independent blocker review PASS; sanitized closure evidence operator-held (phase archive) |
 
-G12 is a required gate, not optional DLP backlog. The A1 source/default-closed foundation permits
-only the explicitly scoped source behavior; it does not supply G12 policy values or authorize A4,
-A5, or production use. Optional DLP enhancements remain future work.
+G12 closure is a recorded operator decision; the repository intentionally records no production
+mapping value. The A1 source/default-closed foundation still permits only the explicitly scoped
+source behavior. Optional DLP enhancements remain future work.
 
 ## Cold history
 
@@ -67,9 +64,10 @@ A5, or production use. Optional DLP enhancements remain future work.
 
 ## Explicit non-approvals
 
-See [`non-approvals.md`](non-approvals.md). Nothing in this board authorizes any separately
-unapproved Stage 2 gate, production/default-on enablement, a follow-on release or publication, or
-external integration.
+See [`non-approvals.md`](non-approvals.md). This board authorizes nothing by itself: the
+A1–A5 closures are recorded operator decisions carried by the Stage 2 archives. A follow-on
+release or publication, Sachima/Gateway integration, and public ingress remain separately
+unapproved.
 
 ## Verification
 

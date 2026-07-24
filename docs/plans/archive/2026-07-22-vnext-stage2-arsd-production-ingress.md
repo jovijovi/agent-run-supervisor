@@ -1,14 +1,29 @@
 ---
 title: "vNext Stage 2 — arsd production ingress implementation plan"
-status: active
+status: archived
 created_at: 2026-07-22
 last_validated_at: 2026-07-23
+archived_at: 2026-07-23
 ---
 # Implementation plan — vNext Stage 2: `arsd` production ingress
 
-Board-linked active implementation plan. The A1 source/default-closed foundation is merged, but
-this file remains `status: active` until A2–A5 and real S1–S5 production acceptance close; it is
-not archived at source merge. Derived from `GOAL.md`, PRD R6/R10 (plus R1–R5/R7–R9
+> **Closed and archived (2026-07-23).** A1–A5 are closed; A5 production/default-on enablement
+> completed on 2026-07-23. The `arsd` user unit is enabled+active as a local supervision
+> service for trusted callers under the closed A2 caller policy, on the versioned CPython
+> 3.12.3 runtime (ARS 0.2.0, ACP SDK 0.11.0, pidfd present), built from source commit
+> `b7f38eb0553786ec594c78a72ce62f33bdc57ae1` (tree
+> `5bc3e13bad9f8ee6a39f9e747d07fd49ed07e5f9`). Sanitized runtime closure digest (SHA-256):
+> `78a75a2d0d3c8a967d974598bdbb77d138a9ff94dc6fb9654797993d7a5dd6cb`; pre-enable evidence
+> tree: `11723d37a09211f1219d320c10ced647affe32fbc16fe2b8e86d20d320631e91`; post-enable
+> evidence tree: `7dcbd7b0ed57ab3c98502fdef8eeb13d0781c451de456a05aba47ba8aa025d7b`. Evidence
+> is sanitized and operator-held outside Git; exact CallerPolicy and credential values remain
+> controller-only. This closure authorized and performed **no** push/PR/merge, tag/GitHub
+> Release/PyPI, Sachima, Gateway/IM, public ingress, or branch cleanup. Everything below —
+> including the §3 gate/timing narrative — is retained historical implementation detail, not
+> living authority. Living board: `docs/roadmap/current-status.md`; phase record:
+> `docs/roadmap/archive/phases/vnext-stage2-arsd-production-ingress.md`.
+
+Archived Stage 2 execution plan. Derived from `GOAL.md`, PRD R6/R10 (plus R1–R5/R7–R9
 as already-implemented constraints), `docs/design/architecture.md` §§1–2/5–8, and
 `docs/design/technical-solution.md` §§1.3/6/9/11. This plan redefines no product goal, widens
 no scope, and approves nothing by its existence.
@@ -30,16 +45,16 @@ socket-path acceptance on OpenCode 1.18.4.
 1. **A1 source/default-closed foundation — complete.** New `agent_run_supervisor.arsd` package
    plus the §10-authorized minimal existing-seam edits (Slices 1–5 and 6a) merged with their
    focused suites, the full test suite, and `./scripts/verify_local.sh` green. PR #72 merged
-   the reviewed exact A1 head `fca2bfa364113ec4c39c8cdc16724d363cd1d757` as the tree of current
-   `main` `d102dfde24aef34c9ecfffb466941d72d901ba83`; independent exact-head review passed and
-   GitHub CI was green before merge.
+   the reviewed exact A1 head `fca2bfa364113ec4c39c8cdc16724d363cd1d757` as the tree of
+   then-current `main` `d102dfde24aef34c9ecfffb466941d72d901ba83`; independent exact-head
+   review passed and GitHub CI was green before merge.
 2. Real S1–S5 socket-path acceptance executed and recorded as sanitized, operator-held
    C-grade evidence covering G9/G10/G11 (§11).
 3. The T1 G12-timing decision that unblocked A1 is recorded (§3); production enablement
-   remains unapproved until A5.
+   remained unapproved until A5 closed (archive notice above).
 4. Post-merge documentation sync records A1 source completion on the board and in
-   `features.md` (including the F-VNEXT-PERMISSION-001 canary remainder). This plan remains
-   active and is neither archived nor phase-closed until A2–A5 and real S1–S5 close.
+   `features.md` (including the F-VNEXT-PERMISSION-001 canary remainder). The plan remained
+   active until A2–A5 and real S1–S5 closed; it is now archived with the Stage 2 phase record.
 
 **Hard constraints.**
 
@@ -68,18 +83,19 @@ socket-path acceptance on OpenCode 1.18.4.
   conventional commits.
 
 **Explicit non-approvals restated** (each requires its own operator approval; see §3 and
-`docs/roadmap/non-approvals.md`): any Stage 2 source expansion or repair beyond the merged A1
-source/default-closed foundation; G12 caller policy owner/mapping values; user-service/cgroup
-harness execution, installation, or enablement; real external-AGENT acceptance runs;
-production enablement; follow-on push/PR creation/merge; tag, GitHub Release, PyPI publication;
-Sachima `ArsdBackend` or pin changes; Gateway/IM/live traffic.
+`docs/roadmap/non-approvals.md`): any Stage 2 source expansion or repair beyond the merged
+source line; follow-on push/PR creation/merge; tag, GitHub Release, PyPI publication;
+Sachima `ArsdBackend` or pin changes; Gateway/IM/live-traffic expansion; public ingress.
+A2/G12, A3, A4, and A5 are closed by the operator records in §3 and the archive notice;
+those records authorized the A5 enablement runbook only, nothing else.
 
 ## 2. Baseline and authority trace
 
-- **Merged A1 source basis:** current `main` is
+- **Merged A1 source basis:** `main` at A1 closure was
   `d102dfde24aef34c9ecfffb466941d72d901ba83`. PR #72
   (`feat/arsd-production-ingress`) is merged; its reviewed exact A1 head
-  `fca2bfa364113ec4c39c8cdc16724d363cd1d757` is the merge tree.
+  `fca2bfa364113ec4c39c8cdc16724d363cd1d757` is the merge tree. Current `main`, including
+  the PR #74 permission-mediation repair, is recorded in §3.
 - Published/tagged v0.2.0 predates A1 and contains no `arsd`; no follow-on release or
   publication is approved.
 - Stage 0/1 (Native ACP core C1–C10) is closed and merged with real B-grade OpenCode 1.18.4
@@ -145,60 +161,100 @@ Sachima `ArsdBackend` or pin changes; Gateway/IM/live traffic.
 | # | Approval | Blocks | Notes |
 |---|---|---|---|
 | A1 | Stage 2 source/default-closed foundation | **Complete:** Slices 1–5 and 6a merged in PR #72 | source lane is closed; any expansion or repair requires separate approval |
-| A2 | G12 caller policy: policy owner + exact real UID→principal/owner/namespace mapping | A4 real acceptance and A5 production enablement | no production UID value or owner mapping is invented by docs, code, or tests |
-| A3 | User-service/cgroup harness | Slice 6b activation/execution, including crash-kill runs and `loginctl` linger | rendering the unit was A1 source-lane; *activation/execution* is A3 |
-| A4 | Real external-AGENT acceptance | real OpenCode S1–S5 runs (includes credential availability) | separately unapproved; fakes never substitute |
-| A5 | Production enablement | default-on socket/service for real callers | separately unapproved; requires A2 plus recorded S1–S5 evidence |
+| A2 | G12 caller policy: policy owner + exact real UID→principal/owner/namespace mapping | **Closed 2026-07-23** by recorded operator policy decision | exact values are controller-only and never enter docs, code, or tests; closure digest in the §3 closure status below |
+| A3 | User-service/cgroup harness | **Closed 2026-07-23** for user-service/restart readiness (no real Run in A3 scope) | rendering the unit was A1 source-lane; keeping it installed/enabled for real callers is A5 |
+| A4 | Real external-AGENT acceptance | **Closed 2026-07-23:** real OpenCode S1–S5 socket-path runs passed | accepted runtime CPython 3.12.3; sanitized C-grade evidence operator-held; fakes never substituted |
+| A5 | Production enablement | **Closed 2026-07-23: production/default-on enabled** | executed under the controller-held A5 production-enablement runbook; canary + independent review PASS; runtime closure digests in the archive notice |
 
 Future push, PR creation, merge, tag/Release/PyPI each additionally remain Hermes-owned
 separate approvals and are not granted by any row above.
 
 **A1 closure status (2026-07-23).** The merged source/default-closed foundation records no
 production caller values, service activation, real S1–S5 execution, production enablement,
-release, deployment, or Sachima integration. A2–A5 remain the separate gates above.
+release, deployment, or Sachima integration. A2–A5 state is recorded below.
 
-**G12 timing conflict (T1) — sequencing ruling recorded 2026-07-22 below; mapping still
-open under A2.** The authority chain
-does not state one consistent G12 timing. PRD R6 ("exact UID values and policy ownership are
-Stage 2 gate G12; documentation does not choose them"), technical solution §9 ("G12 requires
-explicit approval of caller UID policy and values before production enablement"), and the
-board's gate table bind G12 to *production enablement*; technical solution §11 states Stage 2
-"adds `arsd` and production acceptance only after separate approval **and G12 resolution**".
-Choosing between those readings was higher-authority arbitration the plan author does not
-own, so this plan recorded the conflict and held A1 fail-closed pending the Operator's T1
-decision. **The Operator supplied the sequencing ruling — recorded verbatim below — and A1 was
-unblocked; its source/default-closed foundation is now merged:** §11's "G12 resolution" does
-not require G12 closure before A1 source start. The second T1 half — the exact policy owner and
-UID→principal/owner/namespace mapping values — remains deferred to A2 (it may arrive at G12
-closure itself) and blocks A4 real acceptance and A5 production enablement.
+**A2–A4 closure and A5 authorization status (2026-07-23).** Recorded operator decisions.
+Basis: current `main` `b7f38eb0553786ec594c78a72ce62f33bdc57ae1` (tree
+`5bc3e13bad9f8ee6a39f9e747d07fd49ed07e5f9`), which includes PR #74
+(`fix(native-acp): mediate OpenCode write permissions`), merged before A4 closure:
 
-The recorded ruling requires no redesign: the caller policy is injected configuration (§6);
+- **A2/G12 closed** as an operator-held policy decision. The exact policy owner and
+  UID→principal/owner/namespace mapping values are controller-only and never enter the
+  repository. Sanitized closure record digest (SHA-256):
+  `98d2d7b243d88f814afac5c5b36293917d5043db03778847dcdd681e6f72a04f`. The mapping reaches the
+  daemon only as repeatable `--caller-mapping` argv rendered into the mode-0600 user unit; no
+  caller-policy config file exists in current source, and zero mappings keep failing closed.
+- **A3 closed** for user-service/restart readiness only; no real Run was in A3 scope. Closure
+  record digest: `203971ffb12a5e51a9c0ec8f527398375508acb1e83b103cef5811b36e6f242c`.
+- **A4 closed:** real OpenCode 1.18.4 S1–S5 socket-path acceptance passed (C-grade), covering
+  G9/G10/G11 including the real denied-action canary (S2). Accepted runtime: CPython 3.12.3.
+  Closure record digest: `0d1e850361a61c89b3bb947436f09324e821ec14607cf77f60459c80716f7086`;
+  sanitized evidence tree digest:
+  `4b9a7a741ae1681e0c5242c198f6f36b775309fdfff638caa13e20cdbdce7706` (operator-held, out of
+  Git).
+- **A5 runtime invariant:** production `arsd` runs only on CPython 3.12.3, the interpreter
+  that carried A4. Its build provides `os.pidfd_open`/`signal.pidfd_send_signal`, which the
+  S4 crash-containment harness requires for its PID-reuse-safe kill; the standalone Python
+  3.11.15 build lacks them and is not an equivalent runtime.
+- **A5 closed 2026-07-23 — production/default-on enabled.** Enablement followed the
+  controller-held Git-external `A5_PRODUCTION_ENABLEMENT_RUNBOOK.md` (exact-main wheel,
+  commit-versioned CPython 3.12.3 runtime, disabled unit install, manual-start production
+  canary, independent fresh-context blocker review, then `enable --now`). Runtime closure and
+  evidence tree digests are recorded in the archive notice; Stage 2 is closed and this plan
+  is archived.
+
+Push/PR/merge, tag/Release/PyPI, Sachima `ArsdBackend`, Gateway/IM, and public ingress remain
+separately unapproved.
+
+**G12 timing conflict (T1) — historical sequencing context; fully closed 2026-07-23 (part 1
+by the 2026-07-22 ruling below, part 2 by the A2 record above).** At A1 planning time the
+authority chain did not state one consistent G12 timing. PRD R6 ("exact UID values and policy
+ownership are Stage 2 gate G12; documentation does not choose them"), technical solution §9
+("G12 requires explicit approval of caller UID policy and values before production
+enablement"), and the then-current board gate table bound G12 to *production enablement*;
+technical solution §11 states Stage 2 "adds `arsd` and production acceptance only after
+separate approval **and G12 resolution**". Choosing between those readings was
+higher-authority arbitration the plan author did not own, so this plan recorded the conflict
+and held A1 fail-closed pending the Operator's T1 decision. **The Operator supplied the
+sequencing ruling — recorded below — and A1 was unblocked; its source/default-closed
+foundation is merged:** §11's "G12 resolution" did not require G12 closure before A1 source
+start. The second T1 half — the exact policy owner and UID→principal/owner/namespace mapping
+values — was deferred to A2, blocked A4 real acceptance and A5 production enablement while
+open, and **closed 2026-07-23 with the A2 operator record above**. Current state: A2 closed,
+A3 closed, A4 closed, A5 closed 2026-07-23 — production/default-on enabled.
+
+The recorded ruling required no redesign: the caller policy is injected configuration (§6);
 code, tests, and docs never record production values; the daemon has no implicit default
-mapping and refuses to serve without an explicit one; and because acceptance before A2/G12
-resolution is not permitted, only Slice 6 timing shifts — real S1–S5 execution waits behind
-A2/G12 and the separate A3/A4 approvals.
+mapping and refuses to serve without an explicit one (standing invariants); and because
+acceptance before A2/G12 resolution was not permitted, only Slice 6 timing shifted — real
+S1–S5 execution waited behind A2/G12 and the separate A3/A4 approvals, all of which have
+since closed (§3 closure status above).
 
-**Recorded T1 sequencing ruling (Operator, 2026-07-22).** The Operator instruction
-`开始执行计划吧`, following the controller's stated default, authorized the now-merged A1
-source implementation. The recorded sequencing ruling:
+**Recorded T1 sequencing ruling (Operator, 2026-07-22; closure annotations added
+2026-07-23).** The Operator instruction `开始执行计划吧`, following the controller's stated
+default, authorized the now-merged A1 source implementation. The ruling as recorded at that
+time, with current closure state in brackets:
 
-- A1 Slices 1–5 and 6a proceeded before exact G12 production mapping values existed and are now
-  complete/merged.
+- A1 Slices 1–5 and 6a proceeded before exact G12 production mapping values existed
+  [complete/merged].
 - Source implements a generic immutable CallerPolicy seam with zero implicit/default
-  mappings and fail-closed startup.
+  mappings and fail-closed startup [standing invariant].
 - Hermetic tests may inject explicit synthetic/test-scoped mappings only; no production
-  UID, owner, namespace or credential value may appear.
-- A2 remains unresolved: policy owner and exact UID→principal/owner/namespace mapping
-  values.
-- A4 real external-AGENT acceptance and A5 production enablement remain blocked until
-  A2/G12 is explicitly resolved and separately approved.
-- A3 service/cgroup harness execution remains separately blocked.
-- Push/PR/merge/release/deploy/Sachima/Gateway/IM remain unapproved.
+  UID, owner, namespace or credential value may appear [standing invariant].
+- A2 policy owner and exact UID→principal/owner/namespace mapping values were unresolved at
+  ruling time [closed 2026-07-23 by the A2 operator record above].
+- A4 real external-AGENT acceptance and A5 production enablement were blocked pending
+  explicit A2/G12 resolution and separate approval [A4 closed 2026-07-23; A5 closed
+  2026-07-23 — production/default-on enabled].
+- A3 service/cgroup harness execution was separately blocked [closed 2026-07-23].
+- Push/PR/merge/release/deploy/Sachima/Gateway/IM/public ingress were — and still remain —
+  separately unapproved.
 
-This resolves T1 part (1): §11's "G12 resolution" did not block A1 source completion; it must
-be explicitly resolved and separately approved before real S1–S5 acceptance (A4)
-and production enablement (A5). T1 part (2) — the policy owner and exact mapping values —
-stays open and is carried by A2 (§15).
+This resolved T1 part (1): §11's "G12 resolution" did not block A1 source completion but had
+to be explicitly resolved and separately approved before real S1–S5 acceptance (A4) and
+production enablement (A5); both subsequently closed under the §3 records above. T1 part (2)
+— the policy owner and exact mapping values — was carried by A2 and is closed by the A2
+record above (§15 T1).
 
 ## 4. Minimal architecture slice
 
@@ -596,7 +652,7 @@ Commands below use the uv forms from `docs/roadmap/verification.md`; the pip fal
 - [x] Slice 4 — idempotent startup convergence (merged A1 source/default-closed foundation)
 - [x] Slice 5 — client + entrypoint (merged A1 source/default-closed foundation)
 - [x] Slice 6a — service artifact and env-gated acceptance harness (merged A1 source/default-closed foundation)
-- [ ] Slice 6b — real S1–S5 execution (A2/A3/A4 gated)
+- [x] Slice 6b — real S1–S5 execution (closed by A2/A3/A4 — §3 closure status; §11 recorded result)
 
 ### Slice 1 — `feat(arsd): add versioned bounded UDS frame protocol`
 
@@ -787,9 +843,10 @@ reconciliation assertions → fresh successful Run) — runnable only under A3. 
 `scripts/smoke_installed_wheel.sh` additions land here (§13). Hermetic CI stays green with
 the real module skipped.
 
-6b (A3 + A4 execution) remains open: after A2/G12 is explicitly resolved and A3/A4 are
-separately approved, run §11 and capture sanitized operator-held evidence. No source changes
-occur in 6b; neither this plan nor the phase closes until A5.
+6b (A3 + A4 execution) is closed: A2/G12 was explicitly resolved, A3/A4 were separately
+approved, and §11 ran with sanitized operator-held evidence (§3 closure status). 6b itself
+changed no source; the permission-mediation repair (PR #74) was its own separately approved
+fix lane. The plan and the phase closed with A5 (archive notice).
 
 ## 11. G9–G12 and real S1–S5 acceptance matrix
 
@@ -812,10 +869,19 @@ hermetic-test-only and are never C-grade evidence.
 
 Gate mapping: G9 ← S4; G10 ← S2; G11 ← S1+S3+S5 (robustness plus re-proven real
 credential/model usability inside the socket path); G12 is an approval artifact (policy owner
-+ exact UID→principal/owner/namespace mapping) — not producible by tests; A5 stays blocked
-until it is recorded, and its sequencing relative to A1/A4 is settled by the recorded T1
-ruling (§3): it does not gate A1 source start, and A4 stays blocked until A2/G12 is
-explicitly resolved and separately approved.
++ exact UID→principal/owner/namespace mapping) — never producible by tests, and it was not
+test-produced: it closed as the recorded A2 operator decision (§3). At the time, A5 was
+blocked until that record existed, and A4 was blocked until A2/G12 was explicitly resolved
+and separately approved; the sequencing relative to A1/A4 was settled by the recorded T1
+ruling (§3), which did not gate A1 source start. Neither block remains open; the recorded
+result below is the current closure authority.
+
+**Recorded result (2026-07-23).** S1–S5 executed and passed through the production socket
+path with the A2-closed caller policy in force, on accepted runtime CPython 3.12.3, after
+the permission-mediation repair (PR #74) merged. G9/G10/G11 are satisfied per the gate
+mapping above; G12 is closed by the A2 record. Sanitized C-grade evidence is operator-held
+out of Git; closure digests are recorded in §3. This matrix remains the acceptance authority
+for any future re-run.
 
 ## 12. Permissions and execution lanes
 
@@ -896,11 +962,12 @@ explicitly resolved and separately approved.
 
 ## 15. Tail / open-decision register
 
-| # | Open decision | Owner | Blocks | Overturn/closure evidence |
+| # | Decision / closure state | Owner | Blocks | Overturn/closure evidence |
 |---|---|---|---|---|
-| T1 | G12: (a) sequencing ruling for the §3 authority conflict — **recorded 2026-07-22 (§3)**, with A1 source foundation now merged; (b) policy owner + exact real UID→principal/owner/namespace mapping — open | operator (Hermes controller) | (b) blocks A4 real acceptance and A5 production enablement per the recorded ruling | (a) closed by the §3 recorded ruling; (b) closes only by a recorded Operator decision naming the policy owner and the mapping (may arrive at G12 closure) |
-| T2 | Acceptance-host service manager facts: systemd --user availability, linger, or documented equivalent | operator | Slice 6b execution (A3) | recorded A3 approval with host facts |
-| T3 | Real-acceptance credential/window availability for OpenCode 1.18.4 (K3 + registered second model) | operator | Slice 6b real runs (A4) | recorded A4 approval |
+| T1 | G12: (a) sequencing ruling for the §3 authority conflict — **recorded 2026-07-22 (§3)**; (b) policy owner + exact real UID→principal/owner/namespace mapping — **closed 2026-07-23 by the A2 record (§3)** | operator (Hermes controller) | nothing — both halves closed | (a) §3 recorded ruling; (b) §3 A2 closure record; exact values stay controller-only |
+| T2 | Acceptance-host service manager facts: systemd --user availability, linger, or documented equivalent | operator | nothing — **closed 2026-07-23 with A3** (§3) | recorded A3 closure with host facts |
+| T3 | Real-acceptance credential/window availability for OpenCode 1.18.4 (K3 + registered second model) | operator | nothing — **closed 2026-07-23 with A4** (§3) | recorded A4 closure; credential values stay controller-only |
+| T4 | A5 live-enablement blocker review verdict (independent, fresh-context, read-only) | operator (Hermes controller) + independent reviewer | nothing — **closed 2026-07-23**: PASS recorded, enablement completed | recorded PASS verdict bound to the frozen sanitized A5 evidence trees (digests in the archive notice) |
 
 Nothing else is a governance decision. Remaining choices (exact numeric bound defaults,
 default socket path, the caller-mapping flag shape, exact seam/class names such as
@@ -911,11 +978,13 @@ in §§5–8 are binding regardless of final names.
 
 ## 16. Explicit implementation handoff
 
-This plan's existence authorizes nothing. The T1 sequencing decision enabled A1, and the A1
-source/default-closed foundation (Slices 1–5 and 6a) is now merged in PR #72. Still separately
-and explicitly required: A2 G12 policy owner/mapping; A3 harness activation/execution; A4 real-
-AGENT acceptance; A5 production/default-on enablement; and every follow-on source change, push,
-PR, merge, tag, GitHub Release, PyPI publication, deployment, Sachima `ArsdBackend` change,
-Gateway/IM wiring, or live-traffic decision. This plan remains active for those gates; it grants
-no successor implementation. Hermes retains scope control, deterministic gates, evidence
-arbitration, and all side-effect authority.
+This plan's existence authorizes nothing. The T1 sequencing decision enabled A1; the A1
+source/default-closed foundation (Slices 1–5 and 6a) is merged in PR #72; the permission-
+mediation repair is merged in PR #74; and A2/G12, A3, A4, and A5 are closed by the operator
+records in §3 and the archive notice — A5 production/default-on enablement completed
+2026-07-23 under the controller-held runbook and its T4 review gate. Still separately and
+explicitly required: every follow-on source change, push, PR, merge, tag, GitHub Release,
+PyPI publication, deployment, Sachima `ArsdBackend` change, Gateway/IM wiring, or
+live-traffic expansion decision. This plan is archived history and grants no successor
+implementation. Hermes retains scope control, deterministic gates, evidence arbitration, and
+all side-effect authority.
