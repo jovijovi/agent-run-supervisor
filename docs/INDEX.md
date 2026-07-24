@@ -2,10 +2,11 @@
 
 # Documentation Index
 
-Total: 63 documents tracked across 2 statuses.
+Total: 64 documents tracked across 2 statuses.
 
-## Active (15)
+## Active (16)
 
+- [Official-adapter shared blocker repair — B1/B2 run boundaries](plans/active/2026-07-24-official-adapter-run-boundaries.md) — created 2026-07-24
 - [agent-run-supervisor vNext System Architecture](design/architecture.md) — created 2026-07-21
 - [agent-run-supervisor vNext Technical Solution](design/technical-solution.md) — created 2026-07-21
 - [agent-run-supervisor vNext PRD](product/prd.md) — created 2026-07-21

@@ -209,6 +209,148 @@ def test_load_reuse_happy_path_keeps_external_id_and_switches(
     assert payload["status"] == "completed"
 
 
+def test_load_replay_history_never_enters_current_final_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # B1 (2026-07-24): official adapters replay conversation history as
+    # agent_message_chunk updates before session/prompt. Replay stays
+    # historical event evidence, but only chunks causally belonging to the
+    # current prompt/Turn may reach this Run's final_message (PRD R9).
+    harness = SwitchHarness(tmp_path, monkeypatch)
+    harness.prepare_session()
+
+    script = dict(HAPPY_SWITCH_SCRIPT)
+    script["replay_on_load"] = ["HISTORY_ASSISTANT_ONE ", "HISTORY_ASSISTANT_TWO "]
+    result = harness.run(
+        "run-0002", script, _request("kimi-for-coding/k3", "max")
+    )
+    assert result.status is AgentRunStatus.COMPLETED
+
+    run_dir = harness.root / "native-runs" / "run-0002"
+    payload = json.loads((run_dir / "result.json").read_text())
+    assert payload["final_message"] == "RUN2_OK"
+    assert payload["truncated"] is False
+
+    # Replay is not silently discarded: every replayed chunk still lands in
+    # the normalized event evidence alongside the current-turn delta.
+    events = [
+        json.loads(line)
+        for line in (run_dir / "events.jsonl").read_text().splitlines()
+    ]
+    delta_lengths = sorted(
+        event["text_length"]
+        for event in events
+        if event["type"] == "agent_message_delta"
+    )
+    assert delta_lengths == sorted(
+        [
+            len("HISTORY_ASSISTANT_ONE "),
+            len("HISTORY_ASSISTANT_TWO "),
+            len("RUN2_OK"),
+        ]
+    )
+
+
+def test_load_replay_never_consumes_current_final_message_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # B1 (2026-07-24): replayed history must not eat the bounded
+    # final-message budget of the current Turn — accumulation and truncation
+    # operate on current-Turn chunks only.
+    from agent_run_supervisor.result import MAX_FINAL_MESSAGE_BYTES
+
+    current_text = "C" * 40_000
+    replay_text = "H" * 40_000
+    assert len(replay_text) + len(current_text) > MAX_FINAL_MESSAGE_BYTES
+    assert len(current_text) < MAX_FINAL_MESSAGE_BYTES
+
+    harness = SwitchHarness(tmp_path, monkeypatch)
+    harness.prepare_session()
+
+    script = dict(HAPPY_SWITCH_SCRIPT)
+    script["replay_on_load"] = [replay_text]
+    script["final_message"] = current_text
+    result = harness.run(
+        "run-0002", script, _request("kimi-for-coding/k3", "max")
+    )
+    assert result.status is AgentRunStatus.COMPLETED
+
+    payload = json.loads(
+        (harness.root / "native-runs" / "run-0002" / "result.json").read_text()
+    )
+    assert payload["final_message"] == current_text
+    assert payload["truncated"] is False
+    assert payload["truncate_reason"] is None
+
+
+def test_current_turn_chunk_survives_fast_agent_race_with_post_send_observer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # B1 happens-before (2026-07-24 focused review): SDK 0.11.0 notifies the
+    # outgoing stream observer only after MessageSender.send() has written and
+    # drained the session/prompt frame. A fast agent can have its genuine
+    # current-turn update processed by the receive loop inside that window; a
+    # boundary snapshotted by the post-send observer then counts that update
+    # as pre-prompt and final_message silently loses the chunk. Force exactly
+    # that interleaving: hold the prompt send's return (the SDK request
+    # coroutine's post-write suspension point) until the receive loop has
+    # observed one more incoming session/update than existed when the prompt
+    # bytes went out.
+    harness = SwitchHarness(tmp_path, monkeypatch)
+    harness.prepare_session()
+
+    from acp.task import sender as sender_module
+
+    from agent_run_supervisor.native_acp.driver import NativeAcpDriver
+
+    state: dict[str, object] = {
+        "incoming": 0,
+        "baseline": None,
+        "raced": asyncio.Event(),
+    }
+    original_send = sender_module.MessageSender.send
+
+    async def racing_send(self, payload):
+        if payload.get("method") != "session/prompt":
+            await original_send(self, payload)
+            return
+        state["baseline"] = state["incoming"]
+        await original_send(self, payload)
+        # The prompt frame is written+drained; the SDK request coroutine sits
+        # exactly here while the receive loop processes the agent's reply.
+        await asyncio.wait_for(state["raced"].wait(), 30)
+
+    original_observe = NativeAcpDriver._observe_stream
+
+    def observe_and_signal(self, event):
+        original_observe(self, event)
+        direction = getattr(getattr(event, "direction", None), "name", "")
+        if direction != "INCOMING":
+            return
+        if (event.message or {}).get("method") != "session/update":
+            return
+        state["incoming"] = state["incoming"] + 1
+        baseline = state["baseline"]
+        if baseline is not None and state["incoming"] > baseline:
+            state["raced"].set()
+
+    monkeypatch.setattr(sender_module.MessageSender, "send", racing_send)
+    monkeypatch.setattr(NativeAcpDriver, "_observe_stream", observe_and_signal)
+
+    script = dict(HAPPY_SWITCH_SCRIPT)
+    script["replay_on_load"] = ["HISTORY_ASSISTANT_ONE "]
+    result = harness.run("run-0002", script, _request("kimi-for-coding/k3", "max"))
+    assert result.status is AgentRunStatus.COMPLETED
+
+    payload = json.loads(
+        (harness.root / "native-runs" / "run-0002" / "result.json").read_text()
+    )
+    # The forced race must not cost the Run its genuine current-turn chunk,
+    # and replay must stay excluded.
+    assert payload["final_message"] == "RUN2_OK"
+    assert payload["truncated"] is False
+
+
 def test_silent_new_on_load_is_detected_and_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

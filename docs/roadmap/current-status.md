@@ -11,7 +11,7 @@ supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 
 ```text
 base_branch: main
-active_plan: none
+active_plan: docs/plans/active/2026-07-24-official-adapter-run-boundaries.md
 ```
 
 ## Authority chain

@@ -885,7 +885,9 @@ def test_r4_b2_hang_overflow_timeout_must_not_persist_retryable_timed_out(
 ) -> None:
     """Non-terminating prompt + max_events overflow + supervisor timeout.
 
-    Evidence-pipeline failure must win over timed_out (which is retryable).
+    B2 (2026-07-24): the escalated timeout without an ACP terminal is
+    unknown, and unknown uncertainty stays the strongest status under an
+    evidence-pipeline failure — never a retryable timed_out.
     """
     script = dict(HAPPY_SCRIPT)
     script["hang_prompt_until_cancel"] = True
@@ -901,11 +903,51 @@ def test_r4_b2_hang_overflow_timeout_must_not_persist_retryable_timed_out(
     )
     payload = json.loads((harness.run_dir() / "result.json").read_text())
     assert payload["status"] != "timed_out"
-    assert payload["status"] == "failed"
+    assert payload["status"] == "unknown"
     assert payload["retryable"] is False
-    assert payload.get("detail_code") == "EVIDENCE_PIPELINE"
+    assert payload.get("detail_code") == "TURN_TIMEOUT"
     assert (harness.run_dir() / "prompt-dispatch-started").exists()
-    assert result.status is AgentRunStatus.FAILED
+    assert result.status is AgentRunStatus.UNKNOWN
+    record = harness.session_store().open_session("sess-native-1")
+    assert record.state == "quarantined"
+
+
+def test_b2_dispatched_timeout_escalated_kill_is_unknown_quarantined(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B2 (2026-07-24): dispatched prompt + supervisor turn timeout +
+    escalated kill + no trustworthy ACP terminal must publish
+    unknown/quarantined/retryable=false — never a retryable timed_out the
+    quarantined Session then refuses."""
+    script = dict(HAPPY_SCRIPT)
+    script["hang_prompt_until_cancel"] = True
+    harness = Harness(tmp_path, monkeypatch, script)
+    result = _run(
+        harness.task(request=_request(limits=RunLimits(turn_timeout_seconds=0.5)))
+    )
+
+    assert result.status is AgentRunStatus.UNKNOWN, result.payload
+    run_dir = harness.run_dir()
+    assert (run_dir / "prompt-dispatch-started").exists()
+    payload = json.loads((run_dir / "result.json").read_text())
+    assert payload["status"] == "unknown"
+    assert payload["retryable"] is False
+    assert payload["origin"] == "supervisor"
+    assert payload["stop_reason"] is None
+    assert payload["detail_code"] == "TURN_TIMEOUT"
+    record = harness.session_store().open_session("sess-native-1")
+    assert record.state == "quarantined"
+    assert record.quarantined_by_run_id == "run-0001"
+    assert not (
+        harness.root / "native-sessions" / "sess-native-1" / "lock.json"
+    ).exists()
+
+    # Same-Session reuse stays refused before any spawn/prompt (also pinned
+    # by test_session_switching.py::test_quarantined_session_refuses_new_runs).
+    methods_before = harness.methods_seen()
+    retry = _run(harness.task(run_id="run-0002"))
+    assert retry.status is AgentRunStatus.FAILED
+    assert harness.methods_seen() == methods_before
 
 
 def test_r4_b3_writer_close_failure_on_completed_is_evidence_pipeline(
