@@ -96,7 +96,9 @@ def test_permission_violation_fails_the_turn_despite_terminal() -> None:
 @pytest.mark.parametrize(
     ("flags", "expected_status"),
     [
-        ({"supervisor_timed_out": True}, AgentRunStatus.TIMED_OUT),
+        # B2 (2026-07-24): escalated kill without an ACP terminal is
+        # uncertain even when the trigger was the supervisor turn timeout.
+        ({"supervisor_timed_out": True}, AgentRunStatus.UNKNOWN),
         ({"supervisor_cancelled": True}, AgentRunStatus.UNKNOWN),
         ({}, AgentRunStatus.FAILED),
     ],
@@ -116,6 +118,22 @@ def test_supervisor_cancelled_escalated_kill_without_terminal_is_unknown() -> No
         dispatch_started=True,
         escalated_kill_after_dispatch=True,
         supervisor_cancelled=True,
+    )
+    assert status is AgentRunStatus.UNKNOWN
+    assert disposition == "quarantined"
+    assert _RETRYABLE_DEFAULT[AgentRunStatus.UNKNOWN] is False
+
+
+def test_supervisor_timeout_escalated_kill_without_terminal_is_unknown() -> None:
+    # B2 (2026-07-24): a dispatched prompt that forced supervisor
+    # termination/escalation with no trustworthy ACP terminal may already
+    # have executed. timed_out/retryable=true would invite a retry the
+    # quarantined Session then refuses; GOAL contract 5 / PRD R5 require
+    # unknown + quarantined + hard-nonretryable.
+    status, disposition = _finalize(
+        dispatch_started=True,
+        escalated_kill_after_dispatch=True,
+        supervisor_timed_out=True,
     )
     assert status is AgentRunStatus.UNKNOWN
     assert disposition == "quarantined"
@@ -200,14 +218,30 @@ def test_r4_b2_evidence_pipeline_overrides_cancelled_to_failed() -> None:
     assert disposition == "active"
 
 
-def test_r4_b2_evidence_pipeline_overrides_timed_out_keeps_quarantine() -> None:
+def test_r4_b2_evidence_pipeline_overrides_terminal_backed_timed_out() -> None:
+    # The only remaining timed_out row is ACP-terminal-backed (active);
+    # a broken evidence pipeline still downgrades it to failed.
+    status, disposition = _finalize(
+        dispatch_started=True,
+        acp_stop_reason="cancelled",
+        supervisor_timed_out=True,
+        evidence_pipeline_failure=True,
+    )
+    assert status is AgentRunStatus.FAILED
+    assert disposition == "active"
+    assert _RETRYABLE_DEFAULT[status] is False
+
+
+def test_r4_b2_escalated_timeout_with_evidence_pipeline_stays_unknown() -> None:
+    # B2 (2026-07-24): the escalated-timeout row is unknown, and unknown
+    # uncertainty remains the strongest status under pipeline failure.
     status, disposition = _finalize(
         dispatch_started=True,
         escalated_kill_after_dispatch=True,
         supervisor_timed_out=True,
         evidence_pipeline_failure=True,
     )
-    assert status is AgentRunStatus.FAILED
+    assert status is AgentRunStatus.UNKNOWN
     assert disposition == "quarantined"
     assert _RETRYABLE_DEFAULT[status] is False
 

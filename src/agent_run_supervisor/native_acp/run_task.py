@@ -146,7 +146,11 @@ def _post_dispatch_finalize(
         return (_status_for_stop_reason(obs.acp_stop_reason), "active")
     if obs.escalated_kill_after_dispatch:
         if obs.supervisor_timed_out:
-            return (AgentRunStatus.TIMED_OUT, "quarantined")
+            # PRD R5 / GOAL contract 5: the supervisor killed the child with
+            # no trustworthy ACP terminal, so the dispatched prompt may have
+            # executed. timed_out (retryable by default) would invite a retry
+            # the quarantined Session must refuse — uncertainty wins.
+            return (AgentRunStatus.UNKNOWN, "quarantined")
         if obs.supervisor_cancelled:
             # PRD R5: no trustworthy ACP terminal exists on this row — the
             # prompt may have executed, so cancelled-class would overclaim.
@@ -267,6 +271,9 @@ class _RunContext:
     effective: EffectiveRunState = field(default_factory=EffectiveRunState)
     effective_written: bool = False
     dispatch_started: bool = False
+    # Wire-order delivery ordinal of session/update callbacks (one per
+    # observed frame); compared against the driver's prompt boundary.
+    updates_delivered: int = 0
     marker_ordinal: int = 0
     stop_reason: str | None = None
     usage: dict[str, Any] | None = None
@@ -767,13 +774,38 @@ class RunTask:
             if ctx.pipeline_error is None:
                 ctx.pipeline_error = exc
 
+    @staticmethod
+    def _current_turn_chunk(ctx: _RunContext) -> bool:
+        """Whether the update being delivered is causally after the prompt.
+
+        session/load history replay (and any other pre-prompt chunk) stays
+        normalized event evidence but never contributes to this Run's
+        ``final_message``. The boundary is snapshotted in exact wire order by
+        the driver's stream observer, so a pre-prompt update whose queued
+        callback executes late can still never pass this gate. The observer
+        counts only frames the locked SDK will actually dispatch, so a
+        suppressed pre-prompt frame can never shift the boundary onto a
+        genuine current-turn chunk.
+        """
+        driver = ctx.driver
+        if driver is None:
+            return False
+        boundary = driver.prompt_wire_boundary
+        return boundary is not None and ctx.updates_delivered > boundary
+
     def _update_sink(self, ctx: _RunContext, normalizer: NativeAcpEventNormalizer):
         def sink(session_id: str, update: dict[str, Any]) -> None:
+            # One callback per SDK-dispatched session/update frame, in wire
+            # order; count before any processing so a failing update keeps
+            # ordinals aligned with the driver's observed count (which
+            # includes only frames the locked SDK actually dispatches —
+            # suppressed frames never leave phantom ordinals).
+            ctx.updates_delivered += 1
             try:
                 if update.get("sessionUpdate") == "agent_message_chunk":
                     content = update.get("content") or {}
                     text = content.get("text")
-                    if isinstance(text, str):
+                    if isinstance(text, str) and self._current_turn_chunk(ctx):
                         ctx.final_message_acc.ingest(text)
                 self._emit(ctx, normalizer.normalize_update(update))
                 if ctx.bridge is not None:
@@ -1292,6 +1324,8 @@ class RunTask:
             detail_code = "EVIDENCE_PIPELINE"
         elif ctx.supervisor_cancelled:
             detail_code = "SUPERVISOR_CANCELLED"
+        elif ctx.supervisor_timed_out and status is AgentRunStatus.UNKNOWN:
+            detail_code = "TURN_TIMEOUT"
         elif ctx.observation_interrupted and status is AgentRunStatus.UNKNOWN:
             detail_code = "OBSERVATION_LOST"
         elif ctx.child_exit_without_terminal:

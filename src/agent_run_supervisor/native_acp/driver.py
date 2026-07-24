@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
@@ -53,6 +54,29 @@ def _dump_options(config_options: Any) -> list[dict[str, Any]] | None:
     return [_dump(option) for option in config_options]
 
 
+class _PromptBoundaryWriter:
+    """Synchronous pre-write tap around the SDK sender's StreamWriter.
+
+    ``before_write`` runs in the sender-loop task immediately before the
+    frame's bytes are handed to the real ``StreamWriter.write()``, with no
+    await between the two calls — nothing else (in particular the receive
+    loop) can run in that gap. Everything else delegates to the real writer.
+    """
+
+    def __init__(
+        self, writer: Any, before_write: Callable[[bytes], None]
+    ) -> None:
+        self._writer = writer
+        self._before_write = before_write
+
+    def write(self, data: bytes) -> None:
+        self._before_write(data)
+        self._writer.write(data)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._writer, name)
+
+
 class NativeAcpDriver:
     def __init__(self, *, client: NativeAcpClient, machine: ConfigFidelityMachine) -> None:
         self._client = client
@@ -63,11 +87,41 @@ class NativeAcpDriver:
         # written to the transport and drained (the SDK sender resolves each
         # send only after write+drain) — the prompt-accepted boundary.
         self._prompt_frame_hooks: list[Callable[[], None]] = []
-        # Wire-order count of incoming session/update frames. The SDK receive
-        # loop notifies observers synchronously before enqueueing the handler
-        # and before resolving any response future, so every update frame that
-        # precedes a response is counted here before that response resolves.
+        # Wire-order count of incoming session/update frames that the locked
+        # SDK will actually dispatch to ``Client.session_update`` — the same
+        # ordinal domain as the client's delivery/completion counters. The
+        # SDK receive loop notifies observers synchronously before enqueueing
+        # the handler and before resolving any response future, so every
+        # deliverable update frame that precedes a response is counted here
+        # before that response resolves. Frames the SDK silently drops
+        # (schema-invalid notifications, request-shaped session/update) must
+        # never be counted: a counted-but-undeliverable frame is a phantom
+        # ordinal that shifts the frozen boundary past genuine current-turn
+        # chunks and corrupts the pre-response delivery barrier target.
         self._updates_observed = 0
+        # Locked-SDK SessionNotification model, bound at open(): the observer
+        # mirrors the router's validation so "observed" means "will dispatch".
+        self._session_notification: Any | None = None
+        # Causal Turn boundary: the value of ``_updates_observed`` snapshotted
+        # by the sender-side writer tap immediately *before* the
+        # session/prompt bytes reach the real StreamWriter.write(), with no
+        # await in between. Updates counted at or below this ordinal were
+        # received before the prompt could have reached the agent
+        # (session/load history replay, pre-prompt chatter) and cannot belong
+        # to the current Turn; every current-Turn update is necessarily read
+        # after the write and lands above the boundary. The SDK's outgoing
+        # observer runs only after send/write/drain and must not be the
+        # snapshot point: a fast agent's current-turn update can be received
+        # in that window. ``None`` until the prompt frame is written.
+        self._prompt_wire_boundary: int | None = None
+        # One-prompt-per-driver/connection pin: the boundary is write-once,
+        # so a second prompt on the same connection would inherit the first
+        # boundary. Fail closed instead of silently pretending reuse works.
+        self._prompt_dispatched = False
+
+    @property
+    def prompt_wire_boundary(self) -> int | None:
+        return self._prompt_wire_boundary
 
     def add_prompt_frame_hook(self, hook: Callable[[], None]) -> None:
         self._prompt_frame_hooks.append(hook)
@@ -76,26 +130,83 @@ class NativeAcpDriver:
         direction = getattr(getattr(event, "direction", None), "name", "")
         message = getattr(event, "message", None) or {}
         if direction == "INCOMING":
-            if message.get("method") == "session/update":
+            if message.get("method") == "session/update" and (
+                self._update_frame_will_dispatch(message)
+            ):
                 self._updates_observed += 1
             return
         if direction != "OUTGOING":
             return
         if message.get("method") == "session/prompt":
+            # Prompt-accepted hooks only: the causal boundary is snapshotted
+            # by the pre-write tap, never by this post-send observer.
             for hook in list(self._prompt_frame_hooks):
                 hook()
+
+    def _update_frame_will_dispatch(self, message: Mapping[str, Any]) -> bool:
+        """Locked-SDK (0.11.0) dispatch predicate for one update callback.
+
+        ``Client.session_update`` runs for an incoming session/update frame
+        iff it is notification-shaped (no ``id`` — a request-shaped frame
+        hits the request table and fails method-not-found) and its params
+        validate as ``schema.SessionNotification``: the router validates
+        inside the notification handler and ``_run_notification`` suppresses
+        the ValidationError, silently dropping the frame. Counting must
+        mirror that predicate exactly — assuming every raw frame becomes one
+        callback lets a suppressed pre-prompt frame become a phantom ordinal
+        inside the frozen boundary.
+        """
+        if "id" in message:
+            return False
+        model = self._session_notification
+        if model is None:
+            # Observers run only on a connection bound by open(); an unbound
+            # model means nothing dispatches either — never count blindly.
+            return False
+        try:
+            model.model_validate(message.get("params"))
+        except Exception:
+            return False
+        return True
+
+    def _snapshot_prompt_wire_boundary(self, data: bytes) -> None:
+        """Pre-write tap: pin the boundary before the prompt bytes go out.
+
+        Runs synchronously in the sender loop with no await before the real
+        ``write()``; frames after the first prompt are skipped by the
+        write-once guard, so post-prompt traffic costs one comparison.
+        """
+        if self._prompt_wire_boundary is not None:
+            return
+        try:
+            message = json.loads(data)
+        except Exception:
+            return
+        if isinstance(message, dict) and message.get("method") == "session/prompt":
+            self._prompt_wire_boundary = self._updates_observed
+
+    def _sender_factory(self, writer: Any, supervisor: Any) -> Any:
+        sender_module = importlib.import_module("acp.task.sender")
+        return sender_module.MessageSender(
+            _PromptBoundaryWriter(writer, self._snapshot_prompt_wire_boundary),
+            supervisor,
+        )
 
     # -- lifecycle ---------------------------------------------------------
 
     async def open(self, proc: ManagedProcess) -> None:
         """Bind the SDK connection to the supervised process's live wire."""
-        require_sdk()
+        sdk = require_sdk()
+        # Bound before the connection exists so the very first observed frame
+        # is already gated by the locked SDK's own validation model.
+        self._session_notification = sdk.schema.SessionNotification
         connection_module = importlib.import_module("acp.client.connection")
         self._connection = connection_module.ClientSideConnection(
             self._client,
             proc.stdin,
             proc.stdout,
             observers=[self._observe_stream],
+            sender_factory=self._sender_factory,
         )
 
     async def close(self) -> None:
@@ -228,6 +339,12 @@ class NativeAcpDriver:
     async def prompt_once(self, text: str) -> PromptOutcome:
         connection = self._require_connection()
         session_id = self._require_session()
+        if self._prompt_dispatched:
+            raise NativeDriverError(
+                "driver already dispatched a prompt: the prompt wire boundary "
+                "is write-once, one prompt per driver/connection"
+            )
+        self._prompt_dispatched = True
         self._machine.require_ready()
         self._check_identity()
         schema = require_sdk().schema
@@ -236,12 +353,22 @@ class NativeAcpDriver:
             "session/prompt",
             connection.prompt(session_id=session_id, prompt=[block]),
         )
+        if self._prompt_wire_boundary is None:
+            # A resolved prompt response proves the frame was written, so the
+            # pre-write tap must have pinned the boundary; without it the
+            # current-turn gate would silently discard every chunk.
+            raise NativeDriverError(
+                "prompt response arrived but the prompt wire boundary was "
+                "never snapshotted"
+            )
         # Pre-response delivery barrier: the SDK resolves the prompt future
-        # without awaiting queued session/update handlers, so every update
-        # frame observed on the wire before this response must complete its
-        # client callback before the turn returns — otherwise finalization
-        # could cancel those handlers and silently lose final-message/event
-        # evidence. The caller's turn timeout is the only time bound.
+        # without awaiting queued session/update handlers, so every
+        # deliverable update frame observed on the wire before this response
+        # must complete its client callback before the turn returns —
+        # otherwise finalization could cancel those handlers and silently
+        # lose final-message/event evidence. The target and the completion
+        # counter share one ordinal domain (SDK-dispatched frames only).
+        # The caller's turn timeout is the only time bound.
         try:
             await self._client.wait_for_updates_completed(self._updates_observed)
         except UpdateCallbackError as exc:

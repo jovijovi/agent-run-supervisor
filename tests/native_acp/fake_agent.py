@@ -20,6 +20,9 @@ Script keys (all optional):
 - ``silent_new_on_load``: session/load succeeds but later updates carry a
   new session id (silent recreation).
 - ``load_fails``: session/load returns a JSON-RPC error.
+- ``replay_on_load``: list of texts emitted as ``agent_message_chunk``
+  session updates before the session/load response (models the official
+  adapters' history replay).
 - ``final_message``: agent_message_chunk text before end_turn.
 - ``nonce_memory``: echo previously prompted nonce text back (used by C9
   switching tests to model context continuity).
@@ -179,6 +182,15 @@ class FakeAgent:
             # config response so the client observes the identity change.
             self.update_session_id = "fake-recreated-session-2"
             self._notify_update({"sessionUpdate": "session_info_update"})
+        for text in self.script.get("replay_on_load", []):
+            # History replay precedes the load response, like the official
+            # adapters: assistant chunks for turns of *previous* Runs.
+            self._notify_update(
+                {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": text},
+                }
+            )
         _result(request_id, {"configOptions": self._options_list()})
 
     def _on_set_config(self, request_id: Any, params: dict[str, Any]) -> None:

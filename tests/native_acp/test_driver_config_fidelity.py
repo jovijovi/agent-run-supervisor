@@ -179,6 +179,26 @@ def test_happy_exact_sequence_reaches_ready_and_prompts(tmp_path: Path) -> None:
     asyncio.run(case())
 
 
+def test_second_prompt_on_same_driver_fails_closed(tmp_path: Path) -> None:
+    # B1 boundary pin (2026-07-24 focused-review WATCH): the prompt wire
+    # boundary is write-once, so one driver/connection supports exactly one
+    # prompt. A second prompt must be refused before any wire write instead
+    # of silently inheriting the first Turn's boundary.
+    async def case() -> None:
+        async with _Harness(tmp_path, HAPPY_SCRIPT) as harness:
+            driver = harness.driver
+            await asyncio.wait_for(driver.initialize(), 10)
+            await asyncio.wait_for(driver.new_session(cwd=str(tmp_path)), 10)
+            await asyncio.wait_for(driver.set_config_exact(), 10)
+            outcome = await asyncio.wait_for(driver.prompt_once("first prompt"), 10)
+            assert outcome.stop_reason == "end_turn"
+            with pytest.raises(NativeDriverError, match="one prompt per driver"):
+                await asyncio.wait_for(driver.prompt_once("second prompt"), 10)
+        assert harness.methods_seen().count("session/prompt") == 1
+
+    asyncio.run(case())
+
+
 def test_effort_absent_from_post_model_set_fails_closed(tmp_path: Path) -> None:
     script = dict(HAPPY_SCRIPT)
     script["post_model_options"] = [
