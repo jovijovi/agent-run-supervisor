@@ -289,6 +289,8 @@ by Claude-shaped Runs are additive per-Run files that no reader requires.
   one. That is the pre-existing client behavior and the live canary's deny leg
   passed with it; the bridge's computed reject option id remains unused on the
   wire.
-- Local verification only. Nothing was committed, staged, pushed, merged,
-  deployed, restarted, enabled, or published, and no real credential, real
-  socket, or production service was touched.
+- Current state: a local immutable candidate commit exists on the task branch
+  `feat/claude-official-adapter-b3-b5-closure`, and local verification is
+  complete. Nothing was pushed, opened as a PR, merged, deployed, rolled out,
+  restarted, or production-enabled; no release, tag, publication, or PyPI upload
+  was made; and no real-credential or real-socket acceptance was executed.
