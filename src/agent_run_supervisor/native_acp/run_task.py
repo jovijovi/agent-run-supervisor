@@ -514,6 +514,8 @@ class RunTask:
             effort_selector_id=profile.effort_selector_id,
             requested_model=spec.runtime.model_id,
             requested_effort=spec.runtime.effort,
+            permission_mode_selector_id=profile.permission_mode_selector_id,
+            required_permission_mode=profile.required_permission_mode,
         )
         ctx.driver = NativeAcpDriver(client=client, machine=ctx.machine)
 
@@ -604,6 +606,12 @@ class RunTask:
     async def _startup_sequence(self, ctx: _RunContext, spec, binding) -> None:
         driver = ctx.driver
         assert driver is not None and ctx.bridge is not None
+        # The frozen session metadata comes only from the resolved profile and
+        # is sent identically on session/new and session/load: the agent
+        # rebuilds its underlying query from the load request, so omitting it
+        # there would silently restore ambient setting sources on every reused
+        # Session. No caller value can reach this argument.
+        session_meta = ctx.profile.session_meta_payload()
         try:
             self._emit(ctx, {"type": "run_started", "method": "initialize"})
             await driver.open(ctx.proc)
@@ -633,11 +641,14 @@ class RunTask:
                 await driver.load_session(
                     agent_session_id=ctx.load_external_id,
                     cwd=binding.effective_cwd,
+                    meta=session_meta,
                 )
                 ctx.effective.agent_session_id = ctx.load_external_id
             else:
                 self._emit(ctx, {"type": "session_new_requested"})
-                external_id = await driver.new_session(cwd=binding.effective_cwd)
+                external_id = await driver.new_session(
+                    cwd=binding.effective_cwd, meta=session_meta
+                )
                 ctx.effective.agent_session_id = external_id
                 record = self._session_store.open_session(ctx.session_id)
                 if record.agent_session_id is None:
@@ -770,6 +781,11 @@ class RunTask:
                 effort_selector_id=ctx.profile.effort_selector_id,
                 requested_model=previous_model,
                 requested_effort=previous_effort,
+                # The rollback re-runs the full exact sequence, so a frozen
+                # permission mode is re-proven too — a rollback must never
+                # leave the session in an unproven mode.
+                permission_mode_selector_id=ctx.profile.permission_mode_selector_id,
+                required_permission_mode=ctx.profile.required_permission_mode,
             )
             rollback_machine.record_initial_options(latest_options)
             # Rollback is itself exact-readback gated.

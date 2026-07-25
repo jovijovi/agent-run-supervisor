@@ -1549,3 +1549,141 @@ def test_quarantined_codex_session_reuse_refused(tmp_path: Path) -> None:
             owner="hermes",
             namespace="hermes/doc-check",
         )
+
+
+# -- Claude closed-profile admission over the ingress path (B3) --------------
+
+
+def claude_admission_profile(tmp_path: Path, **overrides):
+    """A Claude-shaped identity-pinned profile over private placeholders.
+
+    No real adapter tree, frozen Node copy, CLI, or credential is opened.
+    """
+    from agent_run_supervisor.native_acp.attestation import ExpectedRuntimeIdentity
+    from agent_run_supervisor.native_acp.profile import AgentProfile
+
+    stage = tmp_path / "claude-stage"
+    stage.mkdir(exist_ok=True)
+    node = stage / "node"
+    node.write_bytes(b"# private node placeholder\n")
+    entry = stage / "index.js"
+    entry.write_bytes(b"// private adapter entry placeholder\n")
+    cli = stage / "claude"
+    cli.write_bytes(b"# private cli placeholder\n")
+
+    kwargs = dict(
+        profile_id="claude-agent-acp-admission-0.61.0",
+        revision=1,
+        executable_key="claude-agent-acp-admission",
+        argv_template=(str(entry),),
+        env_allowlist=("HOME", "PATH"),
+        fixed_env=(
+            ("CLAUDE_CODE_EXECUTABLE", str(cli)),
+            ("NO_BROWSER", "1"),
+        ),
+        credential_slots=(),
+        required_credential_refs=(),
+        model_selector_id="model",
+        effort_selector_id="effort",
+        default_model="opus[1m]",
+        default_effort="max",
+        registered_models=("claude-fable-5[1m]", "opus[1m]"),
+        allowed_efforts=("max",),
+        requires_session_load=True,
+        permission_mode_selector_id="mode",
+        required_permission_mode="default",
+        session_meta=(
+            '{"claudeCode":{"options":{"settingSources":[],'
+            '"tools":{"preset":"claude_code","type":"preset"}}}}'
+        ),
+        config_schema={
+            "schema_version": 1,
+            "selectors": {
+                "model": {
+                    "config_id": "model",
+                    "type": "string",
+                    "domain": ["claude-fable-5[1m]", "opus[1m]"],
+                },
+                "effort": {"config_id": "effort", "type": "string", "domain": ["max"]},
+                "permission_mode": {
+                    "config_id": "mode",
+                    "type": "string",
+                    "domain": ["default"],
+                },
+            },
+        },
+        expected_runtime=ExpectedRuntimeIdentity(
+            node_path=str(node),
+            node_sha256="0" * 64,
+            adapter_entry_path=str(entry),
+            adapter_entry_sha256="1" * 64,
+            cli_path=str(cli),
+            cli_sha256="2" * 64,
+            agent_info_name="@agentclientprotocol/claude-agent-acp",
+            agent_info_version="0.61.0",
+            protocol_version="1",
+            cli_path_env="CLAUDE_CODE_EXECUTABLE",
+            credential_root_env=None,
+            project_config_relpath=None,
+        ),
+    )
+    kwargs.update(overrides)
+    return AgentProfile(**kwargs)
+
+
+def claude_wire_request(**overrides) -> dict:
+    kwargs = dict(
+        profile_id="claude-agent-acp-admission-0.61.0",
+        requested_model="opus[1m]",
+        requested_effort="max",
+        credential_refs=[],
+    )
+    kwargs.update(overrides)
+    return valid_wire_request(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("label", "overrides"),
+    [
+        ("credential reference", {"credential_refs": ["claude-home"]}),
+        # The direct Claude CLI author selector is not the ACP readback literal.
+        ("cli author selector", {"requested_model": "claude-opus-5[1m]"}),
+        ("out-of-domain effort", {"requested_effort": "high"}),
+    ],
+)
+def test_claude_closed_admission_refused_over_socket(
+    tmp_path: Path, label: str, overrides
+) -> None:
+    async def scenario() -> None:
+        profile = claude_admission_profile(tmp_path)
+        async with codex_socket_daemon(tmp_path, profile) as (srv, handler, root):
+            payload = submit_payload(
+                request=claude_wire_request(**overrides),
+                workspace_root=str(tmp_path),
+            )
+            reply = await socket_roundtrip(
+                srv.socket_path,
+                {
+                    "api_version": 1,
+                    "op": "submit",
+                    "request_id": "req-claude-1",
+                    "payload": payload,
+                },
+            )
+            assert reply.get("error") is None, reply
+            run_id = reply["result"]["run_id"]
+            run_dir = Path(root) / "native-runs" / run_id
+            deadline = asyncio.get_event_loop().time() + 20
+            while asyncio.get_event_loop().time() < deadline:
+                if (run_dir / "result.json").exists():
+                    break
+                await asyncio.sleep(0.05)
+            result = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+
+        assert result["status"] == "failed", label
+        assert result["detail_code"] == "ADMISSION", label
+        # Refused before spawn: no attestation artifact, no launch attempt.
+        assert not (run_dir / "attestation.json").exists(), label
+        assert not (run_dir / "prompt-dispatch-started").exists(), label
+
+    asyncio.run(scenario())

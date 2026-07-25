@@ -966,3 +966,144 @@ def test_refusal_exception_is_public_typed_with_code_and_failing_check(
             imported.update(alias.name for alias in node.names)
     assert not {name for name in imported if "run_task" in name}
     assert not hasattr(attestation_module, "_PreDispatchFailure")
+
+
+# -- generalized identity bindings (B3: Claude-shaped runtimes) ---------------
+
+
+def _arrange_claude(tmp_path: Path, *, cwd: Path | None = None) -> Fixture:
+    """A Claude-shaped fixture: CLI bound through its own fixed-env key, no
+    ARS-managed credential root, and no project-config closure surface."""
+    fixture = _arrange(tmp_path, cwd=cwd)
+    expected = ExpectedRuntimeIdentity(
+        node_path=fixture.expected.node_path,
+        node_sha256=fixture.expected.node_sha256,
+        adapter_entry_path=fixture.expected.adapter_entry_path,
+        adapter_entry_sha256=fixture.expected.adapter_entry_sha256,
+        cli_path=fixture.expected.cli_path,
+        cli_sha256=fixture.expected.cli_sha256,
+        agent_info_name="@example/private-claude-adapter",
+        agent_info_version="0.0.1",
+        protocol_version="1",
+        cli_path_env="CLAUDE_CODE_EXECUTABLE",
+        credential_root_env=None,
+        project_config_relpath=None,
+    )
+    fixture.expected = expected
+    fixture.fixed_env = {
+        "CLAUDE_CODE_EXECUTABLE": str(fixture.cli),
+        "NO_BROWSER": "1",
+    }
+    return fixture
+
+
+def test_claude_shaped_boundary_passes_without_a_credential_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spawns = _spawn_guard(monkeypatch)
+    fixture = _arrange_claude(tmp_path)
+    result = _attest(fixture)
+    try:
+        report = fixture.report()
+        assert report["pass"] is True
+        assert all(row["passed"] for row in report["checks"])
+        rows = fixture.rows()
+        # Artifact identity rows still run in full.
+        for required in (
+            "node_pin",
+            "adapter_entry_pin",
+            "cli_pin",
+            "node_sha256",
+            "adapter_entry_sha256",
+            "cli_sha256",
+            "argv_node_binding",
+            "argv_adapter_entry_binding",
+            "env_cli_path_binding",
+            "node_binding_lost",
+            "adapter_entry_binding_lost",
+            "cli_binding_lost",
+        ):
+            assert required in rows, required
+        # Absent surfaces are declared explicitly, never silently skipped.
+        assert rows["credential_root_not_declared"]["observed"] == "not declared"
+        assert rows["project_config_not_declared"]["observed"] == "not declared"
+        assert "credential_root_structure" not in rows
+        assert "project_config_closure" not in rows
+        assert os.fstat(result.interpreter_fd).st_ino == os.stat(fixture.node).st_ino
+    finally:
+        os.close(result.interpreter_fd)
+    assert spawns == []
+
+
+def test_claude_shaped_cli_env_binding_is_the_declared_key(tmp_path: Path) -> None:
+    fixture = _arrange_claude(tmp_path)
+    # The Codex key is not a substitute: the CLI binding is refused when the
+    # declared key is missing, so no PATH-resolved fallback CLI can be reached.
+    refusal = _refusal(fixture, fixed_env={"CODEX_PATH": str(fixture.cli)})
+    assert refusal.failing_check == "env_cli_path_binding"
+    assert refusal.code == RUNTIME_IDENTITY_MISMATCH
+    assert fixture.rows()["env_cli_path_binding"]["passed"] is False
+
+
+def test_claude_shaped_cli_env_pointing_elsewhere_is_refused(tmp_path: Path) -> None:
+    fixture = _arrange_claude(tmp_path)
+    other = tmp_path / "stage" / "other-claude"
+    other.write_bytes(b"# a different cli\n")
+    refusal = _refusal(
+        fixture,
+        fixed_env={"CLAUDE_CODE_EXECUTABLE": str(other), "NO_BROWSER": "1"},
+    )
+    assert refusal.failing_check == "env_cli_path_binding"
+
+
+def test_claude_shaped_ignores_a_codex_project_config_layer(tmp_path: Path) -> None:
+    # A profile that declares no project-config surface must not inherit the
+    # Codex closure: the frozen session metadata + forced permission mode are
+    # its proven defense, and the live canary passed with a hostile workspace
+    # settings file present.
+    fixture = _arrange_claude(tmp_path)
+    layer = fixture.workspace / ".codex"
+    layer.mkdir()
+    (layer / "config.toml").write_text("[features]\n", encoding="utf-8")
+    result = _attest(fixture)
+    os.close(result.interpreter_fd)
+    assert fixture.report()["pass"] is True
+
+
+def test_claude_shaped_artifact_drift_still_refuses(tmp_path: Path) -> None:
+    fixture = _arrange_claude(tmp_path)
+    fixture.entry.write_bytes(b"// swapped adapter entry\n")
+    refusal = _refusal(fixture)
+    assert refusal.failing_check == "adapter_entry_sha256"
+    assert refusal.code == RUNTIME_IDENTITY_MISMATCH
+
+
+def test_codex_shaped_rows_are_unchanged_by_the_generalization(
+    tmp_path: Path,
+) -> None:
+    # The Codex fixture declares no explicit bindings, so it must keep the
+    # exact legacy row set (nothing weakened, bypassed, or skipped).
+    fixture = _arrange(tmp_path)
+    result = _attest(fixture)
+    os.close(result.interpreter_fd)
+    rows = fixture.rows()
+    assert "credential_root_not_declared" not in rows
+    assert "project_config_not_declared" not in rows
+    for required in (
+        "credential_root_structure",
+        "auth_json_structure",
+        "config_toml_absent",
+        "project_config_closure",
+        "credential_root_binding_lost",
+        "auth_json_binding_lost",
+        "config_toml_absence_recheck",
+        "project_config_closure_recheck",
+    ):
+        assert required in rows, required
+    assert fixture.expected.cli_path_env == "CODEX_PATH"
+    assert fixture.expected.credential_root_env == "CODEX_HOME"
+    assert fixture.expected.project_config_relpath == ".codex/config.toml"
+    # Omit-when-default keeps the merged Codex launch/profile hashes stable.
+    assert "cli_path_env" not in fixture.expected.to_dict()
+    assert "credential_root_env" not in fixture.expected.to_dict()
+    assert "project_config_relpath" not in fixture.expected.to_dict()

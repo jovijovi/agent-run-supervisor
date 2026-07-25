@@ -234,7 +234,13 @@ def test_codex_profile_snapshot_golden() -> None:
         },
     }
     assert DEFAULT_REGISTRY.get("codex-acp-1.1.7") is CODEX_ACP_1_1_7
-    assert DEFAULT_REGISTRY.ids() == ("codex-acp-1.1.7", "opencode-1.18.4")
+    # The registry grew additively with the Claude admission; the Codex row's
+    # own snapshot/hashes above are unchanged.
+    assert DEFAULT_REGISTRY.ids() == (
+        "claude-agent-acp-0.61.0",
+        "codex-acp-1.1.7",
+        "opencode-1.18.4",
+    )
 
 
 def _codex_like(**overrides) -> AgentProfile:
@@ -341,3 +347,295 @@ def test_codex_carries_no_opencode_permission_binding() -> None:
 
     # _REGISTERED_PERMISSION_ENV stays OpenCode-only.
     assert resolve_registered_permission_env(CODEX_ACP_1_1_7.executable_key) == ()
+
+
+# -- Claude closed-profile admission (B3) ------------------------------------
+
+FROZEN_CLAUDE_ENTRY = (
+    "/home/ecs-user/.local/share/agent-run-supervisor/adapters/claude-agent-acp/0.61.0"
+    "/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js"
+)
+FROZEN_CLAUDE_ENTRY_SHA256 = (
+    "260aac90bf75f197b93640087c1de66441761d43c2784efa035fdcee60b5dacd"
+)
+FROZEN_CLAUDE_CLI_PATH = "/home/ecs-user/.local/bin/claude"
+FROZEN_CLAUDE_CLI_SHA256 = (
+    "22cfd6f5b3061c0391ba84e9cf8c9deaa37783aac18b004d42ec061e98f00691"
+)
+# Byte-stability golden captured at HEAD 5898655 (Codex admission merged),
+# before the Claude row and the generalized identity bindings existed.
+CODEX_PROFILE_HASH_GOLDEN = (
+    "bb57d7e8259c1b399cc4fe97197e2afaf182281ff630b72dfe78f22c109298b8"
+)
+CODEX_CONFIG_SCHEMA_HASH_GOLDEN = (
+    "a86d084c818a7ca3be0a5298dda46800fc3977826e8007e3db74bea7f2b8829a"
+)
+
+
+def test_claude_profile_snapshot_golden() -> None:
+    """Every registered value is a byte-copy of the frozen discovery manifest.
+
+    The ACP model domain is exactly ``claude-fable-5[1m]`` and ``opus[1m]``.
+    ``claude-opus-5[1m]`` is the *direct Claude CLI* author selector and is
+    deliberately NOT registered: a live ACP set/readback on this adapter
+    returns ``opus[1m]``, so the CLI-side string could never pass exact
+    readback.
+    """
+    from agent_run_supervisor.native_acp.attestation import ExpectedRuntimeIdentity
+    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_61_0
+
+    profile = CLAUDE_AGENT_ACP_0_61_0
+    assert profile.profile_id == "claude-agent-acp-0.61.0"
+    assert profile.revision == 1
+    assert profile.executable_key == "claude-agent-acp"
+    assert profile.argv_template == (FROZEN_CLAUDE_ENTRY,)
+    assert profile.model_selector_id == "model"
+    assert profile.effort_selector_id == "effort"
+    assert profile.registered_models == ("claude-fable-5[1m]", "opus[1m]")
+    assert profile.default_model == "opus[1m]"
+    assert profile.allowed_efforts == ("max",)
+    assert profile.default_effort == "max"
+    assert profile.requires_session_load is True
+    # Closed admission: the Claude CLI owns its own credential storage, which
+    # ARS neither manages nor stages, so exactly zero caller references admit.
+    assert profile.credential_slots == ()
+    assert profile.required_credential_refs == ()
+
+    # The downstream CLI is bound only through profile-owned fixed env; a
+    # missing binding would silently switch the adapter to a PATH-resolved or
+    # bundled fallback CLI (a downstream identity change with no hash change).
+    assert profile.fixed_env == (
+        ("CLAUDE_CODE_EXECUTABLE", FROZEN_CLAUDE_CLI_PATH),
+        ("NO_BROWSER", "1"),
+    )
+    assert profile.expected_runtime == ExpectedRuntimeIdentity(
+        node_path=FROZEN_NODE_PATH,
+        node_sha256=FROZEN_NODE_SHA256,
+        adapter_entry_path=FROZEN_CLAUDE_ENTRY,
+        adapter_entry_sha256=FROZEN_CLAUDE_ENTRY_SHA256,
+        cli_path=FROZEN_CLAUDE_CLI_PATH,
+        cli_sha256=FROZEN_CLAUDE_CLI_SHA256,
+        agent_info_name="@agentclientprotocol/claude-agent-acp",
+        agent_info_version="0.61.0",
+        protocol_version="1",
+        cli_path_env="CLAUDE_CODE_EXECUTABLE",
+        credential_root_env=None,
+        project_config_relpath=None,
+    )
+
+    snapshot = profile.snapshot()
+    assert snapshot["fixed_env"] == [
+        ["CLAUDE_CODE_EXECUTABLE", FROZEN_CLAUDE_CLI_PATH],
+        ["NO_BROWSER", "1"],
+    ]
+    assert snapshot["required_credential_refs"] == []
+    assert snapshot["expected_runtime"]["cli_path_env"] == "CLAUDE_CODE_EXECUTABLE"
+    assert snapshot["expected_runtime"]["credential_root_env"] is None
+    assert snapshot["expected_runtime"]["project_config_relpath"] is None
+    assert len(profile.profile_hash()) == 64
+    assert profile.snapshot_ref() == "registry:claude-agent-acp-0.61.0@r1"
+
+
+def test_claude_profile_is_registered_alongside_the_existing_rows() -> None:
+    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_61_0
+
+    assert DEFAULT_REGISTRY.get("claude-agent-acp-0.61.0") is CLAUDE_AGENT_ACP_0_61_0
+    assert DEFAULT_REGISTRY.ids() == (
+        "claude-agent-acp-0.61.0",
+        "codex-acp-1.1.7",
+        "opencode-1.18.4",
+    )
+
+
+def test_claude_executable_resolves_to_the_frozen_node_never_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_61_0
+
+    resolved = resolve_registered_executable(CLAUDE_AGENT_ACP_0_61_0.executable_key)
+    assert str(resolved) == FROZEN_NODE_PATH
+    # The adapter entry is an ESM script with a `#!/usr/bin/env node` shebang:
+    # the process image must be the frozen Node, never an env-resolved one.
+    monkeypatch.setenv("PATH", "/tmp/adversarial-bin")
+    monkeypatch.setenv("NODE", "/tmp/adversarial-bin/node")
+    monkeypatch.setenv("CLAUDE_CODE_EXECUTABLE", "/tmp/adversarial-bin/claude")
+    assert (
+        resolve_registered_executable(CLAUDE_AGENT_ACP_0_61_0.executable_key)
+        == resolved
+    )
+    assert "node_modules/.bin" not in str(resolved)
+
+
+def test_claude_carries_no_opencode_permission_binding() -> None:
+    from agent_run_supervisor.native_acp.profile import (
+        CLAUDE_AGENT_ACP_0_61_0,
+        resolve_registered_permission_env,
+    )
+
+    assert resolve_registered_permission_env(
+        CLAUDE_AGENT_ACP_0_61_0.executable_key
+    ) == ()
+
+
+def _claude_like(**overrides) -> AgentProfile:
+    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_61_0
+    import dataclasses
+
+    return dataclasses.replace(CLAUDE_AGENT_ACP_0_61_0, **overrides)
+
+
+def test_claude_identity_requires_its_declared_cli_env_key() -> None:
+    # A frozen runtime identity must freeze the fixed-env key that carries the
+    # CLI path it attests — derived from the identity, never a hardcoded name.
+    identity = _claude_like().expected_runtime
+    with pytest.raises(ValueError):
+        _claude_like(fixed_env=(("NO_BROWSER", "1"),), expected_runtime=identity)
+    # The Codex-shaped key does not satisfy a Claude identity.
+    with pytest.raises(ValueError):
+        _claude_like(
+            fixed_env=(("CODEX_PATH", FROZEN_CLAUDE_CLI_PATH),),
+            expected_runtime=identity,
+        )
+    _claude_like()
+
+
+def test_codex_profile_hash_is_byte_stable_after_the_claude_admission() -> None:
+    # Additive identity bindings serialize omit-when-default, so the merged
+    # Codex row keeps its snapshot, profile hash, and launch hash.
+    from agent_run_supervisor.native_acp.profile import CODEX_ACP_1_1_7
+
+    snapshot = CODEX_ACP_1_1_7.snapshot()
+    assert sorted(snapshot["expected_runtime"]) == [
+        "adapter_entry_path",
+        "adapter_entry_sha256",
+        "agent_info_name",
+        "agent_info_version",
+        "cli_path",
+        "cli_sha256",
+        "node_path",
+        "node_sha256",
+        "protocol_version",
+    ]
+    assert CODEX_ACP_1_1_7.profile_hash() == CODEX_PROFILE_HASH_GOLDEN
+    assert CODEX_ACP_1_1_7.config_schema_hash() == CODEX_CONFIG_SCHEMA_HASH_GOLDEN
+
+
+# -- B4: profile-frozen permission mode --------------------------------------
+
+
+def test_claude_profile_freezes_the_default_permission_mode() -> None:
+    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_61_0
+
+    profile = CLAUDE_AGENT_ACP_0_61_0
+    assert profile.permission_mode_selector_id == "mode"
+    assert profile.required_permission_mode == "default"
+    assert profile.config_schema["selectors"]["permission_mode"] == {
+        "config_id": "mode",
+        "type": "string",
+        "domain": ["default"],
+    }
+    snapshot = profile.snapshot()
+    assert snapshot["permission_mode_selector_id"] == "mode"
+    assert snapshot["required_permission_mode"] == "default"
+
+
+def test_permission_mode_binding_must_be_declared_as_a_pair() -> None:
+    for overrides in (
+        {"permission_mode_selector_id": "mode", "required_permission_mode": None},
+        {"permission_mode_selector_id": None, "required_permission_mode": "default"},
+    ):
+        with pytest.raises(ValueError):
+            _claude_like(**overrides)
+
+
+def test_legacy_profiles_declare_no_permission_mode_and_omit_it() -> None:
+    from agent_run_supervisor.native_acp.profile import CODEX_ACP_1_1_7
+
+    for profile in (OPENCODE_1_18_4, CODEX_ACP_1_1_7):
+        assert profile.permission_mode_selector_id is None
+        assert profile.required_permission_mode is None
+        snapshot = profile.snapshot()
+        assert "permission_mode_selector_id" not in snapshot
+        assert "required_permission_mode" not in snapshot
+    assert OPENCODE_1_18_4.profile_hash() == OPENCODE_PROFILE_HASH_GOLDEN
+    assert CODEX_ACP_1_1_7.profile_hash() == CODEX_PROFILE_HASH_GOLDEN
+
+
+# -- B5: profile-owned frozen session metadata -------------------------------
+
+FROZEN_CLAUDE_SESSION_META = (
+    '{"claudeCode":{"options":{"settingSources":[],'
+    '"tools":{"preset":"claude_code","type":"preset"}}}}'
+)
+
+
+def test_claude_profile_freezes_the_exact_session_metadata() -> None:
+    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_61_0
+
+    profile = CLAUDE_AGENT_ACP_0_61_0
+    assert profile.session_meta == FROZEN_CLAUDE_SESSION_META
+    payload = profile.session_meta_payload()
+    assert payload == {
+        "claudeCode": {
+            "options": {
+                "settingSources": [],
+                "tools": {"type": "preset", "preset": "claude_code"},
+            }
+        }
+    }
+    # Hash-bound: the metadata is part of the profile snapshot.
+    snapshot = profile.snapshot()
+    assert snapshot["session_meta"] == payload
+
+
+def test_session_metadata_payload_is_a_fresh_deep_copy_each_call() -> None:
+    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_61_0
+
+    first = CLAUDE_AGENT_ACP_0_61_0.session_meta_payload()
+    first["claudeCode"]["options"]["settingSources"].append("user")
+    second = CLAUDE_AGENT_ACP_0_61_0.session_meta_payload()
+    assert second["claudeCode"]["options"]["settingSources"] == []
+    assert first is not second
+
+
+def test_session_metadata_must_be_canonical_json_object_text() -> None:
+    cases = {
+        "unparsable": "not json",
+        "non-object": '["settingSources"]',
+        "non-canonical spacing": '{"claudeCode": {"options": {}}}',
+        "non-canonical key order": '{"b":1,"a":2}',
+        "empty": "",
+    }
+    for label, value in cases.items():
+        with pytest.raises(ValueError):
+            _claude_like(session_meta=value)
+        assert label
+
+
+def test_session_metadata_hash_binding_is_immutable_and_canonical() -> None:
+    import dataclasses
+
+    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_61_0
+
+    baseline = CLAUDE_AGENT_ACP_0_61_0.profile_hash()
+    assert CLAUDE_AGENT_ACP_0_61_0.profile_hash() == baseline
+    # A different frozen metadata is a different profile identity.
+    other = dataclasses.replace(
+        CLAUDE_AGENT_ACP_0_61_0,
+        session_meta='{"claudeCode":{"options":{"settingSources":["user"]}}}',
+    )
+    assert other.profile_hash() != baseline
+    # The frozen dataclass cannot be mutated in place.
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        CLAUDE_AGENT_ACP_0_61_0.session_meta = "{}"  # type: ignore[misc]
+
+
+def test_legacy_profiles_carry_no_session_metadata() -> None:
+    from agent_run_supervisor.native_acp.profile import CODEX_ACP_1_1_7
+
+    for profile in (OPENCODE_1_18_4, CODEX_ACP_1_1_7):
+        assert profile.session_meta is None
+        assert profile.session_meta_payload() is None
+        assert "session_meta" not in profile.snapshot()
+    assert OPENCODE_1_18_4.profile_hash() == OPENCODE_PROFILE_HASH_GOLDEN
+    assert CODEX_ACP_1_1_7.profile_hash() == CODEX_PROFILE_HASH_GOLDEN

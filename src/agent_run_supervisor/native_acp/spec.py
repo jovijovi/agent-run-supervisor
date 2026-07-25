@@ -284,6 +284,10 @@ class ResolvedLaunchSpec:
     transport: str = "stdio"
     fixed_env: tuple[tuple[str, str], ...] = ()
     expected_runtime: ExpectedRuntimeIdentity | None = None
+    # Canonical JSON text of the profile's frozen ACP session metadata, mirrored
+    # so the exact ``_meta`` this Run will send is durable evidence before any
+    # session call. Never caller input.
+    session_meta: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -303,6 +307,8 @@ class ResolvedLaunchSpec:
             payload["fixed_env"] = [list(pair) for pair in self.fixed_env]
         if self.expected_runtime is not None:
             payload["expected_runtime"] = self.expected_runtime.to_dict()
+        if self.session_meta is not None:
+            payload["session_meta"] = json.loads(self.session_meta)
         return payload
 
     def launch_hash(self) -> str:
@@ -539,6 +545,7 @@ class RunSpecAssembler:
             ),
             fixed_env=self._profile.fixed_env,
             expected_runtime=self._profile.expected_runtime,
+            session_meta=self._profile.session_meta,
         )
         return self._launch
 

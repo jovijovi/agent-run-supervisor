@@ -7,6 +7,10 @@ and never widens or re-reads the grant at runtime (snapshot only). Unknown
 operation classes deny by default; an unmappable/unexpected permission
 prompt additionally flags the turn as failed, aligning with the acpx
 non-interactive fail semantics.
+
+Every allow is *once-scoped by construction*: the bridge selects an
+``allow_once`` option or denies, so no decision can install an agent-side rule
+that outlives the mediated call.
 """
 
 from __future__ import annotations
@@ -33,6 +37,16 @@ _REGISTERED_KINDS = frozenset(
         "other",
     }
 )
+
+# Option-scope discipline. Mediation may only ever return a *once*-scoped
+# option: an always-scoped allow makes the agent install a session-scoped rule
+# for that tool, which outlives the mediated call and auto-allows every later
+# one — a broad auto-allow the frozen grant never approved. The official Claude
+# adapter advertises ``allow_always`` first, so first-match scanning would pick
+# it; the preference order below is therefore explicit, and no always-scoped
+# allow is ever selected (a prompt offering only that form denies fail-closed).
+_ALLOW_OPTION_PREFERENCE = ("allow_once",)
+_REJECT_OPTION_PREFERENCE = ("reject_once", "reject_always")
 
 # Write-family ACP tool kinds and the grant capability each one requires. A
 # write-family tool call that reaches ``completed`` without that capability in
@@ -205,19 +219,24 @@ class PermissionBridge:
             )
 
         if kind in _READ_KINDS and "read" in self._capabilities:
-            allow_option = _option_id(options, {"allow_once", "allow_always"})
-            if allow_option is not None:
-                decision = self._emit(
-                    requested_op=f"permission:{kind}",
-                    decision="allow",
-                    reason="workspace-scoped read-like operation under read grant",
-                    tool_call_id=tool_call_id,
-                )
-                decision["option_id"] = allow_option
-                return decision
-            return self._deny_with_option(
-                requested_op=f"permission:{kind}",
-                reason="no allow option offered; denying",
+            return self._allow_once_or_deny(
+                kind=kind,
+                reason="workspace-scoped read-like operation under read grant",
+                tool_call_id=tool_call_id,
+                options=options,
+            )
+
+        # B4: `execute` is mediated against the frozen grant instead of being
+        # denied unconditionally. Without this the completion backstop below
+        # was unreachable in the honest direction — it already treats an
+        # execute completion under an execute grant as legitimate, while
+        # mediation refused the request that could produce it. The remaining
+        # write-family kinds keep their unconditional deny in this slice: their
+        # mediated-allow path has no live canary.
+        if kind == "execute" and "execute" in self._capabilities:
+            return self._allow_once_or_deny(
+                kind=kind,
+                reason="execute permitted once by the frozen grant",
                 tool_call_id=tool_call_id,
                 options=options,
             )
@@ -275,6 +294,32 @@ class PermissionBridge:
             "reason": reason,
         }
 
+    def _allow_once_or_deny(
+        self,
+        *,
+        kind: str,
+        reason: str,
+        tool_call_id: str | None,
+        options: Any,
+    ) -> dict[str, Any]:
+        """Allow through a once-scoped option, or deny fail-closed."""
+        allow_option = _option_id(options, _ALLOW_OPTION_PREFERENCE)
+        if allow_option is None:
+            return self._deny_with_option(
+                requested_op=f"permission:{kind}",
+                reason="no once-scoped allow option offered; denying",
+                tool_call_id=tool_call_id,
+                options=options,
+            )
+        decision = self._emit(
+            requested_op=f"permission:{kind}",
+            decision="allow",
+            reason=reason,
+            tool_call_id=tool_call_id,
+        )
+        decision["option_id"] = allow_option
+        return decision
+
     def _deny_with_option(
         self,
         *,
@@ -289,16 +334,22 @@ class PermissionBridge:
             reason=reason,
             tool_call_id=tool_call_id,
         )
-        reject_option = _option_id(options, {"reject_once", "reject_always"})
+        reject_option = _option_id(options, _REJECT_OPTION_PREFERENCE)
         if reject_option is not None:
             decision["option_id"] = reject_option
         return decision
 
 
-def _option_id(options: Any, kinds: frozenset[str] | set[str]) -> str | None:
-    for option in options or []:
-        if isinstance(option, Mapping) and option.get("kind") in kinds:
-            option_id = option.get("optionId")
-            if isinstance(option_id, str):
-                return option_id
+def _option_id(options: Any, preference: tuple[str, ...]) -> str | None:
+    """First option matching the *preferred kind order*, not wire order.
+
+    Agents order their own option lists; ARS must not inherit that order for a
+    security decision.
+    """
+    for wanted in preference:
+        for option in options or []:
+            if isinstance(option, Mapping) and option.get("kind") == wanted:
+                option_id = option.get("optionId")
+                if isinstance(option_id, str):
+                    return option_id
     return None
