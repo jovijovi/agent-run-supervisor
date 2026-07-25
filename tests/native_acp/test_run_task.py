@@ -22,6 +22,7 @@ from agent_run_supervisor.native_acp import storage
 from agent_run_supervisor.native_acp.driver import NativeAcpDriver
 from agent_run_supervisor.native_acp.profile import AgentProfile, ProfileRegistry
 from agent_run_supervisor.native_acp.run_task import (
+    DISPATCH_STARTED_MARKER,
     NativeRunTaskError,
     RunTask,
 )
@@ -3331,6 +3332,65 @@ def test_spawn_env_exact_composition_fixed_env_wins(
     assert env["INITIAL_AGENT_MODE"] == "read-only"
     assert env["NO_BROWSER"] == "1"
     assert "NOT_ALLOWLISTED" not in env
+
+
+def test_codex_seeded_session_profile_hash_drift_refused_before_attestation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N9 (profile-hash drift on a seeded Session), pinned hermetically.
+
+    A registry revision bump alone breaks the bound profile hash, so
+    `validate_native_binding` refuses reuse inside `_bind_session` — before the
+    spawn-boundary attestation is ever called. The surfaced `detail_code` is
+    the RunTask top-level guard's `RUN_EXCEPTION`, not `ADMISSION`: the
+    acceptance matrix declares exactly this row.
+    """
+    harness = CodexHarness(tmp_path, monkeypatch)
+    first = _run(harness.task(run_id="run-codex-1"))
+    assert first.status is AgentRunStatus.COMPLETED
+
+    spawned = _recording_spawn(monkeypatch)
+    drifted = ProfileRegistry((harness.profile(revision=2),))
+    second = _run(harness.task(run_id="run-codex-2", registry=drifted))
+
+    assert second.status is AgentRunStatus.FAILED
+    assert spawned == []
+    run_dir = harness.run_dir("run-codex-2")
+    payload = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    assert payload["detail_code"] == "RUN_EXCEPTION"
+    assert payload["retryable"] is False
+    # Refused before the attestation stage: no observed-identity artifact.
+    assert not (run_dir / "attestation.json").exists()
+    assert not (run_dir / DISPATCH_STARTED_MARKER).exists()
+
+
+def test_codex_quarantined_session_reuse_refused_before_attestation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N9 (quarantined-session reuse), pinned hermetically — same row."""
+    harness = CodexHarness(tmp_path, monkeypatch)
+    first = _run(harness.task(run_id="run-codex-1"))
+    assert first.status is AgentRunStatus.COMPLETED
+
+    store = harness.session_store()
+    store.write_quarantine_pending(
+        "sess-native-1", reason="test-arranged", run_id="run-codex-1"
+    )
+    store.mark_quarantined(
+        "sess-native-1", reason="test-arranged", run_id="run-codex-1"
+    )
+
+    spawned = _recording_spawn(monkeypatch)
+    second = _run(harness.task(run_id="run-codex-2"))
+
+    assert second.status is AgentRunStatus.FAILED
+    assert spawned == []
+    run_dir = harness.run_dir("run-codex-2")
+    payload = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    assert payload["detail_code"] == "RUN_EXCEPTION"
+    assert payload["retryable"] is False
+    assert not (run_dir / "attestation.json").exists()
+    assert not (run_dir / DISPATCH_STARTED_MARKER).exists()
 
 
 def test_opencode_run_writes_no_attestation_files(

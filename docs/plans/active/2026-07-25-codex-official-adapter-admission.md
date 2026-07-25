@@ -75,6 +75,18 @@ service restart, release/tag/PyPI, and Sachima/Gateway integration.
       `tests/arsd/test_codex_socket_acceptance.py` (skip-by-default; positive
       legs against a derived isolated credential home, negative legs against
       private copies, fail-closed `O_NOATIME` inventory, commit-SHA binding).
+- [x] Repair-1 (review blockers): refuse a runtime artifact that aliases the
+      declared credential file *before* any content hash reads it; guard
+      credential staging so every failure path cleans and re-inventories; make
+      P2 prove exact continuity, clean current-Turn separation, and new thread
+      state; split P4 into cancel-after-dispatch and timeout-after-dispatch
+      sublegs bound to the B2-fixed table; declare and drive the complete
+      R8 N1–N9 variant matrix.
+- [x] Add the unskipped hermetic contract suite
+      `tests/arsd/test_codex_acceptance_contract.py`, which drives the opt-in
+      module's staging-cleanup guard, continuity/state-delta assertions, P4
+      outcome matrix, and negative-case declaration against synthetic fixtures
+      only — no daemon, no spawn, no model call, no credential.
 - [x] GREEN: focused suites, the four-suite baseline, full pytest, the
       canonical verifier, docs index/drift/governance checks, `git diff --check`.
 - [x] Docs: this plan; archive the B1/B2 plan; `F-NATIVE-ADAPTER-CODEX-001`
@@ -129,6 +141,18 @@ service restart, release/tag/PyPI, and Sachima/Gateway integration.
   (non-symlink directory, owner, mode `0700`, `auth.json` non-symlink regular
   file mode `0600`, no `config.toml`); its bytes are never read and no digest of
   a credential-bearing file is ever computed or persisted.
+- **No hashed artifact may alias the credential file.** The configured CLI path
+  is a symlink by design, so its pin follows to the final target; a same-UID
+  retarget onto `CODEX_HOME/auth.json` (or a hardlink at the Node/entry path)
+  would otherwise make the identity hash read credential bytes and persist a
+  credential-derived digest in the FAIL report. The declared root and
+  `auth.json` are therefore identified structurally — `stat`/`lstat` facts
+  only, following and not following the link — *before* step 2, and any pinned
+  artifact whose inode matches is refused with its own
+  `<artifact>_credential_alias` row (class `CREDENTIAL_ROOT_VIOLATION`). The
+  comparison is on inodes, never on pathnames, so a retarget, a hardlink, or a
+  symlinked root are all caught; the hashing function re-asserts the same
+  invariant immediately before its reopen, so no reordering can reach a read.
 - **Post-initialize identity gate.** Before `session/new`, `session/load`, or any
   prompt — on first *and* reused Runs — observed `agent_info`, protocol
   version, and the advertised `loadSession` capability are compared against the
@@ -162,7 +186,20 @@ service restart, release/tag/PyPI, and Sachima/Gateway integration.
    then `fixed_env`; ambient `CODEX_*` values never pass through.
 6. OpenCode snapshot, profile hash, launch hash, and evidence surface are
    byte-identical to the pre-change baseline.
-7. Full pytest and the canonical verifier pass; no dependency, lockfile,
+7. A Run whose Node, adapter entry, or CLI path resolves to the declared
+   credential file — by symlink retarget, by hardlink, or through a symlinked
+   root — is refused at its `<artifact>_credential_alias` row before any
+   content hash runs, and neither the credential bytes nor their SHA-256
+   appear in the persisted report or the refusal text.
+8. The opt-in acceptance harness is executable-by-construction rather than
+   self-satisfying: its staging guard cleans and re-inventories on every
+   failure path, P2 requires exact nonce recall plus a measured current-Turn
+   message path and a real isolated-home state delta, P4 drives both the
+   cancel and the post-dispatch-timeout subleg against the B2-fixed table, and
+   every R8 N1–N9 variant is declared and driven. The unskipped hermetic
+   contract suite fails if any of those conditions is weakened, and the module
+   itself stays skip-by-default.
+9. Full pytest and the canonical verifier pass; no dependency, lockfile,
    version, service, protocol, or result-grammar changes.
 
 ## Files likely to change
@@ -178,7 +215,9 @@ service restart, release/tag/PyPI, and Sachima/Gateway integration.
 - `tests/native_acp/test_attestation.py` — new suite.
 - `tests/native_acp/{test_managed_process,test_profile,test_spec,test_run_task}.py`,
   `tests/native_acp/fake_agent.py` — additions.
-- `tests/arsd/test_admission.py`, `tests/arsd/test_codex_socket_acceptance.py`.
+- `tests/arsd/test_admission.py`, `tests/arsd/test_codex_socket_acceptance.py`,
+  `tests/arsd/test_codex_acceptance_contract.py` — new unskipped hermetic
+  contract suite for the opt-in harness.
 - `docs/roadmap/features.md`, `docs/roadmap/current-status.md`, this plan,
   `docs/INDEX.md`, `docs/lessons/_drift_report.md`.
 
@@ -189,7 +228,7 @@ uv sync --locked --extra dev --extra release --extra native
 uv run --locked python -m pytest -q tests/native_acp/test_attestation.py \
   tests/native_acp/test_managed_process.py tests/native_acp/test_profile.py \
   tests/native_acp/test_spec.py tests/native_acp/test_run_task.py \
-  tests/arsd/test_admission.py
+  tests/arsd/test_admission.py tests/arsd/test_codex_acceptance_contract.py
 uv run --locked python -m pytest -q tests/native_acp/test_run_task.py \
   tests/native_acp/test_finalization_table.py \
   tests/native_acp/test_session_switching.py tests/arsd/test_reconcile.py

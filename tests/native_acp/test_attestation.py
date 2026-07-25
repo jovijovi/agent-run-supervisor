@@ -183,6 +183,9 @@ def test_clean_boundary_passes_and_returns_pinned_interpreter_fd(
         assert all(row["passed"] for row in report["checks"])
         names = [row["name"] for row in report["checks"]]
         for required in (
+            "node_credential_alias",
+            "adapter_entry_credential_alias",
+            "cli_credential_alias",
             "node_sha256",
             "adapter_entry_sha256",
             "cli_sha256",
@@ -429,6 +432,169 @@ def test_cli_retargeted_symlink_refused(tmp_path: Path) -> None:
     assert refusal.code == RUNTIME_IDENTITY_MISMATCH
     assert refusal.failing_check == "cli_sha256"
     assert fixture.rows()["cli_sha256"]["observed"] == _sha256(other)
+
+
+# -- credential aliasing (no hashed artifact may be the credential file) ------
+
+
+def _hash_spy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Records every artifact whose content-hash function is invoked."""
+    real = attestation_module._AttestationState.hash_artifact
+    hashed: list[str] = []
+
+    def spy(self, artifact, *args, **kwargs):
+        hashed.append(artifact)
+        return real(self, artifact, *args, **kwargs)
+
+    monkeypatch.setattr(
+        attestation_module._AttestationState, "hash_artifact", spy
+    )
+    return hashed
+
+
+def _assert_no_credential_derivation(
+    fixture: Fixture, refusal: AttestationRefusal
+) -> None:
+    """Neither the credential bytes nor their digest may survive anywhere."""
+    digest = hashlib.sha256(AUTH_PLACEHOLDER).hexdigest()
+    raw = (fixture.run_dir / "attestation.json").read_bytes()
+    assert AUTH_PLACEHOLDER not in raw
+    assert digest.encode() not in raw
+    assert AUTH_PLACEHOLDER.decode() not in refusal.message
+    assert digest not in refusal.message
+
+
+def test_cli_symlink_retargeted_to_credential_file_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The configured CLI path is a symlink by design, so its pin follows to the
+    # final target: a same-UID retarget onto CODEX_HOME/auth.json would
+    # otherwise make the identity hash read credential bytes.
+    spawns = _spawn_guard(monkeypatch)
+    hashed = _hash_spy(monkeypatch)
+    fixture = _arrange(tmp_path)
+    fixture.cli.unlink()
+    fixture.cli.symlink_to(fixture.auth)
+
+    refusal = _refusal(fixture)
+    assert refusal.code == CREDENTIAL_ROOT_VIOLATION
+    assert refusal.failing_check == "cli_credential_alias"
+    assert hashed == []
+    _assert_no_credential_derivation(fixture, refusal)
+    rows = fixture.rows()
+    assert rows["cli_credential_alias"]["passed"] is False
+    assert "cli_sha256" not in rows
+    assert spawns == []
+
+
+def test_node_hardlinked_to_credential_file_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A hardlink shares the inode under a different name: pathname comparison
+    # would miss it, inode comparison cannot.
+    spawns = _spawn_guard(monkeypatch)
+    hashed = _hash_spy(monkeypatch)
+    fixture = _arrange(tmp_path)
+    fixture.node.unlink()
+    os.link(fixture.auth, fixture.node)
+
+    refusal = _refusal(fixture)
+    assert refusal.code == CREDENTIAL_ROOT_VIOLATION
+    assert refusal.failing_check == "node_credential_alias"
+    assert hashed == []
+    _assert_no_credential_derivation(fixture, refusal)
+    assert spawns == []
+
+
+def test_adapter_entry_hardlinked_to_credential_file_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spawns = _spawn_guard(monkeypatch)
+    hashed = _hash_spy(monkeypatch)
+    fixture = _arrange(tmp_path)
+    fixture.entry.unlink()
+    os.link(fixture.auth, fixture.entry)
+
+    refusal = _refusal(fixture)
+    assert refusal.code == CREDENTIAL_ROOT_VIOLATION
+    assert refusal.failing_check == "adapter_entry_credential_alias"
+    assert hashed == []
+    _assert_no_credential_derivation(fixture, refusal)
+    assert spawns == []
+
+
+def test_credential_alias_through_symlinked_root_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The declared root is itself retargeted, so the credential file is only
+    # reachable by following the root symlink. The structural identification
+    # must still resolve it before any hash runs — the credential-root
+    # structure row refuses the symlinked root, but only *after* hashing.
+    spawns = _spawn_guard(monkeypatch)
+    hashed = _hash_spy(monkeypatch)
+    fixture = _arrange(tmp_path)
+    elsewhere = tmp_path / "relocated-home"
+    elsewhere.mkdir(mode=0o700)
+    os.chmod(elsewhere, 0o700)
+    relocated_auth = elsewhere / "auth.json"
+    relocated_auth.write_bytes(AUTH_PLACEHOLDER)
+    os.chmod(relocated_auth, 0o600)
+    fixture.auth.unlink()
+    fixture.cred_root.rmdir()
+    Path(fixture.fixed_env["CODEX_HOME"]).symlink_to(
+        elsewhere, target_is_directory=True
+    )
+    fixture.cli.unlink()
+    fixture.cli.symlink_to(relocated_auth)
+
+    refusal = _refusal(fixture)
+    assert refusal.code == CREDENTIAL_ROOT_VIOLATION
+    assert refusal.failing_check == "cli_credential_alias"
+    assert hashed == []
+    _assert_no_credential_derivation(fixture, refusal)
+    assert spawns == []
+
+
+def test_benign_cli_retarget_still_reaches_the_hash_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The alias guard must not swallow ordinary identity drift.
+    hashed = _hash_spy(monkeypatch)
+    fixture = _arrange(tmp_path)
+    other = tmp_path / "stage" / "codex-benign"
+    other.write_bytes(b"# a different, non-credential cli binary\n")
+    fixture.cli.unlink()
+    fixture.cli.symlink_to(other)
+
+    refusal = _refusal(fixture)
+    assert refusal.code == RUNTIME_IDENTITY_MISMATCH
+    assert refusal.failing_check == "cli_sha256"
+    assert hashed == ["node", "adapter_entry", "cli"]
+    rows = fixture.rows()
+    for name in (
+        "node_credential_alias",
+        "adapter_entry_credential_alias",
+        "cli_credential_alias",
+    ):
+        assert rows[name]["passed"] is True, name
+
+
+def test_credential_alias_rows_are_recorded_before_any_hash_row(
+    tmp_path: Path,
+) -> None:
+    fixture = _arrange(tmp_path)
+    result = _attest(fixture)
+    os.close(result.interpreter_fd)
+
+    names = [row["name"] for row in fixture.report()["checks"]]
+    for artifact in ("node", "adapter_entry", "cli"):
+        alias = names.index(f"{artifact}_credential_alias")
+        assert alias < names.index("node_sha256"), artifact
+        assert names.index(f"{artifact}_pin") < alias, artifact
+    # Identification precedes hashing but never displaces the structure rows.
+    assert names.index("cli_credential_alias") < names.index(
+        "credential_root_structure"
+    )
 
 
 @pytest.mark.parametrize(

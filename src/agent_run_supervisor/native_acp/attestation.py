@@ -3,8 +3,9 @@
 A profile that freezes an :class:`ExpectedRuntimeIdentity` gets one
 deterministic check point immediately before its child is spawned:
 
-``pin → hash-through-inode → credential-root structure → project-config
-closure → race seam → liveness/absence recheck → write-once report``
+``pin → credential-alias refusal → hash-through-inode → credential-root
+structure → project-config closure → race seam → liveness/absence recheck →
+write-once report``
 
 The gate is **detect-and-refuse at every Run**, not a runtime cage. It proves
 that the artifacts about to be executed, the credential root about to be used,
@@ -21,9 +22,12 @@ residual swap window.
 
 Every persisted value is a path, a hex digest, an octal mode, an errno name, a
 boolean, or an integer. Credential bytes are never read, and digests of
-credential-bearing files are never computed. The module owns its refusal type
-(:class:`AttestationRefusal`) and imports nothing from ``run_task``, so the
-dependency direction stays ``run_task → attestation``.
+credential-bearing files are never computed: the declared credential root and
+``auth.json`` are identified structurally *before* any content hash runs, and
+an artifact whose pin resolves to that inode is refused rather than hashed.
+The module owns its refusal type (:class:`AttestationRefusal`) and imports
+nothing from ``run_task``, so the dependency direction stays
+``run_task → attestation``.
 """
 
 from __future__ import annotations
@@ -51,6 +55,9 @@ _CHECK_CLASSES: dict[str, str] = {
     "node_pin": RUNTIME_IDENTITY_MISMATCH,
     "adapter_entry_pin": RUNTIME_IDENTITY_MISMATCH,
     "cli_pin": RUNTIME_IDENTITY_MISMATCH,
+    "node_credential_alias": CREDENTIAL_ROOT_VIOLATION,
+    "adapter_entry_credential_alias": CREDENTIAL_ROOT_VIOLATION,
+    "cli_credential_alias": CREDENTIAL_ROOT_VIOLATION,
     "node_sha256": RUNTIME_IDENTITY_MISMATCH,
     "adapter_entry_sha256": RUNTIME_IDENTITY_MISMATCH,
     "cli_sha256": RUNTIME_IDENTITY_MISMATCH,
@@ -76,6 +83,7 @@ AUTH_FILE_MODE = 0o600
 PROJECT_CONFIG_DIRNAME = ".codex"
 PROJECT_CONFIG_FILENAME = "config.toml"
 _HASH_BLOCK_BYTES = 1 << 20
+_CREDENTIAL_ALIAS_EXPECTED = "distinct from credential file"
 
 # Documented test-only injection point sitting exactly between the
 # evidence-producing checks and the recheck. Product default is a no-op; tests
@@ -253,6 +261,47 @@ def project_config_closure(effective_cwd: str) -> str | None:
         directory = parent
 
 
+@dataclass(frozen=True)
+class _CredentialIdentity:
+    """Structural identity of the declared credential root and ``auth.json``.
+
+    Built from ``stat``/``lstat`` facts only — no credential byte is read and
+    no digest of a credential-bearing file is ever computed. Both the link
+    itself and whatever it currently resolves to are recorded, because
+    aliasing is an inode question and never a pathname question: a retargeted
+    symlink, a hardlink under another name, and a symlinked root all collapse
+    onto the same ``(st_dev, st_ino)`` pair.
+
+    Identification is deliberately best-effort per probe. A root or file this
+    cannot resolve is one no artifact can be aliased onto through that path
+    either, and the R8 structure rows below still refuse it with their own
+    named row — so a probe failure never silently widens the gate.
+    """
+
+    inodes: frozenset[tuple[int, int]]
+
+    @classmethod
+    def identify(cls, root: str | None) -> "_CredentialIdentity":
+        if not root:
+            return cls(frozenset())
+        auth = os.path.join(root, AUTH_FILENAME)
+        found: set[tuple[int, int]] = set()
+        for path, follow in ((root, True), (root, False), (auth, True), (auth, False)):
+            try:
+                info = os.stat(path) if follow else os.lstat(path)
+            except OSError:
+                continue
+            found.add((info.st_dev, info.st_ino))
+        return cls(frozenset(found))
+
+    def matches(self, info: os.stat_result) -> bool:
+        return (info.st_dev, info.st_ino) in self.inodes
+
+    @staticmethod
+    def observed(info: os.stat_result) -> str:
+        return f"credential file {info.st_dev}:{info.st_ino}"
+
+
 class _AttestationState:
     """Accumulates rows, inode bindings, and open pins for one attestation."""
 
@@ -318,10 +367,42 @@ class _AttestationState:
         }
         self.record(name, "regular file", "regular file")
 
-    def hash_artifact(self, artifact: str, name: str, expected_digest: str) -> None:
+    def require_not_credential_alias(
+        self, artifact: str, name: str, credential: _CredentialIdentity
+    ) -> None:
+        """A content-hashed artifact must never be the declared credential file.
+
+        The comparison is on the pinned inode, so a retargeted symlink, a
+        hardlink, or an outright path swap are all caught — and caught before
+        :meth:`hash_artifact` could read a single credential byte.
+        """
+        info = os.fstat(self.fds[artifact])
+        if credential.matches(info):
+            raise _CheckFailed(
+                name, _CREDENTIAL_ALIAS_EXPECTED, credential.observed(info)
+            )
+        self.record(name, _CREDENTIAL_ALIAS_EXPECTED, "distinct")
+
+    def hash_artifact(
+        self,
+        artifact: str,
+        name: str,
+        expected_digest: str,
+        *,
+        credential: _CredentialIdentity,
+    ) -> None:
         """Stream sha256 through the pinned inode, never through the path."""
         pin_fd = self.fds[artifact]
         pinned = os.fstat(pin_fd)
+        if credential.matches(pinned):
+            # Unreachable through _perform, whose alias rows already refused
+            # this pin. Kept local to the hashing function so no future
+            # reordering can reach the reopen with a credential inode.
+            raise _CheckFailed(
+                f"{artifact}_credential_alias",
+                _CREDENTIAL_ALIAS_EXPECTED,
+                credential.observed(pinned),
+            )
         try:
             read_fd = os.open(f"/proc/self/fd/{pin_fd}", os.O_RDONLY | os.O_CLOEXEC)
         except OSError as exc:
@@ -510,12 +591,32 @@ def _perform(
     )
     state.pin_artifact("cli", "cli_pin", expected.cli_path, nofollow=False)
 
-    # 2. Hash through the pinned inodes and bind argv/env to the same paths.
-    state.hash_artifact("node", "node_sha256", expected.node_sha256)
-    state.hash_artifact(
-        "adapter_entry", "adapter_entry_sha256", expected.adapter_entry_sha256
+    # 1b. Identify the declared credential root and auth.json structurally —
+    #     stat facts only — and refuse any pinned artifact that resolves to
+    #     that inode. This runs before step 2 so an aliased artifact is never
+    #     read: hashing a credential file would both leak a credential-derived
+    #     digest into the FAIL report and read bytes this gate must not touch.
+    root = fixed_env.get("CODEX_HOME")
+    credential = _CredentialIdentity.identify(root)
+    state.require_not_credential_alias("node", "node_credential_alias", credential)
+    state.require_not_credential_alias(
+        "adapter_entry", "adapter_entry_credential_alias", credential
     )
-    state.hash_artifact("cli", "cli_sha256", expected.cli_sha256)
+    state.require_not_credential_alias("cli", "cli_credential_alias", credential)
+
+    # 2. Hash through the pinned inodes and bind argv/env to the same paths.
+    state.hash_artifact(
+        "node", "node_sha256", expected.node_sha256, credential=credential
+    )
+    state.hash_artifact(
+        "adapter_entry",
+        "adapter_entry_sha256",
+        expected.adapter_entry_sha256,
+        credential=credential,
+    )
+    state.hash_artifact(
+        "cli", "cli_sha256", expected.cli_sha256, credential=credential
+    )
     argv = tuple(getattr(launch, "argv", ()) or ())
     state.equality(
         "argv_node_binding", expected.node_path, argv[0] if len(argv) > 0 else None
@@ -528,7 +629,6 @@ def _perform(
     state.equality("env_cli_path_binding", expected.cli_path, fixed_env.get("CODEX_PATH"))
 
     # 3. Credential-root structure (never its bytes).
-    root = fixed_env.get("CODEX_HOME")
     state.pin_credential_root("credential_root_structure", root)
     state.pin_auth_file("auth_json_structure")
     state.require_no_config_toml("config_toml_absent")
