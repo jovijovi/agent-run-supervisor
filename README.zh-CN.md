@@ -35,12 +35,15 @@
 
 ---
 
-> **已发布现状与目标必须分开。** 下方命令和 API 描述 **v0.1.7 acpx 兼容面**，该兼容面在
-> 0.2.0 中保持不变。0.2.0 新增 **Stage 0/1 Native ACP 核心** —— 一个库级 ars-core 纵切，按
-> [`GOAL.md`](GOAL.md)、[PRD](docs/product/prd.md) 与[架构设计](docs/design/architecture.md)
-> 的 vNext 权威链构建：本地非特权 `arsd` UDS 入口 → ars-core/Native ACP → 注册的外部 AGENT。
-> `arsd` 入口属于 Stage 2，**尚未实现**：0.2.0 **没有 `arsd`、没有 Native 服务、也没有
-> Native CLI 生产入口**，未启用生产运行；历史需求和计划只在冷档案中留存。
+> **已发布的 PyPI 0.2.0 与当前 `main` 源码必须分开。** 已发布的 wheel 是 **0.2.0**：v0.1.7 acpx
+> 兼容 CLI/库、库级 **Stage 0/1 Native ACP 核心**，以及封闭的 **OpenCode 1.18.4** profile；其中
+> **不包含 `arsd`**。当前 `main` 另外实现了 **Stage 2 `arsd`** —— 那个小而非特权的本地 Unix socket
+> 守护进程，是唯一的 vNext 生产入口 —— 并注册了另外两个封闭的官方 profile：**Codex ACP 1.1.7** 与
+> **Claude Agent ACP 0.61.0**。这些 `main` 上的新增能力**仅存在于源码**，尚不是更新的 PyPI 发布：
+> 包元数据仍为 `0.2.0`，没有后续 tag、GitHub Release 或 PyPI 上传。
+> 源码检出能做什么见下文「Native `arsd` 监督（源码线）」一节；vNext 权威链见
+> [`GOAL.md`](GOAL.md)、[PRD](docs/product/prd.md) 与[架构设计](docs/design/architecture.md)，其生产形态为
+> `受信调用方 → arsd UDS → ars-core/Native ACP → 注册的外部 AGENT`。历史需求和计划只在冷档案中留存。
 
 ## 它做什么
 
@@ -53,15 +56,16 @@
 将观测输出解析为归一化事件、判定一个**由监督层拥有的状态**，并写出**脱敏、权限受限的本地工件**。
 调用方拿到的是可审计的证据 —— 而不是一团运行器生命周期代码。
 
-已发布的 acpx 兼容面包含**两种本地 acpx 执行模式**：一次性 exec 与本地持久会话生命周期
-（创建/发送/状态/关闭/中止/列举）；这条线没有 daemon。0.2.0 额外携带 **Stage 0/1 Native ACP
-核心**（`agent_run_supervisor.native_acp` 加 `managed_process`）：受监督的实时 stdio AGENT
-进程、冻结的 profile/spec 准入、精确否则归零的配置、`session/load` 连续性与跨 Run 的
-model/effort 切换、隔离的 `native-runs/`/`native-sessions/` 证据，以及失败关闭的
-`unknown/quarantined/retryable=false` 状态 —— 目前仅作为库/测试表面可用。另行分阶段推进的
-Stage 2 目标会增加一个薄的、本地非特权 `arsd` UDS 宿主，作为唯一生产入口，但目前尚未实现，
-因此 0.2.0 没有 Native 服务或 Native CLI 入口。两条线都不是 Sachima、Gateway 插件或 IM
-适配器；ARS 也永不给出业务结论（`business_verdict` 始终为 `null`）。
+acpx 面包含**两种本地 acpx 执行模式**：一次性 exec 与本地持久会话生命周期
+（创建/发送/状态/关闭/中止/列举）；这条线没有 daemon，且属于**兼容面**，不是 vNext 生产入口。
+0.2.0 已发布的 **Native ACP 核心**（`agent_run_supervisor.native_acp` 加 `managed_process`）负责：
+受监督的实时 stdio AGENT 进程、冻结的 profile/spec 准入、精确否则归零的配置、`session/load`
+连续性与跨 Run 的 model/effort 切换、隔离的 `native-runs/`/`native-sessions/` 证据，以及失败关闭的
+`unknown/quarantined/retryable=false` 状态。在当前 `main` 上，**`agent_run_supervisor.arsd`** 把这个
+核心放到一个本地 Unix domain socket 守护进程之后 —— peer 凭据调用方认证、按 owner 归属的
+run/session、有界并发、启动时只做 reconciliation 而不重发 prompt，以及一个类型化的本地 Python
+客户端 —— 这是新开发唯一的生产入口。两条线都不是 Sachima、Gateway 插件或 IM 适配器；ARS
+也永不给出业务结论（`business_verdict` 始终为 `null`）。
 
 ## 工作原理
 
@@ -82,7 +86,11 @@ Stage 2 目标会增加一个薄的、本地非特权 `arsd` UDS 宿主，作为
 不在范围内 —— 属于调用方/平台领域：公网入口、真实 IM 投递、Gateway 生命周期、生产配置写入、
 默认开启/常驻行为、`@all` 扇出，以及 agent 间自动路由。
 
-## 安装与使用
+## 安装与使用（acpx 兼容面）
+
+`pip install` 得到的是已发布的 **0.2.0** wheel：acpx CLI 加 Native ACP 核心库，**不包含 `arsd`**。
+本节与「库用法（acpx 兼容 API）」记录的都是持续维护的兼容面；vNext 生产入口见下文
+「Native `arsd` 监督（源码线）」一节。
 
 ```bash
 pip install agent-run-supervisor
@@ -171,6 +179,9 @@ Codex ACP 模型名要使用 ACP session 广告出来的精确 ID，例如 `gpt-
 `gpt-5.5[high]` 或 `gpt-5.4-mini[medium]`。裸 ID（如 `gpt-5.5`）可能被拒绝并报
 `the ACP agent did not advertise that model`；helper 会在启动任何东西前拒绝这种写法。
 
+该 helper 只驱动 acpx 兼容路径，与下文「Native `arsd` 监督（源码线）」中的 Native
+`codex-acp-1.1.7` 封闭 profile 无关。
+
 安装本包后（`pip install -e .`），同样的接口也可通过 `agent-run-supervisor <command> …`
 控制台脚本使用。
 
@@ -181,11 +192,12 @@ Codex ACP 模型名要使用 ACP session 广告出来的精确 ID，例如 `gpt-
 命令会规划并（仅在 `--apply` 时）删除过期的运行/会话工件，删除范围被限制在解析出的
 `.agent-run-supervisor` 根目录内，且绝不触碰处于打开/活动锁定状态的会话。
 
-## 库用法（Library usage）
+## 库用法（acpx 兼容 API）
 
-已发布的包既是 **Python 库** 也是 CLI。针对 v0.1.7 的程序化集成，优先使用通用本地调用方
+已发布的包既是 **Python 库** 也是 CLI。针对 acpx 的程序化集成，优先使用通用本地调用方
 边界（[`caller.py`](src/agent_run_supervisor/caller.py)）；调用方稳定的载荷契约见
-[`docs/design/result-event-schema.md`](docs/design/result-event-schema.md)。
+[`docs/design/result-event-schema.md`](docs/design/result-event-schema.md)。新开发应面向 vNext
+入口，见下文「Native `arsd` 监督（源码线）」一节。
 
 **安装：**
 
@@ -329,13 +341,142 @@ for turn in list_turns("/path/to/sessions", "nightly-review"):
 - 租约字段沿用 store 的过期锁语义：`lease_held` 表示存在且未证明过期的租约；
   `holder_liveness` 是崩溃恢复分类；`lease_recoverable` 表示 TTL 过期或已证明崩溃。
 
+## Native `arsd` 监督（源码线）
+
+`arsd` 是 vNext 生产入口：一个小而非特权的**本地** Unix domain socket 守护进程，每个 Run 由它独占
+拥有一个进程内 `RunTask`、一个受监督的外部 AGENT 进程和一条 Native ACP 连接。它已在当前 `main`
+上实现，但**不在**已发布的 0.2.0 wheel 中，因此下面的内容都假设你使用源码检出（或自行构建的 wheel）。
+
+`arsd` **没有**控制台脚本入口，守护进程是一个 module 入口；`agent-run-supervisor` 控制台脚本仍然是
+acpx 兼容 CLI。
+
+### 守护进程入口
+
+```bash
+# 查看选项与边界（只读）
+PYTHONPATH=src python3 -m agent_run_supervisor.arsd --help
+
+# 把 systemd --user unit 渲染到 stdout 后退出：纯文本，不检查 euid、不做 reconciliation、
+# 不绑定 socket —— 不安装、不启用、不启动任何东西
+PYTHONPATH=src python3 -m agent_run_supervisor.arsd --print-service-unit
+```
+
+该渲染器是这份服务工件的唯一来源（仓库中没有 `.service` 模板），只输出 user 作用域的 specifier，
+并拒绝 root/system 指令：
+
+```ini
+[Unit]
+Description=agent-run-supervisor arsd (user)
+Documentation=https://github.com/jovijovi/agent-run-supervisor
+
+[Service]
+Type=simple
+ExecStart=<python> -m agent_run_supervisor.arsd --socket %t/agent-run-supervisor/arsd.sock --supervisor-root %h/.local/share/agent-run-supervisor
+Restart=on-failure
+RestartSec=10
+KillMode=control-group
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target
+```
+
+`<python>` 是渲染该 unit 的解释器。守护进程模式（即除 `--print-service-unit` 以外的用法）必须提供
+`--supervisor-root`，以及至少一条 `--caller-mapping UID:principal_id:owner:namespace`：**零条映射会
+拒绝监听**。`--socket` 默认取 `$XDG_RUNTIME_DIR/agent-run-supervisor/arsd.sock`，否则退化为
+`<supervisor-root>/arsd/arsd.sock`；`--max-concurrent-runs`、`--max-connections`、`--log-level`
+约束其余行为。真实的 UID→principal 映射与 socket 路径属于运维方持有的值，应放在权限为 `0600` 的
+unit 文件中，**绝不**进入本仓库；仓库中必须提及此类值时只写 `[REDACTED]`。
+
+### 类型化本地客户端
+
+[`arsd/client.py`](src/agent_run_supervisor/arsd/client.py) 是受支持的调用方边界：显式连接、
+context-managed，绝不静默重连，也绝不重放请求。每一帧都带 `api_version`（当前为 `1`）；未知版本
+一律拒绝，而不是猜测。
+
+```python
+from agent_run_supervisor.arsd.client import ArsdClient
+
+socket_path = "<XDG_RUNTIME_DIR>/agent-run-supervisor/arsd.sock"
+
+with ArsdClient(socket_path) as client:
+    client.server_info()                      # 协议/版本握手事实
+
+    ack = client.submit(                      # 调用方自有的 request_id = 幂等键
+        request_id="my-caller-request-id",
+        payload={
+            "request": {...},                 # 带版本的 AgentRunRequest（见下）
+            "prompt_text": "用 plain language 总结 diff。",
+            "workspace_root": "/path/to/bound/workspace",
+        },
+    )
+    run_id = ack["run_id"]
+
+    client.run_status(run_id)                 # accepted → progress → 唯一终态结果
+    client.run_events(run_id, from_seq=0, limit=100)   # 有界、按 seq 有序的分页
+    client.run_cancel(run_id)                 # 协作式取消；绝不改写终态事实
+
+    client.session_list()                     # 按 owner 限定的 Session 清单
+    client.session_status("my-session-id")
+    client.session_close("my-session-id")
+
+# 实时跟随：follow=True 返回一个 context-managed 的事件帧订阅
+with ArsdClient(socket_path) as client:
+    with client.run_events(run_id, from_seq=0, follow=True) as stream:
+        for frame in stream:
+            ...
+```
+
+`request` 是带版本的 `AgentRunRequest`：owner/namespace、`profile_id`、session 复用选择、请求的
+model/effort、输入引用、冻结的 `execution_grant` 引用/哈希、凭据**引用**与各项 limits。它绝不携带
+shell 文本、argv、环境变量值、可执行文件路径或凭据内容 —— 这些表面在协议上根本不存在。只有资源的
+拥有者调用方才能查询、跟随、取消或关闭自己的 Run 与 Session。
+
+### 已注册的封闭 profile
+
+profile 是类型化、带版本、代码内注册且封闭的 —— 没有任意 command/argv/env/JSON 透传。model 与
+effort 必须**精确**读回；能力缺失、未广告的取值或读回不精确都会在派发任何 prompt 之前让该 Run 失败。
+
+| Profile ID | 适配器 | 已注册 model | effort |
+|---|---|---|---|
+| `opencode-1.18.4` | OpenCode 1.18.4 ACP | `kimi-for-coding/k3`（默认）、`deepseek/deepseek-v4-pro` | `low`/`medium`/`high`/`max`（默认 `max`） |
+| `codex-acp-1.1.7` | 官方 Codex ACP 适配器 + 下游 Codex CLI | `gpt-5.6-sol` | `max`（选择器为 `reasoning_effort`） |
+| `claude-agent-acp-0.61.0` | 官方 Claude ACP 适配器 + 下游 Claude CLI | `claude-fable-5[1m]`、`opus[1m]`（默认） | `max` |
+
+- Claude profile 的 ACP 读回字面量是 `opus[1m]`。直连 Claude Code 的作者侧选择器
+  `claude-opus-5[1m]` 属于另一个命名空间，**刻意不注册**，也永远无法满足 ACP 精确读回。该 profile
+  同时冻结权限模式 `default`，以及在 `session/new` 与 `session/load` 上都发送的 ACP session
+  metadata，使环境中的设置无法定义权限规则或工具面。
+- 两个官方适配器 profile 都用绝对路径**加**哈希钉住运维方安装的运行时（解释器、适配器入口、下游
+  CLI），并在派生边界上证明该身份。仅有一份代码检出并不能让它们可启动；适配器/CLI/运行时的任何变化
+  都需要重新走一遍 install → discovery → 权限 canary，并提升 profile revision。
+
+### 权限与部署边界
+
+- **默认拒绝，由调用方冻结。** 调用方冻结 `execution_grant`，ARS 只执行它，绝不放宽或刷新。已注册的
+  workspace 内读取可以被允许；write/terminal/execute 以及未知操作一律拒绝。每次决策都产出脱敏的
+  中介证据。
+- **不是沙箱。** 这是协作式 agent 策略中介，不是操作系统沙箱、不是敌对进程隔离、不是多租户；
+  `allowed_roots` 也不是文件系统限制。
+- **仅本地、非特权。** `0700` 目录中放一个 `0600` socket；peer 通过 `SO_PEERCRED` 对照已批准的
+  caller-UID 策略完成认证。没有 TCP、没有 root、没有公网入口。
+- **崩溃遏制在进程之外。** 生产环境依赖用户级 service manager 的 cgroup（`Restart=on-failure`、
+  `KillMode=control-group`）：`arsd` 崩溃会杀死全部 AGENT 后代；重启后的守护进程只做持久事实的
+  reconciliation —— 可能已派发但没有可信终态的 Run 会落到
+  `unknown`/`quarantined`/`retryable=false`，且永不重发 prompt。
+- **安装、启用或接线服务是仓库之外的运维决定**，真实 caller 映射与凭据同理。ARS 报告技术监督事实，
+  永不给出业务结论。
+
 ## 环境要求
 
 | 需求 | 要求 |
 |---|---|
 | 运行时 | **Python ≥ 3.11**，仅标准库 —— 零第三方运行时依赖。 |
 | 测试（可选） | `pytest >= 8, < 10`（`dev` 额外依赖）。 |
-| Native ACP 核心测试（可选） | `native` 额外依赖固定 `agent-client-protocol==0.11.0`，供 Stage 0/1 L1/L2 套件使用；真实 OpenCode 冒烟需显式开启（`ARS_NATIVE_SMOKE=1`），并要求已注册的 OpenCode 1.18.4 安装。 |
+| Native ACP / `arsd` 测试（可选） | `native` 额外依赖固定 `agent-client-protocol==0.11.0`，供 Native L1/L2 与 `arsd` 套件使用；它们走密封的 fake agent 与临时 socket。 |
+| 从源码运行 `arsd` | Linux，且有可放置 AF_UNIX socket 的 POSIX 用户会话，另需运维方提供 `--supervisor-root` 与 caller 映射。崩溃遏制还需要用户级 service manager 的 cgroup，以及带 pidfd 支持的 CPython 构建（运维记录的生产运行时为 CPython 3.12.3）。 |
+| 已注册 profile | 每个封闭 profile 启动的都是运维方安装、并以绝对路径加哈希钉住的运行时；仅有源码检出并不提供 OpenCode、Codex 适配器/CLI 或 Claude 适配器/CLI。 |
+| 真实运行时验收（可选） | 默认跳过、需显式开启，且绝不在 CI 中运行：`ARS_NATIVE_SMOKE=1`（OpenCode）、`ARS_ARSD_SOCKET_ACCEPTANCE=1`、`ARS_CODEX_SOCKET_ACCEPTANCE=1`，每项还需运维方持有的 socket/root/workspace/owner/namespace/caller-mapping 输入。 |
 | 真实 AGENT 运行 / 会话轮次 | 本地具备 **Node + acpx + 目标 AGENT CLI** —— 在不带 `--no-real-run` 的 `run`，以及真实的 `session create/send/status/close/abort` 轮次与管理命令时需要。Codex 冒烟 helper 还需要 `npx`，以及通过 `CODEX_PATH` 或 `PATH` 可用的 Codex CLI。 |
 | 不启动 AGENT 的命令 | `validate-role`、`replay`、`doctor`、`run --no-real-run`、`session list` 与 `cleanup`（dry-run）**无需** Node/acpx，且**不启动**任何 AGENT。 |
 
@@ -366,10 +507,13 @@ uv sync --locked --extra dev --extra release --extra native
 [`docs/roadmap/verification.md`](docs/roadmap/verification.md) 对齐（测试、doctor/replay
 冒烟、文档索引/漂移、静态安全扫描、build/twine 检查与已安装 wheel 冒烟）。
 
-完整套件在 L1/L2 层覆盖 Stage 0/1 Native ACP 核心（走密封的 fake agent；`native` 额外依赖
-固定 `agent-client-protocol==0.11.0`）。真实 OpenCode 1.18.4 冒烟绝不在 CI 中运行，需显式
-选择加入：`ARS_NATIVE_SMOKE=1 uv run pytest tests/native_acp/test_real_opencode_smoke.py -q`
-（需要已注册的 OpenCode 安装与凭据）。
+完整套件在 L1/L2 层覆盖 Native ACP 核心与 `arsd` 守护进程（协议分帧、peer 认证与归属、
+准入/幂等、reconciliation、客户端往返，以及 service unit 渲染器），全部走密封的 fake agent 与
+临时 socket；`native` 额外依赖固定 `agent-client-protocol==0.11.0`。真实运行时套件绝不在 CI 中
+运行，默认路径不启动任何东西，需按 profile 显式选择加入，例如：
+`ARS_NATIVE_SMOKE=1 uv run pytest tests/native_acp/test_real_opencode_smoke.py -q`
+（需要已注册的 OpenCode 安装与凭据）。socket 路径验收套件还需要运维方持有的输入；其脱敏证据由
+运维方保存，不进入仓库。
 
 **pip 回退**（无 uv 时）：
 
@@ -381,6 +525,8 @@ python3 -m pytest -q
 ## 发布
 
 版本通过 tag 触发的 GitHub Actions Trusted Publishing 发布至 PyPI 与 GitHub（仓库内无 API token）。
+最新已发布版本是 **0.2.0**；`main` 上的 `arsd` 入口与官方 Codex/Claude profile 尚未发布，本仓库也
+没有在准备后续发布。
 
 **发布流程**（维护者）：
 
@@ -426,11 +572,12 @@ agent-run-supervisor doctor
 | 指标 | 证据 |
 |---|---|
 | 完整本地关卡 | `make verify` 或 `./scripts/verify_local.sh` —— 与 CI verify workflow 对齐。 |
-| 单元 / 集成测试 | **完整 pytest 套件** —— `uv run pytest -q`（当前本地验收：full suite passing）。 |
+| 单元 / 集成测试 | **完整 pytest 套件** —— `uv run pytest -q`；权威验证入口（`make verify` / `./scripts/verify_local.sh`）运行完整套件。 |
 | acpx 契约 | acpx `0.12.0` 夹具 + 校验器 —— `scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0`。 |
 | 导入 / 语法冒烟 | `python -m compileall -q src scripts tests`。 |
 | Doctor（只读） | `… doctor` 绝不启动 AGENT（`launched_real_agent = false`）。 |
-| 包检查 | `python -m build` + `twine check dist/*`，再用已安装 wheel 运行 `agent-run-supervisor doctor` 冒烟。 |
+| Native ACP / `arsd` 套件 | 用密封 fake agent 与临时 socket 覆盖 Native 核心以及 `arsd` 协议、peer 认证/归属、准入与 reconciliation —— 不安装守护进程，也不接触真实 AGENT。 |
+| 包检查 | `python -m build` + `twine check dist/*`，再对已安装 wheel 做冒烟（该 wheel 由当前源码/`main` 构建，**不是**已发布的 PyPI 0.2.0 wheel）：`agent-run-supervisor doctor` 与 `python -m agent_run_supervisor.arsd --print-service-unit`，后者渲染出 `Restart=on-failure` 与 `KillMode=control-group`，且不启动任何服务。 |
 | 安全工件 | 脱敏工件 · `business_verdict = null` · EventStore `0700`/`0600` 原子 NDJSON。 |
 
 ```bash
@@ -440,21 +587,27 @@ uv sync --locked --extra dev --extra release --extra native
 
 ## 路线图
 
-已发布的 v0.1.7 与 vNext 目标严格分开。当前权威、阶段、门禁和非批准项见
+acpx 兼容面与 vNext 线严格分开。当前权威、阶段、门禁和非批准项见
 [`docs/roadmap/current-status.md`](docs/roadmap/current-status.md)、
 [`docs/roadmap/features.md`](docs/roadmap/features.md) 与
 [`docs/roadmap/non-approvals.md`](docs/roadmap/non-approvals.md)。
 
-- **已发布兼容基线 —— v0.1.7。** 本地 acpx 一次性/持久会话监督、脱敏证据、doctor/cleanup、
-  调用方封装、打包与发布工程均已实现。它们继续作为兼容面维护，但不再定义新开发架构。
-- **已合并 —— vNext Stage 0/1（0.2.0 源码线）。** AgentProfile/不可变 RunSpec、ManagedProcess、
-  Native ACP 精确配置、process-per-Run 的 Session load/切换、Native 存储隔离、失败关闭状态、
-  默认拒绝权限中介与真实 OpenCode B 级证据已合并进 `main`。Stage 1 是库级核心，不构成生产
-  验收；见[已归档 plan](docs/plans/archive/2026-07-21-vnext-stage01-native-acp-implementation.md)。
-- **计划中 —— vNext Stage 2。** `arsd` UDS 入口、peer/ownership、reconciliation、有界运行、真实
-  denied-action 权限证明与 cgroup 崩溃遏制。G12 caller-UID policy 和所有生产启用均需单独批准。
-- **暂存 —— Sachima 集成。** 仅在 ARS 通过生产验收且另获集成授权后实现 socket backend；公网
-  入口、IM/Gateway 行为与业务编排仍不属于 ARS。
+- **兼容基线 —— v0.1.7 acpx。** 本地一次性/持久会话监督、脱敏证据、doctor/cleanup、调用方封装、
+  打包与发布工程均已实现。它们继续作为兼容面维护，但不再定义新开发架构。
+- **已关闭 —— vNext Stage 0/1（随 0.2.0 发布）。** AgentProfile/不可变 RunSpec、ManagedProcess、
+  Native ACP 精确配置、process-per-Run 的 Session load/切换、Native 存储隔离、失败关闭状态与
+  默认拒绝权限中介，并有真实 OpenCode 的 B 级证据；见
+  [已归档 plan](docs/plans/archive/2026-07-21-vnext-stage01-native-acp-implementation.md)。
+- **已关闭 —— vNext Stage 2 `arsd`（源码线）。** UDS 入口、peer 认证与归属、启动 reconciliation、
+  有界运行、真实 denied-action 权限证明与 cgroup 崩溃遏制均已在 `main` 上实现，caller-UID policy
+  作为运维决定被记录。源码注册与本地验收既不是发布，也不是部署批准。
+- **已关闭 —— 官方适配器 profile。** OpenCode 1.18.4、Codex ACP 1.1.7 与 Claude Agent ACP 0.61.0
+  已是封闭 profile，并有运维方持有的本地验收。新增或修订 profile 需重新走
+  install/discovery/权限 canary 流程并接受独立复核。
+- **未完成 —— 发布。** 没有任何 tag、GitHub Release 或 PyPI 上传覆盖 `arsd`/官方适配器工作；
+  在单独授权发布之前，包元数据保持 `0.2.0`。
+- **暂存 —— Sachima 集成。** 目前没有 `ArsdBackend`/UDS 集成，需要它自己的授权；公网入口、
+  IM/Gateway 行为与业务编排仍不属于 ARS。
 
 ## 许可证
 

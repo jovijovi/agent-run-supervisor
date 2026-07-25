@@ -1,8 +1,9 @@
 ---
 title: "Codex official ACP adapter — closed-profile admission"
-status: active
+status: archived
 created_at: 2026-07-25
 last_validated_at: 2026-07-25
+archived_at: 2026-07-25
 ---
 # Codex official ACP adapter — closed-profile admission
 

@@ -2,25 +2,31 @@
 title: "ARS vNext Current Explicit Non-Approvals"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-23
+last_validated_at: 2026-07-25
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/non-approvals.md"
 ---
 # ARS vNext Current Explicit Non-Approvals
 
-The merged A1 `arsd` source/default-closed foundation does not approve further work. This
-document does not approve:
+Stage 0/1, Stage 2 A1–A5, and the three registered closed profiles are implemented on `main`, and
+operator-held local socket-path acceptance passed for each profile. None of that approves further
+work: source registration plus local acceptance is not publication, not deployment approval, not
+Sachima integration, not public ingress, and not a reusable or transitive approval for the next
+change. This document does not approve:
 
-- any source expansion or repair beyond merged A1 `arsd` scope, including source, test, script,
-  dependency, lockfile, `pyproject.toml`, or CI/workflow changes;
-- A2/G12 policy ownership or exact real UID→principal/owner/namespace mappings, including any
-  production caller-policy/configuration value or activation;
-- A3 user-service/cgroup harness installation, activation, or execution;
-- A4 real external-AGENT S1–S5 acceptance, including use of real credentials;
-- A5 production/default-on enablement, production config writes, deployment, or live traffic;
+- any source expansion or repair beyond the currently authorized task scope, including source,
+  test, script, dependency, lockfile, `pyproject.toml`, or CI/workflow changes;
+- exact real UID→principal/owner/namespace mappings in the repository, or any production
+  caller-policy/configuration value, unit change, or activation (G12 closure recorded the operator
+  decision, not the values);
+- new profile registrations or revisions of a registered profile without a fresh
+  install → discovery → permission-canary cycle, revision bump, and independent review;
+- deployment, rollout, service install/enable/restart, production config writes, or live traffic
+  changes beyond the already-enabled local user service;
 - follow-on source work and Git/GitHub side effects, including commits, pushes, PR creation,
   merge, or other GitHub mutation, without separate operator authorization;
-- release metadata, release tag, GitHub Release, PyPI publication, or CHANGELOG release work;
-- Sachima `ArsdBackend`, supervisor pin changes, Gateway/IM/Feishu behavior, delivery, automatic replies, or live/default-on wiring;
+- version bump, release metadata, release tag, GitHub Release, PyPI publication, or CHANGELOG
+  release-section work;
+- Sachima `ArsdBackend`/UDS integration, supervisor pin changes, Gateway/IM/Feishu behavior, delivery, automatic replies, or live/default-on wiring;
 - public ingress, TCP/root service, distributed scheduling, multi-tenant control plane, participant UI, `@all`, or agent-to-agent auto-routing;
 - arbitrary executable/command/argv/env/JSON/config/credential passthrough;
 - acpx as Native production driver, fallback, compatibility layer, or shared/imported Session store;

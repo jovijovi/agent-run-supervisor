@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext PRD"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-21
+last_validated_at: 2026-07-25
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/prd.md"
 ---
 # agent-run-supervisor vNext PRD
@@ -117,7 +117,9 @@ caller-authorized Run linked by `retry_of_run_id`; it never rewrites the origina
 - `arsd` authenticates peer credentials with `SO_PEERCRED`, enforces an approved caller UID policy, and
   records owner identity on Runs/Sessions.
 - Only the owner may query, stream, cancel, or close its resources.
-- Exact UID values and policy ownership are Stage 2 gate G12; documentation does not choose them.
+- Exact UID values and policy ownership are gate G12, closed as a recorded operator decision. The
+  repository never stores a production mapping value; it reaches the daemon only as `--caller-mapping`
+  arguments supplied by the operator.
 
 ### R7 — Permission mediation and honest security
 
@@ -178,6 +180,10 @@ caller-authorized Run linked by `retry_of_run_id`; it never rewrites the origina
   `session/load` capability.
 - New profiles are typed, versioned, closed registrations. An Agent-specific adapter is allowed only
   after conformance evidence proves a standard ACP gap; v1 has no runtime plugin system.
+- Official-adapter profiles additionally freeze the runtime identity they launch (interpreter, adapter
+  entrypoint, downstream CLI — path plus hash) and the launch env, and prove it at the spawn boundary.
+  The registry on `main` holds OpenCode 1.18.4, Codex ACP 1.1.7, and Claude Agent ACP 0.61.0; adding or
+  revising one requires a fresh install/discovery/permission-canary cycle and independent review.
 
 ## 4. Acceptance and staged delivery
 
@@ -211,11 +217,16 @@ Sachima `ArsdBackend` is a later, separately approved integration after ARS prod
 
 ## 5. Current implementation status
 
+Volatile status truth lives in [`docs/roadmap/current-status.md`](../roadmap/current-status.md); this
+section records only the coarse position.
+
 - Released compatibility baseline: v0.1.7 acpx one-shot/persistent paths are implemented.
-- vNext authority: active in this PRD/design set.
-- vNext Stage 0/1 source/dependency implementation: not implemented and not authorized by documentation.
-- Stage 2 `arsd`, service/cgroup enablement, release/publication, Sachima integration, and live behavior:
-  not implemented and separately authorized.
+- vNext Stage 0/1 (Native ACP core) and Stage 2 (`arsd` UDS ingress, ownership, reconciliation,
+  service/cgroup containment) are implemented on `main` with their acceptance closed; three closed
+  profiles are registered and have operator-held local socket-path acceptance.
+- Release/publication is not done: the published wheel predates `arsd` and the official adapter
+  profiles. Sachima integration, public ingress, and Gateway/IM/live behavior remain unimplemented and
+  separately authorized. Implementation status is never an approval for the next stage.
 
 ## 6. Non-goals
 

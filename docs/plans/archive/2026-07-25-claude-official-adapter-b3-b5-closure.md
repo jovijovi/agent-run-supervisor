@@ -1,8 +1,9 @@
 ---
 title: "Claude official ACP adapter — B3/B4/B5 closure"
-status: active
+status: archived
 created_at: 2026-07-25
 last_validated_at: 2026-07-25
+archived_at: 2026-07-25
 ---
 # Claude official ACP adapter — B3/B4/B5 closure
 
