@@ -8,6 +8,16 @@ post-set-model set, so skipping rediscovery is impossible. Any violation
 raises :class:`ConfigFidelityError`, which callers convert into a zero-Turn
 pre-dispatch failure.
 
+A profile may additionally freeze a **permission mode** selector (B4). That
+selector is set *first* — before model and effort — with its own exact
+readback, and the final post-set-effort readback must still show it exact, so
+prompt dispatch is impossible unless mode, model, and effort are all proven.
+This exists because the official Claude adapter resolves its initial permission
+mode from ambient settings and auto-allows tool calls in-process while that
+mode is ``bypassPermissions``: a session that starts there would never consult
+the frozen grant. Profiles without the binding keep the exact legacy phases,
+snapshot labels, and wire sequence.
+
 Option inputs are wire-shaped plain dicts (``id`` / ``currentValue`` /
 ``options``) — the SDK-facing driver dumps models by alias before they reach
 this stdlib-only module.
@@ -24,6 +34,8 @@ class ConfigFidelityError(RuntimeError):
 
 _PHASE_INIT = "init"
 _PHASE_INITIAL_OPTIONS = "initial_options"
+_PHASE_MODE_PLANNED = "mode_planned"
+_PHASE_POST_MODE = "post_mode"
 _PHASE_MODEL_PLANNED = "model_planned"
 _PHASE_POST_MODEL = "post_model"
 _PHASE_EFFORT_PLANNED = "effort_planned"
@@ -84,13 +96,23 @@ class ConfigFidelityMachine:
         effort_selector_id: str,
         requested_model: str,
         requested_effort: str,
+        permission_mode_selector_id: str | None = None,
+        required_permission_mode: str | None = None,
     ) -> None:
+        if (permission_mode_selector_id is None) != (required_permission_mode is None):
+            raise ConfigFidelityError(
+                "a permission-mode selector and its required value must be "
+                "declared together"
+            )
         self._model_selector_id = model_selector_id
         self._effort_selector_id = effort_selector_id
         self._requested_model = requested_model
         self._requested_effort = requested_effort
+        self._permission_mode_selector_id = permission_mode_selector_id
+        self._required_permission_mode = required_permission_mode
         self._phase = _PHASE_INIT
         self._initial_options: dict[str, _Option] | None = None
+        self._post_mode_options: dict[str, _Option] | None = None
         self._post_model_options: dict[str, _Option] | None = None
         self._snapshots: list[tuple[str, list[dict[str, Any]]]] = []
 
@@ -107,6 +129,14 @@ class ConfigFidelityMachine:
     @property
     def requested_effort(self) -> str:
         return self._requested_effort
+
+    @property
+    def has_permission_mode(self) -> bool:
+        return self._permission_mode_selector_id is not None
+
+    @property
+    def required_permission_mode(self) -> str | None:
+        return self._required_permission_mode
 
     @property
     def snapshots(self) -> list[tuple[str, list[dict[str, Any]]]]:
@@ -135,11 +165,67 @@ class ConfigFidelityMachine:
         self._record_snapshot("initial", options or [])
         self._phase = _PHASE_INITIAL_OPTIONS
 
+    def permission_mode_plan(self) -> str:
+        """Verify the required permission mode is advertised; return its id."""
+        if self._permission_mode_selector_id is None:
+            raise ConfigFidelityError(
+                "permission_mode_plan requires a declared permission-mode selector"
+            )
+        self._expect_phase(_PHASE_INITIAL_OPTIONS, "permission_mode_plan")
+        assert self._initial_options is not None
+        option = self._initial_options.get(self._permission_mode_selector_id)
+        if option is None or not option.is_select:
+            raise ConfigFidelityError(
+                f"permission mode selector {self._permission_mode_selector_id!r} "
+                "is not advertised as a select option"
+            )
+        if self._required_permission_mode not in option.choices:
+            raise ConfigFidelityError(
+                f"required permission mode {self._required_permission_mode!r} is "
+                f"not advertised (choices: {sorted(option.choices)})"
+            )
+        self._phase = _PHASE_MODE_PLANNED
+        return self._permission_mode_selector_id
+
+    def record_post_mode_options(
+        self, options: Sequence[Mapping[str, Any]] | None
+    ) -> None:
+        """Consume the complete post-set-mode set and require exact readback."""
+        self._expect_phase(_PHASE_MODE_PLANNED, "record_post_mode_options")
+        parsed = _parse_options(options, phase="post-set-permission-mode")
+        # Snapshot before the check: a refused Run must still keep the mode the
+        # agent actually reported as durable evidence.
+        self._record_snapshot("post_mode", options or [])
+        self._require_permission_mode_exact(parsed, "permission mode readback")
+        self._post_mode_options = parsed
+        self._phase = _PHASE_POST_MODE
+
+    def _require_permission_mode_exact(
+        self, parsed: dict[str, _Option], label: str
+    ) -> None:
+        assert self._permission_mode_selector_id is not None
+        mode = parsed.get(self._permission_mode_selector_id)
+        effective = None if mode is None else mode.current_value
+        if effective != self._required_permission_mode:
+            raise ConfigFidelityError(
+                f"{label} mismatch: required "
+                f"{self._required_permission_mode!r}, effective {effective!r}"
+            )
+
     def model_plan(self) -> str:
         """Verify the requested model is advertised; return the selector id."""
-        self._expect_phase(_PHASE_INITIAL_OPTIONS, "model_plan")
-        assert self._initial_options is not None
-        option = self._initial_options.get(self._model_selector_id)
+        if self._permission_mode_selector_id is None:
+            self._expect_phase(_PHASE_INITIAL_OPTIONS, "model_plan")
+            assert self._initial_options is not None
+            discovered = self._initial_options
+        else:
+            # Structural, not conventional: with a frozen permission mode the
+            # model is planned only from the post-set-mode set, so skipping the
+            # mode leg is impossible.
+            self._expect_phase(_PHASE_POST_MODE, "model_plan")
+            assert self._post_mode_options is not None
+            discovered = self._post_mode_options
+        option = discovered.get(self._model_selector_id)
         if option is None or not option.is_select:
             raise ConfigFidelityError(
                 f"model selector {self._model_selector_id!r} is not advertised "
@@ -208,6 +294,12 @@ class ConfigFidelityMachine:
             raise ConfigFidelityError(
                 f"effort readback mismatch: requested {self._requested_effort!r}, "
                 f"effective {effective_effort!r}"
+            )
+        if self._permission_mode_selector_id is not None:
+            # A mode restored between the mode leg and here (silently, or as a
+            # side effect of the model switch) must not reach a prompt.
+            self._require_permission_mode_exact(
+                parsed, "permission mode readback after effort set"
             )
         self._phase = _PHASE_VERIFIED
 

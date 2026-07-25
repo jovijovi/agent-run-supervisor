@@ -67,6 +67,8 @@ _CHECK_CLASSES: dict[str, str] = {
     "node_binding_lost": RUNTIME_IDENTITY_MISMATCH,
     "adapter_entry_binding_lost": RUNTIME_IDENTITY_MISMATCH,
     "cli_binding_lost": RUNTIME_IDENTITY_MISMATCH,
+    "credential_root_not_declared": CREDENTIAL_ROOT_VIOLATION,
+    "project_config_not_declared": PROJECT_CONFIG_LAYER_PRESENT,
     "credential_root_structure": CREDENTIAL_ROOT_VIOLATION,
     "auth_json_structure": CREDENTIAL_ROOT_VIOLATION,
     "config_toml_absent": CREDENTIAL_ROOT_VIOLATION,
@@ -84,6 +86,16 @@ PROJECT_CONFIG_DIRNAME = ".codex"
 PROJECT_CONFIG_FILENAME = "config.toml"
 _HASH_BLOCK_BYTES = 1 << 20
 _CREDENTIAL_ALIAS_EXPECTED = "distinct from credential file"
+_NOT_DECLARED = "not declared"
+
+# Per-runtime bindings the gate needs but cannot infer. Their defaults are the
+# Codex values that were frozen before any second identity-pinned profile
+# existed; :meth:`ExpectedRuntimeIdentity.to_dict` omits each field at its
+# default so the merged Codex snapshot, profile hash, and launch hash stay
+# byte-identical while a second runtime declares its own bindings explicitly.
+DEFAULT_CLI_PATH_ENV = "CODEX_PATH"
+DEFAULT_CREDENTIAL_ROOT_ENV = "CODEX_HOME"
+DEFAULT_PROJECT_CONFIG_RELPATH = f"{PROJECT_CONFIG_DIRNAME}/{PROJECT_CONFIG_FILENAME}"
 
 # Documented test-only injection point sitting exactly between the
 # evidence-producing checks and the recheck. Product default is a no-op; tests
@@ -137,7 +149,16 @@ def _file_type(mode: int) -> str:
 
 @dataclass(frozen=True)
 class ExpectedRuntimeIdentity:
-    """Profile-frozen identity of the runtime a spawn is allowed to launch."""
+    """Profile-frozen identity of the runtime a spawn is allowed to launch.
+
+    The last three fields bind the gate to *this* runtime's surfaces: the
+    fixed-env key that must carry the CLI path, the fixed-env key holding an
+    ARS-managed credential root (``None`` when the downstream CLI owns its own
+    credential storage), and the workspace project-config path whose ancestor
+    chain must stay clean (``None`` when the profile freezes no such surface).
+    A ``None`` surface never drops rows silently: the report records an
+    explicit ``*_not_declared`` row instead.
+    """
 
     node_path: str
     node_sha256: str
@@ -148,6 +169,9 @@ class ExpectedRuntimeIdentity:
     agent_info_name: str
     agent_info_version: str
     protocol_version: str
+    cli_path_env: str = DEFAULT_CLI_PATH_ENV
+    credential_root_env: str | None = DEFAULT_CREDENTIAL_ROOT_ENV
+    project_config_relpath: str | None = DEFAULT_PROJECT_CONFIG_RELPATH
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -181,9 +205,31 @@ class ExpectedRuntimeIdentity:
             raise ValueError(
                 "expected runtime identity protocol_version must be a decimal string"
             )
+        for field_name in ("cli_path_env", "credential_root_env"):
+            value = getattr(self, field_name)
+            if field_name == "credential_root_env" and value is None:
+                continue
+            if not isinstance(value, str) or not value or "=" in value:
+                raise ValueError(
+                    f"expected runtime identity {field_name} must be an "
+                    "environment variable name"
+                )
+        relpath = self.project_config_relpath
+        if relpath is not None:
+            if not isinstance(relpath, str) or not relpath:
+                raise ValueError(
+                    "expected runtime identity project_config_relpath must be a "
+                    "non-empty relative path"
+                )
+            parts = Path(relpath).parts
+            if Path(relpath).is_absolute() or not parts or ".." in parts:
+                raise ValueError(
+                    "expected runtime identity project_config_relpath must be a "
+                    "relative path without parent references"
+                )
 
-    def to_dict(self) -> dict[str, str]:
-        return {
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "node_path": self.node_path,
             "node_sha256": self.node_sha256,
             "adapter_entry_path": self.adapter_entry_path,
@@ -194,6 +240,15 @@ class ExpectedRuntimeIdentity:
             "agent_info_version": self.agent_info_version,
             "protocol_version": self.protocol_version,
         }
+        # Omit-when-default: a runtime that keeps the pre-existing bindings
+        # serializes exactly as it did before they were expressible.
+        if self.cli_path_env != DEFAULT_CLI_PATH_ENV:
+            payload["cli_path_env"] = self.cli_path_env
+        if self.credential_root_env != DEFAULT_CREDENTIAL_ROOT_ENV:
+            payload["credential_root_env"] = self.credential_root_env
+        if self.project_config_relpath != DEFAULT_PROJECT_CONFIG_RELPATH:
+            payload["project_config_relpath"] = self.project_config_relpath
+        return payload
 
 
 @dataclass(frozen=True)
@@ -236,23 +291,24 @@ class SpawnAttestation:
     interpreter_fd: int
 
 
-def project_config_closure(effective_cwd: str) -> str | None:
+def project_config_closure(
+    effective_cwd: str, relpath: str = DEFAULT_PROJECT_CONFIG_RELPATH
+) -> str | None:
     """D11a: the inclusive ancestor chain of ``effective_cwd`` up to ``/``.
 
-    Returns the first ``<dir>/.codex/config.toml`` that exists as a path entry
-    of any type (``lexists``: a symlinked ``.codex/``, a symlinked or broken
+    Returns the first ``<dir>/<relpath>`` that exists as a path entry of any
+    type (``lexists``: a symlinked ``.codex/``, a symlinked or broken
     ``config.toml``, and a directory all count), else ``None``. The adapter
     loads layered configuration by cwd, so any such layer on the chain is a
-    configuration surface ARS did not freeze.
+    configuration surface ARS did not freeze. ``relpath`` defaults to the
+    Codex surface, so existing callers keep their exact behavior.
 
     One pure predicate, two call sites per attestation — the pre-hook pass and
     the post-hook recheck cannot diverge.
     """
     directory = Path(effective_cwd)
     while True:
-        candidate = str(
-            directory / PROJECT_CONFIG_DIRNAME / PROJECT_CONFIG_FILENAME
-        )
+        candidate = str(directory / relpath)
         if os.path.lexists(candidate):
             return candidate
         parent = directory.parent
@@ -429,10 +485,12 @@ class _AttestationState:
             raise _CheckFailed(name, expected, observed)
         self.record(name, expected, observed)
 
-    def pin_credential_root(self, name: str, root: str | None) -> None:
+    def pin_credential_root(
+        self, name: str, root: str | None, *, env_key: str
+    ) -> None:
         """Structure only — the root's contents are never read."""
         if not root:
-            raise _CheckFailed(name, "CODEX_HOME", "missing")
+            raise _CheckFailed(name, env_key, "missing")
         try:
             info = os.lstat(root)
         except OSError as exc:
@@ -507,8 +565,10 @@ class _AttestationState:
             raise _CheckFailed(name, "absent", _errno_name(exc)) from None
         raise _CheckFailed(name, "absent", "present")
 
-    def require_no_project_config(self, name: str, effective_cwd: str) -> None:
-        offender = project_config_closure(effective_cwd)
+    def require_no_project_config(
+        self, name: str, effective_cwd: str, relpath: str
+    ) -> None:
+        offender = project_config_closure(effective_cwd, relpath)
         if offender is not None:
             raise _CheckFailed(name, "absent", offender)
         self.record(name, "absent", "absent")
@@ -596,7 +656,8 @@ def _perform(
     #     that inode. This runs before step 2 so an aliased artifact is never
     #     read: hashing a credential file would both leak a credential-derived
     #     digest into the FAIL report and read bytes this gate must not touch.
-    root = fixed_env.get("CODEX_HOME")
+    credential_env_key = expected.credential_root_env
+    root = fixed_env.get(credential_env_key) if credential_env_key else None
     credential = _CredentialIdentity.identify(root)
     state.require_not_credential_alias("node", "node_credential_alias", credential)
     state.require_not_credential_alias(
@@ -626,15 +687,32 @@ def _perform(
         expected.adapter_entry_path,
         argv[1] if len(argv) > 1 else None,
     )
-    state.equality("env_cli_path_binding", expected.cli_path, fixed_env.get("CODEX_PATH"))
+    state.equality(
+        "env_cli_path_binding",
+        expected.cli_path,
+        fixed_env.get(expected.cli_path_env),
+    )
 
-    # 3. Credential-root structure (never its bytes).
-    state.pin_credential_root("credential_root_structure", root)
-    state.pin_auth_file("auth_json_structure")
-    state.require_no_config_toml("config_toml_absent")
+    # 3. Credential-root structure (never its bytes). A runtime whose CLI owns
+    #    its own credential storage declares no root; the absence is recorded
+    #    as its own row so a missing check is never invisible in the report.
+    if credential_env_key is not None:
+        state.pin_credential_root(
+            "credential_root_structure", root, env_key=credential_env_key
+        )
+        state.pin_auth_file("auth_json_structure")
+        state.require_no_config_toml("config_toml_absent")
+    else:
+        state.record("credential_root_not_declared", _NOT_DECLARED, _NOT_DECLARED)
 
-    # 4. Workspace project-config closure.
-    state.require_no_project_config("project_config_closure", effective_cwd)
+    # 4. Workspace project-config closure (only for runtimes that freeze one).
+    project_relpath = expected.project_config_relpath
+    if project_relpath is not None:
+        state.require_no_project_config(
+            "project_config_closure", effective_cwd, project_relpath
+        )
+    else:
+        state.record("project_config_not_declared", _NOT_DECLARED, _NOT_DECLARED)
 
     # 5. Deterministic race seam (product no-op).
     hook = _POST_ATTESTATION_HOOK
@@ -651,10 +729,14 @@ def _perform(
         nofollow=True,
     )
     state.recheck_artifact("cli", "cli_binding_lost", expected.cli_path, nofollow=False)
-    state.recheck_credential_root("credential_root_binding_lost", str(root))
-    state.recheck_auth_file("auth_json_binding_lost")
-    state.require_no_config_toml("config_toml_absence_recheck")
-    state.require_no_project_config("project_config_closure_recheck", effective_cwd)
+    if credential_env_key is not None:
+        state.recheck_credential_root("credential_root_binding_lost", str(root))
+        state.recheck_auth_file("auth_json_binding_lost")
+        state.require_no_config_toml("config_toml_absence_recheck")
+    if project_relpath is not None:
+        state.require_no_project_config(
+            "project_config_closure_recheck", effective_cwd, project_relpath
+        )
 
 
 def attest_spawn_boundary(

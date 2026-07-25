@@ -358,3 +358,249 @@ def test_machine_ready_gate_requires_verified_state() -> None:
     machine = _machine()
     with pytest.raises(ConfigFidelityError):
         machine.require_ready()
+
+
+# -- B4: frozen permission mode inside the config-fidelity sequence ----------
+
+# The official Claude adapter resolves its INITIAL permission mode from ambient
+# settings through its own settings manager, so a hostile/non-default mode is
+# what a session starts from; in `bypassPermissions` it auto-allows tool calls
+# in-process and the frozen grant is never consulted.
+def _mode_option(current: str, values=("default", "acceptEdits", "bypassPermissions")):
+    return {
+        "id": "mode",
+        "name": "Permission mode",
+        "type": "select",
+        "currentValue": current,
+        "options": [{"value": value, "name": value} for value in values],
+    }
+
+
+def _claude_shaped_script(**overrides) -> dict:
+    script = {
+        "initial_options": [
+            _mode_option("bypassPermissions"),
+            {
+                "id": "model",
+                "name": "Model",
+                "type": "select",
+                "currentValue": "claude-fable-5[1m]",
+                "options": [
+                    {"value": "claude-fable-5[1m]", "name": "Fable"},
+                    {"value": "opus[1m]", "name": "Opus"},
+                ],
+            },
+            {
+                "id": "effort",
+                "name": "Effort",
+                "type": "select",
+                "currentValue": "high",
+                "options": [{"value": "high", "name": "High"}, {"value": "max", "name": "Max"}],
+            },
+        ],
+        "final_message": "FAKE_AGENT_OK",
+    }
+    script.update(overrides)
+    return script
+
+
+def _claude_machine(**overrides) -> ConfigFidelityMachine:
+    kwargs = dict(
+        model_selector_id="model",
+        effort_selector_id="effort",
+        requested_model="opus[1m]",
+        requested_effort="max",
+        permission_mode_selector_id="mode",
+        required_permission_mode="default",
+    )
+    kwargs.update(overrides)
+    return ConfigFidelityMachine(**kwargs)
+
+
+def _run_claude_shaped(tmp_path: Path, script: dict, machine=None):
+    async def case():
+        async with _Harness(tmp_path, script) as harness:
+            if machine is not None:
+                harness.machine = machine
+                harness.driver._machine = machine
+            driver = harness.driver
+            await asyncio.wait_for(driver.initialize(), 10)
+            await asyncio.wait_for(driver.new_session(cwd=str(tmp_path)), 10)
+            error: Exception | None = None
+            try:
+                result = await asyncio.wait_for(driver.set_config_exact(), 10)
+            except (ConfigFidelityError, NativeDriverError) as exc:
+                error = exc
+                result = None
+            if error is None:
+                await asyncio.wait_for(driver.prompt_once("hello agent"), 10)
+            return result, error, harness.methods_seen(), harness.machine
+
+    return asyncio.run(case())
+
+
+def test_permission_mode_is_set_to_exact_default_before_model_and_effort(
+    tmp_path: Path,
+) -> None:
+    machine = _claude_machine()
+    result, error, methods, machine = _run_claude_shaped(
+        tmp_path, _claude_shaped_script(), machine
+    )
+    assert error is None
+    assert result == ("opus[1m]", "max")
+    # mode → model → effort, each with its own exact readback, and only then
+    # the prompt.
+    assert methods == [
+        "initialize",
+        "session/new",
+        "session/set_config_option",
+        "session/set_config_option",
+        "session/set_config_option",
+        "session/prompt",
+    ]
+    labels = [label for label, _ in machine.snapshots]
+    assert labels == ["initial", "post_mode", "post_model", "post_effort"]
+    post_mode = dict(machine.snapshots)["post_mode"]
+    assert [row for row in post_mode if row["id"] == "mode"][0][
+        "currentValue"
+    ] == "default"
+
+
+def test_missing_mode_selector_refuses_before_any_prompt(tmp_path: Path) -> None:
+    script = _claude_shaped_script()
+    script["initial_options"] = [
+        option for option in script["initial_options"] if option["id"] != "mode"
+    ]
+    _, error, methods, _ = _run_claude_shaped(tmp_path, script, _claude_machine())
+    assert isinstance(error, ConfigFidelityError)
+    assert "mode" in str(error)
+    assert "session/prompt" not in methods
+    assert "session/set_config_option" not in methods
+
+
+def test_mode_value_outside_the_advertised_domain_refuses(tmp_path: Path) -> None:
+    script = _claude_shaped_script()
+    script["initial_options"] = [
+        _mode_option("bypassPermissions", values=("acceptEdits", "bypassPermissions"))
+    ] + [option for option in script["initial_options"] if option["id"] != "mode"]
+    _, error, methods, _ = _run_claude_shaped(tmp_path, script, _claude_machine())
+    assert isinstance(error, ConfigFidelityError)
+    assert "session/prompt" not in methods
+
+
+def test_inexact_mode_readback_refuses_before_any_prompt(tmp_path: Path) -> None:
+    script = _claude_shaped_script(wrong_readback={"mode": "bypassPermissions"})
+    _, error, methods, _ = _run_claude_shaped(tmp_path, script, _claude_machine())
+    assert isinstance(error, ConfigFidelityError)
+    assert "mode" in str(error)
+    assert "session/prompt" not in methods
+
+
+def test_mode_drift_in_the_final_readback_refuses(tmp_path: Path) -> None:
+    # The agent silently restores a bypass mode while the effort is being set:
+    # the final all-three readback must catch it.
+    script = _claude_shaped_script()
+    script["post_model_options"] = [
+        _mode_option("bypassPermissions"),
+        {
+            "id": "model",
+            "name": "Model",
+            "type": "select",
+            "currentValue": "opus[1m]",
+            "options": [
+                {"value": "claude-fable-5[1m]", "name": "Fable"},
+                {"value": "opus[1m]", "name": "Opus"},
+            ],
+        },
+        {
+            "id": "effort",
+            "name": "Effort",
+            "type": "select",
+            "currentValue": "high",
+            "options": [{"value": "max", "name": "Max"}],
+        },
+    ]
+    _, error, methods, _ = _run_claude_shaped(tmp_path, script, _claude_machine())
+    assert isinstance(error, ConfigFidelityError)
+    assert "mode" in str(error)
+    assert "session/prompt" not in methods
+
+
+def test_legacy_two_selector_sequence_is_unchanged(tmp_path: Path) -> None:
+    # A machine without a permission-mode binding keeps the exact legacy phase
+    # names, snapshot labels, and wire sequence.
+    machine = ConfigFidelityMachine(
+        model_selector_id="model",
+        effort_selector_id="effort",
+        requested_model="kimi-for-coding/k3",
+        requested_effort="max",
+    )
+    assert machine.phase == "init"
+    machine.record_initial_options(HAPPY_SCRIPT["initial_options"])
+    assert machine.phase == "initial_options"
+    assert machine.model_plan() == "model"
+    assert machine.phase == "model_planned"
+    machine.record_post_model_options(HAPPY_SCRIPT["post_model_options"])
+    assert machine.effort_plan() == "effort"
+    machine.record_post_effort_options(
+        [
+            {
+                "id": "model",
+                "type": "select",
+                "currentValue": "kimi-for-coding/k3",
+                "options": [{"value": "kimi-for-coding/k3"}],
+            },
+            {
+                "id": "effort",
+                "type": "select",
+                "currentValue": "max",
+                "options": [{"value": "max"}],
+            },
+        ]
+    )
+    assert machine.require_ready() == ("kimi-for-coding/k3", "max")
+    assert [label for label, _ in machine.snapshots] == [
+        "initial",
+        "post_model",
+        "post_effort",
+    ]
+
+
+def test_mode_leg_cannot_be_skipped_structurally() -> None:
+    # A machine that freezes a permission mode plans the model only from the
+    # post-set-mode option set, so a caller that forgets the mode leg fails
+    # closed instead of silently prompting in an ambient mode.
+    machine = _claude_machine()
+    machine.record_initial_options(
+        [
+            _mode_option("bypassPermissions"),
+            {
+                "id": "model",
+                "type": "select",
+                "currentValue": "claude-fable-5[1m]",
+                "options": [{"value": "opus[1m]"}],
+            },
+            {
+                "id": "effort",
+                "type": "select",
+                "currentValue": "max",
+                "options": [{"value": "max"}],
+            },
+        ]
+    )
+    with pytest.raises(ConfigFidelityError) as err:
+        machine.model_plan()
+    assert "post_mode" in str(err.value)
+    with pytest.raises(ConfigFidelityError):
+        machine.require_ready()
+
+
+def test_permission_mode_binding_must_be_declared_as_a_pair() -> None:
+    with pytest.raises(ConfigFidelityError):
+        ConfigFidelityMachine(
+            model_selector_id="model",
+            effort_selector_id="effort",
+            requested_model="opus[1m]",
+            requested_effort="max",
+            permission_mode_selector_id="mode",
+        )

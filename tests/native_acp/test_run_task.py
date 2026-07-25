@@ -3408,3 +3408,375 @@ def test_opencode_run_writes_no_attestation_files(
     launch = json.loads((run_dir / "launch.json").read_text(encoding="utf-8"))
     assert "fixed_env" not in launch
     assert "expected_runtime" not in launch
+
+
+# -- B4: frozen permission mode + execute mediation over a Claude-shaped Run --
+
+CLAUDE_SHAPED_PERMISSION_OPTIONS = [
+    # The official Claude adapter advertises the always-scoped option FIRST.
+    {"optionId": "allow_always", "name": "Always allow", "kind": "allow_always"},
+    {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+    {"optionId": "reject", "name": "Reject", "kind": "reject_once"},
+]
+
+
+def _mode_option(current: str, values=("default", "acceptEdits", "bypassPermissions")):
+    return {
+        "id": "mode",
+        "name": "Permission mode",
+        "type": "select",
+        "currentValue": current,
+        "options": [{"value": value, "name": value} for value in values],
+    }
+
+
+def _claude_shaped_script(initial_mode: str = "bypassPermissions", **overrides) -> dict:
+    script = {
+        "initial_options": [
+            _mode_option(initial_mode),
+            {
+                "id": "model",
+                "name": "Model",
+                "type": "select",
+                "currentValue": "claude-fable-5[1m]",
+                "options": [
+                    {"value": "claude-fable-5[1m]", "name": "Fable"},
+                    {"value": "opus[1m]", "name": "Opus"},
+                ],
+            },
+            {
+                "id": "effort",
+                "name": "Effort",
+                "type": "select",
+                "currentValue": "max",
+                "options": [{"value": "max", "name": "Max"}],
+            },
+        ],
+        "final_message": "FAKE_AGENT_OK",
+    }
+    script.update(overrides)
+    return script
+
+
+def _claude_shaped_profile(**overrides) -> AgentProfile:
+    kwargs = dict(
+        profile_id="fake-claude-1.0",
+        revision=1,
+        executable_key="python-fake",
+        argv_template=(str(FAKE_AGENT_PATH),),
+        env_allowlist=("PATH", "HOME", "FAKE_AGENT_SCRIPT", "FAKE_AGENT_TRACE"),
+        credential_slots=(),
+        model_selector_id="model",
+        effort_selector_id="effort",
+        default_model="opus[1m]",
+        default_effort="max",
+        registered_models=("claude-fable-5[1m]", "opus[1m]"),
+        allowed_efforts=("max",),
+        requires_session_load=False,
+        config_schema={"selectors": {"model": "string", "effort": "string"}},
+        permission_mode_selector_id="mode",
+        required_permission_mode="default",
+    )
+    kwargs.update(overrides)
+    return AgentProfile(**kwargs)
+
+
+def _claude_harness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    script: dict,
+    *,
+    profile: AgentProfile | None = None,
+) -> Harness:
+    harness = Harness(tmp_path, monkeypatch, script)
+    harness.registry = ProfileRegistry((profile or _claude_shaped_profile(),))
+    return harness
+
+
+def _claude_request(**overrides) -> AgentRunRequest:
+    kwargs = dict(
+        profile_id="fake-claude-1.0",
+        requested_model="opus[1m]",
+        requested_effort="max",
+    )
+    kwargs.update(overrides)
+    return _request(**kwargs)
+
+
+def test_hostile_initial_permission_mode_is_switched_to_exact_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _claude_harness(tmp_path, monkeypatch, _claude_shaped_script())
+    result = _run(harness.task(request=_claude_request()))
+
+    assert result.status is AgentRunStatus.COMPLETED
+    run_dir = harness.run_dir()
+    effective = json.loads((run_dir / "effective.json").read_text())
+    labels = [row["label"] for row in effective["discovery_snapshots"]]
+    assert labels == ["initial", "post_mode", "post_model", "post_effort"]
+    initial = {
+        row["id"]: row
+        for row in effective["discovery_snapshots"][0]["options"]
+    }
+    assert initial["mode"]["currentValue"] == "bypassPermissions"
+    for label in ("post_mode", "post_effort"):
+        snapshot = [
+            row for row in effective["discovery_snapshots"] if row["label"] == label
+        ][0]
+        modes = {row["id"]: row for row in snapshot["options"]}
+        assert modes["mode"]["currentValue"] == "default"
+    assert effective["effective_model"] == "opus[1m]"
+    assert effective["effective_effort"] == "max"
+
+
+@pytest.mark.parametrize(
+    ("label", "mutate"),
+    [
+        ("missing selector", "missing"),
+        ("value outside domain", "domain"),
+        ("inexact readback", "readback"),
+    ],
+)
+def test_permission_mode_failures_refuse_before_any_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, label: str, mutate: str
+) -> None:
+    script = _claude_shaped_script()
+    if mutate == "missing":
+        script["initial_options"] = [
+            option for option in script["initial_options"] if option["id"] != "mode"
+        ]
+    elif mutate == "domain":
+        script["initial_options"][0] = _mode_option(
+            "bypassPermissions", values=("acceptEdits", "bypassPermissions")
+        )
+    else:
+        script["wrong_readback"] = {"mode": "bypassPermissions"}
+
+    harness = _claude_harness(tmp_path, monkeypatch, script)
+    result = _run(harness.task(request=_claude_request()))
+
+    assert result.status is AgentRunStatus.FAILED, label
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    assert payload["detail_code"] == "CONFIG_FIDELITY", label
+    # Zero Turn: the fake agent never observed a prompt frame.
+    assert "session/prompt" not in harness_methods(harness), label
+    assert not (harness.run_dir() / DISPATCH_STARTED_MARKER).exists(), label
+    # The refusal still leaves the observed discovery evidence on disk.
+    effective = json.loads((harness.run_dir() / "effective.json").read_text())
+    labels = [row["label"] for row in effective["discovery_snapshots"]]
+    assert labels[0] == "initial", label
+    if mutate == "readback":
+        # The mode the agent actually reported back is durable evidence.
+        assert labels == ["initial", "post_mode"], label
+        post_mode = {
+            row["id"]: row for row in effective["discovery_snapshots"][1]["options"]
+        }
+        assert post_mode["mode"]["currentValue"] == "bypassPermissions", label
+
+
+def test_execute_ask_is_denied_and_the_side_effect_never_happens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sentinel = "ARS_B4_EXECUTE_MARKER_MUST_NOT_EXIST"
+    choice = tmp_path / "permission-choice.txt"
+    script = _claude_shaped_script()
+    script["ask_permission"] = {
+        "kind": "execute",
+        "path": sentinel,
+        "options": CLAUDE_SHAPED_PERMISSION_OPTIONS,
+        "allow_option_ids": ["allow", "allow_always"],
+        "choice_path": str(choice),
+    }
+    harness = _claude_harness(tmp_path, monkeypatch, script)
+    # Frozen read-only grant: execute is not granted.
+    result = _run(harness.task(request=_claude_request(grant_capabilities=("read",))))
+
+    assert result.status is AgentRunStatus.COMPLETED
+    assert not (harness.workspace / sentinel).exists()
+    assert list(harness.workspace.iterdir()) == []
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    assert payload["final_message"] == "ASK_DENIED"
+    # A denied decision is answered as a cancelled outcome, so the agent is
+    # handed no option id at all — in particular never the always-scoped one.
+    assert choice.read_text() == ""
+    events = _run_events(harness.run_dir())
+    denies = [
+        e
+        for e in events
+        if e.get("type") == "permission_mediation"
+        and e.get("requested_op") == "permission:execute"
+        and e.get("decision") == "deny"
+    ]
+    assert denies, "expected an execute deny mediation event"
+
+
+def test_execute_ask_allow_once_permits_only_the_granted_side_effect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = "ars-b4-allow-marker"
+    choice = tmp_path / "permission-choice.txt"
+    script = _claude_shaped_script()
+    script["ask_permission"] = {
+        "kind": "execute",
+        "path": str(tmp_path / "workspace" / marker),
+        "content": "ARS_B4_ALLOW",
+        "options": CLAUDE_SHAPED_PERMISSION_OPTIONS,
+        "allow_option_ids": ["allow", "allow_always"],
+        "choice_path": str(choice),
+    }
+    harness = _claude_harness(tmp_path, monkeypatch, script)
+    result = _run(
+        harness.task(request=_claude_request(grant_capabilities=("read", "execute")))
+    )
+
+    assert result.status is AgentRunStatus.COMPLETED
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    assert payload["final_message"] == "ASK_ALLOWED"
+    # The once-scoped option, never the always-scoped one the agent listed
+    # first: an always grant would install a session rule that outlives the
+    # mediated call.
+    assert choice.read_text() == "allow"
+    # Exactly the one granted inert side effect, nothing else.
+    assert (harness.workspace / marker).read_text() == "ARS_B4_ALLOW"
+    assert [path.name for path in harness.workspace.iterdir()] == [marker]
+    events = _run_events(harness.run_dir())
+    allows = [
+        e
+        for e in events
+        if e.get("type") == "permission_mediation"
+        and e.get("requested_op") == "permission:execute"
+        and e.get("decision") == "allow"
+    ]
+    assert len(allows) == 1
+    assert not [e for e in events if e.get("type") == "permission_violation"]
+
+
+# -- B5: frozen session metadata on session/new AND session/load -------------
+
+FROZEN_CLAUDE_SESSION_META_TEXT = (
+    '{"claudeCode":{"options":{"settingSources":[],'
+    '"tools":{"preset":"claude_code","type":"preset"}}}}'
+)
+FROZEN_CLAUDE_SESSION_META = {
+    "claudeCode": {
+        "options": {
+            "settingSources": [],
+            "tools": {"type": "preset", "preset": "claude_code"},
+        }
+    }
+}
+
+
+def _captured_meta(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line]
+
+
+def test_claude_shaped_run_sends_the_frozen_metadata_on_session_new(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capture = tmp_path / "session-meta.jsonl"
+    script = _claude_shaped_script(capture_meta_path=str(capture))
+    profile = _claude_shaped_profile(session_meta=FROZEN_CLAUDE_SESSION_META_TEXT)
+    harness = _claude_harness(tmp_path, monkeypatch, script, profile=profile)
+    result = _run(harness.task(request=_claude_request()))
+
+    assert result.status is AgentRunStatus.COMPLETED
+    captured = _captured_meta(capture)
+    assert [row["method"] for row in captured] == ["session/new"]
+    assert captured[0]["meta_present"] is True
+    assert captured[0]["meta"] == FROZEN_CLAUDE_SESSION_META
+    # The expected metadata is durable in launch.json before any wire call.
+    launch = json.loads((harness.run_dir() / "launch.json").read_text())
+    assert launch["session_meta"] == FROZEN_CLAUDE_SESSION_META
+
+
+def test_claude_shaped_reused_session_sends_the_same_metadata_on_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capture = tmp_path / "session-meta.jsonl"
+    script = _claude_shaped_script(capture_meta_path=str(capture))
+    profile = _claude_shaped_profile(
+        requires_session_load=True,
+        session_meta=FROZEN_CLAUDE_SESSION_META_TEXT,
+    )
+    harness = _claude_harness(tmp_path, monkeypatch, script, profile=profile)
+    first = _run(harness.task(run_id="run-0001", request=_claude_request()))
+    assert first.status is AgentRunStatus.COMPLETED
+    second = _run(harness.task(run_id="run-0002", request=_claude_request()))
+    assert second.status is AgentRunStatus.COMPLETED
+
+    captured = _captured_meta(capture)
+    assert [row["method"] for row in captured] == ["session/new", "session/load"]
+    # Load is not "resume with whatever the session had": the same frozen
+    # metadata must be re-sent, or ambient setting sources come back.
+    assert all(row["meta_present"] is True for row in captured)
+    assert captured[0]["meta"] == captured[1]["meta"] == FROZEN_CLAUDE_SESSION_META
+    # Same external session identity across the load.
+    first_effective = json.loads(
+        (harness.run_dir("run-0001") / "effective.json").read_text()
+    )
+    second_effective = json.loads(
+        (harness.run_dir("run-0002") / "effective.json").read_text()
+    )
+    assert (
+        first_effective["agent_session_id"]
+        == second_effective["agent_session_id"]
+        == "fake-external-session-1"
+    )
+
+
+def test_profiles_without_metadata_send_no_meta_argument(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capture = tmp_path / "session-meta.jsonl"
+    script = dict(HAPPY_SCRIPT)
+    script["capture_meta_path"] = str(capture)
+    harness = Harness(tmp_path, monkeypatch, script)
+    result = _run(harness.task())
+
+    assert result.status is AgentRunStatus.COMPLETED
+    captured = _captured_meta(capture)
+    assert captured
+    # The argument is omitted entirely — no `_meta` key on the wire at all,
+    # not a null one — so legacy frames stay byte-identical.
+    assert all(row["meta_present"] is False for row in captured)
+    assert all(row["meta"] is None for row in captured)
+    launch = json.loads((harness.run_dir() / "launch.json").read_text())
+    assert "session_meta" not in launch
+
+
+def test_post_load_mode_fidelity_failure_refuses_before_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A reused Session must not inherit trust: if the reloaded session cannot
+    # be proven back to the frozen permission mode, the Run ends zero-Turn.
+    capture = tmp_path / "session-meta.jsonl"
+    profile = _claude_shaped_profile(
+        requires_session_load=True,
+        session_meta=FROZEN_CLAUDE_SESSION_META_TEXT,
+    )
+    harness = _claude_harness(
+        tmp_path,
+        monkeypatch,
+        _claude_shaped_script(capture_meta_path=str(capture)),
+        profile=profile,
+    )
+    first = _run(harness.task(run_id="run-0001", request=_claude_request()))
+    assert first.status is AgentRunStatus.COMPLETED
+
+    hostile = _claude_shaped_script(
+        capture_meta_path=str(capture), wrong_readback={"mode": "bypassPermissions"}
+    )
+    monkeypatch.setenv("FAKE_AGENT_SCRIPT", json.dumps(hostile))
+    second = _run(harness.task(run_id="run-0002", request=_claude_request()))
+
+    assert second.status is AgentRunStatus.FAILED
+    payload = json.loads((harness.run_dir("run-0002") / "result.json").read_text())
+    assert payload["detail_code"] == "CONFIG_FIDELITY"
+    assert not (harness.run_dir("run-0002") / DISPATCH_STARTED_MARKER).exists()
+    # The load still carried the frozen metadata before the refusal.
+    captured = _captured_meta(capture)
+    assert captured[-1]["method"] == "session/load"
+    assert captured[-1]["meta"] == FROZEN_CLAUDE_SESSION_META

@@ -38,8 +38,16 @@ Script keys (all optional):
   the prompt, send ``session/request_permission`` with OpenCode-shaped
   options (once/always/reject); on an allow outcome write ``path`` and
   answer ``ASK_ALLOWED``, otherwise write nothing and answer ``ASK_DENIED``.
+  Optional keys: ``options`` (wire-shaped option list, e.g. the official
+  Claude adapter's always-first ordering), ``allow_option_ids`` (option ids
+  that count as an allow; default ``["once", "always"]``), and
+  ``choice_path`` (file receiving the exact selected option id, so a test can
+  prove *which* option the client chose — never only that it allowed).
 - ``echo_env``: final message becomes ``ENV:<value>`` of that environment
   variable (``ENV_MISSING`` when unset) — proves spawn-env injection.
+- ``capture_meta_path``: append one JSON line per session/new and
+  session/load recording the exact ``_meta`` the client sent (``null`` when
+  the argument was absent) — proves the frozen session metadata on the wire.
 """
 
 from __future__ import annotations
@@ -104,6 +112,24 @@ class FakeAgent:
         with open(self.trace_path, "a", encoding="utf-8") as handle:
             handle.write(method + "\n")
 
+    def _capture_meta(self, method: str, params: dict[str, Any]) -> None:
+        path = self.script.get("capture_meta_path")
+        if not path:
+            return
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "method": method,
+                        "meta": params.get("_meta"),
+                        # Presence, not just value: a profile without metadata
+                        # must omit the argument entirely, never send a null.
+                        "meta_present": "_meta" in params,
+                    }
+                )
+                + "\n"
+            )
+
     def _options_list(self) -> list[dict[str, Any]]:
         return [dict(option) for option in self.options.values()]
 
@@ -138,8 +164,10 @@ class FakeAgent:
         if method == "initialize":
             self._on_initialize(request_id, params)
         elif method == "session/new":
+            self._capture_meta(method, params)
             self._on_new(request_id)
         elif method == "session/load":
+            self._capture_meta(method, params)
             self._on_load(request_id, params)
         elif method == "session/set_config_option":
             self._on_set_config(request_id, params)
@@ -252,11 +280,26 @@ class FakeAgent:
                             "kind": ask.get("kind", "edit"),
                             "status": "pending",
                         },
-                        "options": [
-                            {"optionId": "once", "name": "Allow once", "kind": "allow_once"},
-                            {"optionId": "always", "name": "Always allow", "kind": "allow_always"},
-                            {"optionId": "reject", "name": "Reject", "kind": "reject_once"},
-                        ],
+                        "options": ask.get(
+                            "options",
+                            [
+                                {
+                                    "optionId": "once",
+                                    "name": "Allow once",
+                                    "kind": "allow_once",
+                                },
+                                {
+                                    "optionId": "always",
+                                    "name": "Always allow",
+                                    "kind": "allow_always",
+                                },
+                                {
+                                    "optionId": "reject",
+                                    "name": "Reject",
+                                    "kind": "reject_once",
+                                },
+                            ],
+                        ),
                     },
                 }
             )
@@ -326,9 +369,12 @@ class FakeAgent:
         ask = self.script.get("ask_permission") or {}
         result = message.get("result") or {}
         outcome = result.get("outcome") or {}
-        allowed = outcome.get("outcome") == "selected" and outcome.get(
-            "optionId"
-        ) in ("once", "always")
+        selected = outcome.get("optionId")
+        allow_ids = ask.get("allow_option_ids", ["once", "always"])
+        allowed = outcome.get("outcome") == "selected" and selected in allow_ids
+        if ask.get("choice_path"):
+            with open(ask["choice_path"], "w", encoding="utf-8") as handle:
+                handle.write("" if selected is None else str(selected))
         if allowed:
             path = ask.get("path")
             if path:

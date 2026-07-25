@@ -331,3 +331,122 @@ def test_completion_of_unknown_tool_id_without_kind_does_not_flag(
         is None
     )
     assert bridge.grant_violation is False
+
+
+# -- B4: option-scope discipline and grant-driven execute mediation ----------
+
+ALLOW_ALWAYS_OPTION = {
+    "optionId": "allow_always",
+    "name": "Always allow",
+    "kind": "allow_always",
+}
+REJECT_ALWAYS_OPTION = {
+    "optionId": "reject_always",
+    "name": "Always reject",
+    "kind": "reject_always",
+}
+# The official Claude adapter advertises the always-scoped option FIRST.
+CLAUDE_SHAPED_OPTIONS = [
+    ALLOW_ALWAYS_OPTION,
+    {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+    {"optionId": "reject", "name": "Reject", "kind": "reject_once"},
+]
+
+
+def test_allow_once_is_preferred_over_an_earlier_allow_always(
+    tmp_path: Path,
+) -> None:
+    # Honoring allow_always installs a session-scoped allow rule for the tool:
+    # a broad auto-allow that outlives the mediated call.
+    bridge, _, events = _bridge(tmp_path)
+    decision = bridge.decide_permission_request(
+        _request("read", options=CLAUDE_SHAPED_OPTIONS)
+    )
+    assert decision["decision"] == "allow"
+    assert decision["option_id"] == "allow"
+    assert events[-1].decision == "allow"
+
+
+def test_allow_never_selects_an_always_scoped_option(tmp_path: Path) -> None:
+    bridge, _, events = _bridge(tmp_path)
+    decision = bridge.decide_permission_request(
+        _request("read", options=[ALLOW_ALWAYS_OPTION, REJECT_OPTION])
+    )
+    # No once-scoped allow on offer: fail closed rather than widen the grant.
+    assert decision["decision"] == "deny"
+    assert decision["option_id"] == "opt-reject"
+    assert "once" in events[-1].reason
+
+
+def test_reject_once_is_preferred_over_an_earlier_reject_always(
+    tmp_path: Path,
+) -> None:
+    bridge, _, _ = _bridge(tmp_path)
+    decision = bridge.decide_permission_request(
+        _request("edit", options=[REJECT_ALWAYS_OPTION, REJECT_OPTION])
+    )
+    assert decision["decision"] == "deny"
+    assert decision["option_id"] == "opt-reject"
+
+
+def test_execute_allows_once_only_when_the_grant_carries_execute(
+    tmp_path: Path,
+) -> None:
+    bridge, _, events = _bridge(tmp_path, capabilities=("read", "execute"))
+    decision = bridge.decide_permission_request(
+        _request("execute", options=CLAUDE_SHAPED_OPTIONS)
+    )
+    assert decision["decision"] == "allow"
+    assert decision["option_id"] == "allow"  # the once-scoped option id
+    assert events[-1].requested_op == "permission:execute"
+    assert bridge.turn_failed is False
+    # The completion backstop agrees: an execute completion under an execute
+    # grant is legitimate, so mediation and detection cannot contradict.
+    assert (
+        bridge.observe_tool_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tool-1",
+                "kind": "execute",
+                "status": "completed",
+            }
+        )
+        is None
+    )
+    assert bridge.grant_violation is False
+
+
+def test_execute_denies_without_the_execute_grant(tmp_path: Path) -> None:
+    bridge, _, events = _bridge(tmp_path, capabilities=("read", "write"))
+    decision = bridge.decide_permission_request(
+        _request("execute", options=CLAUDE_SHAPED_OPTIONS)
+    )
+    assert decision["decision"] == "deny"
+    assert decision["option_id"] == "reject"
+    assert events[-1].decision == "deny"
+
+
+def test_execute_without_a_once_option_denies_even_when_granted(
+    tmp_path: Path,
+) -> None:
+    bridge, _, _ = _bridge(tmp_path, capabilities=("read", "execute"))
+    decision = bridge.decide_permission_request(
+        _request("execute", options=[ALLOW_ALWAYS_OPTION, REJECT_OPTION])
+    )
+    assert decision["decision"] == "deny"
+
+
+@pytest.mark.parametrize(
+    ("kind", "capability"),
+    [("edit", "write"), ("delete", "delete"), ("move", "move")],
+)
+def test_other_write_family_kinds_stay_denied_even_when_granted(
+    tmp_path: Path, kind: str, capability: str
+) -> None:
+    # Scope pin: only `execute` mediation is opened in this slice; the other
+    # write-family kinds have no live-canaried mediated-allow path.
+    bridge, _, _ = _bridge(tmp_path, capabilities=("read", capability))
+    decision = bridge.decide_permission_request(
+        _request(kind, options=CLAUDE_SHAPED_OPTIONS)
+    )
+    assert decision["decision"] == "deny"

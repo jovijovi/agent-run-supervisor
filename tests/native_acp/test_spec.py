@@ -667,3 +667,139 @@ def test_codex_out_of_domain_model_or_effort_refused(overrides) -> None:
     assembler = RunSpecAssembler(_codex_request(**overrides))
     with pytest.raises(SpecValidationError):
         assembler.resolve_profile(DEFAULT_REGISTRY)
+
+
+# -- Claude closed-profile admission (B3) ------------------------------------
+
+FROZEN_CLAUDE_ENTRY = (
+    "/home/ecs-user/.local/share/agent-run-supervisor/adapters/claude-agent-acp/0.61.0"
+    "/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js"
+)
+FROZEN_CLAUDE_CLI_PATH = "/home/ecs-user/.local/bin/claude"
+
+
+def _claude_request(**overrides) -> AgentRunRequest:
+    kwargs = dict(
+        profile_id="claude-agent-acp-0.61.0",
+        requested_model="opus[1m]",
+        requested_effort="max",
+        credential_refs=(),
+    )
+    kwargs.update(overrides)
+    return _request(**kwargs)
+
+
+def _claude_launch(tmp_path: Path, request: AgentRunRequest | None = None):
+    assembler = RunSpecAssembler(request or _claude_request())
+    assembler.resolve_profile(DEFAULT_REGISTRY)
+    assembler.bind_workspace(root=tmp_path)
+    return assembler.resolve_launch()
+
+
+def test_claude_launch_argv_frozen_node_plus_entry(tmp_path: Path) -> None:
+    launch = _claude_launch(tmp_path)
+    assert launch.executable == FROZEN_NODE_PATH
+    assert launch.argv == (FROZEN_NODE_PATH, FROZEN_CLAUDE_ENTRY)
+    assert launch.credential_refs == ()
+    assert launch.permission_env == ()
+
+    payload = launch.to_dict()
+    assert payload["fixed_env"] == [
+        ["CLAUDE_CODE_EXECUTABLE", FROZEN_CLAUDE_CLI_PATH],
+        ["NO_BROWSER", "1"],
+    ]
+    assert payload["expected_runtime"]["adapter_entry_path"] == FROZEN_CLAUDE_ENTRY
+    assert payload["expected_runtime"]["cli_path"] == FROZEN_CLAUDE_CLI_PATH
+    assert payload["expected_runtime"]["cli_path_env"] == "CLAUDE_CODE_EXECUTABLE"
+    assert len(launch.launch_hash()) == 64
+
+
+@pytest.mark.parametrize(
+    "credential_refs",
+    [("claude-home",), ("codex-home-auth",), ("", )],
+)
+def test_claude_admission_refuses_any_credential_reference(credential_refs) -> None:
+    # Closed admission: the profile requires exactly zero references, so any
+    # reference is refused before workspace bind and before spawn.
+    assembler = RunSpecAssembler(_claude_request(credential_refs=credential_refs))
+    with pytest.raises(SpecValidationError) as err:
+        assembler.resolve_profile(DEFAULT_REGISTRY)
+    assert "credential_refs" in str(err.value)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        # The direct Claude CLI author selector is not the ACP readback literal.
+        {"requested_model": "claude-opus-5[1m]"},
+        {"requested_model": "opus"},
+        {"requested_model": "gpt-5.6-sol"},
+        {"requested_effort": "high"},
+    ],
+)
+def test_claude_out_of_domain_model_or_effort_refused(overrides) -> None:
+    assembler = RunSpecAssembler(_claude_request(**overrides))
+    with pytest.raises(SpecValidationError):
+        assembler.resolve_profile(DEFAULT_REGISTRY)
+
+
+def test_claude_registered_model_domain_is_exactly_two_values(tmp_path: Path) -> None:
+    for model in ("claude-fable-5[1m]", "opus[1m]"):
+        assembler = RunSpecAssembler(_claude_request(requested_model=model))
+        profile = assembler.resolve_profile(DEFAULT_REGISTRY)
+        assert profile.registered_models == ("claude-fable-5[1m]", "opus[1m]")
+
+
+def test_claude_launch_mirrors_the_frozen_session_metadata(tmp_path: Path) -> None:
+    launch = _claude_launch(tmp_path)
+    assert launch.session_meta == (
+        '{"claudeCode":{"options":{"settingSources":[],'
+        '"tools":{"preset":"claude_code","type":"preset"}}}}'
+    )
+    payload = launch.to_dict()
+    assert payload["session_meta"] == {
+        "claudeCode": {
+            "options": {
+                "settingSources": [],
+                "tools": {"type": "preset", "preset": "claude_code"},
+            }
+        }
+    }
+
+
+def test_legacy_launch_omits_session_metadata_and_keeps_its_hash(
+    tmp_path: Path,
+) -> None:
+    from agent_run_supervisor.native_acp.spec import ResolvedLaunchSpec
+
+    legacy = ResolvedLaunchSpec(
+        executable="/bin/true",
+        argv=("/bin/true",),
+        env_allowlist=("PATH",),
+        credential_refs=(),
+        profile_id="legacy-1.0",
+        profile_revision=1,
+        profile_hash="0" * 64,
+        config_schema_hash="1" * 64,
+    )
+    assert legacy.session_meta is None
+    assert "session_meta" not in legacy.to_dict()
+    codex = _codex_launch(tmp_path)
+    assert "session_meta" not in codex.to_dict()
+
+
+def test_request_carries_no_caller_metadata_surface() -> None:
+    import dataclasses
+
+    fields = {field.name for field in dataclasses.fields(AgentRunRequest)}
+    assert not {name for name in fields if "meta" in name.lower()}
+    with pytest.raises(TypeError):
+        AgentRunRequest(  # type: ignore[call-arg]
+            **{
+                **{
+                    field.name: getattr(_claude_request(), field.name)
+                    for field in dataclasses.fields(AgentRunRequest)
+                },
+                "session_meta": '{"claudeCode":{}}',
+            }
+        )

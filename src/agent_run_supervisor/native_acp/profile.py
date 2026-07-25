@@ -38,30 +38,37 @@ def _sha256_hex(text: str) -> str:
 # Operator-managed registered installation mapping. Resolution never consults
 # caller input, PATH, or any environment variable.
 #
-# ``codex-acp`` maps to the controller-frozen Node interpreter, not to the
-# adapter's ``.bin`` shim: the adapter entrypoint is an ESM script whose
-# ``#!/usr/bin/env node`` shebang would otherwise let the kernel resolve the
-# interpreter from the child's ambient PATH. The process image is Node and the
-# entry JS is argv[1], so interpreter selection never involves PATH at all.
+# ``codex-acp`` and ``claude-agent-acp`` map to the controller-frozen Node
+# interpreter, not to the adapters' ``.bin`` shims: each adapter entrypoint is
+# an ESM script whose ``#!/usr/bin/env node`` shebang would otherwise let the
+# kernel resolve the interpreter from the child's ambient PATH. The process
+# image is Node and the entry JS is argv[1], so interpreter selection never
+# involves PATH at all.
+_FROZEN_NODE = Path(
+    "/home/ecs-user/.local/share/agent-run-supervisor/adapters/node/v24.14.0/bin/node"
+)
 _REGISTERED_EXECUTABLES: dict[str, Path] = {
     "opencode": Path("/home/linuxbrew/.linuxbrew/bin/opencode"),
-    "codex-acp": Path(
-        "/home/ecs-user/.local/share/agent-run-supervisor/adapters/node/v24.14.0/bin/node"
-    ),
+    "codex-acp": _FROZEN_NODE,
+    "claude-agent-acp": _FROZEN_NODE,
 }
 
 # Profile-owned frozen non-model launch environment (D2). The key set is closed
 # per slice; values are bounded printable non-secret strings and never
 # credential material.
 _FIXED_ENV_ALLOWED_KEYS = frozenset(
-    {"CODEX_HOME", "CODEX_PATH", "CODEX_CONFIG", "INITIAL_AGENT_MODE", "NO_BROWSER"}
+    {
+        "CODEX_HOME",
+        "CODEX_PATH",
+        "CODEX_CONFIG",
+        "CLAUDE_CODE_EXECUTABLE",
+        "INITIAL_AGENT_MODE",
+        "NO_BROWSER",
+    }
 )
 _INITIAL_AGENT_MODES = frozenset({"read-only", "agent", "agent-full-access"})
 _MAX_FIXED_ENV_VALUE_LENGTH = 512
-# The attestation checks depend on both: a missing CODEX_PATH would silently
-# switch the adapter to a PATH-resolved or bundled fallback CLI, changing
-# downstream identity without any hash change.
-_IDENTITY_REQUIRED_FIXED_ENV = ("CODEX_HOME", "CODEX_PATH")
+_MAX_SESSION_META_LENGTH = 4096
 
 # Registered agent-side permission mediation binding, keyed like the
 # installation mapping and injected only at spawn by the supervisor — never
@@ -119,8 +126,23 @@ class AgentProfile:
     # Exact caller credential references this profile admits (D11). ``None``
     # means unconstrained, preserving legacy behavior.
     required_credential_refs: tuple[str, ...] | None = None
+    # Profile-frozen ACP permission mode (B4): the config selector id and the
+    # exact literal every Run must prove by readback before it may prompt.
+    # ``None``/``None`` means the profile freezes no permission mode and the
+    # legacy two-selector fidelity sequence applies unchanged.
+    permission_mode_selector_id: str | None = None
+    required_permission_mode: str | None = None
+    # Profile-owned frozen ACP session metadata (B5): the exact ``_meta``
+    # argument sent on ``session/new`` *and* ``session/load``, stored as
+    # canonical JSON **text** so the value is deeply immutable by construction
+    # and hashes canonically. ``None`` means the profile owns no metadata and
+    # the argument is omitted entirely (legacy wire frames stay byte-identical).
+    # There is no caller metadata surface anywhere: this is the only source.
+    session_meta: str | None = None
 
     def __post_init__(self) -> None:
+        self._validate_permission_mode()
+        self._validate_session_meta()
         self._validate_fixed_env()
         if self.required_credential_refs is not None:
             for ref in self.required_credential_refs:
@@ -128,6 +150,64 @@ class AgentProfile:
                     raise ProfileValidationError(
                         "required_credential_refs entries must be non-empty strings"
                     )
+
+    def _validate_permission_mode(self) -> None:
+        selector = self.permission_mode_selector_id
+        required = self.required_permission_mode
+        if (selector is None) != (required is None):
+            raise ProfileValidationError(
+                "permission_mode_selector_id and required_permission_mode must "
+                "be declared together"
+            )
+        for name, value in (
+            ("permission_mode_selector_id", selector),
+            ("required_permission_mode", required),
+        ):
+            if value is None:
+                continue
+            if not isinstance(value, str) or not value:
+                raise ProfileValidationError(f"{name} must be a non-empty string")
+            if not all(ch.isprintable() for ch in value):
+                raise ProfileValidationError(
+                    f"{name} contains non-printable characters"
+                )
+
+    def _validate_session_meta(self) -> None:
+        value = self.session_meta
+        if value is None:
+            return
+        if not isinstance(value, str) or not value:
+            raise ProfileValidationError("session_meta must be a non-empty string")
+        if len(value) > _MAX_SESSION_META_LENGTH:
+            raise ProfileValidationError(
+                f"session_meta exceeds {_MAX_SESSION_META_LENGTH} characters"
+            )
+        try:
+            parsed = json.loads(value)
+        except ValueError as exc:
+            raise ProfileValidationError("session_meta must be valid JSON") from exc
+        if not isinstance(parsed, dict):
+            raise ProfileValidationError("session_meta must be a JSON object")
+        if _canonical_json(parsed) != value:
+            raise ProfileValidationError(
+                "session_meta must equal its canonical re-serialization byte "
+                "for byte"
+            )
+        for key in parsed:
+            if not isinstance(key, str) or not key:
+                raise ProfileValidationError(
+                    "session_meta top-level keys must be non-empty strings"
+                )
+
+    def session_meta_payload(self) -> dict[str, Any] | None:
+        """A fresh deep copy of the frozen metadata, or ``None``.
+
+        Parsed per call from the canonical text, so no caller, Run, or test can
+        mutate shared nested state between sessions.
+        """
+        if self.session_meta is None:
+            return None
+        return json.loads(self.session_meta)
 
     def _validate_fixed_env(self) -> None:
         seen: set[str] = set()
@@ -174,7 +254,16 @@ class AgentProfile:
                     f"fixed_env INITIAL_AGENT_MODE {value!r} is not registered"
                 )
         if self.expected_runtime is not None:
-            for required in _IDENTITY_REQUIRED_FIXED_ENV:
+            # Derived from the frozen identity, never a hardcoded name: the
+            # attestation checks depend on these keys, and a missing CLI-path
+            # key would silently switch the adapter to a PATH-resolved or
+            # bundled fallback CLI — a downstream identity change with no hash
+            # change. A runtime whose CLI owns its own credential storage
+            # declares no credential-root key and requires none.
+            required_keys = [self.expected_runtime.cli_path_env]
+            if self.expected_runtime.credential_root_env is not None:
+                required_keys.append(self.expected_runtime.credential_root_env)
+            for required in required_keys:
                 if required not in seen:
                     raise ProfileValidationError(
                         f"expected_runtime requires fixed_env {required}"
@@ -205,6 +294,11 @@ class AgentProfile:
             payload["expected_runtime"] = self.expected_runtime.to_dict()
         if self.required_credential_refs is not None:
             payload["required_credential_refs"] = list(self.required_credential_refs)
+        if self.permission_mode_selector_id is not None:
+            payload["permission_mode_selector_id"] = self.permission_mode_selector_id
+            payload["required_permission_mode"] = self.required_permission_mode
+        if self.session_meta is not None:
+            payload["session_meta"] = json.loads(self.session_meta)
         return payload
 
     def snapshot_ref(self) -> str:
@@ -370,4 +464,114 @@ CODEX_ACP_1_1_7 = AgentProfile(
     ),
 )
 
-DEFAULT_REGISTRY = ProfileRegistry((OPENCODE_1_18_4, CODEX_ACP_1_1_7))
+# Revision 1: the official Claude ACP adapter 0.61.0 over the operator-installed
+# downstream Claude CLI, admitted as a closed profile whose every value is a
+# byte-copy of the operator-frozen discovery manifest.
+#
+# ACP Opus alias distinction: ``claude-opus-5[1m]`` is the *direct Claude CLI*
+# author selector and is deliberately absent from the registered domain. A live
+# ACP ``session/set_config_option(model)`` on this adapter reads back
+# ``opus[1m]``, so the CLI-side string could never satisfy exact readback.
+#
+# The downstream CLI is bound only through profile-owned ``CLAUDE_CODE_EXECUTABLE``
+# (the adapter's own resolution order checks that variable first and otherwise
+# falls back to a bundled/PATH-resolved CLI). This profile freezes no ARS-managed
+# credential root: the Claude CLI owns its own credential storage, which ARS
+# neither manages, stages, nor inspects — so admission requires exactly zero
+# caller credential references.
+CLAUDE_ADAPTER_ENTRY = (
+    "/home/ecs-user/.local/share/agent-run-supervisor/adapters/claude-agent-acp/0.61.0"
+    "/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js"
+)
+
+CLAUDE_CLI_PATH = "/home/ecs-user/.local/bin/claude"
+
+CLAUDE_AGENT_ACP_0_61_0 = AgentProfile(
+    profile_id="claude-agent-acp-0.61.0",
+    revision=1,
+    executable_key="claude-agent-acp",
+    argv_template=(CLAUDE_ADAPTER_ENTRY,),
+    env_allowlist=(
+        "HOME",
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "TERM",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+    ),
+    fixed_env=(
+        ("CLAUDE_CODE_EXECUTABLE", CLAUDE_CLI_PATH),
+        ("NO_BROWSER", "1"),
+    ),
+    credential_slots=(),
+    required_credential_refs=(),
+    model_selector_id="model",
+    effort_selector_id="effort",
+    default_model="opus[1m]",
+    default_effort="max",
+    registered_models=("claude-fable-5[1m]", "opus[1m]"),
+    allowed_efforts=("max",),
+    requires_session_load=True,
+    # The adapter resolves its INITIAL permission mode from ambient Claude
+    # settings through its own settings manager — a surface the frozen session
+    # metadata's ``settingSources: []`` does not govern — and auto-allows tool
+    # calls in-process while that mode is ``bypassPermissions``. The mode is
+    # therefore frozen as a config selector and proven by readback before any
+    # prompt, so the frozen grant is always the deciding authority.
+    permission_mode_selector_id="mode",
+    required_permission_mode="default",
+    # Frozen ACP session metadata sent on session/new AND session/load.
+    # ``settingSources: []`` removes the adapter default
+    # ``["user","project","local"]`` so no ambient user/project/local settings
+    # file can define the underlying SDK's permission rules or tool surface;
+    # the tools preset pins the built-in tool set explicitly. This is the
+    # rule-source half of the B4/B5 defense — the frozen ``mode`` selector is
+    # the other half, and neither alone is sufficient.
+    session_meta=(
+        '{"claudeCode":{"options":{"settingSources":[],'
+        '"tools":{"preset":"claude_code","type":"preset"}}}}'
+    ),
+    config_schema={
+        "schema_version": 1,
+        "selectors": {
+            "model": {
+                "config_id": "model",
+                "type": "string",
+                "domain": ["claude-fable-5[1m]", "opus[1m]"],
+            },
+            "effort": {
+                "config_id": "effort",
+                "type": "string",
+                "domain": ["max"],
+            },
+            "permission_mode": {
+                "config_id": "mode",
+                "type": "string",
+                "domain": ["default"],
+            },
+        },
+    },
+    expected_runtime=ExpectedRuntimeIdentity(
+        node_path=str(_FROZEN_NODE),
+        node_sha256="e237a2839d0cbdc9a9a2adda1a184afc0f5b20306ffbe923af5686550472d8a8",
+        adapter_entry_path=CLAUDE_ADAPTER_ENTRY,
+        adapter_entry_sha256=(
+            "260aac90bf75f197b93640087c1de66441761d43c2784efa035fdcee60b5dacd"
+        ),
+        cli_path=CLAUDE_CLI_PATH,
+        cli_sha256="22cfd6f5b3061c0391ba84e9cf8c9deaa37783aac18b004d42ec061e98f00691",
+        agent_info_name="@agentclientprotocol/claude-agent-acp",
+        agent_info_version="0.61.0",
+        protocol_version="1",
+        cli_path_env="CLAUDE_CODE_EXECUTABLE",
+        credential_root_env=None,
+        project_config_relpath=None,
+    ),
+)
+
+DEFAULT_REGISTRY = ProfileRegistry(
+    (OPENCODE_1_18_4, CODEX_ACP_1_1_7, CLAUDE_AGENT_ACP_0_61_0)
+)

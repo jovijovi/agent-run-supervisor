@@ -276,22 +276,45 @@ class NativeAcpDriver:
             capabilities=capabilities,
         )
 
-    async def new_session(self, *, cwd: str) -> str:
+    @staticmethod
+    def _meta_kwargs(meta: Mapping[str, Any] | None) -> dict[str, Any]:
+        """The frozen session metadata as SDK ``_meta`` keyword arguments.
+
+        Empty/``None`` means the argument is omitted entirely, so profiles
+        without metadata keep byte-identical wire frames (no ``_meta`` key at
+        all, not a null one). The only source is the resolved profile: no
+        caller metadata passthrough surface exists.
+        """
+        return dict(meta) if meta else {}
+
+    async def new_session(
+        self, *, cwd: str, meta: Mapping[str, Any] | None = None
+    ) -> str:
         connection = self._require_connection()
         response = await self._call(
-            "session/new", connection.new_session(cwd=cwd)
+            "session/new", connection.new_session(cwd=cwd, **self._meta_kwargs(meta))
         )
         self._machine.record_initial_options(_dump_options(response.config_options))
         self._session_id = response.session_id
         self._client.expected_session_id = response.session_id
         return response.session_id
 
-    async def load_session(self, *, agent_session_id: str, cwd: str) -> None:
+    async def load_session(
+        self,
+        *,
+        agent_session_id: str,
+        cwd: str,
+        meta: Mapping[str, Any] | None = None,
+    ) -> None:
         connection = self._require_connection()
         self._client.expected_session_id = agent_session_id
         response = await self._call(
             "session/load",
-            connection.load_session(cwd=cwd, session_id=agent_session_id),
+            connection.load_session(
+                cwd=cwd,
+                session_id=agent_session_id,
+                **self._meta_kwargs(meta),
+            ),
         )
         self._machine.record_initial_options(_dump_options(response.config_options))
         self._session_id = agent_session_id
@@ -300,8 +323,9 @@ class NativeAcpDriver:
     async def set_config_exact(
         self, machine: ConfigFidelityMachine | None = None
     ) -> tuple[str, str]:
-        """Run set model → consume full set → rediscover effort → set effort
-        → consume full set → exact readback. Zero prompt on any failure.
+        """Run [set permission mode → consume full set → exact readback →]
+        set model → consume full set → rediscover effort → set effort →
+        consume full set → exact readback. Zero prompt on any failure.
 
         ``machine`` overrides the Run's machine for the rollback sequence;
         the prompt gate always stays on the Run's own machine.
@@ -309,6 +333,22 @@ class NativeAcpDriver:
         active = machine or self._machine
         connection = self._require_connection()
         session_id = self._require_session()
+        if active.has_permission_mode:
+            # First leg: a session whose ambient initial mode auto-allows tool
+            # calls must be switched to the frozen mode, with readback proof,
+            # before any model/effort work and long before any prompt.
+            mode_selector = active.permission_mode_plan()
+            mode_response = await self._call(
+                "session/set_config_option(permission_mode)",
+                connection.set_config_option(
+                    config_id=mode_selector,
+                    session_id=session_id,
+                    value=active.required_permission_mode,
+                ),
+            )
+            active.record_post_mode_options(
+                _dump_options(mode_response.config_options)
+            )
         model_selector = active.model_plan()
         model_response = await self._call(
             "session/set_config_option(model)",
