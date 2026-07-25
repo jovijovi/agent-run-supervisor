@@ -1,8 +1,9 @@
 ---
 title: "Official-adapter shared blocker repair — B1/B2 run boundaries"
-status: active
+status: archived
 created_at: 2026-07-24
 last_validated_at: 2026-07-24
+archived_at: 2026-07-25
 ---
 # Official-adapter shared blocker repair — B1/B2 run boundaries
 

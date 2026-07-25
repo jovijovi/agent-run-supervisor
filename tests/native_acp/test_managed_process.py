@@ -212,3 +212,70 @@ def test_missing_executable_raises_typed_error() -> None:
             )
 
     asyncio.run(case())
+
+
+# -- D10(b) bound-inode exec -------------------------------------------------
+#
+# Fixture isolation (r8): both legs stage private temporary copies under
+# ``tmp_path``; no repository file, installed adapter, frozen Node, or real CLI
+# is opened for write, renamed, chmodded, or deleted.
+
+_ARGV0_SCRIPT = "#!/bin/sh\necho ARGV0_IMAGE\n"
+
+
+def _stage_exec_pair(tmp_path: Path) -> tuple[Path, Path]:
+    """(attested image copy, decoy argv[0] script) — both private copies."""
+    import shutil
+
+    image = tmp_path / "attested-image"
+    shutil.copy2(shutil.which("echo") or "/bin/echo", image)
+    os.chmod(image, 0o755)
+    decoy = tmp_path / "argv0-path"
+    decoy.write_text(_ARGV0_SCRIPT, encoding="utf-8")
+    os.chmod(decoy, 0o755)
+    return image, decoy
+
+
+def test_spawn_uses_interpreter_fd_image_not_argv0_path(tmp_path: Path) -> None:
+    image, decoy = _stage_exec_pair(tmp_path)
+
+    async def case() -> None:
+        fd = os.open(str(image), os.O_PATH | os.O_CLOEXEC)
+        try:
+            proc = await spawn_managed_process(
+                argv=[str(decoy), "ATTESTED_IMAGE"],
+                cwd=tmp_path,
+                env=dict(os.environ),
+                limits=ManagedProcessLimits(),
+                interpreter_fd=fd,
+            )
+            # argv[0] keeps the canonical path string; the exec image is the
+            # pinned inode, so the descriptor — not the path — is authoritative.
+            out = await asyncio.wait_for(proc.stdout.readline(), 10)
+            await asyncio.wait_for(proc.wait(), 10)
+        finally:
+            os.close(fd)
+        assert out == b"ATTESTED_IMAGE\n"
+        assert out != b"ARGV0_IMAGE\n"
+
+    asyncio.run(case())
+
+
+def test_spawn_without_interpreter_fd_unchanged(tmp_path: Path) -> None:
+    _image, decoy = _stage_exec_pair(tmp_path)
+
+    async def case() -> None:
+        proc = await spawn_managed_process(
+            argv=[str(decoy), "ATTESTED_IMAGE"],
+            cwd=tmp_path,
+            env=dict(os.environ),
+            limits=ManagedProcessLimits(),
+        )
+        out = await asyncio.wait_for(proc.stdout.readline(), 10)
+        exit_state = await asyncio.wait_for(proc.wait(), 10)
+        # The None path is byte-identical to today's behavior: the pathname is
+        # exec'd, so the decoy script runs.
+        assert out == b"ARGV0_IMAGE\n"
+        assert exit_state.exit_code == 0
+
+    asyncio.run(case())

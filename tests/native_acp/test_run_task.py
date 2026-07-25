@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -2634,3 +2635,716 @@ def test_registered_permission_env_reaches_spawned_agent(
     assert launch_payload["permission_env"] == [
         ["OPENCODE_PERMISSION", binding_value]
     ]
+
+
+# ---------------------------------------------------------------------------
+# Codex closed-profile admission: spawn-boundary attestation (D10a/D10b),
+# post-initialize identity gate (D10c), fixed spawn env (D2), and the
+# credential-ref binding (D11), driven end-to-end through RunTask.
+#
+# Fixture isolation (r8 clarification 2): every artifact any test here tampers,
+# swaps, retargets, deletes, or inserts into is a per-test temporary copy
+# staged under ``tmp_path``. The repository fake-agent source, the pinned
+# adapter tree, the frozen Node copy, and the real CLI are never opened for
+# write, renamed, chmodded, or deleted; ``sys.executable`` is only executed.
+# No real credential bytes are read anywhere in this section.
+# ---------------------------------------------------------------------------
+
+CODEX_CANONICAL_CONFIG = '{"features":{"use_legacy_landlock":true}}'
+CODEX_AUTH_PLACEHOLDER = b'{"placeholder":"not-a-real-credential"}'
+
+CODEX_SCRIPT = {
+    "initial_options": [
+        {
+            "id": "model",
+            "name": "Model",
+            "type": "select",
+            "currentValue": "provider/base",
+            "options": [
+                {"value": "provider/base", "name": "Base"},
+                {"value": "gpt-5.6-sol", "name": "Sol"},
+            ],
+        },
+        {
+            "id": "reasoning_effort",
+            "name": "Reasoning effort",
+            "type": "select",
+            "currentValue": "high",
+            "options": [
+                {"value": "high", "name": "High"},
+                {"value": "max", "name": "Max"},
+            ],
+        },
+    ],
+    "final_message": "CODEX_FAKE_OK",
+}
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+class CodexHarness:
+    """Codex-shaped closed profile over the fake agent, with private copies."""
+
+    def __init__(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        script: dict | None = None,
+        *,
+        cwd_subdir: str | None = None,
+    ) -> None:
+        import shutil
+
+        from agent_run_supervisor.native_acp.attestation import (
+            ExpectedRuntimeIdentity,
+        )
+
+        self.root = tmp_path / ".agent-run-supervisor"
+        self.workspace = tmp_path / "workspace"
+        self.workspace.mkdir(exist_ok=True)
+        self.cwd = self.workspace
+        if cwd_subdir:
+            self.cwd = self.workspace / cwd_subdir
+            self.cwd.mkdir(parents=True, exist_ok=True)
+        self.trace = tmp_path / "codex-fake-trace.log"
+
+        stage = tmp_path / "stage"
+        stage.mkdir(exist_ok=True)
+        # Private copy of the repository fake-agent entry: tamper legs mutate
+        # only this file.
+        self.entry = stage / "codex_fake_entry.py"
+        shutil.copy2(FAKE_AGENT_PATH, self.entry)
+        # sys.executable is executed, never modified; the attested identity is
+        # its resolved regular file (the venv path itself is a symlink).
+        self.interpreter = Path(os.path.realpath(sys.executable))
+        self.cli = stage / "codex"
+        self.cli.write_bytes(b"# private downstream cli placeholder\n")
+        self.cred_root = tmp_path / "codex-home"
+        self.cred_root.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(self.cred_root, 0o700)
+        self.auth = self.cred_root / "auth.json"
+        self.auth.write_bytes(CODEX_AUTH_PLACEHOLDER)
+        os.chmod(self.auth, 0o600)
+
+        self.expected = ExpectedRuntimeIdentity(
+            node_path=str(self.interpreter),
+            node_sha256=_sha256_file(self.interpreter),
+            adapter_entry_path=str(self.entry),
+            adapter_entry_sha256=_sha256_file(self.entry),
+            cli_path=str(self.cli),
+            cli_sha256=_sha256_file(self.cli),
+            agent_info_name="fake-acp-agent",
+            agent_info_version="1.0.0",
+            protocol_version="1",
+        )
+        self.fixed_env = (
+            ("CODEX_HOME", str(self.cred_root)),
+            ("CODEX_PATH", str(self.cli)),
+            ("CODEX_CONFIG", CODEX_CANONICAL_CONFIG),
+            ("INITIAL_AGENT_MODE", "read-only"),
+            ("NO_BROWSER", "1"),
+        )
+        monkeypatch.setitem(
+            profile_module._REGISTERED_EXECUTABLES, "codex-fake", self.interpreter
+        )
+        monkeypatch.setenv(
+            "FAKE_AGENT_SCRIPT", json.dumps(script if script is not None else CODEX_SCRIPT)
+        )
+        monkeypatch.setenv("FAKE_AGENT_TRACE", str(self.trace))
+        self.registry = ProfileRegistry((self.profile(),))
+
+    def profile(self, **overrides) -> AgentProfile:
+        kwargs = dict(
+            profile_id="codex-fake-1.0",
+            revision=1,
+            executable_key="codex-fake",
+            argv_template=(str(self.entry),),
+            env_allowlist=(
+                "PATH",
+                "HOME",
+                "FAKE_AGENT_SCRIPT",
+                "FAKE_AGENT_TRACE",
+            ),
+            fixed_env=self.fixed_env,
+            credential_slots=("codex-home-auth",),
+            required_credential_refs=("codex-home-auth",),
+            model_selector_id="model",
+            effort_selector_id="reasoning_effort",
+            default_model="gpt-5.6-sol",
+            default_effort="max",
+            registered_models=("gpt-5.6-sol",),
+            allowed_efforts=("max",),
+            requires_session_load=True,
+            config_schema={
+                "schema_version": 1,
+                "selectors": {
+                    "model": {
+                        "config_id": "model",
+                        "type": "string",
+                        "domain": ["gpt-5.6-sol"],
+                    },
+                    "effort": {
+                        "config_id": "reasoning_effort",
+                        "type": "string",
+                        "domain": ["max"],
+                    },
+                },
+            },
+            expected_runtime=self.expected,
+        )
+        kwargs.update(overrides)
+        return AgentProfile(**kwargs)
+
+    def request(self, **overrides) -> AgentRunRequest:
+        kwargs = dict(
+            profile_id="codex-fake-1.0",
+            requested_model="gpt-5.6-sol",
+            requested_effort="max",
+            credential_refs=("codex-home-auth",),
+        )
+        kwargs.update(overrides)
+        return _request(**kwargs)
+
+    def task(self, *, run_id: str = "run-codex-1", request=None, **overrides) -> RunTask:
+        kwargs = dict(
+            request=request or self.request(),
+            prompt_text="hello codex",
+            run_id=run_id,
+            workspace_root=self.workspace,
+            registry=self.registry,
+            supervisor_root=self.root,
+            submitted_at="2026-07-24T00:00:00+00:00",
+            cwd=str(self.cwd) if self.cwd != self.workspace else None,
+        )
+        kwargs.update(overrides)
+        return RunTask(**kwargs)
+
+    def run_dir(self, run_id: str = "run-codex-1") -> Path:
+        return self.root / "native-runs" / run_id
+
+    def session_store(self) -> SessionStore:
+        return storage.native_session_store(self.root)
+
+    def attestation(self, run_id: str = "run-codex-1") -> dict:
+        return json.loads(
+            (self.run_dir(run_id) / "attestation.json").read_text(encoding="utf-8")
+        )
+
+    def rows(self, run_id: str = "run-codex-1") -> dict[str, dict]:
+        return {row["name"]: row for row in self.attestation(run_id)["checks"]}
+
+    def initialize_attestation(self, run_id: str = "run-codex-1") -> dict:
+        return json.loads(
+            (self.run_dir(run_id) / "initialize_attestation.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+
+def _fd_refs_to(dev: int, ino: int) -> list[str]:
+    """Descriptors in this (supervisor) process that reference an inode."""
+    hits: list[str] = []
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            info = os.stat(f"/proc/self/fd/{name}")
+        except OSError:
+            continue
+        if (info.st_dev, info.st_ino) == (dev, ino):
+            hits.append(name)
+    return hits
+
+
+# -- pre-spawn refusals with durable evidence --------------------------------
+
+
+def test_codex_poisoned_workspace_refused_pre_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = CodexHarness(tmp_path, monkeypatch)
+    spawned = _recording_spawn(monkeypatch)
+    layer = harness.cwd / ".codex"
+    layer.mkdir()
+    (layer / "config.toml").write_text("model = 'poison'\n", encoding="utf-8")
+
+    result = _run(harness.task())
+
+    assert result.status is AgentRunStatus.FAILED
+    assert spawned == []
+    run_dir = harness.run_dir()
+    payload = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    assert payload["detail_code"] == "PROJECT_CONFIG_LAYER_PRESENT"
+    row = harness.rows()["project_config_closure"]
+    assert row["passed"] is False
+    assert row["observed"] == str(layer / "config.toml")
+    assert (run_dir / "spec.json").exists()
+    assert (run_dir / "launch.json").exists()
+    assert not (
+        harness.root / "native-sessions" / "sess-native-1" / "lock.json"
+    ).exists()
+
+
+def test_codex_project_config_inserted_between_runs_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = CodexHarness(tmp_path, monkeypatch)
+    first = _run(harness.task(run_id="run-codex-1"))
+    assert first.status is AgentRunStatus.COMPLETED
+
+    spawned = _recording_spawn(monkeypatch)
+    layer = harness.cwd / ".codex"
+    layer.mkdir()
+    (layer / "config.toml").write_text("model = 'poison'\n", encoding="utf-8")
+
+    second = _run(harness.task(run_id="run-codex-2"))
+    assert second.status is AgentRunStatus.FAILED
+    assert spawned == []
+    payload = json.loads(
+        (harness.run_dir("run-codex-2") / "result.json").read_text(encoding="utf-8")
+    )
+    assert payload["detail_code"] == "PROJECT_CONFIG_LAYER_PRESENT"
+    assert harness.rows("run-codex-2")["project_config_closure"]["passed"] is False
+    # Session record intact and the lease released.
+    record = harness.session_store().open_session("sess-native-1")
+    assert record.state == "open"
+    assert record.agent_session_id == "fake-external-session-1"
+    assert not (
+        harness.root / "native-sessions" / "sess-native-1" / "lock.json"
+    ).exists()
+
+
+def test_artifact_tamper_before_run_refused_with_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = CodexHarness(tmp_path, monkeypatch)
+    spawned = _recording_spawn(monkeypatch)
+    task = harness.task()
+    # Tamper the per-test temporary copy of the fake-agent entry — never the
+    # repository fixture — after construction and before run().
+    harness.entry.write_bytes(b"# tampered private adapter entry copy\n")
+
+    result = _run(task)
+
+    assert result.status is AgentRunStatus.FAILED
+    assert spawned == []
+    run_dir = harness.run_dir()
+    assert (run_dir / "spec.json").exists()
+    launch = json.loads((run_dir / "launch.json").read_text(encoding="utf-8"))
+    assert launch["expected_runtime"]["adapter_entry_sha256"] == (
+        harness.expected.adapter_entry_sha256
+    )
+    row = harness.rows()["adapter_entry_sha256"]
+    assert row["passed"] is False
+    assert row["expected"] == harness.expected.adapter_entry_sha256
+    payload = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    assert payload["detail_code"] == "RUNTIME_IDENTITY_MISMATCH"
+
+
+def test_inwindow_swap_refused_end_to_end_with_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_run_supervisor.native_acp import attestation as attestation_module
+
+    harness = CodexHarness(tmp_path, monkeypatch)
+    spawned = _recording_spawn(monkeypatch)
+    replacement = tmp_path / "stage" / "codex_fake_entry_evil.py"
+    replacement.write_bytes(b"# swapped-in adapter entry\n")
+    monkeypatch.setattr(
+        attestation_module,
+        "_POST_ATTESTATION_HOOK",
+        lambda: os.replace(replacement, harness.entry),
+    )
+
+    result = _run(harness.task())
+
+    assert result.status is AgentRunStatus.FAILED
+    assert spawned == []
+    run_dir = harness.run_dir()
+    payload = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    # The surfaced detail_code is exactly the raised AttestationRefusal.code:
+    # proof of the _drive translation seam end to end.
+    assert payload["detail_code"] == "RUNTIME_IDENTITY_MISMATCH"
+    assert payload["retryable"] is False
+    assert harness.attestation()["pass"] is False
+    assert harness.rows()["adapter_entry_binding_lost"]["passed"] is False
+    assert not (
+        harness.root / "native-sessions" / "sess-native-1" / "lock.json"
+    ).exists()
+
+
+@pytest.mark.parametrize("location", ["workspace", "credential_root"])
+def test_inwindow_config_insertion_refused_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, location: str
+) -> None:
+    from agent_run_supervisor.native_acp import attestation as attestation_module
+
+    harness = CodexHarness(tmp_path, monkeypatch)
+    spawned = _recording_spawn(monkeypatch)
+    if location == "workspace":
+        inserted = harness.cwd / ".codex" / "config.toml"
+
+        def hook() -> None:
+            inserted.parent.mkdir()
+            inserted.write_text("model = 'poison'\n", encoding="utf-8")
+
+        expected_code = "PROJECT_CONFIG_LAYER_PRESENT"
+        expected_row = "project_config_closure_recheck"
+    else:
+        inserted = harness.cred_root / "config.toml"
+
+        def hook() -> None:
+            inserted.write_text("[features]\n", encoding="utf-8")
+
+        expected_code = "CREDENTIAL_ROOT_VIOLATION"
+        expected_row = "config_toml_absence_recheck"
+
+    monkeypatch.setattr(attestation_module, "_POST_ATTESTATION_HOOK", hook)
+    result = _run(harness.task())
+
+    assert result.status is AgentRunStatus.FAILED
+    assert spawned == []
+    payload = json.loads(
+        (harness.run_dir() / "result.json").read_text(encoding="utf-8")
+    )
+    assert payload["detail_code"] == expected_code
+    row = harness.rows()[expected_row]
+    assert row["passed"] is False
+    if location == "workspace":
+        assert row["observed"] == str(inserted)
+    assert not (
+        harness.root / "native-sessions" / "sess-native-1" / "lock.json"
+    ).exists()
+
+
+# -- descriptor wiring at the RunTask seam (D10b) ----------------------------
+
+
+def _fd_capturing_spawn(monkeypatch: pytest.MonkeyPatch, *, raise_after: bool = False):
+    from agent_run_supervisor.native_acp import run_task as run_task_module
+
+    captured: list[dict] = []
+    real_spawn = run_task_module.spawn_managed_process
+
+    async def wrapper(**kwargs):
+        fd = kwargs.get("interpreter_fd")
+        record: dict = {"kwarg_present": "interpreter_fd" in kwargs, "fd": fd}
+        if fd is not None:
+            info = os.fstat(fd)
+            record["dev"] = info.st_dev
+            record["ino"] = info.st_ino
+        captured.append(record)
+        if raise_after:
+            raise OSError("injected spawn failure after attestation")
+        return await real_spawn(**kwargs)
+
+    monkeypatch.setattr(run_task_module, "spawn_managed_process", wrapper)
+    return captured
+
+
+def test_codex_run_spawn_receives_attested_interpreter_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = CodexHarness(tmp_path, monkeypatch)
+    captured = _fd_capturing_spawn(monkeypatch)
+
+    result = _run(harness.task())
+
+    assert result.status is AgentRunStatus.COMPLETED
+    assert len(captured) == 1
+    record = captured[0]
+    assert record["kwarg_present"] is True
+    assert record["fd"] is not None
+    interpreter_stat = os.stat(harness.interpreter)
+    assert (record["dev"], record["ino"]) == (
+        interpreter_stat.st_dev,
+        interpreter_stat.st_ino,
+    )
+    binding = harness.attestation()["binding"]["node"]
+    assert (binding["dev"], binding["ino"]) == (record["dev"], record["ino"])
+    assert binding["recheck_passed"] is True
+    # Reuse-proof closure: no supervisor descriptor still references the
+    # attested node inode after run() returns.
+    assert _fd_refs_to(record["dev"], record["ino"]) == []
+
+
+def test_interpreter_fd_closed_after_spawn_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = CodexHarness(tmp_path, monkeypatch)
+    captured = _fd_capturing_spawn(monkeypatch, raise_after=True)
+
+    result = _run(harness.task())
+
+    assert result.status is AgentRunStatus.FAILED
+    payload = json.loads(
+        (harness.run_dir() / "result.json").read_text(encoding="utf-8")
+    )
+    assert payload["detail_code"] == "SPAWN_FAILED"
+    record = captured[0]
+    assert record["fd"] is not None
+    # Attestation succeeded; the spawn failed after it.
+    assert harness.attestation()["pass"] is True
+    assert all(row["passed"] for row in harness.attestation()["checks"])
+    assert _fd_refs_to(record["dev"], record["ino"]) == []
+
+
+# -- post-initialize identity gate (D10c) ------------------------------------
+
+
+def _order_instrumentation(
+    monkeypatch: pytest.MonkeyPatch, *, method: str, run_dir: Path
+):
+    """Ordered storage-write / ACP-call log plus an at-call existence probe."""
+    from agent_run_supervisor.native_acp import run_task as run_task_module
+
+    events: list[tuple[str, str]] = []
+    probes: list[bool] = []
+
+    real_write = run_task_module.storage.write_once_json
+
+    def write_spy(path, payload):
+        events.append(("write", Path(path).name))
+        return real_write(path, payload)
+
+    monkeypatch.setattr(run_task_module.storage, "write_once_json", write_spy)
+
+    real_call = getattr(NativeAcpDriver, method)
+
+    async def call_spy(self, *args, **kwargs):
+        events.append(("acp", method))
+        probes.append((run_dir / "initialize_attestation.json").exists())
+        return await real_call(self, *args, **kwargs)
+
+    monkeypatch.setattr(NativeAcpDriver, method, call_spy)
+    return events, probes
+
+
+def test_codex_first_run_initialize_attestation_pass_precedes_new_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = CodexHarness(tmp_path, monkeypatch)
+    events, probes = _order_instrumentation(
+        monkeypatch, method="new_session", run_dir=harness.run_dir()
+    )
+
+    result = _run(harness.task())
+
+    assert result.status is AgentRunStatus.COMPLETED
+    assert probes == [True]
+    write_index = events.index(("write", "initialize_attestation.json"))
+    call_index = events.index(("acp", "new_session"))
+    assert write_index < call_index
+    artifact = harness.initialize_attestation()
+    assert artifact["pass"] is True
+    assert all(row["passed"] for row in artifact["checks"])
+
+
+def test_codex_reused_run_initialize_attestation_pass_precedes_load_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = CodexHarness(tmp_path, monkeypatch)
+    first = _run(harness.task(run_id="run-codex-1"))
+    assert first.status is AgentRunStatus.COMPLETED
+
+    second_dir = harness.run_dir("run-codex-2")
+    events, probes = _order_instrumentation(
+        monkeypatch, method="load_session", run_dir=second_dir
+    )
+    second = _run(harness.task(run_id="run-codex-2"))
+
+    assert second.status is AgentRunStatus.COMPLETED
+    assert probes == [True]
+    write_index = events.index(("write", "initialize_attestation.json"))
+    call_index = events.index(("acp", "load_session"))
+    assert write_index < call_index
+    artifact = harness.initialize_attestation("run-codex-2")
+    assert artifact["pass"] is True
+    assert all(row["passed"] for row in artifact["checks"])
+
+
+def test_codex_agent_info_mismatch_pre_dispatch_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = dict(CODEX_SCRIPT)
+    script["agent_info"] = {"name": "impostor-agent", "version": "9.9.9"}
+    harness = CodexHarness(tmp_path, monkeypatch, script)
+
+    result = _run(harness.task())
+
+    assert result.status is AgentRunStatus.FAILED
+    payload = json.loads(
+        (harness.run_dir() / "result.json").read_text(encoding="utf-8")
+    )
+    assert payload["detail_code"] == "AGENT_IDENTITY_MISMATCH"
+    artifact = harness.initialize_attestation()
+    assert artifact["pass"] is False
+    rows = {row["name"]: row for row in artifact["checks"]}
+    assert rows["agent_identity"]["expected"] == "fake-acp-agent@1.0.0"
+    assert rows["agent_identity"]["observed"] == "impostor-agent@9.9.9"
+    assert rows["agent_identity"]["passed"] is False
+    # Zero session call, zero prompt, clean process group.
+    assert "session/new" not in harness_methods(harness)
+    assert "session/prompt" not in harness_methods(harness)
+    assert not (harness.run_dir() / "prompt-dispatch-started").exists()
+
+
+def harness_methods(harness: CodexHarness) -> list[str]:
+    if not harness.trace.exists():
+        return []
+    return [line for line in harness.trace.read_text().splitlines() if line]
+
+
+def test_codex_first_run_requires_load_session_advertised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = dict(CODEX_SCRIPT)
+    script["load_session_advertised"] = False
+    harness = CodexHarness(tmp_path, monkeypatch, script)
+
+    result = _run(harness.task())
+
+    assert result.status is AgentRunStatus.FAILED
+    payload = json.loads(
+        (harness.run_dir() / "result.json").read_text(encoding="utf-8")
+    )
+    assert payload["detail_code"] == "LOAD_SESSION_UNADVERTISED"
+    artifact = harness.initialize_attestation()
+    assert artifact["pass"] is False
+    rows = {row["name"]: row for row in artifact["checks"]}
+    assert rows["load_session_advertised"]["passed"] is False
+    # The gate runs on the FIRST Run too, before session/new.
+    assert "session/new" not in harness_methods(harness)
+
+
+def test_codex_protocol_version_mismatch_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = dict(CODEX_SCRIPT)
+    script["protocol_version"] = 2
+    harness = CodexHarness(tmp_path, monkeypatch, script)
+
+    result = _run(harness.task())
+
+    assert result.status is AgentRunStatus.FAILED
+    payload = json.loads(
+        (harness.run_dir() / "result.json").read_text(encoding="utf-8")
+    )
+    assert payload["detail_code"] == "AGENT_IDENTITY_MISMATCH"
+    rows = {
+        row["name"]: row for row in harness.initialize_attestation()["checks"]
+    }
+    assert rows["protocol_version"]["expected"] == "1"
+    assert rows["protocol_version"]["observed"] == "2"
+    assert rows["protocol_version"]["passed"] is False
+
+
+def test_initialize_attestation_survives_pre_dispatch_finalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = dict(CODEX_SCRIPT)
+    script["agent_info"] = {"name": "impostor-agent", "version": "9.9.9"}
+    harness = CodexHarness(tmp_path, monkeypatch, script)
+
+    _run(harness.task())
+
+    run_dir = harness.run_dir()
+    # _finalize_inner only adds files; the FAIL artifact is still there.
+    assert (run_dir / "initialize_attestation.json").exists()
+    assert (run_dir / "result.json").exists()
+    assert (run_dir / "effective.json").exists()
+    assert harness.initialize_attestation()["pass"] is False
+
+
+def test_initialize_attestation_sanitized_closed_keyset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = CodexHarness(tmp_path, monkeypatch)
+    _run(harness.task())
+
+    artifact = harness.initialize_attestation()
+    assert set(artifact) == {"schema_version", "expected", "observed", "checks", "pass"}
+    assert artifact["schema_version"] == 1
+    assert {row["name"] for row in artifact["checks"]} == {
+        "agent_identity",
+        "protocol_version",
+        "load_session_advertised",
+    }
+    for row in artifact["checks"]:
+        assert set(row) == {"name", "expected", "observed", "passed"}
+        assert isinstance(row["passed"], bool)
+        for key in ("expected", "observed"):
+            assert isinstance(row[key], str)
+    for block in ("expected", "observed"):
+        for value in artifact[block].values():
+            assert isinstance(value, (str, bool))
+    raw = (harness.run_dir() / "initialize_attestation.json").read_bytes()
+    assert b"fake-external-session-1" not in raw   # no session id
+    assert b"CODEX_FAKE_OK" not in raw             # no model body
+    assert b"CODEX_HOME" not in raw                # no env dump
+    assert CODEX_AUTH_PLACEHOLDER not in raw       # no credential value
+
+
+# -- spawn env composition and OpenCode evidence stability -------------------
+
+
+def test_spawn_env_exact_composition_fixed_env_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = CodexHarness(tmp_path, monkeypatch)
+    # Ambient CODEX_* names are not allowlisted and can never pass through.
+    monkeypatch.setenv("CODEX_HOME", "/tmp/ambient-home")
+    monkeypatch.setenv("CODEX_PATH", "/tmp/ambient-codex")
+    monkeypatch.setenv("CODEX_CONFIG", '{"features":{"use_legacy_landlock":false}}')
+    monkeypatch.setenv("INITIAL_AGENT_MODE", "agent-full-access")
+    monkeypatch.setenv("NOT_ALLOWLISTED", "leak")
+
+    from agent_run_supervisor.native_acp.spec import RunSpecAssembler
+
+    task = harness.task()
+    assembler = RunSpecAssembler(harness.request())
+    assembler.resolve_profile(harness.registry)
+    assembler.bind_workspace(root=harness.workspace, cwd=str(harness.cwd))
+    assembler_launch = assembler.resolve_launch()
+
+    env = task._spawn_env(assembler_launch)
+
+    allowlisted = {
+        name: os.environ[name]
+        for name in assembler_launch.env_allowlist
+        if name in os.environ
+    }
+    expected = dict(allowlisted)
+    expected.update(dict(assembler_launch.permission_env))
+    expected.update(dict(harness.fixed_env))
+    assert env == expected
+    # fixed_env wins, ambient values never leak in.
+    assert env["CODEX_HOME"] == str(harness.cred_root)
+    assert env["CODEX_PATH"] == str(harness.cli)
+    assert env["CODEX_CONFIG"] == CODEX_CANONICAL_CONFIG
+    assert env["INITIAL_AGENT_MODE"] == "read-only"
+    assert env["NO_BROWSER"] == "1"
+    assert "NOT_ALLOWLISTED" not in env
+
+
+def test_opencode_run_writes_no_attestation_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # expected_runtime is None for legacy profiles: no call, no file, byte-
+    # stable evidence surface.
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    result = _run(harness.task())
+
+    assert result.status is AgentRunStatus.COMPLETED
+    run_dir = harness.run_dir()
+    assert not (run_dir / "attestation.json").exists()
+    assert not (run_dir / "initialize_attestation.json").exists()
+    launch = json.loads((run_dir / "launch.json").read_text(encoding="utf-8"))
+    assert "fixed_env" not in launch
+    assert "expected_runtime" not in launch

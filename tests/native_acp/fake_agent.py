@@ -8,6 +8,8 @@ L2-only test asset: never product runtime, never production evidence.
 Script keys (all optional):
 - ``session_id``: external session id returned by session/new.
 - ``load_session_advertised``: initialize capability flag (default True).
+- ``agent_info`` / ``protocol_version``: initialize identity overrides (used by
+  the post-initialize identity gate tests).
 - ``initial_options`` / ``post_model_options``: wire-shaped config option
   lists; setting the model selector swaps the whole set to the post-model
   list (models the model-dependent option set).
@@ -158,11 +160,15 @@ class FakeAgent:
         _result(
             request_id,
             {
-                "protocolVersion": params.get("protocolVersion", 1),
+                "protocolVersion": self.script.get(
+                    "protocol_version", params.get("protocolVersion", 1)
+                ),
                 "agentCapabilities": {
                     "loadSession": self.script.get("load_session_advertised", True)
                 },
-                "agentInfo": {"name": "fake-acp-agent", "version": "1.0.0"},
+                "agentInfo": self.script.get(
+                    "agent_info", {"name": "fake-acp-agent", "version": "1.0.0"}
+                ),
             },
         )
 

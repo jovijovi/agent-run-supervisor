@@ -11,7 +11,7 @@ supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 
 ```text
 base_branch: main
-active_plan: docs/plans/active/2026-07-24-official-adapter-run-boundaries.md
+active_plan: docs/plans/active/2026-07-25-codex-official-adapter-admission.md
 ```
 
 ## Authority chain
@@ -31,6 +31,7 @@ and cannot direct new work.
 - **Released baseline:** v0.1.7 acpx behavior remains compatibility-only; it is not the new-development architecture.
 - **Stage 0/1:** the Native ACP core is closed and remains the compatibility baseline for the vNext supervision architecture.
 - **Stage 2 — `arsd` (closed 2026-07-23):** A1–A5 are closed. `arsd` is production/default-on enabled as a local user service for trusted local callers under the closed A2 caller policy. This is an enabled local supervision service only — not a release/publication, Sachima, Gateway/IM, or public-ingress approval. Closure detail lives in the Stage 2 phase archive and the archived execution plan.
+- **Registered official adapters:** the Codex closed profile (F-NATIVE-ADAPTER-CODEX-001) is in implementation on its own task branch — an additive admission with spawn-boundary runtime attestation. Registration in the code registry is not deployment: it carries no publication, deployment, enablement, or Claude-adapter approval, and each of those remains a separate operator decision.
 - **Runtime invariant:** production `arsd` runs on CPython 3.12.3 — the interpreter that carried A4/A5 acceptance and whose build provides the pidfd APIs the crash-containment harness requires. Standalone Python 3.11.15 lacks those APIs and is not an equivalent runtime.
 - **Release/publication:** v0.2.0 predates A1. A follow-on release or publication is not approved.
 - **Later integration:** Sachima `ArsdBackend` remains parked; ARS production acceptance is closed, and the integration still requires its own separate approval.
@@ -42,6 +43,7 @@ and cannot direct new work.
 | vNext authority reset | Documentation complete | GOAL/PRD/design/roadmap + cold archive | no implementation authority |
 | Stage 0/1 — Native ACP core | Closed | [phase archive](archive/phases/vnext-stage01-native-acp.md) | production claims require Stage 2 acceptance |
 | Stage 2 — `arsd` production ingress (A1–A5) | Closed; production/default-on enabled 2026-07-23 | [phase archive](archive/phases/vnext-stage2-arsd-production-ingress.md) · [archived plan](../plans/archive/2026-07-22-vnext-stage2-arsd-production-ingress.md) | enabled local supervision service under the closed A2 caller policy; release/publication and external integration remain separately unapproved |
+| Codex official-adapter admission | In implementation | [active plan](../plans/active/2026-07-25-codex-official-adapter-admission.md) · F-NATIVE-ADAPTER-CODEX-001 | implementation only; independent review, real-credential acceptance, publication, deployment, and enablement are each separately unapproved |
 | Sachima integration | Parked | boundary only | after ARS production acceptance and separate approval |
 
 ## Gates

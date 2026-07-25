@@ -54,6 +54,7 @@ from agent_run_supervisor.session import (
 )
 
 from . import storage
+from .attestation import AttestationRefusal, attest_spawn_boundary
 from .client import NativeAcpClient
 from .config_fidelity import ConfigFidelityError, ConfigFidelityMachine
 from .driver import NativeAcpDriver, NativeDriverError
@@ -437,20 +438,46 @@ class RunTask:
 
         self._bind_session(ctx, spec, binding, profile)
 
+        # Identity-pinned profiles attest the spawn boundary here: after the
+        # session is bound and immediately before the child is created, so the
+        # artifacts, credential-root structure, and configuration surfaces are
+        # verified on both sides of the deterministic race window. Profiles
+        # without an expected runtime take no call and write no artifact.
+        interpreter_fd: int | None = None
+        if profile.expected_runtime is not None:
+            try:
+                attestation = attest_spawn_boundary(
+                    expected=profile.expected_runtime,
+                    launch=launch,
+                    fixed_env=dict(launch.fixed_env),
+                    effective_cwd=binding.effective_cwd,
+                    run_dir=ctx.handle.run_dir,
+                )
+            except AttestationRefusal as refusal:
+                raise _PreDispatchFailure(refusal.message, refusal.code) from refusal
+            interpreter_fd = attestation.interpreter_fd
+
         try:
-            ctx.proc = await spawn_managed_process(
-                argv=list(launch.argv),
-                cwd=Path(binding.effective_cwd),
-                env=self._spawn_env(launch),
-                limits=ManagedProcessLimits(
-                    max_stderr_bytes=limits.max_stderr_bytes,
-                    cancel_grace_seconds=limits.cancel_grace_seconds,
-                ),
-            )
-        except Exception as exc:
-            raise _PreDispatchFailure(
-                f"spawn failed: {exc}", "SPAWN_FAILED"
-            ) from exc
+            try:
+                ctx.proc = await spawn_managed_process(
+                    argv=list(launch.argv),
+                    cwd=Path(binding.effective_cwd),
+                    env=self._spawn_env(launch),
+                    limits=ManagedProcessLimits(
+                        max_stderr_bytes=limits.max_stderr_bytes,
+                        cancel_grace_seconds=limits.cancel_grace_seconds,
+                    ),
+                    interpreter_fd=interpreter_fd,
+                )
+            except Exception as exc:
+                raise _PreDispatchFailure(
+                    f"spawn failed: {exc}", "SPAWN_FAILED"
+                ) from exc
+        finally:
+            # The exec'd child inherited its own copy; the supervisor never
+            # keeps the pin, on success or failure.
+            if interpreter_fd is not None:
+                os.close(interpreter_fd)
         assert ctx.lock is not None and ctx.session_id is not None
         self._session_store.update_lock_holder(
             ctx.session_id,
@@ -588,6 +615,10 @@ class RunTask:
             ctx.effective.capabilities = summary.capabilities
             ctx.effective.load_session_advertised = summary.load_session_advertised
 
+            expected_runtime = getattr(ctx.profile, "expected_runtime", None)
+            if expected_runtime is not None:
+                self._attest_initialize(ctx, expected_runtime, summary)
+
             if ctx.reuse_load:
                 if not summary.load_session_advertised:
                     raise _PreDispatchFailure(
@@ -650,6 +681,78 @@ class RunTask:
         )
         ctx.effective_written = True
         self._write_progress(ctx, "running")
+
+    def _attest_initialize(self, ctx: _RunContext, expected, summary) -> None:
+        """Post-initialize identity gate (D10c), before any session call.
+
+        Runs on first *and* reused Runs. The write-once artifact is persisted
+        before any refusal and strictly before ``session/new``/``session/load``
+        or any prompt, so a mismatch leaves durable observed-vs-expected
+        evidence and zero Turn. Sanitized by construction: names, versions, the
+        protocol integer, and one capability flag only.
+        """
+        agent_info = summary.agent_info or {}
+        observed_name = str(agent_info.get("name", ""))
+        observed_version = str(agent_info.get("version", ""))
+        observed_identity = f"{observed_name}@{observed_version}"
+        expected_identity = f"{expected.agent_info_name}@{expected.agent_info_version}"
+        observed_protocol = str(summary.protocol_version)
+        observed_load = bool(summary.load_session_advertised)
+        checks = [
+            {
+                "name": "agent_identity",
+                "expected": expected_identity,
+                "observed": observed_identity,
+                "passed": observed_identity == expected_identity,
+            },
+            {
+                "name": "protocol_version",
+                "expected": expected.protocol_version,
+                "observed": observed_protocol,
+                "passed": observed_protocol == expected.protocol_version,
+            },
+            {
+                "name": "load_session_advertised",
+                "expected": "true",
+                "observed": "true" if observed_load else "false",
+                "passed": observed_load,
+            },
+        ]
+        storage.write_once_json(
+            ctx.handle.run_dir / "initialize_attestation.json",
+            {
+                "schema_version": 1,
+                "expected": {
+                    "agent_info_name": expected.agent_info_name,
+                    "agent_info_version": expected.agent_info_version,
+                    "protocol_version": expected.protocol_version,
+                    "load_session_advertised": True,
+                },
+                "observed": {
+                    "agent_info_name": observed_name,
+                    "agent_info_version": observed_version,
+                    "protocol_version": observed_protocol,
+                    "load_session_advertised": observed_load,
+                },
+                "checks": checks,
+                "pass": all(check["passed"] for check in checks),
+            },
+        )
+        identity_failures = [
+            check["name"] for check in checks[:2] if not check["passed"]
+        ]
+        if identity_failures:
+            raise _PreDispatchFailure(
+                "initialize identity does not match the frozen expected runtime: "
+                f"{', '.join(identity_failures)}",
+                "AGENT_IDENTITY_MISMATCH",
+            )
+        if not checks[2]["passed"]:
+            raise _PreDispatchFailure(
+                "agent does not advertise loadSession; the registered profile "
+                "requires it — escalate per G6",
+                "LOAD_SESSION_UNADVERTISED",
+            )
 
     async def _rollback_after_partial_switch(self, ctx: _RunContext) -> None:
         self._emit(ctx, {"type": "config_rollback_started"})
@@ -885,6 +988,10 @@ class RunTask:
         # Registered permission-mediation binding: supervisor policy wins
         # over any same-named allowlist passthrough.
         env.update(dict(launch.permission_env))
+        # Profile-owned frozen environment last: it wins over everything, and
+        # its names are deliberately outside the allowlist, so no ambient value
+        # can reach the child under them.
+        env.update(dict(launch.fixed_env))
         return env
 
     # -- finalization ------------------------------------------------------

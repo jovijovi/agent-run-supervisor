@@ -10,6 +10,7 @@ evidence. No socket, no real AGENT, no acpx.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -1240,4 +1241,311 @@ def test_production_default_factory_builds_runtask_on_native_stores(
             run_id=run_id,
             prepared_handle=foreign_handle,
             submitted_at="2026-07-22T00:00:00+00:00",
+        )
+
+
+# --- Codex closed-profile admission (D11 credential-ref binding) -------------
+#
+# Fixture isolation: the Codex-shaped profile below points exclusively at
+# private temporary copies under ``tmp_path``. No installed adapter, frozen
+# Node, real CLI, or real credential root is referenced, and admission refuses
+# before any spawn, so nothing is ever executed by these tests.
+
+CODEX_CANONICAL_CONFIG = '{"features":{"use_legacy_landlock":true}}'
+
+
+def codex_admission_profile(tmp_path: Path, **overrides):
+    from agent_run_supervisor.native_acp.attestation import ExpectedRuntimeIdentity
+    from agent_run_supervisor.native_acp.profile import AgentProfile
+
+    stage = tmp_path / "codex-stage"
+    stage.mkdir(exist_ok=True)
+    node = stage / "node"
+    node.write_bytes(b"# private node placeholder\n")
+    entry = stage / "index.js"
+    entry.write_bytes(b"// private adapter entry placeholder\n")
+    cli = stage / "codex"
+    cli.write_bytes(b"# private cli placeholder\n")
+    cred_root = tmp_path / "codex-home"
+    cred_root.mkdir(mode=0o700, exist_ok=True)
+
+    kwargs = dict(
+        profile_id="codex-acp-admission-1.0",
+        revision=1,
+        executable_key="codex-acp-admission",
+        argv_template=(str(entry),),
+        env_allowlist=("HOME", "PATH"),
+        fixed_env=(
+            ("CODEX_HOME", str(cred_root)),
+            ("CODEX_PATH", str(cli)),
+            ("CODEX_CONFIG", CODEX_CANONICAL_CONFIG),
+            ("INITIAL_AGENT_MODE", "read-only"),
+            ("NO_BROWSER", "1"),
+        ),
+        credential_slots=("codex-home-auth",),
+        required_credential_refs=("codex-home-auth",),
+        model_selector_id="model",
+        effort_selector_id="reasoning_effort",
+        default_model="gpt-5.6-sol",
+        default_effort="max",
+        registered_models=("gpt-5.6-sol",),
+        allowed_efforts=("max",),
+        requires_session_load=True,
+        config_schema={
+            "schema_version": 1,
+            "selectors": {
+                "model": {
+                    "config_id": "model",
+                    "type": "string",
+                    "domain": ["gpt-5.6-sol"],
+                },
+                "effort": {
+                    "config_id": "reasoning_effort",
+                    "type": "string",
+                    "domain": ["max"],
+                },
+            },
+        },
+        expected_runtime=ExpectedRuntimeIdentity(
+            node_path=str(node),
+            node_sha256="0" * 64,
+            adapter_entry_path=str(entry),
+            adapter_entry_sha256="1" * 64,
+            cli_path=str(cli),
+            cli_sha256="2" * 64,
+            agent_info_name="@agentclientprotocol/codex-acp",
+            agent_info_version="1.1.7",
+            protocol_version="1",
+        ),
+    )
+    kwargs.update(overrides)
+    return AgentProfile(**kwargs)
+
+
+def codex_wire_request(**overrides) -> dict:
+    kwargs = dict(
+        profile_id="codex-acp-admission-1.0",
+        requested_model="gpt-5.6-sol",
+        requested_effort="max",
+        credential_refs=["codex-home-auth"],
+    )
+    kwargs.update(overrides)
+    return valid_wire_request(**kwargs)
+
+
+@contextlib.asynccontextmanager
+async def codex_socket_daemon(tmp_path: Path, profile):
+    """In-process ephemeral daemon on a private socket (never production)."""
+    from agent_run_supervisor.native_acp.profile import ProfileRegistry
+
+    sock_dir = tmp_path / "sock"
+    sock_dir.mkdir(parents=True, exist_ok=True)
+    socket_path = sock_dir / "arsd-codex.sock"
+    root = tmp_path / "svroot-codex"
+    session_store = storage.native_session_store(root)
+    event_store = storage.native_event_store(root)
+    handler = handlers.ArsdHandlers(
+        session_store=session_store,
+        event_store=event_store,
+        supervisor_root=root,
+        profile_registry=ProfileRegistry((profile,)),
+        cancel_wait_seconds=5.0,
+    )
+    srv = server.ArsdServer(
+        socket_path=socket_path,
+        policy=server.CallerPolicy({os.getuid(): principal_a()}),
+        handler=handler,
+    )
+    await srv.start()
+    try:
+        yield srv, handler, root
+    finally:
+        await handler.aclose()
+        await srv.shutdown()
+
+
+async def socket_roundtrip(socket_path: Path, frame: dict) -> dict:
+    reader, writer = await asyncio.open_unix_connection(str(socket_path))
+    try:
+        writer.write(protocol.encode_frame(frame))
+        await writer.drain()
+        line = await asyncio.wait_for(reader.readline(), 15)
+    finally:
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+    return json.loads(line.decode("utf-8"))
+
+
+@pytest.mark.parametrize(
+    "credential_refs",
+    [
+        [],                                        # missing
+        ["kimi-for-coding"],                       # wrong
+        ["codex-home-auth", "kimi-for-coding"],    # extra
+        ["codex-home-auth", "codex-home-auth"],    # duplicated
+    ],
+)
+def test_codex_credential_ref_mismatch_refused_over_socket(
+    tmp_path: Path, credential_refs
+) -> None:
+    async def scenario() -> None:
+        profile = codex_admission_profile(tmp_path)
+        async with codex_socket_daemon(tmp_path, profile) as (srv, handler, root):
+            payload = submit_payload(
+                request=codex_wire_request(credential_refs=credential_refs),
+                workspace_root=str(tmp_path),
+            )
+            reply = await socket_roundtrip(
+                srv.socket_path,
+                {
+                    "api_version": 1,
+                    "op": "submit",
+                    "request_id": "req-codex-1",
+                    "payload": payload,
+                },
+            )
+            assert reply.get("error") is None, reply
+            run_id = reply["result"]["run_id"]
+            run_dir = Path(root) / "native-runs" / run_id
+            deadline = asyncio.get_event_loop().time() + 20
+            while asyncio.get_event_loop().time() < deadline:
+                if (run_dir / "result.json").exists():
+                    break
+                await asyncio.sleep(0.05)
+            result = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+
+        assert result["status"] == "failed"
+        # Refused at admission: before workspace bind, before any
+        # credential-root access, before spawn.
+        assert result["detail_code"] == "ADMISSION"
+        assert not (run_dir / "launch.json").exists()
+        assert not (run_dir / "prompt-dispatch-started").exists()
+        assert not (run_dir / "attestation.json").exists()
+
+    run_async(scenario())
+
+
+@pytest.mark.parametrize(
+    "payload_overrides",
+    [
+        {"env": {"CODEX_CONFIG": '{"features":{"use_legacy_landlock":false}}'}},
+        {"fixed_env": [["CODEX_HOME", "/tmp/attacker-home"]]},
+        {"expected_runtime": {"node_path": "/tmp/attacker/node"}},
+        {"metadata": {"note": "injected"}},
+    ],
+)
+def test_codex_env_or_config_injection_payload_refused(payload_overrides) -> None:
+    # Op-level submit keys are closed by parse_submit.
+    payload = submit_payload(request=codex_wire_request(), **payload_overrides)
+    with pytest.raises(protocol.ProtocolError) as err:
+        protocol.parse_submit(payload)
+    assert err.value.code == protocol.INVALID_REQUEST
+
+
+@pytest.mark.parametrize(
+    "request_overrides",
+    [
+        {"fixed_env": [["CODEX_HOME", "/tmp/attacker-home"]]},
+        {"env_allowlist": ["LD_PRELOAD"]},
+        {"expected_runtime": {"cli_path": "/tmp/attacker/codex"}},
+        {"argv_template": ["/tmp/attacker/index.js"]},
+        {"executable_key": "codex-acp"},
+    ],
+)
+def test_codex_nested_request_injection_refused(request_overrides) -> None:
+    # Nested request keys are closed by _parse_request_object.
+    payload = submit_payload(request=codex_wire_request(**request_overrides))
+    with pytest.raises(protocol.ProtocolError) as err:
+        protocol.parse_submit(payload)
+    assert err.value.code == protocol.INVALID_REQUEST
+
+
+def test_profile_hash_drift_refuses_session_reuse(tmp_path: Path) -> None:
+    from agent_run_supervisor.native_acp.spec import resolve_workspace_binding
+    from agent_run_supervisor.session import SessionBindingError, validate_native_binding
+
+    profile = codex_admission_profile(tmp_path)
+    root = tmp_path / "svroot-drift"
+    session_store = storage.native_session_store(root)
+    binding = resolve_workspace_binding(root=tmp_path)
+    record = storage.create_native_session(
+        session_store,
+        session_id="sess-codex-drift",
+        profile_id=profile.profile_id,
+        profile_revision=profile.revision,
+        profile_hash=profile.profile_hash(),
+        owner="hermes",
+        namespace="hermes/doc-check",
+        workspace_hash=binding.workspace_hash,
+        effective_cwd=binding.effective_cwd,
+        matched_root=binding.canonical_root,
+    )
+    # Unchanged registration still binds.
+    validate_native_binding(
+        record,
+        profile=profile,
+        workspace_result=binding,
+        owner="hermes",
+        namespace="hermes/doc-check",
+    )
+    # CODEX_CONFIG changed without a revision bump: the profile hash drifts and
+    # reuse is refused before spawn.
+    drifted = dataclasses.replace(
+        profile,
+        fixed_env=tuple(
+            (name, '{"features":{"use_legacy_landlock":false}}'
+             if name == "CODEX_CONFIG" else value)
+            for name, value in profile.fixed_env
+        ),
+    )
+    assert drifted.profile_hash() != profile.profile_hash()
+    with pytest.raises(SessionBindingError) as err:
+        validate_native_binding(
+            record,
+            profile=drifted,
+            workspace_result=binding,
+            owner="hermes",
+            namespace="hermes/doc-check",
+        )
+    assert "profile_hash" in str(err.value)
+
+
+def test_quarantined_codex_session_reuse_refused(tmp_path: Path) -> None:
+    from agent_run_supervisor.native_acp.spec import resolve_workspace_binding
+    from agent_run_supervisor.session import (
+        SessionQuarantinedError,
+        validate_native_binding,
+    )
+
+    profile = codex_admission_profile(tmp_path)
+    root = tmp_path / "svroot-quarantine"
+    session_store = storage.native_session_store(root)
+    binding = resolve_workspace_binding(root=tmp_path)
+    storage.create_native_session(
+        session_store,
+        session_id="sess-codex-quarantined",
+        profile_id=profile.profile_id,
+        profile_revision=profile.revision,
+        profile_hash=profile.profile_hash(),
+        owner="hermes",
+        namespace="hermes/doc-check",
+        workspace_hash=binding.workspace_hash,
+        effective_cwd=binding.effective_cwd,
+        matched_root=binding.canonical_root,
+    )
+    session_store.write_quarantine_pending(
+        "sess-codex-quarantined", reason="test", run_id="run-x"
+    )
+    session_store.mark_quarantined(
+        "sess-codex-quarantined", reason="test", run_id="run-x"
+    )
+    record = session_store.open_session("sess-codex-quarantined")
+    with pytest.raises(SessionQuarantinedError):
+        validate_native_binding(
+            record,
+            profile=profile,
+            workspace_result=binding,
+            owner="hermes",
+            namespace="hermes/doc-check",
         )

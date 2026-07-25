@@ -179,17 +179,29 @@ async def spawn_managed_process(
     env: Mapping[str, str],
     limits: ManagedProcessLimits,
     on_spawn: Callable[[int], None] | None = None,
+    interpreter_fd: int | None = None,
 ) -> ManagedProcess:
     """Spawn a supervised child in its own POSIX session/process group.
 
     ``on_spawn`` failure is fail-closed: the just-spawned group is terminated
     (SIGTERM → grace → SIGKILL), reaped, and the error re-raised as
     :class:`ManagedProcessError` — an untracked child is never left running.
+
+    ``interpreter_fd`` binds the exec image to an already-attested inode: the
+    descriptor is inherited across the fork and the child execs
+    ``/proc/self/fd/N``, which resolves directly to that inode without
+    re-walking any path, while ``argv[0]`` keeps its canonical path string.
+    Callers own the descriptor's lifetime. ``None`` is the ordinary pathname
+    exec and is byte-identical to the pre-attestation behavior.
     """
     if os.name != "posix":
         raise ManagedProcessError(
             "spawn_managed_process requires POSIX: start_new_session is mandatory"
         )
+    image_kwargs: dict[str, object] = {}
+    if interpreter_fd is not None:
+        image_kwargs["executable"] = f"/proc/self/fd/{interpreter_fd}"
+        image_kwargs["pass_fds"] = (interpreter_fd,)
     try:
         process = await asyncio.create_subprocess_exec(
             *argv,
@@ -199,6 +211,7 @@ async def spawn_managed_process(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
+            **image_kwargs,
         )
     except (OSError, ValueError) as exc:
         raise ManagedProcessError(f"failed to spawn managed process: {exc}") from exc
