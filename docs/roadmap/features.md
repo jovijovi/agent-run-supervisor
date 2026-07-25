@@ -23,6 +23,7 @@ Status legend: **Done** · **Planned** · **Parked** · **Non-goal**
 | F-VNEXT-PERMISSION-001 | frozen grant, default-deny mediation, real canary | Required | Done | PRD R7; L1/L2 bridge; PR #74; A4 S2 real denied-action canary PASS (operator-held C-grade evidence) | none — production default-on is tracked by F-ARSD-001 |
 | F-VNEXT-EVIDENCE-001 | isolated Native stores and bounded runtime ledger | Required | Done | PRD R8–R9; archived plan C6–C8; poisoned-legacy isolation + bounded-writer suites | merged; in the 0.2.0 source line |
 | F-ARSD-001 | local UDS production ingress, ownership, reconciliation, cgroup containment | Required | Done | PRD R6/R10; A1–A5 closed; default-on enabled 2026-07-23 on CPython 3.12.3 (operator-held evidence) | none — operate on the CPython 3.12.3 runtime invariant; Sachima stays parked (F-SACHIMA-ARSD-001) |
+| F-NATIVE-ADAPTER-CODEX-001 | Codex official ACP adapter closed profile: frozen launch env, spawn-boundary attestation, credential-ref binding | Required | Planned | PRD R1/R3/R12; [active plan](../plans/active/2026-07-25-codex-official-adapter-admission.md) | independent review + real-credential acceptance, then publication/deployment/enablement — each separately approved |
 | F-SACHIMA-ARSD-001 | Sachima socket backend | Later integration | Parked | GOAL/PRD stage boundary | ARS production acceptance closed; integration still requires its own separate approval |
 | F-NONGOAL-001 | public/root/TCP/multi-tenant/business-orchestration surfaces | Non-goal | Non-goal | GOAL; PRD §6; non-approvals | separate product decision only |
 
@@ -33,6 +34,7 @@ Status legend: **Done** · **Planned** · **Parked** · **Non-goal**
 | Legacy compatibility baseline | 1 | 0 | 0 | 0 |
 | vNext Stage 0/1 | 7 | 0 | 0 | 0 |
 | vNext Stage 2 | 1 | 0 | 0 | 0 |
+| Registered official adapters | 0 | 1 | 0 | 0 |
 | Later integration | 0 | 0 | 1 | 0 |
 | Explicit exclusions | 0 | 0 | 0 | 1 |
 

@@ -2,11 +2,11 @@
 
 # Documentation Index
 
-Total: 64 documents tracked across 2 statuses.
+Total: 65 documents tracked across 2 statuses.
 
 ## Active (16)
 
-- [Official-adapter shared blocker repair — B1/B2 run boundaries](plans/active/2026-07-24-official-adapter-run-boundaries.md) — created 2026-07-24
+- [Codex official ACP adapter — closed-profile admission](plans/active/2026-07-25-codex-official-adapter-admission.md) — created 2026-07-25
 - [agent-run-supervisor vNext System Architecture](design/architecture.md) — created 2026-07-21
 - [agent-run-supervisor vNext Technical Solution](design/technical-solution.md) — created 2026-07-21
 - [agent-run-supervisor vNext PRD](product/prd.md) — created 2026-07-21
@@ -23,8 +23,9 @@ Total: 64 documents tracked across 2 statuses.
 - [Engineering practices](practices/README.md) — created 2026-05-28
 - [Verification gates for implementation PRs](roadmap/verification.md) — created 2026-05-28
 
-## Archived (48)
+## Archived (49)
 
+- [Official-adapter shared blocker repair — B1/B2 run boundaries](plans/archive/2026-07-24-official-adapter-run-boundaries.md) — created 2026-07-24
 - [vNext Stage 2 — arsd production ingress](roadmap/archive/phases/vnext-stage2-arsd-production-ingress.md) — created 2026-07-23
 - [vNext Stage 2 — arsd production ingress implementation plan](plans/archive/2026-07-22-vnext-stage2-arsd-production-ingress.md) — created 2026-07-22
 - [vNext Stage 0/1 — Native ACP core through ars-core](roadmap/archive/phases/vnext-stage01-native-acp.md) — created 2026-07-22

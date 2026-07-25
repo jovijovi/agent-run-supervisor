@@ -18,6 +18,7 @@ from typing import Any, Mapping
 from agent_run_supervisor.process_liveness import ProcessIdentity
 from agent_run_supervisor.role import PERMISSION_KINDS
 
+from .attestation import ExpectedRuntimeIdentity
 from .profile import (
     AgentProfile,
     ProfileRegistry,
@@ -264,6 +265,11 @@ class ResolvedLaunchSpec:
     binding (name/value pairs injected at spawn): supervisor policy resolved
     from the closed profile registry, never caller input and never a
     credential value — serialized here as durable launch evidence.
+
+    ``fixed_env`` and ``expected_runtime`` mirror the profile's frozen launch
+    environment and runtime identity, so the *expected* identity is durable in
+    ``launch.json`` before the spawn-boundary attestation can fail. Nothing is
+    hashed here: resolution never opens an attested artifact.
     """
 
     executable: str
@@ -276,9 +282,11 @@ class ResolvedLaunchSpec:
     config_schema_hash: str
     permission_env: tuple[tuple[str, str], ...] = ()
     transport: str = "stdio"
+    fixed_env: tuple[tuple[str, str], ...] = ()
+    expected_runtime: ExpectedRuntimeIdentity | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "executable": self.executable,
             "argv": list(self.argv),
             "env_allowlist": list(self.env_allowlist),
@@ -290,6 +298,12 @@ class ResolvedLaunchSpec:
             "permission_env": [list(pair) for pair in self.permission_env],
             "transport": self.transport,
         }
+        # Omit-when-empty/None keeps legacy launch hashes byte-identical.
+        if self.fixed_env:
+            payload["fixed_env"] = [list(pair) for pair in self.fixed_env]
+        if self.expected_runtime is not None:
+            payload["expected_runtime"] = self.expected_runtime.to_dict()
+        return payload
 
     def launch_hash(self) -> str:
         return _sha256_hex(_canonical_json(self.to_dict()))
@@ -477,6 +491,17 @@ class RunSpecAssembler:
             f"effort {self._request.requested_effort!r} is outside the registered "
             f"domain {profile.allowed_efforts} for {profile.profile_id}",
         )
+        required_refs = profile.required_credential_refs
+        if required_refs is not None:
+            # Exact match: missing, wrong, extra, or duplicated references are
+            # refused here — before workspace bind, before any credential-root
+            # access, and before spawn.
+            _require(
+                tuple(self._request.credential_refs) == tuple(required_refs),
+                f"credential_refs {tuple(self._request.credential_refs)!r} do not "
+                f"exactly match the required credential_refs "
+                f"{tuple(required_refs)!r} for {profile.profile_id}",
+            )
         self._profile = profile
         return profile
 
@@ -512,6 +537,8 @@ class RunSpecAssembler:
             permission_env=resolve_registered_permission_env(
                 self._profile.executable_key
             ),
+            fixed_env=self._profile.fixed_env,
+            expected_runtime=self._profile.expected_runtime,
         )
         return self._launch
 

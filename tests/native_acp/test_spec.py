@@ -472,3 +472,198 @@ def test_r6_b5_run_limits_huge_int_no_overflow(field: str) -> None:
 def test_r6_b5_run_limits_nan_inf_refused(field: str, bad: float) -> None:
     with pytest.raises(SpecValidationError):
         RunLimits(**{field: bad})
+
+
+# -- Codex closed-profile admission (D3/D11) ---------------------------------
+
+FROZEN_NODE_PATH = (
+    "/home/ecs-user/.local/share/agent-run-supervisor/adapters/node/v24.14.0/bin/node"
+)
+FROZEN_ADAPTER_ENTRY = (
+    "/home/ecs-user/.local/share/agent-run-supervisor/adapters/codex-acp/1.1.7"
+    "/node_modules/@agentclientprotocol/codex-acp/dist/index.js"
+)
+FROZEN_CLI_PATH = "/home/ecs-user/.local/bin/codex"
+FROZEN_CODEX_HOME = "/home/ecs-user/.config/agent-run-supervisor/codex-acp-1.1.7"
+FROZEN_CODEX_CONFIG = '{"features":{"use_legacy_landlock":true}}'
+
+# Captured at HEAD 773200b6 before the additive launch fields existed.
+OPENCODE_LAUNCH_HASH_GOLDEN = (
+    "d15e8baae17b841ff569aa1710bf6dca680084c06e1bdc904c08f388428e2bcf"
+)
+
+
+def _codex_request(**overrides) -> AgentRunRequest:
+    kwargs = dict(
+        profile_id="codex-acp-1.1.7",
+        requested_model="gpt-5.6-sol",
+        requested_effort="max",
+        credential_refs=("codex-home-auth",),
+    )
+    kwargs.update(overrides)
+    return _request(**kwargs)
+
+
+def _codex_launch(tmp_path: Path, request: AgentRunRequest | None = None):
+    assembler = RunSpecAssembler(request or _codex_request())
+    assembler.resolve_profile(DEFAULT_REGISTRY)
+    assembler.bind_workspace(root=tmp_path)
+    return assembler.resolve_launch()
+
+
+def test_codex_launch_argv_frozen_node_plus_entry_golden(tmp_path: Path) -> None:
+    launch = _codex_launch(tmp_path)
+    # argv is exactly (frozen node, adapter entry js) — D9: the process image
+    # is Node and resolution never consults PATH.
+    assert launch.executable == FROZEN_NODE_PATH
+    assert launch.argv == (FROZEN_NODE_PATH, FROZEN_ADAPTER_ENTRY)
+    assert launch.credential_refs == ("codex-home-auth",)
+    assert launch.permission_env == ()
+
+    payload = launch.to_dict()
+    assert payload["argv"] == [FROZEN_NODE_PATH, FROZEN_ADAPTER_ENTRY]
+    assert payload["fixed_env"] == [
+        ["CODEX_HOME", FROZEN_CODEX_HOME],
+        ["CODEX_PATH", FROZEN_CLI_PATH],
+        ["CODEX_CONFIG", FROZEN_CODEX_CONFIG],
+        ["INITIAL_AGENT_MODE", "read-only"],
+        ["NO_BROWSER", "1"],
+    ]
+    # Expected identity persists in launch.json before any check can fail.
+    assert payload["expected_runtime"]["node_path"] == FROZEN_NODE_PATH
+    assert payload["expected_runtime"]["adapter_entry_path"] == FROZEN_ADAPTER_ENTRY
+    assert payload["expected_runtime"]["cli_path"] == FROZEN_CLI_PATH
+    assert payload["expected_runtime"]["protocol_version"] == "1"
+    assert len(launch.launch_hash()) == 64
+
+    # The legacy OpenCode launch hash is byte-stable across the additive fields.
+    opencode = RunSpecAssembler(_request())
+    opencode.resolve_profile(DEFAULT_REGISTRY)
+    opencode.bind_workspace(root=tmp_path)
+    assert opencode.resolve_launch().launch_hash() == OPENCODE_LAUNCH_HASH_GOLDEN
+
+
+def test_resolve_launch_performs_no_artifact_hashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # D3: resolve_launch only mirrors the frozen expectation into the launch
+    # spec — it opens no attested artifact. Artifact hashing belongs to the
+    # spawn-boundary attestation, so expected identity persists in launch.json
+    # before any check can fail.
+    import builtins
+    import os as os_module
+
+    opened: list[str] = []
+    real_open = builtins.open
+    real_os_open = os_module.open
+
+    def spy_open(file, *args, **kwargs):
+        opened.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    def spy_os_open(path, *args, **kwargs):
+        opened.append(str(path))
+        return real_os_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", spy_open)
+    monkeypatch.setattr(os_module, "open", spy_os_open)
+    launch = _codex_launch(tmp_path)
+    monkeypatch.undo()
+
+    assert launch.expected_runtime is not None
+    for artifact in (FROZEN_NODE_PATH, FROZEN_ADAPTER_ENTRY, FROZEN_CLI_PATH):
+        assert artifact not in opened
+
+
+def test_launch_serialization_omits_empty_new_fields(tmp_path: Path) -> None:
+    assembler = RunSpecAssembler(_request())
+    assembler.resolve_profile(DEFAULT_REGISTRY)
+    assembler.bind_workspace(root=tmp_path)
+    launch = assembler.resolve_launch()
+    payload = launch.to_dict()
+    assert "fixed_env" not in payload
+    assert "expected_runtime" not in payload
+    assert launch.fixed_env == ()
+    assert launch.expected_runtime is None
+    assert sorted(payload) == [
+        "argv",
+        "config_schema_hash",
+        "credential_refs",
+        "env_allowlist",
+        "executable",
+        "permission_env",
+        "profile_hash",
+        "profile_id",
+        "profile_revision",
+        "transport",
+    ]
+
+
+def test_launch_hash_binds_fixed_env_and_expected_runtime(tmp_path: Path) -> None:
+    import dataclasses
+
+    from agent_run_supervisor.native_acp.profile import CODEX_ACP_1_1_7
+
+    baseline = _codex_launch(tmp_path)
+    moved_home = tuple(
+        (name, str(tmp_path / "other-home") if name == "CODEX_HOME" else value)
+        for name, value in CODEX_ACP_1_1_7.fixed_env
+    )
+    derived = dataclasses.replace(
+        CODEX_ACP_1_1_7, profile_id="codex-acp-1.1.7-derived", fixed_env=moved_home
+    )
+    assembler = RunSpecAssembler(
+        _codex_request(profile_id="codex-acp-1.1.7-derived")
+    )
+    assembler.resolve_profile(ProfileRegistry((derived,)))
+    assembler.bind_workspace(root=tmp_path)
+    assert assembler.resolve_launch().launch_hash() != baseline.launch_hash()
+
+
+@pytest.mark.parametrize(
+    "credential_refs",
+    [
+        (),                                            # missing
+        ("kimi-for-coding",),                          # wrong
+        ("codex-home-auth", "kimi-for-coding"),        # extra
+        ("codex-home-auth", "codex-home-auth"),        # duplicated
+    ],
+)
+def test_codex_credential_refs_exact_match_required(
+    tmp_path: Path, credential_refs
+) -> None:
+    assembler = RunSpecAssembler(_codex_request(credential_refs=credential_refs))
+    # Refused at admission — before workspace bind, before any credential-root
+    # access, before spawn.
+    with pytest.raises(SpecValidationError) as err:
+        assembler.resolve_profile(DEFAULT_REGISTRY)
+    assert "credential_refs" in str(err.value)
+
+
+def test_codex_credential_refs_exact_match_accepted(tmp_path: Path) -> None:
+    assembler = RunSpecAssembler(_codex_request())
+    profile = assembler.resolve_profile(DEFAULT_REGISTRY)
+    assert profile.required_credential_refs == ("codex-home-auth",)
+
+
+def test_opencode_credential_refs_unconstrained_unchanged(tmp_path: Path) -> None:
+    # required_credential_refs is None for the legacy row: no constraint.
+    for refs in ((), ("kimi-for-coding",), ("kimi-for-coding", "deepseek")):
+        assembler = RunSpecAssembler(_request(credential_refs=refs))
+        profile = assembler.resolve_profile(DEFAULT_REGISTRY)
+        assert profile.required_credential_refs is None
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"requested_model": "gpt-5.6-terra"},
+        {"requested_model": "kimi-for-coding/k3"},
+        {"requested_effort": "high"},
+        {"requested_effort": "xhigh"},
+    ],
+)
+def test_codex_out_of_domain_model_or_effort_refused(overrides) -> None:
+    assembler = RunSpecAssembler(_codex_request(**overrides))
+    with pytest.raises(SpecValidationError):
+        assembler.resolve_profile(DEFAULT_REGISTRY)
