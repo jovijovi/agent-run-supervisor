@@ -64,8 +64,10 @@ and result verification.
    writes, imports, mirrors, or migrates acpx/legacy session storage.
 8. Production crash containment uses a user-level service manager/cgroup: an `arsd` crash terminates
    all AGENT descendants; restart performs reconciliation only and never resends a prompt.
-9. The first closed profile is OpenCode 1.18.4 with literal `kimi-for-coding/k3` and literal `max`;
-   selectors are typed and registered, with no arbitrary command/argv/env/JSON passthrough.
+9. Every AGENT is reached through a typed, versioned, code-registered closed profile with registered
+   selectors and no arbitrary command/argv/env/JSON passthrough. The first closed profile is OpenCode
+   1.18.4 with literal `kimi-for-coding/k3` and literal `max`; the registry on `main` also holds the
+   official Codex ACP 1.1.7 and Claude Agent ACP 0.61.0 profiles.
 
 ## Released legacy line
 
@@ -78,13 +80,15 @@ their archive directories. Git history remains the implementation audit trail.
 
 ## Current status and authorization
 
-The vNext goal, PRD, architecture, technical solution, roadmap, and Stage 0/1 plan are documentation
-authority. They do not claim the target is implemented and do not authorize implementation by their
-existence.
+This goal, the PRD, architecture, and technical solution are documentation authority. They describe the
+target and do not authorize work by their existence; volatile implementation status lives in
+`docs/roadmap/current-status.md`.
 
-Stage 0/1 source/dependency work, Stage 2 `arsd`, caller UID policy, service/cgroup enablement,
-release/publication, Sachima integration, and any Gateway/IM/live behavior each require separate,
-explicit authorization.
+As of that board, Stage 0/1 Native ACP and Stage 2 `arsd` (A1–A5, including the caller-UID policy and
+user-service/cgroup enablement) are implemented on `main`, and the closed registry holds three profiles
+with operator-held local acceptance. Release/publication, Sachima integration, public ingress, and any
+Gateway/IM/live behavior each still require separate, explicit authorization — and registration plus
+local acceptance never transfers approval to the next change.
 
 ## Non-goals
 

@@ -9,11 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Stage 2 `arsd` — the local, unprivileged Unix-domain-socket ingress that is the
+  sole vNext production path (`agent_run_supervisor.arsd`), present in the source
+  line only:
+  - Daemon module entry point `python -m agent_run_supervisor.arsd` (no console
+    script; `agent-run-supervisor` stays the acpx compatibility CLI), with a
+    side-effect-free `--print-service-unit` renderer for a systemd `--user` unit
+    that installs, enables, and starts nothing.
+  - `SO_PEERCRED` caller authentication against an explicit
+    `--caller-mapping UID:principal_id:owner:namespace` policy — zero mappings
+    refuse to listen — plus owner-scoped Run/Session access, a `0700` socket
+    directory with a `0600` socket, and no TCP or root mode.
+  - Versioned bounded JSON framing (`api_version`, unknown versions rejected),
+    submit/status/events/cancel and Session status/list/close operations,
+    idempotent admission keyed by caller `request_id`, bounded concurrency and
+    connection backlog, graceful shutdown, and startup-only reconciliation that
+    never replays or resumes a prompt.
+  - Typed local client `arsd.client.ArsdClient` with explicit connect/close,
+    seq-cursor event pages, an optional follow subscription, and no silent
+    reconnect or replay.
+- Official closed-profile registrations alongside OpenCode 1.18.4: Codex ACP
+  1.1.7 (`codex-acp-1.1.7`) and Claude Agent ACP 0.61.0
+  (`claude-agent-acp-0.61.0`). Each freezes its launch environment and the
+  runtime identity it launches (interpreter, adapter entrypoint, downstream CLI
+  by path and hash), proves that identity at the spawn boundary, binds
+  credentials by reference only, and closes its model/effort domains. The Claude
+  profile additionally freezes permission mode `default` and the ACP session
+  metadata sent on both `session/new` and `session/load`, so ambient settings
+  cannot define the permission rules or tool surface; its ACP model readback
+  literal is `opus[1m]` and the direct Claude Code author selector
+  `claude-opus-5[1m]` is deliberately not registered.
+
 ### Changed
+
+- README / README.zh-CN and the current authority, design, and roadmap documents
+  now describe `arsd` and the three registered profiles as implemented on `main`,
+  label the acpx CLI/library as a compatibility surface rather than the vNext
+  production ingress, and separate released PyPI 0.2.0 from the current source
+  line.
 
 ### Fixed
 
 ### Notes
+
+- Source-line only. The published PyPI wheel is 0.2.0 and predates `arsd` and the
+  official Codex/Claude registrations; package metadata is still `0.2.0` and no
+  tag, GitHub Release, or PyPI upload covers this work.
+- Registration plus operator-held local socket-path acceptance is not
+  publication, not a deployment/enablement approval, and not transferable to the
+  next change. Sachima `ArsdBackend`/UDS integration remains separate and
+  unimplemented.
+- Permission mediation is cooperative-agent policy enforcement against a
+  caller-frozen grant — not an OS sandbox, hostile-process isolation, or
+  multi-tenancy. ARS never emits a business verdict.
 
 ## [0.2.0] - 2026-07-22
 

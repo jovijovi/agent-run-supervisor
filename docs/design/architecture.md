@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext System Architecture"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-21
+last_validated_at: 2026-07-25
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/architecture.md"
 ---
 # agent-run-supervisor vNext System Architecture
@@ -10,14 +10,17 @@ supersedes: "docs/archive/pre-vnext-reset-2026-07-21/architecture.md"
 ## 0. Scope and status
 
 This is the system architecture authority for **new ARS development**. It describes the settled vNext
-target, not the released v0.1.7 topology and not an implementation claim. The previous mixed document is
-preserved at `docs/archive/pre-vnext-reset-2026-07-21/architecture.md` for history only.
+target, not the released v0.1.7 topology. The previous mixed document is preserved at
+`docs/archive/pre-vnext-reset-2026-07-21/architecture.md` for history only.
 
 Status markers:
 
 - ✅ released compatibility baseline reused unchanged;
-- 🟦 required vNext target, not implemented until its separately approved stage lands;
+- 🟦 vNext supervision plane, implemented on `main` (Stage 0/1 and Stage 2 closed);
 - ⏸ separately approved later integration.
+
+Marker 🟦 records the settled design, not an approval: per-stage implementation status, gates, and
+enablement decisions live in [`docs/roadmap/current-status.md`](../roadmap/current-status.md).
 
 ## 1. System context
 
@@ -183,7 +186,8 @@ enforces `execution_grant` default-deny without widening or live-policy refresh.
 - A real denied-action canary is mandatory; zero mediation events prove nothing.
 - `allowed_roots`, UDS auth, and ACP mediation are not OS sandboxing or hostile-process containment.
 
-Exact caller UID values and policy ownership remain Stage 2 gate G12.
+Exact caller UID values and policy ownership are gate G12, closed as a recorded operator decision; the
+repository stores no production mapping value.
 
 ## 8. Storage and evidence
 
@@ -228,7 +232,8 @@ No lower grade can claim a higher one.
 | later | Sachima `ArsdBackend` | separate integration evidence | separately approved |
 
 Stage 1 is intentionally an intermediate implementation boundary, not a downgrade of the production
-target. Production is achieved only after Stage 2 acceptance.
+target. Production is achieved only after Stage 2 acceptance — which is closed on `main`; the board
+carries the closure and enablement facts. Publication and later integration are not implied by it.
 
 ## 10. Legacy coexistence and rollback
 

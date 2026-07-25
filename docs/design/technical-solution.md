@@ -2,15 +2,17 @@
 title: "agent-run-supervisor vNext Technical Solution"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-21
+last_validated_at: 2026-07-25
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/technical-solution.md"
 ---
 # agent-run-supervisor vNext Technical Solution
 
 ## 0. Scope and implementation status
 
-This is the module-level design authority for new ARS work. All described vNext modules are planned until
-the roadmap records verified implementation. The previous mixed v0.1.7/vNext solution is preserved at
+This is the module-level design authority for new ARS work. The Stage 1 `native_acp/` and Stage 2
+`arsd/` packages described below exist on `main`; the roadmap board remains the status authority for
+what is closed, enabled, or still gated, and this document never grants approval. The previous mixed
+v0.1.7/vNext solution is preserved at
 `docs/archive/pre-vnext-reset-2026-07-21/technical-solution.md` and must not direct new development.
 
 ARS stays Python. vNext extends the existing package additively, preserves the released acpx path as a
@@ -36,7 +38,8 @@ share their stdout consumer or wait-before-return contract.
 | Module | Responsibility |
 |---|---|
 | `spec.py` | versioned `AgentRunRequest`; immutable `AgentRunSpec/spec_hash`; controlled `ResolvedLaunchSpec`; observation-only `EffectiveRunState` |
-| `profile.py` | typed, versioned, closed `AgentProfile` registry; first `OPENCODE_1_18_4` profile |
+| `profile.py` | typed, versioned, closed `AgentProfile` registry; `OPENCODE_1_18_4` plus the official `CODEX_ACP_1_1_7` and `CLAUDE_AGENT_ACP_0_61_0` profiles with frozen expected runtime identity |
+| `attestation.py` | spawn-boundary proof that the frozen interpreter/adapter/CLI identity and launch env are what the profile registered |
 | `storage.py` | only Native root-binding constructors for `native-runs/` and `native-sessions/`; structural guard against direct legacy store construction |
 | `driver.py` | ACP wire/state machine over a supplied `ManagedProcess`; never spawns or selects policy/profile |
 | `config_fidelity.py` | exact-or-zero configuration and between-Run switch/rollback state machine |
@@ -52,10 +55,12 @@ share their stdout consumer or wait-before-return contract.
 |---|---|
 | `server.py` | asyncio UDS accept loop, `SO_PEERCRED`, finite backlog, per-connection isolation |
 | `protocol.py` | bounded JSON frames, mandatory `api_version`, unknown-version rejection |
-| `handlers.py` | submit/status/events/cancel and Session create/status/close/list with owner checks |
+| `handlers.py` | submit/status/events/cancel and Session status/list/close with owner checks; Session creation is part of `submit` |
+| `admission.py` | durable submission/idempotency records, keyed admission locks, typed terminal-result inspection |
 | `reconcile.py` | startup-only reconciliation; no prompt replay/resume |
-| `client.py` | typed local caller for Hermes/CLI |
-| `__main__.py` | unprivileged daemon entrypoint; no state authority beyond `arsd` core |
+| `client.py` | typed local caller for Hermes/CLI; explicit connect/close, no silent reconnect or replay |
+| `service_unit.py` | pure data→text renderer for the user-scope service unit; never installs, enables, or starts anything |
+| `__main__.py` | unprivileged daemon entrypoint (`python -m agent_run_supervisor.arsd`) and the side-effect-free `--print-service-unit` mode; no state authority beyond `arsd` core |
 
 No TCP, root mode, runtime plugin loader, arbitrary command adapter, or per-Run Worker is introduced.
 
@@ -213,7 +218,9 @@ Production packaging must demonstrate user-level service semantics equivalent to
 AGENT descendant dies, restarts, verifies `unknown/quarantined/retryable=false` with no second dispatch,
 and then proves a new Session/Run succeeds.
 
-G12 requires explicit approval of caller UID policy and values before production enablement.
+G12 required explicit approval of caller UID policy and values before production enablement; it is
+closed as a recorded operator decision. The values stay controller-only and reach the daemon solely as
+`--caller-mapping` arguments in a mode-`0600` user unit — zero mappings refuse to listen.
 
 ## 10. Tests and evidence
 
@@ -221,17 +228,21 @@ G12 requires explicit approval of caller UID policy and values before production
   Session binding/switch rollback, mediation mapping, event bounds, UDS frame/ownership helpers.
 - **L2 hermetic ACP child:** real stdio JSON-RPC framing for malformed/inexact/timeout/cancel/load/switch/
   rollback/event-flood/reconciliation faults. Fake is never product runtime or production evidence.
-- **L3 real:** OpenCode 1.18.4 profile, K3/max exact readback, same-Session historical token continuity,
-  denied-action canary, and cgroup crash containment.
+- **L3 real:** registered closed profiles (OpenCode 1.18.4, Codex ACP 1.1.7, Claude Agent ACP 0.61.0)
+  with exact model/effort readback, same-Session historical token continuity, denied-action canary, and
+  cgroup crash containment. Real-runtime suites are opt-in, skip-by-default, and never run in CI;
+  sanitized evidence stays operator-held.
 
 Stage 1 direct-drive real evidence is B-grade only. Stage 2 socket-path S1–S5 is the only C-grade
 production acceptance.
 
 ## 11. Implementation and rollback boundaries
 
-- Stage 0/1 may modify dependencies/lock, shared additive seams, `native_acp/`, and tests only after
-  explicit implementation approval. It does not add `arsd`, deploy, release, or change Sachima.
-- Stage 2 adds `arsd` and production acceptance only after separate approval and G12 resolution.
+- Stage 0/1 (`native_acp/` plus the shared additive seams) and Stage 2 (`arsd/`, production acceptance,
+  G12) have landed under their own approvals. Landing them authorized nothing further: dependency/lock,
+  `pyproject.toml`, CI, profile-registry, and unit/caller-policy changes each need their own approval.
+- Publication (version bump, tag, GitHub Release, PyPI) is separate from implementation; the published
+  wheel carries the Stage 0/1 core only.
 - Sachima `ArsdBackend` and pin changes are later work.
 - Rollback disables Native ingress; no auto-fallback to acpx and no terminal fact rewrite.
 
