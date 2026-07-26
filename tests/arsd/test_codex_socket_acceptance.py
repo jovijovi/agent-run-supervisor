@@ -61,6 +61,12 @@ from pathlib import Path
 import pytest
 
 _GATE = "ARS_CODEX_SOCKET_ACCEPTANCE"
+# The Binding inputs are *required*, not optional: after the R13 split the
+# downstream CLI path/version/digest and the credential-root value are operator
+# deployment facts, so a positive leg cannot be assembled from source constants
+# at all. An operator who has not prepared an immutable, non-service-writable
+# artifact root and authored a generation for it cannot opt in — which is the
+# intended fail-closed consequence, not a harness limitation to work around.
 _REQUIRED_ENV = (
     "ARS_CODEX_ACCEPTANCE_SOCKET_DIR",
     "ARS_CODEX_ACCEPTANCE_SUPERVISOR_ROOT",
@@ -69,6 +75,9 @@ _REQUIRED_ENV = (
     "ARS_CODEX_ACCEPTANCE_NAMESPACE",
     "ARS_CODEX_ACCEPTANCE_CALLER_MAPPING",
     "ARS_CODEX_ACCEPTANCE_COMMIT_SHA",
+    "ARS_CODEX_ACCEPTANCE_BINDING_ROOT",
+    "ARS_CODEX_ACCEPTANCE_TRUSTED_UID",
+    "ARS_CODEX_ACCEPTANCE_REAL_CREDENTIAL_ROOT",
 )
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -94,14 +103,22 @@ from agent_run_supervisor.arsd import client as arsd_client  # noqa: E402
 from agent_run_supervisor.arsd import handlers, server  # noqa: E402
 from agent_run_supervisor.native_acp import storage  # noqa: E402
 from agent_run_supervisor.native_acp import profile as profile_module  # noqa: E402
+from agent_run_supervisor.native_acp import runtime_binding as rb  # noqa: E402
 from agent_run_supervisor.native_acp.attestation import (  # noqa: E402
-    ExpectedRuntimeIdentity,
+    ArtifactClosure,
+    SealedRuntimeIdentity,
 )
 from agent_run_supervisor.native_acp.profile import (  # noqa: E402
     CODEX_ACP_1_1_7,
     DEFAULT_REGISTRY,
+    SLOT_KIND_CONFIG_ROOT,
+    SLOT_KIND_PACKAGE_TREE,
+    AdapterContract,
     AgentProfile,
+    BindingSlot,
     ProfileRegistry,
+    VersionProbeRule,
+    WrappedRuntimeArtifacts,
 )
 from agent_run_supervisor.native_acp.run_task import (  # noqa: E402
     DISPATCH_STARTED_MARKER,
@@ -117,7 +134,9 @@ from agent_run_supervisor.native_acp.spec import (  # noqa: E402
 
 REQUIRED_MODEL = "gpt-5.6-sol"
 REQUIRED_EFFORT = "max"
-POSITIVE_PROFILE_ID = "codex-acp-1.1.7-e2e-pos"
+# The acceptance run uses the registered profile unchanged: re-pointing the
+# credential root is now a Binding generation, not a derived source row.
+POSITIVE_PROFILE_ID = CODEX_ACP_1_1_7_PROFILE_ID = "codex-acp-1.1.7"
 NEGATIVE_PROFILE_ID = "codex-acp-e2e-neg"
 NEGATIVE_EXECUTABLE_KEY = "codex-acp-e2e"
 RUN_TIMEOUT_SECONDS = 900
@@ -198,12 +217,15 @@ NEGATIVE_CASES: tuple[NegativeCase, ...] = (
         "node_sha256",
         "attestation",
     ),
+    # The downstream CLI is a Binding artifact now, so a retarget is caught at
+    # the single per-Run Binding read — strictly earlier than the attestation
+    # row it used to fail, and before any Run artifact beyond the terminal.
     NegativeCase(
         "n3_retargeted_cli_symlink",
         "n3",
-        "RUNTIME_IDENTITY_MISMATCH",
-        "cli_sha256",
-        "attestation",
+        "REGISTRATION_FAILED",
+        None,
+        "binding",
     ),
     NegativeCase(
         "n4_auth_json_symlink",
@@ -233,12 +255,14 @@ NEGATIVE_CASES: tuple[NegativeCase, ...] = (
         "credential_root_structure",
         "attestation",
     ),
+    # A symlinked config root fails the Binding read's own directory shape
+    # check before the credential-root structure row is reached.
     NegativeCase(
         "n5_credential_root_symlink",
         "n5",
-        "CREDENTIAL_ROOT_VIOLATION",
-        "credential_root_structure",
-        "attestation",
+        "REGISTRATION_FAILED",
+        None,
+        "binding",
     ),
     NegativeCase(
         "n6_credential_root_config_toml",
@@ -613,19 +637,53 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+# The negative legs' private artifacts are owned by the run's own UID, so the
+# declared service UID must be one that owns nothing at all.
+_FAKE_SERVICE_UID = 4_000_000_001
+
+
+def _write_canonical(path: Path, payload: dict) -> Path:
+    path.write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    os.chmod(path, 0o644)
+    return path
+
+
 # --- profiles ----------------------------------------------------------------
 
 
-def _positive_profile(home: Path) -> AgentProfile:
-    """Derived row: identical except ``profile_id`` and the CODEX_HOME value."""
-    return dataclasses.replace(
-        CODEX_ACP_1_1_7,
-        profile_id=POSITIVE_PROFILE_ID,
-        fixed_env=tuple(
-            (name, str(home) if name == "CODEX_HOME" else value)
-            for name, value in CODEX_ACP_1_1_7.fixed_env
-        ),
+def _acceptance_ownership() -> rb.TrustedOwnership:
+    """The operator's declared artifact-trust policy for this acceptance run."""
+    return rb.TrustedOwnership(
+        trusted_uids=frozenset({int(_env("ARS_CODEX_ACCEPTANCE_TRUSTED_UID"))}),
+        service_uid=os.geteuid(),
     )
+
+
+def _positive_binding() -> rb.AdmittedRuntimeBinding:
+    """The operator-prepared generation the positive legs run against.
+
+    The credential isolation that used to come from a derived profile with an
+    ephemeral ``CODEX_HOME`` now comes from the Binding itself: the operator
+    promotes an acceptance generation whose ``codex_home`` slot is *not* the
+    production credential root, and the harness proves that before it runs.
+    The registered profile is used unchanged — re-pointing a deployment fact no
+    longer needs a source change, which is the whole point of R13.
+    """
+    ownership = _acceptance_ownership()
+    reader = rb.BindingReader(
+        Path(_env("ARS_CODEX_ACCEPTANCE_BINDING_ROOT")), ownership=ownership
+    )
+    resolved = reader.resolve_active(CODEX_ACP_1_1_7)
+    staged_home = Path(resolved.slot("codex_home").descriptor["path"]).resolve()
+    real_root = Path(_env("ARS_CODEX_ACCEPTANCE_REAL_CREDENTIAL_ROOT")).resolve()
+    if staged_home == real_root:
+        raise CredentialIsolationError(
+            "the acceptance generation must not bind the production credential root"
+        )
+    return rb.AdmittedRuntimeBinding(resolved=resolved, ownership=ownership)
 
 
 CODEX_FAKE_AGENT_MJS = """\
@@ -753,17 +811,28 @@ class PrivateNegativeFixtures:
         self.base = base
         stage = base / "stage"
         stage.mkdir(parents=True)
-        real_node = Path(DEFAULT_REGISTRY.get("codex-acp-1.1.7").expected_runtime.node_path)
+        real_node = Path(
+            DEFAULT_REGISTRY.get(
+                "codex-acp-1.1.7"
+            ).contract.wrapped_runtime.interpreter_path
+        )
         self.node = stage / "node"
         shutil.copy2(real_node, self.node)
         os.chmod(self.node, 0o555)
         self.entry = stage / "codex-fake-agent.mjs"
         self.entry.write_text(CODEX_FAKE_AGENT_MJS, encoding="utf-8")
-        self.cli_target = stage / "codex-placeholder"
-        self.cli_target.write_bytes(b"#!/bin/false\n# private placeholder cli\n")
-        os.chmod(self.cli_target, 0o555)
-        self.cli = stage / "codex"
-        self.cli.symlink_to(self.cli_target)
+        # The downstream CLI is a package closure, and a Binding names an
+        # immutable regular file: no symlink stands in for the launcher.
+        self.package_root = stage / "codex-pkg"
+        (self.package_root / "lib").mkdir(parents=True)
+        (self.package_root / "lib" / "sibling.js").write_bytes(b"// private sibling\n")
+        self.cli = self.package_root / "codex"
+        self.cli.write_bytes(b"#!/bin/false\n# private placeholder cli\n")
+        os.chmod(self.cli, 0o555)
+        self.cli_target = self.cli
+        self.cli_interpreter = stage / "cli-node"
+        self.cli_interpreter.write_bytes(b"#!/bin/false\n# private cli interpreter\n")
+        os.chmod(self.cli_interpreter, 0o555)
         self.cred_root = base / "synthetic-codex-home"
         self.cred_root.mkdir(mode=0o700)
         os.chmod(self.cred_root, 0o700)
@@ -778,20 +847,130 @@ class PrivateNegativeFixtures:
         self.nested_cwd = self.workspace / "nested"
         self.nested_cwd.mkdir()
 
-    def expected(self) -> ExpectedRuntimeIdentity:
-        return ExpectedRuntimeIdentity(
+    def closure(self) -> ArtifactClosure:
+        return ArtifactClosure(
+            kind="package_tree",
+            path=str(self.cli),
+            sha256=_sha256_file(self.cli),
+            version="0.0.0-private",
+            package_root=str(self.package_root),
+            tree_sha256=rb.package_tree_digest(self.package_root),
+            interpreter_path=str(self.cli_interpreter),
+            interpreter_sha256=_sha256_file(self.cli_interpreter),
+        )
+
+    def expected(self) -> SealedRuntimeIdentity:
+        return SealedRuntimeIdentity(
+            launch_kind="wrapped_acp",
+            agent_info_name="@example/codex-e2e-fake",
+            agent_info_version="1.1.7",
+            protocol_version="1",
+            cli=self.closure(),
+            cli_path_env="CODEX_PATH",
             node_path=str(self.node),
             node_sha256=_sha256_file(self.node),
             adapter_entry_path=str(self.entry),
             adapter_entry_sha256=_sha256_file(self.entry),
-            cli_path=str(self.cli),
-            cli_sha256=_sha256_file(self.cli_target),
-            agent_info_name="@example/codex-e2e-fake",
-            agent_info_version="1.1.7",
-            protocol_version="1",
+            credential_root_env="CODEX_HOME",
+            credential_root_path=str(self.cred_root),
+            project_config_relpath=".codex/config.toml",
+        )
+
+    def contract(self, **overrides) -> AdapterContract:
+        kwargs = dict(
+            launch_kind="wrapped_acp",
+            acp_agent_name="@example/codex-e2e-fake",
+            acp_protocol_version="1",
+            acp_agent_version="1.1.7",
+            version_probe=VersionProbeRule(argv_suffix=("--version",)),
+            binding_slots=(
+                BindingSlot(
+                    name="downstream_cli",
+                    kind=SLOT_KIND_PACKAGE_TREE,
+                    env_key="CODEX_PATH",
+                ),
+                BindingSlot(
+                    name="codex_home",
+                    kind=SLOT_KIND_CONFIG_ROOT,
+                    env_key="CODEX_HOME",
+                ),
+            ),
+            wrapped_runtime=WrappedRuntimeArtifacts(
+                interpreter_path=str(self.node),
+                interpreter_sha256=_sha256_file(self.node),
+                adapter_entry_path=str(self.entry),
+                adapter_entry_sha256=_sha256_file(self.entry),
+            ),
+            cli_slot="downstream_cli",
+            credential_root_slot="codex_home",
+            project_config_relpath=".codex/config.toml",
+        )
+        kwargs.update(overrides)
+        return AdapterContract(**kwargs)
+
+    def binding_slots(self) -> dict:
+        closure = self.closure()
+        return {
+            "downstream_cli": {
+                "kind": SLOT_KIND_PACKAGE_TREE,
+                "package_root": closure.package_root,
+                "tree_sha256": closure.tree_sha256,
+                "launcher_path": closure.path,
+                "launcher_sha256": closure.sha256,
+                "interpreter_path": closure.interpreter_path,
+                "interpreter_sha256": closure.interpreter_sha256,
+                "version": closure.version,
+            },
+            "codex_home": {
+                "kind": SLOT_KIND_CONFIG_ROOT,
+                "path": str(self.cred_root),
+            },
+        }
+
+    def write_binding_root(self, profile: AgentProfile) -> Path:
+        """A private Binding root for the negative legs — never a real one."""
+        root = self.base / "binding-root"
+        generation = root / rb.GENERATIONS_DIRNAME / "gen-neg"
+        generation.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "schema_version": rb.BINDING_SCHEMA_VERSION,
+            "generation_id": "gen-neg",
+            "contract_identity": {
+                "profile_id": profile.profile_id,
+                "profile_revision": profile.revision,
+                "adapter_contract_hash": profile.adapter_contract_hash(),
+            },
+            "slots": self.binding_slots(),
+            "session_compatibility_epoch": 1,
+            "provenance": {
+                "created_at": "2026-07-26T00:00:00+00:00",
+                "accepted_by": "acceptance-harness",
+                "accepted_at": "2026-07-26T00:00:00+00:00",
+                "acceptance_receipt": {"ref": "receipt:private", "sha256": "0" * 64},
+            },
+        }
+        manifest_path = generation / rb.MANIFEST_FILENAME
+        _write_canonical(manifest_path, manifest)
+        _write_canonical(
+            root / rb.ACTIVE_FILENAME,
+            {
+                "schema_version": rb.BINDING_SCHEMA_VERSION,
+                "generation_id": "gen-neg",
+                "manifest_sha256": _sha256_file(manifest_path),
+            },
+        )
+        for directory in (root, root / rb.GENERATIONS_DIRNAME, generation):
+            os.chmod(directory, 0o755)
+        return root
+
+    def binding_ownership(self) -> rb.TrustedOwnership:
+        """Trust this run's own UID; a fake service UID owns nothing here."""
+        return rb.TrustedOwnership(
+            trusted_uids=frozenset({os.getuid()}), service_uid=_FAKE_SERVICE_UID
         )
 
     def profile(self, **overrides) -> AgentProfile:
+        contract_overrides = overrides.pop("contract_overrides", {})
         kwargs = dict(
             profile_id=NEGATIVE_PROFILE_ID,
             revision=1,
@@ -804,8 +983,6 @@ class PrivateNegativeFixtures:
                 "FAKE_AGENT_VERSION",
             ),
             fixed_env=(
-                ("CODEX_HOME", str(self.cred_root)),
-                ("CODEX_PATH", str(self.cli)),
                 ("CODEX_CONFIG", '{"features":{"use_legacy_landlock":true}}'),
                 ("INITIAL_AGENT_MODE", "read-only"),
                 ("NO_BROWSER", "1"),
@@ -820,7 +997,7 @@ class PrivateNegativeFixtures:
             allowed_efforts=(REQUIRED_EFFORT,),
             requires_session_load=True,
             config_schema=dict(CODEX_ACP_1_1_7.config_schema),
-            expected_runtime=self.expected(),
+            contract=self.contract(**contract_overrides),
         )
         kwargs.update(overrides)
         return AgentProfile(**kwargs)
@@ -832,7 +1009,15 @@ class PrivateNegativeFixtures:
 class EphemeralDaemon:
     """In-process ArsdServer on a private socket; never the production unit."""
 
-    def __init__(self, *, socket_path: Path, supervisor_root: Path, registry) -> None:
+    def __init__(
+        self,
+        *,
+        socket_path: Path,
+        supervisor_root: Path,
+        registry,
+        binding_root: Path,
+        binding_ownership: rb.TrustedOwnership,
+    ) -> None:
         self.socket_path = socket_path
         self.supervisor_root = supervisor_root
         self.session_store = storage.native_session_store(supervisor_root)
@@ -842,6 +1027,8 @@ class EphemeralDaemon:
             event_store=self.event_store,
             supervisor_root=supervisor_root,
             profile_registry=registry,
+            binding_root=binding_root,
+            binding_ownership=binding_ownership,
             cancel_wait_seconds=10.0,
         )
         owner = _env("ARS_CODEX_ACCEPTANCE_OWNER")
@@ -1151,50 +1338,43 @@ def test_p0_registry_parity_and_hash_binding(tmp_path: Path) -> None:
     EVIDENCE["binding"] = _commit_binding()
 
     assert DEFAULT_REGISTRY.get("codex-acp-1.1.7") is CODEX_ACP_1_1_7
-    home = tmp_path / "positive-codex-home"
-    derived = _positive_profile(home)
-
-    production_snapshot = CODEX_ACP_1_1_7.snapshot()
-    derived_snapshot = derived.snapshot()
-    differing = {
-        key
-        for key in set(production_snapshot) | set(derived_snapshot)
-        if production_snapshot.get(key) != derived_snapshot.get(key)
+    # The acceptance run uses the *registered* profile unchanged: after the R13
+    # split, re-pointing the credential root is a Binding generation, not a
+    # derived source row. The parity claim is therefore about the generation.
+    acceptance = _positive_binding()
+    assert acceptance.resolved.contract_identity == {
+        "profile_id": CODEX_ACP_1_1_7.profile_id,
+        "profile_revision": CODEX_ACP_1_1_7.revision,
+        "adapter_contract_hash": CODEX_ACP_1_1_7.adapter_contract_hash(),
     }
-    assert differing == {"profile_id", "fixed_env"}
-    production_env = dict(tuple(pair) for pair in production_snapshot["fixed_env"])
-    derived_env = dict(tuple(pair) for pair in derived_snapshot["fixed_env"])
-    assert set(production_env) == set(derived_env)
-    assert {
-        key for key in production_env if production_env[key] != derived_env[key]
-    } == {"CODEX_HOME"}
 
     workspace = Path(_env("ARS_CODEX_ACCEPTANCE_WORKSPACE_PARENT")) / "p0-ws"
     workspace.mkdir(parents=True, exist_ok=True)
-    hashes = {}
-    for label, profile in (("production", CODEX_ACP_1_1_7), ("derived", derived)):
-        assembler = RunSpecAssembler(
-            AgentRunRequest(
-                **{
-                    **_typed_request(profile.profile_id),
-                }
-            )
-        )
-        assembler.resolve_profile(ProfileRegistry((profile,)))
-        assembler.bind_workspace(root=workspace)
-        launch = assembler.resolve_launch()
-        spec = assembler.seal(
-            run_id=f"run-p0-{label}", submitted_at="2026-07-24T00:00:00+00:00"
-        )
-        hashes[label] = {
-            "profile_hash": profile.profile_hash(),
-            "launch_hash": launch.launch_hash(),
-            "spec_agent_profile_hash": spec.agent.profile_hash,
-            "spec_hash": spec_hash(spec),
-        }
-    # The behavior-affecting difference is bound into all four surfaces.
-    for field in ("profile_hash", "launch_hash", "spec_agent_profile_hash", "spec_hash"):
-        assert hashes["production"][field] != hashes["derived"][field], field
+    assembler = RunSpecAssembler(
+        AgentRunRequest(**{**_typed_request(CODEX_ACP_1_1_7.profile_id)})
+    )
+    assembler.resolve_profile(ProfileRegistry((CODEX_ACP_1_1_7,)))
+    assembler.bind_workspace(root=workspace)
+    launch = assembler.resolve_launch(runtime=acceptance)
+    spec = assembler.seal(
+        run_id="run-p0-acceptance", submitted_at="2026-07-24T00:00:00+00:00"
+    )
+    # The generation's deployment facts are bound into the launch seal, and the
+    # profile hash stays the registered one — the split is real in both
+    # directions: source identity unchanged, deployment identity sealed.
+    provenance = launch.runtime_provenance
+    assert provenance.generation_id == acceptance.resolved.generation_id
+    assert provenance.slot_set_hash == acceptance.resolved.slot_set_hash
+    assert spec.agent.profile_hash == CODEX_ACP_1_1_7.profile_hash()
+    assert spec.launch_spec_hash == launch.launch_hash()
+    hashes = {
+        "profile_hash": CODEX_ACP_1_1_7.profile_hash(),
+        "adapter_contract_hash": CODEX_ACP_1_1_7.adapter_contract_hash(),
+        "launch_hash": launch.launch_hash(),
+        "spec_hash": spec_hash(spec),
+        "generation_id": acceptance.resolved.generation_id,
+        "slot_set_hash": acceptance.resolved.slot_set_hash,
+    }
     EVIDENCE["p0_hashes"] = hashes
 
 
@@ -1236,8 +1416,11 @@ def _typed_request(profile_id: str) -> dict:
 def test_positive_legs(tmp_path: Path, leg: str) -> None:
     _codex_preflight()
     binding = _commit_binding()
-    home = tmp_path / "positive-codex-home"
-    real_root = Path(dict(CODEX_ACP_1_1_7.fixed_env)["CODEX_HOME"])
+    acceptance = _positive_binding()
+    # The staged home is the operator-promoted generation's config-root slot,
+    # not a source constant this harness invented.
+    home = Path(acceptance.resolved.slot("codex_home").descriptor["path"])
+    real_root = Path(_env("ARS_CODEX_ACCEPTANCE_REAL_CREDENTIAL_ROOT"))
     real_auth = real_root / "auth.json"
 
     # Staging, the leg, cleanup, and the nanosecond pre/post identity check all
@@ -1254,10 +1437,17 @@ def test_positive_legs(tmp_path: Path, leg: str) -> None:
         daemon = EphemeralDaemon(
             socket_path=Path(_env("ARS_CODEX_ACCEPTANCE_SOCKET_DIR")) / f"{leg}.sock",
             supervisor_root=tmp_path / "pos-root",
-            registry=ProfileRegistry((_positive_profile(home),)),
+            registry=ProfileRegistry((CODEX_ACP_1_1_7,)),
+            binding_root=Path(_env("ARS_CODEX_ACCEPTANCE_BINDING_ROOT")),
+            binding_ownership=_acceptance_ownership(),
         )
         outcome = _run_positive_leg(
-            daemon, leg, workspace, home, commit_sha=binding["commit_sha"]
+            daemon,
+            leg,
+            workspace,
+            home,
+            commit_sha=binding["commit_sha"],
+            acceptance=acceptance,
         )
         outcome["commit_sha"] = binding["commit_sha"]
         EVIDENCE["legs"][leg] = outcome  # type: ignore[index]
@@ -1270,13 +1460,14 @@ def _run_positive_leg(
     home: Path,
     *,
     commit_sha: str,
+    acceptance: rb.AdmittedRuntimeBinding,
 ) -> dict:
     """Drive one positive leg over the private socket against the real pair.
 
     Returns sanitized summary facts only — never model text, session IDs,
     credential values, or credential-file digests.
     """
-    derived_profile = _positive_profile(home)
+    derived_profile = CODEX_ACP_1_1_7
     nonce = _context_nonce(leg, commit_sha)
     continuity = leg == "p2_continuity_and_b1_boundary"
     # P2 binds a reusable Session up front: an ephemeral record is closed at
@@ -1330,23 +1521,40 @@ def _run_positive_leg(
         stderr_text = (run_dir / "stderr.log").read_text(encoding="utf-8")
         _assert_no_bwrap_signature(stderr_text)
 
-        # Common to every positive leg: the boundary attested clean, the frozen
-        # identity is durable in launch.json, and the derived home is bound
-        # into the spec's profile hash.
+        # Common to every positive leg: the boundary attested clean, the sealed
+        # identity is durable in launch.json, and the generation the Run was
+        # admitted under is durable beside it.
         assert attestation["pass"] is True
         assert all(row["passed"] for row in attestation["checks"])
         rows = {row["name"] for row in attestation["checks"]}
-        assert {"config_toml_absence_recheck", "project_config_closure_recheck"} <= rows
+        assert {
+            "config_toml_absence_recheck",
+            "project_config_closure_recheck",
+            "cli_artifact_trust",
+            "cli_package_closure",
+            "cli_package_closure_recheck",
+        } <= rows
         assert initialize["pass"] is True
-        assert launch["fixed_env"] == [
-            list(pair) for pair in derived_profile.fixed_env
-        ]
-        assert launch["expected_runtime"] == (
-            derived_profile.expected_runtime.to_dict()
+        sealed = launch["expected_runtime"]
+        downstream = acceptance.resolved.slot("downstream_cli").descriptor
+        assert sealed["node_path"] == (
+            derived_profile.contract.wrapped_runtime.interpreter_path
+        )
+        assert sealed["cli"]["path"] == downstream["launcher_path"]
+        assert sealed["cli"]["tree_sha256"] == downstream["tree_sha256"]
+        assert sealed["credential_root_path"] == str(home)
+        assert dict(tuple(pair) for pair in launch["fixed_env"])["CODEX_HOME"] == str(
+            home
+        )
+        assert launch["runtime_provenance"]["generation_id"] == (
+            acceptance.resolved.generation_id
+        )
+        assert launch["runtime_provenance"]["adapter_contract_hash"] == (
+            derived_profile.adapter_contract_hash()
         )
         assert spec["agent"]["profile_hash"] == derived_profile.profile_hash()
         assert effective["agent_info"]["name"] == (
-            derived_profile.expected_runtime.agent_info_name
+            derived_profile.contract.acp_agent_name
         )
 
         summary: dict[str, object] = {
@@ -1560,12 +1768,15 @@ def test_negative_legs(tmp_path: Path, case: NegativeCase) -> None:
     _codex_preflight()
     binding = _commit_binding()
     fixtures = PrivateNegativeFixtures(tmp_path / "neg")
+    negative_profile = fixtures.profile()
     daemon = EphemeralDaemon(
         socket_path=(
             Path(_env("ARS_CODEX_ACCEPTANCE_SOCKET_DIR")) / f"{case.case_id}.sock"
         ),
         supervisor_root=tmp_path / "neg-root",
-        registry=ProfileRegistry((fixtures.profile(),)),
+        registry=ProfileRegistry((negative_profile,)),
+        binding_root=fixtures.write_binding_root(negative_profile),
+        binding_ownership=fixtures.binding_ownership(),
     )
     outcome = _run_negative_leg(daemon, fixtures, case)
     outcome["commit_sha"] = binding["commit_sha"]
@@ -1713,9 +1924,16 @@ def _run_negative_leg(
         if case.case_id == "n9_seeded_session_profile_hash_drift":
             # A revision bump in the private registry alone must refuse reuse
             # before spawn: the record's bound profile hash no longer matches.
+            drifted = fixtures.profile(revision=2)
             daemon.handlers._factory = handlers.default_run_task_factory(
                 daemon.supervisor_root,
-                registry=ProfileRegistry((fixtures.profile(revision=2),)),
+                registry=ProfileRegistry((drifted,)),
+                # A revision bump changes the contract hash, so the drifted
+                # registry needs its own generation; otherwise the Binding read
+                # would refuse first and the *session* refusal under test would
+                # never be reached.
+                binding_root=fixtures.write_binding_root(drifted),
+                binding_ownership=fixtures.binding_ownership(),
             )
         if case.case_id == "n9_quarantined_session_reuse":
             daemon.session_store.write_quarantine_pending(
@@ -1751,10 +1969,14 @@ def _run_negative_leg(
             row["passed"] for name, row in rows.items() if name != case.failing_row
         ), "exactly one attestation row may fail"
     else:
-        # Admission and session-binding refusals never reach the attestation
-        # stage, so the probe Run must carry no attestation artifact at all.
-        assert case.stage in {"admission", "session"}
+        # Binding, admission, and session-binding refusals never reach the
+        # attestation stage, so the probe Run carries no attestation artifact.
+        assert case.stage in {"binding", "admission", "session"}
         assert not (run_dir / "attestation.json").exists()
+    if case.stage == "binding":
+        # Refused before the RunTask exists: not even a sealed spec was written.
+        assert not (run_dir / "spec.json").exists()
+        assert not (run_dir / "launch.json").exists()
 
     # Private fixtures stay exactly as arranged — the refusal path mutated
     # nothing — and nothing real was ever referenced.
@@ -1795,16 +2017,27 @@ def _private_fixture_state(fixtures: PrivateNegativeFixtures) -> dict[str, str]:
 
 
 def test_shared_resource_invariant_untouched() -> None:
-    """Durable trees byte-untouched; the production surface never referenced."""
+    """Durable trees byte-untouched; the production surface never referenced.
+
+    Two halves, checked against their own authority: the interpreter and the
+    ACP adapter entry against the source contract, and the downstream CLI
+    closure against the operator's promoted generation.
+    """
     _codex_preflight()
-    identity = CODEX_ACP_1_1_7.expected_runtime
-    assert identity is not None
+    wrapped = CODEX_ACP_1_1_7.contract.wrapped_runtime
+    assert wrapped is not None
     for path, expected_digest in (
-        (Path(identity.node_path), identity.node_sha256),
-        (Path(identity.adapter_entry_path), identity.adapter_entry_sha256),
-        (Path(identity.cli_path), identity.cli_sha256),
+        (Path(wrapped.interpreter_path), wrapped.interpreter_sha256),
+        (Path(wrapped.adapter_entry_path), wrapped.adapter_entry_sha256),
     ):
         assert _sha256_file(path) == expected_digest, path
+    downstream = _positive_binding().resolved.slot("downstream_cli").descriptor
+    assert _sha256_file(Path(downstream["launcher_path"])) == (
+        downstream["launcher_sha256"]
+    )
+    assert rb.package_tree_digest(Path(downstream["package_root"])) == (
+        downstream["tree_sha256"]
+    )
     EVIDENCE["shared_resources_verified"] = True
 
 

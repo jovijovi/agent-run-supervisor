@@ -195,6 +195,8 @@ def create_native_session(
     workspace_hash: str,
     effective_cwd: str,
     matched_root: str | None,
+    adapter_contract_hash: str | None = None,
+    session_compatibility_epoch: int | None = None,
     now: _dt.datetime | None = None,
 ) -> SessionRecord:
     """The only sanctioned Native call site for record creation."""
@@ -208,6 +210,8 @@ def create_native_session(
         workspace_hash=workspace_hash,
         effective_cwd=effective_cwd,
         matched_root=matched_root,
+        adapter_contract_hash=adapter_contract_hash,
+        session_compatibility_epoch=session_compatibility_epoch,
         now=now,
     )
 

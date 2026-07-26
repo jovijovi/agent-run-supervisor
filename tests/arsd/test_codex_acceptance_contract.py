@@ -610,6 +610,12 @@ def test_case_stages_and_rows_agree_with_the_attestation_classes() -> None:
         elif case.stage == "admission":
             assert case.failing_row is None, case.case_id
             assert case.detail_code == "ADMISSION", case.case_id
+        elif case.stage == "binding":
+            # The single per-Run Binding read refuses before the RunTask is
+            # even constructed, so the Run carries only the write-once
+            # registration-failure terminal — no spec, launch, or attestation.
+            assert case.failing_row is None, case.case_id
+            assert case.detail_code == "REGISTRATION_FAILED", case.case_id
         else:
             # Session-binding refusals leave `_bind_session` through the
             # RunTask top-level guard, so they surface as RUN_EXCEPTION — not

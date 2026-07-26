@@ -18,13 +18,29 @@ from typing import Any, AsyncIterator, Mapping
 
 from agent_run_supervisor.event_store import EventStore, RunHandle, _RUN_ID_RE
 from agent_run_supervisor.exit_classifier import AgentRunStatus
-from agent_run_supervisor.native_acp import storage
+from agent_run_supervisor.native_acp import runtime_binding, storage
+from agent_run_supervisor.native_acp.profile import AgentProfile
 from agent_run_supervisor.result import build_result_payload
 
 from . import protocol
 
 DIGEST_SCHEMA_VERSION = 1
 SUBMISSION_SCHEMA_VERSION = 1
+
+# Request fields that would let a caller choose a runtime. None of them exist
+# on ``AgentRunRequest`` and none is added here: the guard is a structural
+# assertion that admission never grew one, not a filter over caller input.
+FORBIDDEN_RUNTIME_SELECTION_FIELDS = (
+    "runtime_path",
+    "executable",
+    "cli_path",
+    "cli_version",
+    "cli_sha256",
+    "binding_generation_id",
+    "generation_id",
+    "adapter_contract_hash",
+    "session_compatibility_epoch",
+)
 
 _RUN_ID_PREFIX = "run-"
 _DERIVATION_TAG = b"arsd-run-id-v1\x00"
@@ -119,6 +135,44 @@ def compute_request_digest(command: protocol.SubmitCommand) -> RequestDigest:
 def prepare_run(event_store: EventStore, run_id: str) -> RunHandle:
     """Exclusive ``create_run`` for a derived Run identity (socket-submit only)."""
     return event_store.create_run(run_id)
+
+
+def resolve_runtime_binding(
+    profile: AgentProfile,
+    *,
+    binding_root: Path | None,
+    ownership: runtime_binding.TrustedOwnership | None = None,
+) -> runtime_binding.AdmittedRuntimeBinding | None:
+    """The single per-Run Binding read (C8) — one pointer, one generation.
+
+    Reads ``active.json`` exactly once and the generation it names exactly
+    once, revalidates contract match and artifact digest against the trusted
+    immutable paths, and hands the result forward as a sealed value. Nothing
+    downstream re-opens the Binding root, so a promotion between two Runs can
+    never re-point work already admitted.
+
+    A caller cannot reach this: the profile comes from the closed registry and
+    the root from operator-supplied daemon configuration. A profile whose
+    contract declares no slot needs no Binding and gets ``None``; a profile
+    that declares slots refuses fail-closed when no root is configured, rather
+    than falling back to a source constant that no longer exists.
+    """
+    if not profile.contract.requires_binding:
+        return None
+    if binding_root is None:
+        raise runtime_binding.BindingRefusal(
+            rule="BINDING_ROOT_NOT_CONFIGURED",
+            message=(
+                "runtime binding refused [BINDING_ROOT_NOT_CONFIGURED]: profile "
+                f"{profile.profile_id} requires a Runtime Binding root and none "
+                "is configured"
+            ),
+        )
+    policy = ownership or runtime_binding.default_ownership()
+    reader = runtime_binding.BindingReader(binding_root, ownership=policy)
+    return runtime_binding.AdmittedRuntimeBinding(
+        resolved=reader.resolve_active(profile), ownership=policy
+    )
 
 
 def finalize_registration_failure(handle: RunHandle, run_id: str) -> None:

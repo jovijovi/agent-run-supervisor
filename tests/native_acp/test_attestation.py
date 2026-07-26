@@ -12,10 +12,12 @@ and no real credential bytes are ever read.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import errno
 import hashlib
 import json
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,12 +28,16 @@ from agent_run_supervisor.native_acp.attestation import (
     CREDENTIAL_ROOT_VIOLATION,
     PROJECT_CONFIG_LAYER_PRESENT,
     RUNTIME_IDENTITY_MISMATCH,
+    ArtifactClosure,
     AttestationRefusal,
-    ExpectedRuntimeIdentity,
+    SealedRuntimeIdentity,
     attest_spawn_boundary,
     project_config_closure,
 )
+from agent_run_supervisor.native_acp.runtime_binding import package_tree_digest
 from agent_run_supervisor.native_acp.spec import ResolvedLaunchSpec
+
+from . import binding_fixtures as bf
 
 # Placeholder credential bytes: synthetic, never a real credential value, and
 # asserted absent from every persisted report.
@@ -55,11 +61,13 @@ class Fixture:
     entry: Path
     cli: Path
     cli_target: Path
+    package_root: Path
+    cli_interpreter: Path
     cred_root: Path
     auth: Path
     workspace: Path
     run_dir: Path
-    expected: ExpectedRuntimeIdentity
+    expected: SealedRuntimeIdentity
     fixed_env: dict[str, str]
     launch: ResolvedLaunchSpec
 
@@ -69,6 +77,24 @@ class Fixture:
     def rows(self) -> dict[str, dict]:
         return {row["name"]: row for row in self.report()["checks"]}
 
+    def reseal(self, **overrides) -> SealedRuntimeIdentity:
+        import dataclasses as _dc
+
+        return _dc.replace(self.expected, **overrides)
+
+
+def _closure(package_root: Path, launcher: Path, interpreter: Path) -> ArtifactClosure:
+    return ArtifactClosure(
+        kind="package_tree",
+        path=str(launcher),
+        sha256=_sha256(launcher),
+        version="1.0.0",
+        package_root=str(package_root),
+        tree_sha256=package_tree_digest(package_root),
+        interpreter_path=str(interpreter),
+        interpreter_sha256=_sha256(interpreter),
+    )
+
 
 def _arrange(tmp_path: Path, *, cwd: Path | None = None) -> Fixture:
     stage = tmp_path / "stage"
@@ -77,10 +103,17 @@ def _arrange(tmp_path: Path, *, cwd: Path | None = None) -> Fixture:
     node.write_bytes(b"#!/bin/false\n# private node copy\n")
     entry = stage / "index.js"
     entry.write_bytes(b"// private adapter entry copy\n")
-    cli_target = stage / "codex-real"
-    cli_target.write_bytes(b"# private cli copy\n")
-    cli = stage / "codex"
-    cli.symlink_to(cli_target)
+    # The downstream CLI is a package closure: a launcher plus the sibling code
+    # it loads plus its required interpreter. A launcher hash alone would not
+    # freeze the siblings (C5).
+    package_root = stage / "codex-pkg"
+    (package_root / "lib").mkdir(parents=True)
+    (package_root / "lib" / "sibling.js").write_bytes(b"// sibling code\n")
+    cli = package_root / "codex"
+    cli.write_bytes(b"# private cli copy\n")
+    cli_target = cli
+    cli_interpreter = stage / "cli-node"
+    cli_interpreter.write_bytes(b"#!/bin/false\n# private cli interpreter\n")
 
     cred_root = tmp_path / "codex-home"
     cred_root.mkdir(mode=0o700)
@@ -93,17 +126,22 @@ def _arrange(tmp_path: Path, *, cwd: Path | None = None) -> Fixture:
     workspace.mkdir(parents=True, exist_ok=True)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
+    bf.harden_tree(stage)
 
-    expected = ExpectedRuntimeIdentity(
+    expected = SealedRuntimeIdentity(
+        launch_kind="wrapped_acp",
+        agent_info_name="@example/private-adapter",
+        agent_info_version="1.0.0",
+        protocol_version="1",
+        cli=_closure(package_root, cli, cli_interpreter),
+        cli_path_env="CODEX_PATH",
         node_path=str(node),
         node_sha256=_sha256(node),
         adapter_entry_path=str(entry),
         adapter_entry_sha256=_sha256(entry),
-        cli_path=str(cli),
-        cli_sha256=_sha256(cli_target),
-        agent_info_name="@example/private-adapter",
-        agent_info_version="1.0.0",
-        protocol_version="1",
+        credential_root_env="CODEX_HOME",
+        credential_root_path=str(cred_root),
+        project_config_relpath=".codex/config.toml",
     )
     fixed_env = {
         "CODEX_HOME": str(cred_root),
@@ -127,6 +165,8 @@ def _arrange(tmp_path: Path, *, cwd: Path | None = None) -> Fixture:
         entry=entry,
         cli=cli,
         cli_target=cli_target,
+        package_root=package_root,
+        cli_interpreter=cli_interpreter,
         cred_root=cred_root,
         auth=auth,
         workspace=workspace,
@@ -137,14 +177,27 @@ def _arrange(tmp_path: Path, *, cwd: Path | None = None) -> Fixture:
     )
 
 
-def _attest(fixture: Fixture, *, launch: ResolvedLaunchSpec | None = None,
-            fixed_env: dict[str, str] | None = None):
+def _reclose(fixture: Fixture) -> SealedRuntimeIdentity:
+    """Re-seal the CLI closure after a test mutated the package tree."""
+    return fixture.reseal(
+        cli=_closure(fixture.package_root, fixture.cli, fixture.cli_interpreter)
+    )
+
+
+def _attest(
+    fixture: Fixture,
+    *,
+    launch: ResolvedLaunchSpec | None = None,
+    fixed_env: dict[str, str] | None = None,
+    expected: SealedRuntimeIdentity | None = None,
+):
     return attest_spawn_boundary(
-        expected=fixture.expected,
+        expected=expected if expected is not None else fixture.expected,
         launch=launch if launch is not None else fixture.launch,
         fixed_env=fixed_env if fixed_env is not None else fixture.fixed_env,
         effective_cwd=str(fixture.workspace),
         run_dir=fixture.run_dir,
+        ownership=bf.ownership(),
     )
 
 
@@ -171,7 +224,7 @@ def _refusal(fixture: Fixture, **kwargs) -> AttestationRefusal:
 # -- clean boundary ----------------------------------------------------------
 
 
-def test_clean_boundary_passes_and_returns_pinned_interpreter_fd(
+def test_clean_boundary_passes_and_returns_pinned_exec_fd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     spawns = _spawn_guard(monkeypatch)
@@ -203,14 +256,14 @@ def test_clean_boundary_passes_and_returns_pinned_interpreter_fd(
         ):
             assert required in names, required
         node_stat = os.stat(fixture.node)
-        pinned = os.fstat(result.interpreter_fd)
+        pinned = os.fstat(result.exec_fd)
         assert (pinned.st_dev, pinned.st_ino) == (node_stat.st_dev, node_stat.st_ino)
         binding = report["binding"]
         assert binding["node"]["dev"] == node_stat.st_dev
         assert binding["node"]["ino"] == node_stat.st_ino
         assert binding["node"]["recheck_passed"] is True
     finally:
-        os.close(result.interpreter_fd)
+        os.close(result.exec_fd)
     assert spawns == []
 
 
@@ -421,7 +474,10 @@ def test_adapter_entry_hash_mismatch_refused(tmp_path: Path) -> None:
     assert fixture.rows()["adapter_entry_sha256"]["passed"] is False
 
 
-def test_cli_retargeted_symlink_refused(tmp_path: Path) -> None:
+def test_cli_replaced_by_a_symlink_is_refused_at_the_pin(tmp_path: Path) -> None:
+    # A Binding names an immutable versioned path and the Binding reader
+    # already refused a symlinked artifact, so a symlink appearing here is a
+    # swap between admission and spawn — refused before any hash row.
     fixture = _arrange(tmp_path)
     other = tmp_path / "stage" / "codex-other"
     other.write_bytes(b"# a different cli binary\n")
@@ -430,8 +486,19 @@ def test_cli_retargeted_symlink_refused(tmp_path: Path) -> None:
 
     refusal = _refusal(fixture)
     assert refusal.code == RUNTIME_IDENTITY_MISMATCH
+    assert refusal.failing_check == "cli_pin"
+    assert fixture.rows()["cli_pin"]["passed"] is False
+    assert "cli_sha256" not in fixture.rows()
+
+
+def test_cli_content_drift_refused_at_the_hash_row(tmp_path: Path) -> None:
+    fixture = _arrange(tmp_path)
+    fixture.cli.write_bytes(b"# a different cli binary\n")
+
+    refusal = _refusal(fixture)
+    assert refusal.code == RUNTIME_IDENTITY_MISMATCH
     assert refusal.failing_check == "cli_sha256"
-    assert fixture.rows()["cli_sha256"]["observed"] == _sha256(other)
+    assert fixture.rows()["cli_sha256"]["observed"] == _sha256(fixture.cli)
 
 
 # -- credential aliasing (no hashed artifact may be the credential file) ------
@@ -464,17 +531,17 @@ def _assert_no_credential_derivation(
     assert digest not in refusal.message
 
 
-def test_cli_symlink_retargeted_to_credential_file_refused(
+def test_cli_hardlinked_to_credential_file_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The configured CLI path is a symlink by design, so its pin follows to the
-    # final target: a same-UID retarget onto CODEX_HOME/auth.json would
-    # otherwise make the identity hash read credential bytes.
+    # A hardlink shares the inode under a different name, so the CLI pin lands
+    # on CODEX_HOME/auth.json without any symlink for the pin to refuse: the
+    # identity hash would otherwise read credential bytes.
     spawns = _spawn_guard(monkeypatch)
     hashed = _hash_spy(monkeypatch)
     fixture = _arrange(tmp_path)
     fixture.cli.unlink()
-    fixture.cli.symlink_to(fixture.auth)
+    os.link(fixture.auth, fixture.cli)
 
     refusal = _refusal(fixture)
     assert refusal.code == CREDENTIAL_ROOT_VIOLATION
@@ -545,7 +612,7 @@ def test_credential_alias_through_symlinked_root_refused(
         elsewhere, target_is_directory=True
     )
     fixture.cli.unlink()
-    fixture.cli.symlink_to(relocated_auth)
+    os.link(relocated_auth, fixture.cli)
 
     refusal = _refusal(fixture)
     assert refusal.code == CREDENTIAL_ROOT_VIOLATION
@@ -555,16 +622,13 @@ def test_credential_alias_through_symlinked_root_refused(
     assert spawns == []
 
 
-def test_benign_cli_retarget_still_reaches_the_hash_row(
+def test_benign_cli_drift_still_reaches_the_hash_row(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The alias guard must not swallow ordinary identity drift.
     hashed = _hash_spy(monkeypatch)
     fixture = _arrange(tmp_path)
-    other = tmp_path / "stage" / "codex-benign"
-    other.write_bytes(b"# a different, non-credential cli binary\n")
-    fixture.cli.unlink()
-    fixture.cli.symlink_to(other)
+    fixture.cli.write_bytes(b"# a different, non-credential cli binary\n")
 
     refusal = _refusal(fixture)
     assert refusal.code == RUNTIME_IDENTITY_MISMATCH
@@ -584,7 +648,7 @@ def test_credential_alias_rows_are_recorded_before_any_hash_row(
 ) -> None:
     fixture = _arrange(tmp_path)
     result = _attest(fixture)
-    os.close(result.interpreter_fd)
+    os.close(result.exec_fd)
 
     names = [row["name"] for row in fixture.report()["checks"]]
     for artifact in ("node", "adapter_entry", "cli"):
@@ -866,7 +930,7 @@ def test_inwindow_project_config_inserted_refused(
 def test_report_is_sanitized_paths_hashes_modes_only(tmp_path: Path) -> None:
     fixture = _arrange(tmp_path)
     result = _attest(fixture)
-    os.close(result.interpreter_fd)
+    os.close(result.exec_fd)
 
     report = fixture.report()
     assert set(report) == {"schema_version", "pass", "checks", "binding"}
@@ -923,8 +987,8 @@ def test_attestation_fds_closed_on_refusal_and_success(
             assert exc.errno == errno.EBADF
         else:
             survivors.append(fd)
-    assert survivors == [result.interpreter_fd]
-    os.close(result.interpreter_fd)
+    assert survivors == [result.exec_fd]
+    os.close(result.exec_fd)
 
     refused = _arrange(tmp_path / "bad")
     refused.node.write_bytes(b"tampered\n")
@@ -975,21 +1039,14 @@ def _arrange_claude(tmp_path: Path, *, cwd: Path | None = None) -> Fixture:
     """A Claude-shaped fixture: CLI bound through its own fixed-env key, no
     ARS-managed credential root, and no project-config closure surface."""
     fixture = _arrange(tmp_path, cwd=cwd)
-    expected = ExpectedRuntimeIdentity(
-        node_path=fixture.expected.node_path,
-        node_sha256=fixture.expected.node_sha256,
-        adapter_entry_path=fixture.expected.adapter_entry_path,
-        adapter_entry_sha256=fixture.expected.adapter_entry_sha256,
-        cli_path=fixture.expected.cli_path,
-        cli_sha256=fixture.expected.cli_sha256,
+    fixture.expected = fixture.reseal(
         agent_info_name="@example/private-claude-adapter",
         agent_info_version="0.0.1",
-        protocol_version="1",
         cli_path_env="CLAUDE_CODE_EXECUTABLE",
         credential_root_env=None,
+        credential_root_path=None,
         project_config_relpath=None,
     )
-    fixture.expected = expected
     fixture.fixed_env = {
         "CLAUDE_CODE_EXECUTABLE": str(fixture.cli),
         "NO_BROWSER": "1",
@@ -1029,9 +1086,9 @@ def test_claude_shaped_boundary_passes_without_a_credential_root(
         assert rows["project_config_not_declared"]["observed"] == "not declared"
         assert "credential_root_structure" not in rows
         assert "project_config_closure" not in rows
-        assert os.fstat(result.interpreter_fd).st_ino == os.stat(fixture.node).st_ino
+        assert os.fstat(result.exec_fd).st_ino == os.stat(fixture.node).st_ino
     finally:
-        os.close(result.interpreter_fd)
+        os.close(result.exec_fd)
     assert spawns == []
 
 
@@ -1066,7 +1123,7 @@ def test_claude_shaped_ignores_a_codex_project_config_layer(tmp_path: Path) -> N
     layer.mkdir()
     (layer / "config.toml").write_text("[features]\n", encoding="utf-8")
     result = _attest(fixture)
-    os.close(result.interpreter_fd)
+    os.close(result.exec_fd)
     assert fixture.report()["pass"] is True
 
 
@@ -1078,14 +1135,12 @@ def test_claude_shaped_artifact_drift_still_refuses(tmp_path: Path) -> None:
     assert refusal.code == RUNTIME_IDENTITY_MISMATCH
 
 
-def test_codex_shaped_rows_are_unchanged_by_the_generalization(
-    tmp_path: Path,
-) -> None:
-    # The Codex fixture declares no explicit bindings, so it must keep the
-    # exact legacy row set (nothing weakened, bypassed, or skipped).
+def test_codex_shaped_rows_survive_the_binding_split(tmp_path: Path) -> None:
+    # A Codex-shaped runtime keeps the exact legacy row set (nothing weakened,
+    # bypassed, or skipped) and gains the artifact-trust and closure rows.
     fixture = _arrange(tmp_path)
     result = _attest(fixture)
-    os.close(result.interpreter_fd)
+    os.close(result.exec_fd)
     rows = fixture.rows()
     assert "credential_root_not_declared" not in rows
     assert "project_config_not_declared" not in rows
@@ -1098,12 +1153,345 @@ def test_codex_shaped_rows_are_unchanged_by_the_generalization(
         "auth_json_binding_lost",
         "config_toml_absence_recheck",
         "project_config_closure_recheck",
+        "cli_artifact_trust",
+        "cli_package_closure",
+        "cli_package_closure_recheck",
+        "cli_interpreter_sha256",
     ):
         assert required in rows, required
-    assert fixture.expected.cli_path_env == "CODEX_PATH"
-    assert fixture.expected.credential_root_env == "CODEX_HOME"
-    assert fixture.expected.project_config_relpath == ".codex/config.toml"
-    # Omit-when-default keeps the merged Codex launch/profile hashes stable.
-    assert "cli_path_env" not in fixture.expected.to_dict()
-    assert "credential_root_env" not in fixture.expected.to_dict()
-    assert "project_config_relpath" not in fixture.expected.to_dict()
+    # A sealed identity states every surface it declares explicitly: the
+    # per-Run record is evidence, so nothing is inferred from a default.
+    payload = fixture.expected.to_dict()
+    assert payload["cli_path_env"] == "CODEX_PATH"
+    assert payload["credential_root_env"] == "CODEX_HOME"
+    assert payload["credential_root_path"] == str(fixture.cred_root)
+    assert payload["project_config_relpath"] == ".codex/config.toml"
+
+
+# -- C5/C10: artifact trust and package closure ------------------------------
+
+
+def test_service_uid_owned_cli_is_refused(tmp_path: Path) -> None:
+    """The artifact-trust row is re-proven at the boundary, not inherited."""
+    fixture = _arrange(tmp_path)
+    with pytest.raises(AttestationRefusal) as err:
+        attest_spawn_boundary(
+            expected=fixture.expected,
+            launch=fixture.launch,
+            fixed_env=fixture.fixed_env,
+            effective_cwd=str(fixture.workspace),
+            run_dir=fixture.run_dir,
+            ownership=attestation_module.TrustedOwnership(
+                trusted_uids=frozenset({0}), service_uid=os.getuid()
+            ),
+        )
+    assert err.value.failing_check == "cli_artifact_trust"
+    assert err.value.code == RUNTIME_IDENTITY_MISMATCH
+    assert fixture.rows()["cli_artifact_trust"]["observed"] == "SERVICE_UID_WRITABLE"
+
+
+def test_sibling_code_change_refused_by_the_package_closure(tmp_path: Path) -> None:
+    # A launcher hash alone would pass here: the launcher is untouched and only
+    # the sibling code it loads changed.
+    fixture = _arrange(tmp_path)
+    (fixture.package_root / "lib" / "sibling.js").write_bytes(b"// swapped\n")
+    refusal = _refusal(fixture)
+    assert refusal.failing_check == "cli_package_closure"
+    assert refusal.code == RUNTIME_IDENTITY_MISMATCH
+
+
+def test_writable_package_root_refused_by_the_artifact_ancestor_walk(
+    tmp_path: Path,
+) -> None:
+    # The package root is an ancestor of the launcher, so the ancestor walk
+    # refuses it first — a stricter row, reached earlier, same conclusion.
+    fixture = _arrange(tmp_path)
+    fixture.package_root.chmod(0o777)
+    refusal = _refusal(fixture)
+    assert refusal.failing_check == "cli_artifact_trust"
+    assert fixture.rows()["cli_artifact_trust"]["observed"] == "GROUP_OR_OTHER_WRITABLE"
+
+
+def test_writable_sibling_directory_refused_by_the_closure(tmp_path: Path) -> None:
+    # ``lib/`` is not an ancestor of the launcher, so only the closure walk can
+    # see that the code the launcher loads became rewritable.
+    fixture = _arrange(tmp_path)
+    (fixture.package_root / "lib").chmod(0o777)
+    refusal = _refusal(fixture)
+    assert refusal.failing_check == "cli_package_closure"
+    assert fixture.rows()["cli_package_closure"]["observed"] == "GROUP_OR_OTHER_WRITABLE"
+
+
+def test_sticky_world_writable_package_root_refused_by_the_closure(
+    tmp_path: Path,
+) -> None:
+    """Sticky is not immutability: entries can still be *added* to the closure.
+
+    ``01777`` is trusted-owned, the tree digest is unchanged, and the ancestor
+    walk is satisfied — yet the service/AGENT UID can drop a new module into the
+    closure between this gate and Node's own reopen. The closure row is what has
+    to see that, because a protected object is defined by what cannot appear in
+    it, not only by what cannot be removed.
+    """
+    fixture = _arrange(tmp_path)
+    fixture.package_root.chmod(0o1777)
+    assert package_tree_digest(fixture.package_root) == fixture.expected.cli.tree_sha256
+    refusal = _refusal(fixture)
+    assert refusal.failing_check == "cli_package_closure"
+    assert refusal.code == RUNTIME_IDENTITY_MISMATCH
+    assert fixture.rows()["cli_package_closure"]["observed"] == "GROUP_OR_OTHER_WRITABLE"
+
+
+def test_sticky_world_writable_closure_subdirectory_refused(tmp_path: Path) -> None:
+    """``lib/`` holds the sibling code, so the same rule applies one level in."""
+    fixture = _arrange(tmp_path)
+    (fixture.package_root / "lib").chmod(0o1777)
+    refusal = _refusal(fixture)
+    assert refusal.failing_check == "cli_package_closure"
+    assert fixture.rows()["cli_package_closure"]["observed"] == "GROUP_OR_OTHER_WRITABLE"
+
+
+def test_inwindow_sticky_package_root_refused_by_the_closure_recheck(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C10: admission is not the only gate — the recheck must fail closed too.
+
+    Every first-pass row passes here; the closure only turns sticky inside the
+    spawn window. Relying on admission alone would admit exactly the shape this
+    window exists to catch.
+    """
+    fixture = _arrange(tmp_path)
+    _arm(monkeypatch, lambda: fixture.package_root.chmod(0o1777))
+    refusal = _refusal(fixture)
+    assert refusal.failing_check == "cli_package_closure_recheck"
+    assert refusal.code == RUNTIME_IDENTITY_MISMATCH
+    assert fixture.rows()["cli_package_closure"]["passed"] is True
+
+
+def test_sticky_ambient_ancestor_above_the_stage_stays_admissible(
+    tmp_path: Path,
+) -> None:
+    """The ancestor walk keeps the ``/tmp`` shape the hermetic suite runs under.
+
+    A sticky ancestor *above* the staged artifacts holds neither closure content
+    nor a Binding: its sticky bit is what stops a non-owner from renaming or
+    removing the trusted-owned entry the walk selects. Refusing it would not make
+    the closure safer, and it is the one world-writable shape this gate keeps.
+    """
+    stage_parent = tmp_path / "ambient"
+    stage_parent.mkdir()
+    fixture = _arrange(stage_parent)
+    stage_parent.chmod(0o1777)  # after staging, so harden_tree cannot clear it
+    assert stat.S_IMODE(stage_parent.stat().st_mode) == 0o1777
+    result = _attest(fixture)
+    os.close(result.exec_fd)
+    assert fixture.report()["pass"] is True
+
+
+def test_cli_interpreter_drift_refused(tmp_path: Path) -> None:
+    fixture = _arrange(tmp_path)
+    fixture.cli_interpreter.write_bytes(b"#!/bin/false\n# swapped interpreter\n")
+    refusal = _refusal(fixture)
+    assert refusal.failing_check == "cli_interpreter_sha256"
+
+
+def test_inwindow_sibling_code_swap_refused_by_the_closure_recheck(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C10: the wrapped CLI closure must hold on both sides of the window."""
+    fixture = _arrange(tmp_path)
+    sibling = fixture.package_root / "lib" / "sibling.js"
+    _arm(monkeypatch, lambda: sibling.write_bytes(b"// swapped in the window\n"))
+    refusal = _refusal(fixture)
+    assert refusal.failing_check == "cli_package_closure_recheck"
+    assert refusal.code == RUNTIME_IDENTITY_MISMATCH
+
+
+# -- direct_acp: one artifact that is both CLI and ACP implementation ---------
+
+
+def _arrange_direct(tmp_path: Path) -> Fixture:
+    fixture = _arrange(tmp_path)
+    fixture.expected = SealedRuntimeIdentity(
+        launch_kind="direct_acp",
+        agent_info_name="OpenCode-shaped",
+        protocol_version="1",
+        cli=ArtifactClosure(
+            kind="native_binary",
+            path=str(fixture.cli),
+            sha256=_sha256(fixture.cli),
+            version="1.0.0",
+        ),
+    )
+    fixture.fixed_env = {}
+    fixture.launch = ResolvedLaunchSpec(
+        executable=str(fixture.cli),
+        argv=(str(fixture.cli), "acp"),
+        env_allowlist=("HOME", "PATH"),
+        credential_refs=(),
+        profile_id="private-direct-1.0",
+        profile_revision=1,
+        profile_hash="0" * 64,
+        config_schema_hash="1" * 64,
+    )
+    return fixture
+
+
+def test_direct_acp_boundary_pins_and_exec_s_the_agent_cli_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spawns = _spawn_guard(monkeypatch)
+    fixture = _arrange_direct(tmp_path)
+    result = _attest(fixture)
+    try:
+        rows = fixture.rows()
+        assert fixture.report()["pass"] is True
+        # The exec'd descriptor is the sealed AGENT CLI, not an interpreter.
+        assert os.fstat(result.exec_fd).st_ino == os.stat(fixture.cli).st_ino
+        for required in (
+            "cli_pin",
+            "cli_sha256",
+            "cli_artifact_trust",
+            "argv_cli_binding",
+            "cli_binding_lost",
+        ):
+            assert required in rows, required
+        # A direct runtime seals no interpreter or adapter entry at all.
+        for absent in ("node_pin", "adapter_entry_pin", "env_cli_path_binding"):
+            assert absent not in rows, absent
+        assert rows["cli_package_closure"]["observed"] == "not declared"
+    finally:
+        os.close(result.exec_fd)
+    assert spawns == []
+
+
+def test_direct_acp_argv0_must_be_the_sealed_executable(tmp_path: Path) -> None:
+    fixture = _arrange_direct(tmp_path)
+    other = tmp_path / "stage" / "impostor"
+    other.write_bytes(b"# impostor\n")
+    import dataclasses as _dc
+
+    refusal = _refusal(
+        fixture,
+        launch=_dc.replace(fixture.launch, argv=(str(other), "acp")),
+    )
+    assert refusal.failing_check == "argv_cli_binding"
+    assert refusal.code == RUNTIME_IDENTITY_MISMATCH
+
+
+def test_direct_acp_inwindow_swap_refused_by_the_recheck(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _arrange_direct(tmp_path)
+
+    def swap() -> None:
+        replacement = tmp_path / "stage" / "swapped-agent"
+        replacement.write_bytes(b"# swapped agent cli\n")
+        fixture.cli.unlink()
+        os.rename(replacement, fixture.cli)
+
+    _arm(monkeypatch, swap)
+    refusal = _refusal(fixture)
+    assert refusal.failing_check == "cli_binding_lost"
+    assert refusal.code == RUNTIME_IDENTITY_MISMATCH
+
+
+# -- C5/C9/C10: the wrapped source artifacts carry the same trust boundary ---
+#
+# Node and the adapter entry are source-frozen and hash-pinned, but a digest
+# freezes bytes only until someone who can write them changes them — and the
+# adapter entry is the one artifact ARS hands to Node *by path*, after the
+# attestation descriptor is gone.
+
+
+def test_writable_node_is_refused(tmp_path: Path) -> None:
+    """Node is source-frozen, which freezes bytes, not who may rewrite them."""
+    fixture = _arrange(tmp_path)
+    fixture.node.chmod(0o666)
+    refusal = _refusal(fixture)
+    assert refusal.failing_check == "node_artifact_trust"
+    assert fixture.rows()["node_artifact_trust"]["observed"] == "GROUP_OR_OTHER_WRITABLE"
+
+
+def test_writable_adapter_entry_is_refused(tmp_path: Path) -> None:
+    fixture = _arrange(tmp_path)
+    fixture.entry.chmod(0o666)
+    refusal = _refusal(fixture)
+    assert refusal.failing_check == "adapter_entry_artifact_trust"
+    assert (
+        fixture.rows()["adapter_entry_artifact_trust"]["observed"]
+        == "GROUP_OR_OTHER_WRITABLE"
+    )
+
+
+def test_writable_adapter_entry_ancestor_is_refused(tmp_path: Path) -> None:
+    """The adapter's own ancestor chain is walked, not just the CLI's."""
+    fixture = _arrange(tmp_path)
+    private = tmp_path / "stage" / "adapter"
+    private.mkdir()
+    relocated = private / "index.js"
+    relocated.write_bytes(fixture.entry.read_bytes())
+    bf.harden_tree(private)
+    expected = fixture.reseal(
+        adapter_entry_path=str(relocated),
+        adapter_entry_sha256=_sha256(relocated),
+    )
+    launch = dataclasses.replace(
+        fixture.launch, argv=(str(fixture.node), str(relocated))
+    )
+    private.chmod(0o777)  # only the adapter's own parent is rewritable
+
+    with pytest.raises(AttestationRefusal) as err:
+        _attest(fixture, expected=expected, launch=launch)
+    assert err.value.failing_check == "adapter_entry_artifact_trust"
+    assert (
+        fixture.rows()["adapter_entry_artifact_trust"]["observed"]
+        == "GROUP_OR_OTHER_WRITABLE"
+    )
+    assert err.value.code == RUNTIME_IDENTITY_MISMATCH
+
+
+def test_inwindow_adapter_entry_rewrite_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An in-place rewrite keeps the inode, so only content can catch it.
+
+    Node opens ``argv[1]`` by path after this gate closes its descriptor, so
+    the adapter entry's bytes are re-proven on the far side of the window.
+    """
+    spawns = _spawn_guard(monkeypatch)
+    fixture = _arrange(tmp_path)
+    before = os.stat(fixture.entry)
+
+    def rewrite() -> None:
+        mode = fixture.entry.stat().st_mode
+        with open(fixture.entry, "r+b") as handle:
+            handle.write(b"// swapped adapter entry code!!\n")
+        fixture.entry.chmod(mode)
+
+    _arm(monkeypatch, rewrite)
+    refusal = _refusal(fixture)
+    assert refusal.failing_check == "adapter_entry_sha256_recheck"
+    assert refusal.code == RUNTIME_IDENTITY_MISMATCH
+    # The inode never changed: the existing liveness row could not see this.
+    after = os.stat(fixture.entry)
+    assert (before.st_dev, before.st_ino) == (after.st_dev, after.st_ino)
+    assert spawns == []
+
+
+def test_inwindow_adapter_entry_permission_grant_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Losing the trust property mid-window is itself the refusal."""
+    fixture = _arrange(tmp_path)
+
+    def loosen() -> None:
+        fixture.entry.chmod(0o666)
+
+    _arm(monkeypatch, loosen)
+    refusal = _refusal(fixture)
+    assert refusal.failing_check == "adapter_entry_trust_recheck"
+    assert (
+        fixture.rows()["adapter_entry_trust_recheck"]["observed"]
+        == "GROUP_OR_OTHER_WRITABLE"
+    )

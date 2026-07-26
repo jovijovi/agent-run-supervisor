@@ -18,13 +18,17 @@ from typing import Any, Mapping
 from agent_run_supervisor.process_liveness import ProcessIdentity
 from agent_run_supervisor.role import PERMISSION_KINDS
 
-from .attestation import ExpectedRuntimeIdentity
+from .attestation import ArtifactClosure, SealedRuntimeIdentity
 from .profile import (
+    LAUNCH_KIND_DIRECT,
+    LAUNCH_KIND_WRAPPED,
+    SLOT_KIND_NATIVE_BINARY,
     AgentProfile,
     ProfileRegistry,
     resolve_registered_executable,
     resolve_registered_permission_env,
 )
+from .runtime_binding import AdmittedRuntimeBinding
 
 SPEC_SCHEMA_VERSION = 1
 
@@ -258,6 +262,42 @@ def resolve_workspace_binding(*, root: Path, cwd: str | None = None) -> Workspac
 
 
 @dataclass(frozen=True)
+class RuntimeProvenance:
+    """Which Binding generation this Run resolved, and under which contract.
+
+    Reported, never re-consulted: once sealed, nothing on the Run path reads
+    the Binding root again, so a promotion can never re-point work that is
+    already sealed. The acceptance receipt travels for reporting only and is
+    never an authorization input.
+    """
+
+    adapter_contract_hash: str
+    launch_kind: str
+    generation_id: str
+    manifest_sha256: str
+    generation_hash: str
+    slot_set_hash: str
+    slot_hashes: tuple[tuple[str, str], ...]
+    session_compatibility_epoch: int
+    acceptance_receipt_ref: str | None = None
+    acceptance_receipt_sha256: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "adapter_contract_hash": self.adapter_contract_hash,
+            "launch_kind": self.launch_kind,
+            "generation_id": self.generation_id,
+            "manifest_sha256": self.manifest_sha256,
+            "generation_hash": self.generation_hash,
+            "slot_set_hash": self.slot_set_hash,
+            "slot_hashes": [list(pair) for pair in self.slot_hashes],
+            "session_compatibility_epoch": self.session_compatibility_epoch,
+            "acceptance_receipt_ref": self.acceptance_receipt_ref,
+            "acceptance_receipt_sha256": self.acceptance_receipt_sha256,
+        }
+
+
+@dataclass(frozen=True)
 class ResolvedLaunchSpec:
     """Controlled launch material: fixed argv, slot names only, stdio.
 
@@ -266,10 +306,14 @@ class ResolvedLaunchSpec:
     from the closed profile registry, never caller input and never a
     credential value — serialized here as durable launch evidence.
 
-    ``fixed_env`` and ``expected_runtime`` mirror the profile's frozen launch
-    environment and runtime identity, so the *expected* identity is durable in
-    ``launch.json`` before the spawn-boundary attestation can fail. Nothing is
-    hashed here: resolution never opens an attested artifact.
+    ``fixed_env`` is the profile's frozen launch environment *plus* the values
+    projected into the code-known env keys the contract's Binding slots
+    declared. ``expected_runtime`` is the per-Run sealed runtime identity and
+    ``runtime_provenance`` records which Binding generation produced it, so
+    both are durable in ``launch.json`` before the spawn-boundary attestation
+    can fail. Nothing is hashed here: resolution never opens an attested
+    artifact — the digests it carries are the ones the Binding read already
+    verified.
     """
 
     executable: str
@@ -283,7 +327,8 @@ class ResolvedLaunchSpec:
     permission_env: tuple[tuple[str, str], ...] = ()
     transport: str = "stdio"
     fixed_env: tuple[tuple[str, str], ...] = ()
-    expected_runtime: ExpectedRuntimeIdentity | None = None
+    expected_runtime: SealedRuntimeIdentity | None = None
+    runtime_provenance: RuntimeProvenance | None = None
     # Canonical JSON text of the profile's frozen ACP session metadata, mirrored
     # so the exact ``_meta`` this Run will send is durable evidence before any
     # session call. Never caller input.
@@ -302,11 +347,14 @@ class ResolvedLaunchSpec:
             "permission_env": [list(pair) for pair in self.permission_env],
             "transport": self.transport,
         }
-        # Omit-when-empty/None keeps legacy launch hashes byte-identical.
+        # Omit-when-empty/None: a profile that owns no such surface serializes
+        # exactly as it did before the surface was expressible.
         if self.fixed_env:
             payload["fixed_env"] = [list(pair) for pair in self.fixed_env]
         if self.expected_runtime is not None:
             payload["expected_runtime"] = self.expected_runtime.to_dict()
+        if self.runtime_provenance is not None:
+            payload["runtime_provenance"] = self.runtime_provenance.to_dict()
         if self.session_meta is not None:
             payload["session_meta"] = json.loads(self.session_meta)
         return payload
@@ -471,6 +519,84 @@ class EffectiveRunState:
         }
 
 
+def seal_runtime_identity(
+    profile: AgentProfile, runtime: AdmittedRuntimeBinding | None
+) -> SealedRuntimeIdentity | None:
+    """Combine the source contract half with the Binding's deployment half."""
+    contract = profile.contract
+    if runtime is None or contract.cli_slot is None:
+        return None
+    slot = runtime.resolved.slot(contract.cli_slot)
+    descriptor = slot.descriptor
+    if slot.kind == SLOT_KIND_NATIVE_BINARY:
+        closure = ArtifactClosure(
+            kind=slot.kind,
+            path=str(descriptor["path"]),
+            sha256=str(descriptor["sha256"]),
+            version=str(descriptor["version"]),
+            interpreter_path=descriptor["interpreter"],
+            interpreter_sha256=descriptor["interpreter_sha256"],
+        )
+    else:
+        closure = ArtifactClosure(
+            kind=slot.kind,
+            path=str(descriptor["launcher_path"]),
+            sha256=str(descriptor["launcher_sha256"]),
+            version=str(descriptor["version"]),
+            package_root=str(descriptor["package_root"]),
+            tree_sha256=str(descriptor["tree_sha256"]),
+            interpreter_path=str(descriptor["interpreter_path"]),
+            interpreter_sha256=str(descriptor["interpreter_sha256"]),
+        )
+    credential_root_path = None
+    if contract.credential_root_slot is not None:
+        credential_root_path = str(
+            runtime.resolved.slot(contract.credential_root_slot).descriptor["path"]
+        )
+    wrapped = contract.wrapped_runtime
+    return SealedRuntimeIdentity(
+        launch_kind=contract.launch_kind,
+        agent_info_name=contract.acp_agent_name,
+        agent_info_version=contract.acp_agent_version,
+        protocol_version=contract.acp_protocol_version,
+        cli=closure,
+        cli_path_env=contract.slot(contract.cli_slot).env_key,
+        node_path=wrapped.interpreter_path if wrapped else None,
+        node_sha256=wrapped.interpreter_sha256 if wrapped else None,
+        adapter_entry_path=wrapped.adapter_entry_path if wrapped else None,
+        adapter_entry_sha256=wrapped.adapter_entry_sha256 if wrapped else None,
+        credential_root_env=(
+            contract.slot(contract.credential_root_slot).env_key
+            if contract.credential_root_slot is not None
+            else None
+        ),
+        credential_root_path=credential_root_path,
+        project_config_relpath=contract.project_config_relpath,
+    )
+
+
+def seal_runtime_provenance(
+    profile: AgentProfile, runtime: AdmittedRuntimeBinding | None
+) -> RuntimeProvenance | None:
+    if runtime is None:
+        return None
+    resolved = runtime.resolved
+    return RuntimeProvenance(
+        adapter_contract_hash=profile.adapter_contract_hash(),
+        launch_kind=profile.contract.launch_kind,
+        generation_id=resolved.generation_id,
+        manifest_sha256=resolved.manifest_sha256,
+        generation_hash=resolved.generation_hash,
+        slot_set_hash=resolved.slot_set_hash,
+        slot_hashes=tuple(
+            (name, slot.slot_hash) for name, slot in sorted(resolved.slots.items())
+        ),
+        session_compatibility_epoch=resolved.session_compatibility_epoch,
+        acceptance_receipt_ref=resolved.acceptance_receipt_ref,
+        acceptance_receipt_sha256=resolved.acceptance_receipt_sha256,
+    )
+
+
 class RunSpecAssembler:
     """Enforces the R1 freeze order for one Run admission."""
 
@@ -515,14 +641,47 @@ class RunSpecAssembler:
         self._binding = resolve_workspace_binding(root=root, cwd=cwd)
         return self._binding
 
-    def resolve_launch(self) -> ResolvedLaunchSpec:
+    def resolve_launch(
+        self, *, runtime: AdmittedRuntimeBinding | None = None
+    ) -> ResolvedLaunchSpec:
+        """Materialize the controlled launch, projecting accepted slots only.
+
+        ``runtime`` is the Binding generation admission already read exactly
+        once. A profile whose contract declares slots cannot launch without it:
+        the deployment facts simply are not in source any more, and inventing a
+        default would be the silent fallback R13 forbids.
+        """
         if self._profile is None or self._binding is None:
             raise SpecFreezeOrderError(
                 "resolve_launch requires a resolved profile and a bound workspace"
             )
-        executable = resolve_registered_executable(self._profile.executable_key)
-        argv: list[str] = [str(executable)]
-        for token in self._profile.argv_template:
+        profile = self._profile
+        contract = profile.contract
+        if contract.requires_binding and runtime is None:
+            raise SpecValidationError(
+                f"profile {profile.profile_id} requires a resolved Runtime Binding"
+            )
+        if runtime is not None and not contract.requires_binding:
+            raise SpecValidationError(
+                f"profile {profile.profile_id} accepts no Runtime Binding slot"
+            )
+
+        fixed_env = list(profile.fixed_env)
+        executable_slot = contract.executable_slot()
+        if executable_slot is not None and runtime is not None:
+            executable = str(runtime.resolved.slot(executable_slot.name).descriptor["path"])
+        else:
+            executable = str(resolve_registered_executable(profile.executable_key))
+        if runtime is not None:
+            for slot in contract.binding_slots:
+                if slot.env_key is None:
+                    continue
+                descriptor = runtime.resolved.slot(slot.name).descriptor
+                value = descriptor.get("launcher_path") or descriptor.get("path")
+                fixed_env.append((slot.env_key, str(value)))
+
+        argv: list[str] = [executable]
+        for token in profile.argv_template:
             if token == _CWD_TOKEN:
                 argv.append(self._binding.effective_cwd)
             elif "<" in token or ">" in token:
@@ -532,20 +691,19 @@ class RunSpecAssembler:
             else:
                 argv.append(token)
         self._launch = ResolvedLaunchSpec(
-            executable=str(executable),
+            executable=executable,
             argv=tuple(argv),
-            env_allowlist=self._profile.env_allowlist,
-            credential_refs=self._profile.credential_slots,
-            profile_id=self._profile.profile_id,
-            profile_revision=self._profile.revision,
-            profile_hash=self._profile.profile_hash(),
-            config_schema_hash=self._profile.config_schema_hash(),
-            permission_env=resolve_registered_permission_env(
-                self._profile.executable_key
-            ),
-            fixed_env=self._profile.fixed_env,
-            expected_runtime=self._profile.expected_runtime,
-            session_meta=self._profile.session_meta,
+            env_allowlist=profile.env_allowlist,
+            credential_refs=profile.credential_slots,
+            profile_id=profile.profile_id,
+            profile_revision=profile.revision,
+            profile_hash=profile.profile_hash(),
+            config_schema_hash=profile.config_schema_hash(),
+            permission_env=resolve_registered_permission_env(profile.executable_key),
+            fixed_env=tuple(fixed_env),
+            expected_runtime=seal_runtime_identity(profile, runtime),
+            runtime_provenance=seal_runtime_provenance(profile, runtime),
+            session_meta=profile.session_meta,
         )
         return self._launch
 

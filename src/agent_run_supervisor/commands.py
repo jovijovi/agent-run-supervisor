@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import platform
 from importlib import resources
@@ -406,3 +407,257 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
         }
     )
     return 0 if not result.failed else 1
+
+
+# --- Runtime Binding operator surface (PRD R13, C13/C14) ---------------------
+
+
+def _binding_ownership(args: argparse.Namespace):
+    """The operator's declared artifact-trust policy for this invocation.
+
+    Defaults are fail-closed: only root may own the artifact root, and this
+    process's effective UID is treated as the ``arsd``/AGENT UID that must not
+    be able to rewrite it. An operator whose root is owned by a dedicated
+    non-service account states that explicitly rather than having it inferred.
+    """
+    import os
+
+    from agent_run_supervisor.native_acp import runtime_binding as rb
+
+    trusted = frozenset(args.trusted_uid) if args.trusted_uid else frozenset({0})
+    service = args.service_uid if args.service_uid is not None else os.geteuid()
+    return rb.TrustedOwnership(trusted_uids=trusted, service_uid=service)
+
+
+def _resolve_binding_profile(profile_id: str):
+    from agent_run_supervisor.native_acp.profile import (
+        DEFAULT_REGISTRY,
+        UnknownProfileError,
+    )
+
+    try:
+        return DEFAULT_REGISTRY.get(profile_id)
+    except UnknownProfileError:
+        return None
+
+
+def _validated_generation(
+    args: argparse.Namespace,
+) -> tuple[int, dict[str, Any], Any]:
+    """Shared validate/promote/rollback core: full validation plus the probe.
+
+    Returns the probed :class:`ResolvedBinding` itself, because C6 makes the
+    probed object the only object a promotion may activate.
+    """
+    from agent_run_supervisor.native_acp import runtime_binding as rb
+
+    profile = _resolve_binding_profile(args.profile)
+    if profile is None:
+        return 1, {
+            "valid": False,
+            "rule": "UNKNOWN_PROFILE",
+            "profile_id": args.profile,
+        }, None
+    try:
+        resolved = rb.validate_generation(
+            Path(args.binding_root),
+            args.generation,
+            profile=profile,
+            ownership=_binding_ownership(args),
+            probe=True,
+        )
+    except rb.BindingRefusal as refusal:
+        return 1, {
+            "valid": False,
+            "rule": refusal.rule,
+            "profile_id": profile.profile_id,
+            "generation_id": args.generation,
+        }, None
+    report: dict[str, Any] = {
+        "valid": True,
+        "profile_id": profile.profile_id,
+        "profile_revision": profile.revision,
+        "adapter_contract_hash": profile.adapter_contract_hash(),
+        "generation_id": resolved.generation_id,
+        "manifest_sha256": resolved.manifest_sha256,
+        "generation_hash": resolved.generation_hash,
+        "slot_set_hash": resolved.slot_set_hash,
+        "session_compatibility_epoch": resolved.session_compatibility_epoch,
+        "acceptance_receipt_ref": resolved.acceptance_receipt_ref,
+        "declared_version": None,
+        "probe_version": None,
+    }
+    if profile.contract.cli_slot is not None:
+        report["declared_version"] = rb.declared_cli_version(resolved, profile)
+        # ``validate_generation`` already probed and matched this exact object;
+        # the declared value is reported rather than the CLI re-run, so the
+        # report can never describe a different probe than the one that gated.
+        report["probe_version"] = report["declared_version"]
+    return 0, report, resolved
+
+
+def cmd_runtime_binding(args: argparse.Namespace) -> int:
+    command = getattr(args, "runtime_binding_command", None)
+    if command is None:
+        print(
+            "error: a runtime-binding subcommand is required "
+            "(validate | promote | rollback | inspect-run)",
+            file=sys.stderr,
+        )
+        return 2
+    if command == "inspect-run":
+        return _cmd_binding_inspect_run(args)
+    if command in ("validate", "promote", "rollback"):
+        return _cmd_binding_generation(args, command)
+    print(f"error: unknown runtime-binding subcommand {command!r}", file=sys.stderr)
+    return 2
+
+
+def _cmd_binding_generation(args: argparse.Namespace, command: str) -> int:
+    from agent_run_supervisor.native_acp import runtime_binding as rb
+
+    if command == "rollback":
+        # A rollback targets a generation other than the active one: rolling
+        # back to what is already promoted would be a silent no-op that reads
+        # like a successful recovery.
+        try:
+            active = rb.read_active_pointer(
+                Path(args.binding_root), ownership=_binding_ownership(args)
+            )
+        except rb.BindingRefusal as refusal:
+            _print_json({"valid": False, "rule": refusal.rule})
+            return 1
+        if active is not None and active[0] == args.generation:
+            _print_json(
+                {
+                    "valid": False,
+                    "rule": "ALREADY_ACTIVE",
+                    "generation_id": args.generation,
+                }
+            )
+            return 1
+
+    code, report, resolved = _validated_generation(args)
+    if code != 0 or command == "validate":
+        _print_json(report)
+        return code
+
+    # C6: promote exactly the object the probe proved. A second read here could
+    # activate a manifest that replaced it mid-command, so there is no second
+    # read — ``validate_generation`` has already re-confirmed that this
+    # generation's bytes did not change while it was being probed.
+    try:
+        rb.write_active_pointer(
+            Path(args.binding_root), resolved, ownership=_binding_ownership(args)
+        )
+    except rb.BindingRefusal as refusal:
+        _print_json({"valid": True, "promoted": False, "rule": refusal.rule})
+        return 1
+    except OSError as exc:
+        _print_json({"valid": True, "promoted": False, "error": exc.__class__.__name__})
+        return 1
+    report["promoted"] = True
+    if command == "rollback":
+        report["rolled_back_to"] = resolved.generation_id
+    _print_json(report)
+    return 0
+
+
+# The one top-level field the launch hash excludes — and the only one. The
+# inspector pops it from a copy, so a second exclusion is not expressible.
+LAUNCH_SEAL_FIELD = "launch_spec_hash"
+
+
+def _recompute_launch_hash(record: dict[str, Any]) -> str:
+    body = dict(record)
+    body.pop(LAUNCH_SEAL_FIELD, None)
+    canonical = json.dumps(
+        body, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _cmd_binding_inspect_run(args: argparse.Namespace) -> int:
+    """C13: recompute one Run's launch seal and report its provenance.
+
+    Reads ``launch.json`` and ``spec.json`` and writes nothing. A pre-PR-B
+    record carries no runtime provenance and possibly no embedded seal; it is
+    reported as a legacy launch record and verified against ``spec.json``
+    alone rather than failing.
+    """
+    run_dir = Path(args.run_dir)
+    try:
+        record = json.loads((run_dir / "launch.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        _print_json({"error": "LAUNCH_RECORD_MISSING", "run_dir": str(run_dir)})
+        return 1
+    if not isinstance(record, dict):
+        _print_json({"error": "LAUNCH_RECORD_MALFORMED", "run_dir": str(run_dir)})
+        return 1
+
+    spec_launch_hash = None
+    try:
+        spec = json.loads((run_dir / "spec.json").read_text(encoding="utf-8"))
+        if isinstance(spec, dict):
+            spec_launch_hash = spec.get(LAUNCH_SEAL_FIELD)
+    except (OSError, json.JSONDecodeError):
+        spec_launch_hash = None
+
+    recomputed = _recompute_launch_hash(record)
+    embedded = record.get(LAUNCH_SEAL_FIELD)
+    provenance = record.get("runtime_provenance")
+    sealed = record.get("expected_runtime") or {}
+    cli = sealed.get("cli") or {}
+    legacy = provenance is None
+
+    report: dict[str, Any] = {
+        "run_dir": str(run_dir),
+        "legacy_launch_record": legacy,
+        "recomputed_launch_spec_hash": recomputed,
+        "embedded_seal": embedded,
+        "spec_launch_spec_hash": spec_launch_hash,
+        "seal_verified": embedded is not None and embedded == recomputed,
+        "matches_spec": spec_launch_hash is not None and spec_launch_hash == recomputed,
+        "profile_id": record.get("profile_id"),
+        "profile_revision": record.get("profile_revision"),
+        "profile_hash": record.get("profile_hash"),
+        "config_schema_hash": record.get("config_schema_hash"),
+        "adapter_contract_hash": (provenance or {}).get("adapter_contract_hash"),
+        "launch_kind": sealed.get("launch_kind") or (provenance or {}).get("launch_kind"),
+        "agent_info_name": sealed.get("agent_info_name"),
+        "agent_info_version": sealed.get("agent_info_version"),
+        "protocol_version": sealed.get("protocol_version"),
+        "interpreter": {
+            "path": sealed.get("node_path"),
+            "sha256": sealed.get("node_sha256"),
+        },
+        "adapter_entry": {
+            "path": sealed.get("adapter_entry_path"),
+            "sha256": sealed.get("adapter_entry_sha256"),
+        },
+        "cli": dict(cli) if cli else None,
+        "binding": None,
+        "session_compatibility_epoch": (provenance or {}).get(
+            "session_compatibility_epoch"
+        ),
+    }
+    if provenance is not None:
+        report["binding"] = {
+            "generation_id": provenance.get("generation_id"),
+            "manifest_sha256": provenance.get("manifest_sha256"),
+            "generation_hash": provenance.get("generation_hash"),
+            "slot_set_hash": provenance.get("slot_set_hash"),
+            "slot_hashes": provenance.get("slot_hashes"),
+            # Recorded and reported, never an authorization input.
+            "acceptance_receipt_ref": provenance.get("acceptance_receipt_ref"),
+            "acceptance_receipt_sha256": provenance.get("acceptance_receipt_sha256"),
+        }
+    _print_json(report)
+    if legacy:
+        # A pre-PR-B record carries no embedded seal, so it is graded against
+        # ``spec.json`` alone — graded, not waived. Reporting a legacy record
+        # whose launch hash disagrees with the Run's sealed spec as a success
+        # would make forged legacy evidence indistinguishable from intact
+        # evidence, and a missing spec leaves nothing to verify against.
+        return 0 if report["matches_spec"] else 1
+    return 0 if report["seal_verified"] and report["matches_spec"] else 1

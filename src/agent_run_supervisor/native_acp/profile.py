@@ -1,4 +1,4 @@
-"""Typed, versioned, closed AgentProfile registry (PRD R12).
+"""Typed, versioned, closed AgentProfile registry (PRD R12/R13).
 
 Profiles are code-registered constants: fixed executable reference (resolved
 only through the operator-managed registered installation mapping — no
@@ -6,17 +6,23 @@ caller or environment path override), fixed argv template with registered
 substitutions only, credential/env slot *names* (never values), typed config
 selectors, and capability flags. No command/argv/env/JSON passthrough
 surface exists.
+
+Each profile also carries its source-frozen :class:`AdapterContract` — layer 1
+of the three runtime-authority layers (PRD R13). The contract freezes
+compatibility semantics and the *shape* of the Binding it accepts; it never
+freezes a deployment-specific downstream CLI path, version, or digest. Those
+are layer-2 operator facts read once per Run through
+:mod:`agent_run_supervisor.native_acp.runtime_binding`.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping
-
-from .attestation import ExpectedRuntimeIdentity
+from typing import Any, Callable, Iterable, Mapping
 
 
 class UnknownProfileError(ValueError):
@@ -35,6 +41,14 @@ def _sha256_hex(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _is_sha256_hex(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(ch in "0123456789abcdef" for ch in value)
+    )
+
+
 # Operator-managed registered installation mapping. Resolution never consults
 # caller input, PATH, or any environment variable.
 #
@@ -44,11 +58,14 @@ def _sha256_hex(text: str) -> str:
 # kernel resolve the interpreter from the child's ambient PATH. The process
 # image is Node and the entry JS is argv[1], so interpreter selection never
 # involves PATH at all.
+#
+# A ``direct_acp`` profile has no entry here at all: its one executable is both
+# the AGENT CLI and the ACP implementation, so it is a deployment fact the
+# operator-owned Binding supplies through the contract's executable slot.
 _FROZEN_NODE = Path(
     "/home/ecs-user/.local/share/agent-run-supervisor/adapters/node/v24.14.0/bin/node"
 )
 _REGISTERED_EXECUTABLES: dict[str, Path] = {
-    "opencode": Path("/home/linuxbrew/.linuxbrew/bin/opencode"),
     "codex-acp": _FROZEN_NODE,
     "claude-agent-acp": _FROZEN_NODE,
 }
@@ -98,6 +115,310 @@ def resolve_registered_permission_env(key: str) -> tuple[tuple[str, str], ...]:
     return _REGISTERED_PERMISSION_ENV.get(key, ())
 
 
+# ---------------------------------------------------------------------------
+# AdapterContract — layer 1 of PRD R13
+# ---------------------------------------------------------------------------
+
+LAUNCH_KIND_WRAPPED = "wrapped_acp"
+LAUNCH_KIND_DIRECT = "direct_acp"
+LAUNCH_KINDS = (LAUNCH_KIND_WRAPPED, LAUNCH_KIND_DIRECT)
+
+SLOT_KIND_NATIVE_BINARY = "native_binary"
+SLOT_KIND_PACKAGE_TREE = "package_tree"
+SLOT_KIND_CONFIG_ROOT = "config_root"
+SLOT_KINDS = (SLOT_KIND_NATIVE_BINARY, SLOT_KIND_PACKAGE_TREE, SLOT_KIND_CONFIG_ROOT)
+
+ARTIFACT_SLOT_KINDS = (SLOT_KIND_NATIVE_BINARY, SLOT_KIND_PACKAGE_TREE)
+
+# The exact descriptor field set a Binding slot of each kind must carry — no
+# more, no less. Declared here because it is contract shape, not operator data.
+# ``package_tree`` deliberately requires the tree digest *and* the interpreter
+# identity beside the launcher: a launcher hash alone never freezes the sibling
+# code the launcher loads (C5).
+# ``native_binary`` carries the same pair for the same reason: a script or a
+# dynamically linked image is executed by an interpreter or loader that lives
+# outside the hashed file, so its identity is frozen beside the file's own
+# digest. Only an image that needs no external interpreter may leave both null.
+SLOT_DESCRIPTOR_FIELDS: dict[str, tuple[str, ...]] = {
+    SLOT_KIND_NATIVE_BINARY: (
+        "path",
+        "version",
+        "sha256",
+        "interpreter",
+        "interpreter_sha256",
+    ),
+    SLOT_KIND_PACKAGE_TREE: (
+        "package_root",
+        "tree_sha256",
+        "launcher_path",
+        "launcher_sha256",
+        "interpreter_path",
+        "interpreter_sha256",
+        "version",
+    ),
+    SLOT_KIND_CONFIG_ROOT: ("path",),
+}
+
+_SEMVER_RE = re.compile(r"\b(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.\-]+)?)\b")
+
+
+def _parse_first_semver(text: str) -> str | None:
+    match = _SEMVER_RE.search(text)
+    return match.group(1) if match is not None else None
+
+
+# Closed set of code-owned probe output parsers. A Binding names nothing here:
+# the contract picks the parser, and the operator can never supply one.
+VERSION_PROBE_PARSERS: dict[str, Callable[[str], str | None]] = {
+    "first_semver": _parse_first_semver,
+}
+
+
+@dataclass(frozen=True)
+class VersionProbeRule:
+    """The only sanctioned way to learn an external CLI's real version (C6).
+
+    A fixed non-prompt argv suffix, a hermetic environment, bounded output and
+    timeout, and a code-owned parser. The rule is contract data; running it is
+    an operator-command action, never an admission-path action.
+    """
+
+    argv_suffix: tuple[str, ...]
+    parser_id: str = "first_semver"
+    timeout_seconds: float = 15.0
+    max_output_bytes: int = 8192
+
+    def __post_init__(self) -> None:
+        if not self.argv_suffix:
+            raise ProfileValidationError("version probe requires a fixed argv suffix")
+        for token in self.argv_suffix:
+            if not isinstance(token, str) or not token or not token.startswith("-"):
+                raise ProfileValidationError(
+                    "version probe argv suffix accepts option tokens only"
+                )
+        if self.parser_id not in VERSION_PROBE_PARSERS:
+            raise ProfileValidationError(
+                f"version probe parser {self.parser_id!r} is not code-owned"
+            )
+        if not (0 < self.timeout_seconds <= 60):
+            raise ProfileValidationError("version probe timeout must be in (0, 60]")
+        if not (256 <= self.max_output_bytes <= 1 << 20):
+            raise ProfileValidationError("version probe output bound is out of range")
+
+    def parse(self, text: str) -> str | None:
+        return VERSION_PROBE_PARSERS[self.parser_id](text)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "argv_suffix": list(self.argv_suffix),
+            "parser_id": self.parser_id,
+            "timeout_seconds": self.timeout_seconds,
+            "max_output_bytes": self.max_output_bytes,
+        }
+
+
+@dataclass(frozen=True)
+class BindingSlot:
+    """One slot the contract accepts a Binding value into (C2).
+
+    A slot declares a name, a kind, and — at most — the code-known env key the
+    projected value fills. It never declares the value itself, and a Binding
+    can never introduce a slot or an env key the contract has not declared.
+    """
+
+    name: str
+    kind: str
+    env_key: str | None = None
+    provides_executable: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name.isidentifier():
+            raise ProfileValidationError("binding slot name must be an identifier")
+        if self.kind not in SLOT_KINDS:
+            raise ProfileValidationError(f"unknown binding slot kind: {self.kind!r}")
+        if self.env_key is not None and self.env_key not in _FIXED_ENV_ALLOWED_KEYS:
+            raise ProfileValidationError(
+                f"binding slot env key {self.env_key!r} is not a code-known key"
+            )
+        if self.provides_executable and self.kind != SLOT_KIND_NATIVE_BINARY:
+            raise ProfileValidationError(
+                "only a native_binary slot may provide the executable"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "kind": self.kind,
+            "env_key": self.env_key,
+            "provides_executable": self.provides_executable,
+            # C1 freezes the *accepted Binding schema*, not only the slot's
+            # name and kind, so the descriptor field set rides in the contract
+            # hash: widening or narrowing what a generation may declare is a
+            # contract change and fails prior generations closed (C3).
+            "descriptor_fields": list(SLOT_DESCRIPTOR_FIELDS[self.kind]),
+        }
+
+
+@dataclass(frozen=True)
+class WrappedRuntimeArtifacts:
+    """Source-frozen interpreter and ACP adapter identity for ``wrapped_acp``.
+
+    These stay in code (C9): the interpreter and the adapter entry are ARS-
+    controlled artifacts, not deployment facts an operator re-points.
+    """
+
+    interpreter_path: str
+    interpreter_sha256: str
+    adapter_entry_path: str
+    adapter_entry_sha256: str
+
+    def __post_init__(self) -> None:
+        for name in ("interpreter_path", "adapter_entry_path"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not Path(value).is_absolute():
+                raise ProfileValidationError(f"{name} must be an absolute path")
+        for name in ("interpreter_sha256", "adapter_entry_sha256"):
+            value = getattr(self, name)
+            if not _is_sha256_hex(value):
+                raise ProfileValidationError(f"{name} must be a sha256 hex digest")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "interpreter_path": self.interpreter_path,
+            "interpreter_sha256": self.interpreter_sha256,
+            "adapter_entry_path": self.adapter_entry_path,
+            "adapter_entry_sha256": self.adapter_entry_sha256,
+        }
+
+
+@dataclass(frozen=True)
+class AdapterContract:
+    """The source-frozen adapter compatibility contract (PRD R13, C1).
+
+    It freezes ``launch_kind``, the accepted Binding schema and slot
+    projection, the ACP protocol/name plus required *and forbidden*
+    capabilities, the wrapped interpreter/adapter artifact identity, and the
+    code-owned version-probe rule. It freezes no downstream CLI path, version,
+    digest, or config-root value: those are Binding facts.
+    """
+
+    launch_kind: str
+    acp_agent_name: str
+    acp_protocol_version: str
+    version_probe: VersionProbeRule
+    # The ACP-reported agent version, asserted only where it is itself a
+    # *source* artifact fact — a wrapped adapter whose entry digest this
+    # contract already freezes. ``None`` for ``direct_acp``, where
+    # ``agentInfo.version`` reports the deployed executable: freezing it would
+    # re-freeze a deployment fact, and it may never be asserted equal to a CLI
+    # ``--version``.
+    acp_agent_version: str | None = None
+    binding_slots: tuple[BindingSlot, ...] = ()
+    required_capabilities: tuple[str, ...] = ("loadSession",)
+    forbidden_capabilities: tuple[str, ...] = ()
+    wrapped_runtime: WrappedRuntimeArtifacts | None = None
+    # Slot names that carry, respectively, the downstream CLI artifact and an
+    # ARS-managed credential root. Both are slot *names*, never values.
+    cli_slot: str | None = None
+    credential_root_slot: str | None = None
+    # Workspace project-config surface whose ancestor chain must stay clean.
+    project_config_relpath: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.launch_kind not in LAUNCH_KINDS:
+            raise ProfileValidationError(f"unknown launch kind: {self.launch_kind!r}")
+        if not self.acp_agent_name:
+            raise ProfileValidationError("contract requires an ACP agent name")
+        if not self.acp_protocol_version.isdigit():
+            raise ProfileValidationError("acp_protocol_version must be decimal text")
+        names = [slot.name for slot in self.binding_slots]
+        if len(names) != len(set(names)):
+            raise ProfileValidationError("duplicate binding slot name")
+        overlap = set(self.required_capabilities) & set(self.forbidden_capabilities)
+        if overlap:
+            raise ProfileValidationError(
+                f"capability declared both required and forbidden: {sorted(overlap)}"
+            )
+        artifact_slots = [
+            slot for slot in self.binding_slots if slot.kind in ARTIFACT_SLOT_KINDS
+        ]
+        if len(artifact_slots) > 1:
+            raise ProfileValidationError(
+                "a contract declares at most one external CLI artifact slot"
+            )
+        if self.cli_slot is not None and self.cli_slot not in names:
+            raise ProfileValidationError(f"cli_slot {self.cli_slot!r} is not declared")
+        if self.credential_root_slot is not None:
+            if self.credential_root_slot not in names:
+                raise ProfileValidationError(
+                    f"credential_root_slot {self.credential_root_slot!r} is not declared"
+                )
+            if self.slot(self.credential_root_slot).kind != SLOT_KIND_CONFIG_ROOT:
+                raise ProfileValidationError(
+                    "credential_root_slot must be a config_root slot"
+                )
+        if self.launch_kind == LAUNCH_KIND_DIRECT and self.acp_agent_version is not None:
+            raise ProfileValidationError(
+                "a direct_acp contract must not freeze the deployed agent version"
+            )
+        if self.launch_kind == LAUNCH_KIND_WRAPPED:
+            if self.wrapped_runtime is None:
+                raise ProfileValidationError(
+                    "a wrapped_acp contract must freeze its interpreter and adapter"
+                )
+            if artifact_slots and artifact_slots[0].kind != SLOT_KIND_PACKAGE_TREE:
+                raise ProfileValidationError(
+                    "a wrapped downstream CLI binds as a package_tree closure"
+                )
+            if artifact_slots and artifact_slots[0].env_key is None:
+                raise ProfileValidationError(
+                    "a wrapped downstream CLI slot must fill a code-known env key"
+                )
+        else:
+            if self.wrapped_runtime is not None:
+                raise ProfileValidationError(
+                    "a direct_acp contract freezes no wrapped interpreter/adapter"
+                )
+            if artifact_slots and not artifact_slots[0].provides_executable:
+                raise ProfileValidationError(
+                    "a direct_acp artifact slot must provide the executable"
+                )
+
+    @property
+    def requires_binding(self) -> bool:
+        return bool(self.binding_slots)
+
+    def slot(self, name: str) -> BindingSlot:
+        for slot in self.binding_slots:
+            if slot.name == name:
+                return slot
+        raise UnknownProfileError(f"unknown binding slot: {name!r}")
+
+    def executable_slot(self) -> BindingSlot | None:
+        for slot in self.binding_slots:
+            if slot.provides_executable:
+                return slot
+        return None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "launch_kind": self.launch_kind,
+            "acp_agent_name": self.acp_agent_name,
+            "acp_protocol_version": self.acp_protocol_version,
+            "acp_agent_version": self.acp_agent_version,
+            "version_probe": self.version_probe.to_dict(),
+            "binding_slots": [slot.to_dict() for slot in self.binding_slots],
+            "required_capabilities": list(self.required_capabilities),
+            "forbidden_capabilities": list(self.forbidden_capabilities),
+            "cli_slot": self.cli_slot,
+            "credential_root_slot": self.credential_root_slot,
+            "project_config_relpath": self.project_config_relpath,
+        }
+        if self.wrapped_runtime is not None:
+            payload["wrapped_runtime"] = self.wrapped_runtime.to_dict()
+        return payload
+
+
 @dataclass(frozen=True)
 class AgentProfile:
     profile_id: str
@@ -117,12 +438,15 @@ class AgentProfile:
     allowed_efforts: tuple[str, ...]
     requires_session_load: bool
     config_schema: Mapping[str, Any]
+    # The source-frozen adapter compatibility contract (PRD R13 layer 1). It
+    # owns launch kind, accepted Binding shape, ACP identity/capabilities, the
+    # wrapped interpreter/adapter artifacts, and the version-probe rule.
+    contract: AdapterContract
     # Profile-owned frozen launch environment, deeply immutable and injected
     # only at spawn (D2). Empty for profiles that own no fixed environment.
+    # Deployment-specific values never live here: a Binding slot fills the
+    # code-known env key its contract declared.
     fixed_env: tuple[tuple[str, str], ...] = ()
-    # Frozen runtime identity verified at the spawn boundary (D3/D10). ``None``
-    # means no identity check, no attestation artifact, and no migration.
-    expected_runtime: ExpectedRuntimeIdentity | None = None
     # Exact caller credential references this profile admits (D11). ``None``
     # means unconstrained, preserving legacy behavior.
     required_credential_refs: tuple[str, ...] | None = None
@@ -141,9 +465,12 @@ class AgentProfile:
     session_meta: str | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.contract, AdapterContract):
+            raise ProfileValidationError("profile requires an AdapterContract")
         self._validate_permission_mode()
         self._validate_session_meta()
         self._validate_fixed_env()
+        self._validate_contract_binding()
         if self.required_credential_refs is not None:
             for ref in self.required_credential_refs:
                 if not isinstance(ref, str) or not ref:
@@ -253,21 +580,28 @@ class AgentProfile:
                 raise ProfileValidationError(
                     f"fixed_env INITIAL_AGENT_MODE {value!r} is not registered"
                 )
-        if self.expected_runtime is not None:
-            # Derived from the frozen identity, never a hardcoded name: the
-            # attestation checks depend on these keys, and a missing CLI-path
-            # key would silently switch the adapter to a PATH-resolved or
-            # bundled fallback CLI — a downstream identity change with no hash
-            # change. A runtime whose CLI owns its own credential storage
-            # declares no credential-root key and requires none.
-            required_keys = [self.expected_runtime.cli_path_env]
-            if self.expected_runtime.credential_root_env is not None:
-                required_keys.append(self.expected_runtime.credential_root_env)
-            for required in required_keys:
-                if required not in seen:
-                    raise ProfileValidationError(
-                        f"expected_runtime requires fixed_env {required}"
-                    )
+    def _validate_contract_binding(self) -> None:
+        """A Binding-filled env key is never also a source-frozen constant.
+
+        The contract declares which code-known env keys a Binding slot fills;
+        freezing the same key in ``fixed_env`` would give one launch variable
+        two authorities, and the source constant would silently win.
+        """
+        seen = {name for name, _ in self.fixed_env}
+        for slot in self.contract.binding_slots:
+            if slot.env_key is not None and slot.env_key in seen:
+                raise ProfileValidationError(
+                    f"fixed_env {slot.env_key!r} collides with binding slot "
+                    f"{slot.name!r}"
+                )
+        if (
+            self.contract.launch_kind == LAUNCH_KIND_DIRECT
+            and self.contract.requires_binding
+            and self.contract.executable_slot() is None
+        ):
+            raise ProfileValidationError(
+                "a direct_acp profile must bind its executable through a slot"
+            )
 
     def snapshot(self) -> dict[str, Any]:
         # Additive fields are omit-when-empty/None so legacy rows keep
@@ -290,8 +624,6 @@ class AgentProfile:
         }
         if self.fixed_env:
             payload["fixed_env"] = [list(pair) for pair in self.fixed_env]
-        if self.expected_runtime is not None:
-            payload["expected_runtime"] = self.expected_runtime.to_dict()
         if self.required_credential_refs is not None:
             payload["required_credential_refs"] = list(self.required_credential_refs)
         if self.permission_mode_selector_id is not None:
@@ -309,6 +641,20 @@ class AgentProfile:
 
     def config_schema_hash(self) -> str:
         return _sha256_hex(_canonical_json(dict(self.config_schema)))
+
+    def contract_snapshot(self) -> dict[str, Any]:
+        """Everything the AdapterContract freezes, in one canonical projection.
+
+        The profile snapshot is included wholesale because argv construction,
+        code-known env keys, selectors, domains, permission mode, and frozen
+        session metadata are all contract semantics (C1). Profile ID and
+        revision ride along, so a revision bump necessarily changes the
+        contract hash and fails every prior Binding generation closed (C3).
+        """
+        return {"profile": self.snapshot(), "contract": self.contract.to_dict()}
+
+    def adapter_contract_hash(self) -> str:
+        return _sha256_hex(_canonical_json(self.contract_snapshot()))
 
 
 class ProfileRegistry:
@@ -332,13 +678,28 @@ class ProfileRegistry:
         return tuple(sorted(self._profiles))
 
 
-# Revision 2 (chair-approved C10 decision): the effort selector on real
-# OpenCode 1.18.4 is model-dependent, so the registered closed model pair is
-# k3 plus deepseek/deepseek-v4-pro — the configured-provider text/code model
-# whose live post-set-model option set advertises literal efforts high|max.
-OPENCODE_1_18_4 = AgentProfile(
-    profile_id="opencode-1.18.4",
-    revision=2,
+# Revision 3 (C15): the stable ID ``opencode-native-acp`` replaces the retired
+# ``opencode-1.18.4`` with **no** compatibility alias — the old ID is simply an
+# unknown profile and is refused at admission. The version left the ID because
+# the executable's version is a Binding fact, not a source constant.
+#
+# Every identity/capability/selector constant below is a byte-copy of the
+# operator-run zero-prompt ACP discovery against the installed executable:
+# ``agentInfo`` OpenCode/1.18.5, protocol 1, ``loadSession`` advertised,
+# selectors ``model``/``effort``, and — after the exact model was set to
+# kimi-for-coding/k3 — the model-dependent effort domain low|high|max. The ACP
+# ``agentInfo.version`` and the CLI ``--version`` stay independent facts; the
+# CLI version is proven only by the contract's own probe at validate/promote,
+# and this profile asserts no equality between the two.
+#
+# Only the model whose model-dependent effort domain the discovery actually
+# observed is registered. ``deepseek/deepseek-v4-pro`` was registered at r2
+# under the retired 1.18.4 evidence; re-registering it here would freeze a
+# selector domain this discovery does not prove, so it stays out until its own
+# discovery exists.
+OPENCODE_NATIVE_ACP = AgentProfile(
+    profile_id="opencode-native-acp",
+    revision=3,
     executable_key="opencode",
     argv_template=("acp",),
     env_allowlist=(
@@ -352,29 +713,48 @@ OPENCODE_1_18_4 = AgentProfile(
         "XDG_DATA_HOME",
         "XDG_STATE_HOME",
     ),
-    credential_slots=("kimi-for-coding", "deepseek"),
+    credential_slots=("kimi-for-coding",),
     model_selector_id="model",
     effort_selector_id="effort",
     default_model="kimi-for-coding/k3",
     default_effort="max",
-    registered_models=("kimi-for-coding/k3", "deepseek/deepseek-v4-pro"),
-    allowed_efforts=("low", "medium", "high", "max"),
+    registered_models=("kimi-for-coding/k3",),
+    allowed_efforts=("low", "high", "max"),
     requires_session_load=True,
     config_schema={
-        "schema_version": 2,
+        "schema_version": 3,
         "selectors": {
             "model": {
                 "config_id": "model",
                 "type": "string",
-                "domain": ["kimi-for-coding/k3", "deepseek/deepseek-v4-pro"],
+                "domain": ["kimi-for-coding/k3"],
             },
             "effort": {
                 "config_id": "effort",
                 "type": "string",
-                "domain": ["low", "medium", "high", "max"],
+                "domain": ["low", "high", "max"],
             },
         },
     },
+    contract=AdapterContract(
+        launch_kind=LAUNCH_KIND_DIRECT,
+        acp_agent_name="OpenCode",
+        acp_protocol_version="1",
+        version_probe=VersionProbeRule(argv_suffix=("--version",)),
+        binding_slots=(
+            BindingSlot(
+                name="agent_cli",
+                kind=SLOT_KIND_NATIVE_BINARY,
+                provides_executable=True,
+            ),
+        ),
+        required_capabilities=("loadSession",),
+        # One executable is both the AGENT CLI and the ACP implementation, so a
+        # generation that also claimed an adapter-side capability would be
+        # describing a runtime this contract does not implement.
+        forbidden_capabilities=("terminal",),
+        cli_slot="agent_cli",
+    ),
 )
 
 # Revision 1: the official Codex ACP adapter 1.1.7 over downstream Codex CLI
@@ -394,6 +774,13 @@ OPENCODE_1_18_4 = AgentProfile(
 # must live under an ancestor chain free of ``.codex/config.toml``, because any
 # such layer is a configuration surface this profile did not freeze and is
 # refused at every spawn boundary.
+#
+# Revision 2 (PR-B): the downstream Codex CLI path/version/digest and the
+# ``CODEX_HOME`` credential-root value left these constants for the
+# operator-owned Binding. Source keeps exactly what C9 assigns to it — the
+# frozen Node interpreter and the ACP adapter entry — plus the frozen
+# ``CODEX_CONFIG``/mode/browser environment, which are compatibility semantics
+# rather than deployment facts.
 CODEX_ADAPTER_ENTRY = (
     "/home/ecs-user/.local/share/agent-run-supervisor/adapters/codex-acp/1.1.7"
     "/node_modules/@agentclientprotocol/codex-acp/dist/index.js"
@@ -401,7 +788,7 @@ CODEX_ADAPTER_ENTRY = (
 
 CODEX_ACP_1_1_7 = AgentProfile(
     profile_id="codex-acp-1.1.7",
-    revision=1,
+    revision=2,
     executable_key="codex-acp",
     argv_template=(CODEX_ADAPTER_ENTRY,),
     env_allowlist=(
@@ -416,8 +803,6 @@ CODEX_ACP_1_1_7 = AgentProfile(
         "XDG_STATE_HOME",
     ),
     fixed_env=(
-        ("CODEX_HOME", "/home/ecs-user/.config/agent-run-supervisor/codex-acp-1.1.7"),
-        ("CODEX_PATH", "/home/ecs-user/.local/bin/codex"),
         ("CODEX_CONFIG", '{"features":{"use_legacy_landlock":true}}'),
         ("INITIAL_AGENT_MODE", "read-only"),
         ("NO_BROWSER", "1"),
@@ -446,21 +831,41 @@ CODEX_ACP_1_1_7 = AgentProfile(
             },
         },
     },
-    expected_runtime=ExpectedRuntimeIdentity(
-        node_path=(
-            "/home/ecs-user/.local/share/agent-run-supervisor/adapters/node"
-            "/v24.14.0/bin/node"
+    contract=AdapterContract(
+        launch_kind=LAUNCH_KIND_WRAPPED,
+        acp_agent_name="@agentclientprotocol/codex-acp",
+        acp_protocol_version="1",
+        acp_agent_version="1.1.7",
+        version_probe=VersionProbeRule(argv_suffix=("--version",)),
+        binding_slots=(
+            BindingSlot(
+                name="downstream_cli",
+                kind=SLOT_KIND_PACKAGE_TREE,
+                env_key="CODEX_PATH",
+            ),
+            BindingSlot(
+                name="codex_home",
+                kind=SLOT_KIND_CONFIG_ROOT,
+                env_key="CODEX_HOME",
+            ),
         ),
-        node_sha256="e237a2839d0cbdc9a9a2adda1a184afc0f5b20306ffbe923af5686550472d8a8",
-        adapter_entry_path=CODEX_ADAPTER_ENTRY,
-        adapter_entry_sha256=(
-            "0deb6b820dfed8804cd76b16a50210fe12202e5e339b5edaa23f6987f1742e0a"
+        required_capabilities=("loadSession",),
+        # Population awaits this adapter's own capability discovery: nothing is
+        # forbidden that an operator-run initialize exchange has not observed.
+        forbidden_capabilities=(),
+        wrapped_runtime=WrappedRuntimeArtifacts(
+            interpreter_path=str(_FROZEN_NODE),
+            interpreter_sha256=(
+                "e237a2839d0cbdc9a9a2adda1a184afc0f5b20306ffbe923af5686550472d8a8"
+            ),
+            adapter_entry_path=CODEX_ADAPTER_ENTRY,
+            adapter_entry_sha256=(
+                "0deb6b820dfed8804cd76b16a50210fe12202e5e339b5edaa23f6987f1742e0a"
+            ),
         ),
-        cli_path="/home/ecs-user/.local/bin/codex",
-        cli_sha256="a2a05dafaa1acb002a45eaec0a462de5b13694fcfcd7bc43305f14781ce7be14",
-        agent_info_name="@agentclientprotocol/codex-acp",
-        agent_info_version="1.1.7",
-        protocol_version="1",
+        cli_slot="downstream_cli",
+        credential_root_slot="codex_home",
+        project_config_relpath=".codex/config.toml",
     ),
 )
 
@@ -484,11 +889,15 @@ CLAUDE_ADAPTER_ENTRY = (
     "/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js"
 )
 
-CLAUDE_CLI_PATH = "/home/ecs-user/.local/bin/claude"
-
+# Revision 2 (PR-B): the downstream Claude CLI path/version/digest left these
+# constants for the operator-owned Binding. ``CLAUDE_CODE_EXECUTABLE`` is still
+# the only binding key the adapter honours, but the *value* is now projected
+# from the contract-declared ``downstream_cli`` slot instead of being frozen
+# here — so the profile still forbids a PATH-resolved or bundled fallback CLI
+# while the deployment fact belongs to the operator.
 CLAUDE_AGENT_ACP_0_61_0 = AgentProfile(
     profile_id="claude-agent-acp-0.61.0",
-    revision=1,
+    revision=2,
     executable_key="claude-agent-acp",
     argv_template=(CLAUDE_ADAPTER_ENTRY,),
     env_allowlist=(
@@ -502,10 +911,7 @@ CLAUDE_AGENT_ACP_0_61_0 = AgentProfile(
         "XDG_DATA_HOME",
         "XDG_STATE_HOME",
     ),
-    fixed_env=(
-        ("CLAUDE_CODE_EXECUTABLE", CLAUDE_CLI_PATH),
-        ("NO_BROWSER", "1"),
-    ),
+    fixed_env=(("NO_BROWSER", "1"),),
     credential_slots=(),
     required_credential_refs=(),
     model_selector_id="model",
@@ -554,24 +960,40 @@ CLAUDE_AGENT_ACP_0_61_0 = AgentProfile(
             },
         },
     },
-    expected_runtime=ExpectedRuntimeIdentity(
-        node_path=str(_FROZEN_NODE),
-        node_sha256="e237a2839d0cbdc9a9a2adda1a184afc0f5b20306ffbe923af5686550472d8a8",
-        adapter_entry_path=CLAUDE_ADAPTER_ENTRY,
-        adapter_entry_sha256=(
-            "260aac90bf75f197b93640087c1de66441761d43c2784efa035fdcee60b5dacd"
+    contract=AdapterContract(
+        launch_kind=LAUNCH_KIND_WRAPPED,
+        acp_agent_name="@agentclientprotocol/claude-agent-acp",
+        acp_protocol_version="1",
+        acp_agent_version="0.61.0",
+        version_probe=VersionProbeRule(argv_suffix=("--version",)),
+        binding_slots=(
+            BindingSlot(
+                name="downstream_cli",
+                kind=SLOT_KIND_PACKAGE_TREE,
+                env_key="CLAUDE_CODE_EXECUTABLE",
+            ),
         ),
-        cli_path=CLAUDE_CLI_PATH,
-        cli_sha256="22cfd6f5b3061c0391ba84e9cf8c9deaa37783aac18b004d42ec061e98f00691",
-        agent_info_name="@agentclientprotocol/claude-agent-acp",
-        agent_info_version="0.61.0",
-        protocol_version="1",
-        cli_path_env="CLAUDE_CODE_EXECUTABLE",
-        credential_root_env=None,
+        required_capabilities=("loadSession",),
+        # Population awaits this adapter's own capability discovery.
+        forbidden_capabilities=(),
+        wrapped_runtime=WrappedRuntimeArtifacts(
+            interpreter_path=str(_FROZEN_NODE),
+            interpreter_sha256=(
+                "e237a2839d0cbdc9a9a2adda1a184afc0f5b20306ffbe923af5686550472d8a8"
+            ),
+            adapter_entry_path=CLAUDE_ADAPTER_ENTRY,
+            adapter_entry_sha256=(
+                "260aac90bf75f197b93640087c1de66441761d43c2784efa035fdcee60b5dacd"
+            ),
+        ),
+        cli_slot="downstream_cli",
+        # The Claude CLI owns its own credential storage, which ARS neither
+        # manages, stages, nor inspects — so no credential-root slot exists.
+        credential_root_slot=None,
         project_config_relpath=None,
     ),
 )
 
 DEFAULT_REGISTRY = ProfileRegistry(
-    (OPENCODE_1_18_4, CODEX_ACP_1_1_7, CLAUDE_AGENT_ACP_0_61_0)
+    (OPENCODE_NATIVE_ACP, CODEX_ACP_1_1_7, CLAUDE_AGENT_ACP_0_61_0)
 )

@@ -15,7 +15,13 @@ pytest.importorskip("acp")
 from agent_run_supervisor.exit_classifier import AgentRunStatus
 from agent_run_supervisor.native_acp import profile as profile_module
 from agent_run_supervisor.native_acp import storage
-from agent_run_supervisor.native_acp.profile import AgentProfile, ProfileRegistry
+from agent_run_supervisor.native_acp.profile import (
+    LAUNCH_KIND_DIRECT,
+    AdapterContract,
+    AgentProfile,
+    ProfileRegistry,
+    VersionProbeRule,
+)
 from agent_run_supervisor.native_acp.run_task import RunTask
 from agent_run_supervisor.native_acp.spec import AgentRunRequest, InputRef, RunLimits
 
@@ -101,6 +107,14 @@ def _profile() -> AgentProfile:
         allowed_efforts=("low", "medium", "high", "max"),
         requires_session_load=True,
         config_schema={"selectors": {"model": "string", "effort": "string"}},
+        # Wholly source-frozen: the fake agent is not a deployment, so its
+        # contract accepts no operator Binding value at all.
+        contract=AdapterContract(
+            launch_kind=LAUNCH_KIND_DIRECT,
+            acp_agent_name="fake-acp-agent",
+            acp_protocol_version="1",
+            version_probe=VersionProbeRule(argv_suffix=("--version",)),
+        ),
     )
 
 
