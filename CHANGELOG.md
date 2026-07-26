@@ -53,8 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Notes
 
 - Source-line only. The published PyPI wheel is 0.2.0 and predates `arsd` and the
-  official Codex/Claude registrations; package metadata is still `0.2.0` and no
-  tag, GitHub Release, or PyPI upload covers this work.
+  official Codex/Claude registrations; source package metadata is now `0.5.0` and
+  no tag, GitHub Release, or PyPI upload covers this work.
 - Registration plus operator-held local socket-path acceptance is not
   publication, not a deployment/enablement approval, and not transferable to the
   next change. Sachima `ArsdBackend`/UDS integration remains separate and
@@ -62,6 +62,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Permission mediation is cooperative-agent policy enforcement against a
   caller-frozen grant — not an OS sandbox, hostile-process isolation, or
   multi-tenancy. ARS never emits a business verdict.
+
+## [0.5.0] - 2026-07-26
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Notes
 
 ## [0.2.0] - 2026-07-22
 
