@@ -2,7 +2,7 @@
 title: "ARS vNext Current Explicit Non-Approvals"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-25
+last_validated_at: 2026-07-26
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/non-approvals.md"
 ---
 # ARS vNext Current Explicit Non-Approvals
@@ -34,6 +34,23 @@ change. This document does not approve:
 - treating `allowed_roots`, UDS authentication, ACP mediation, workspace binding, or cgroup cleanup as an OS sandbox or hostile-process isolation;
 - a workspace content-digest service, filesystem watcher, broad RBAC/policy engine, or second conversation database inside ARS;
 - using any document under `docs/archive/`, `docs/plans/archive/`, or `docs/roadmap/archive/` as new-development authority or implicit approval.
+
+The accepted Runtime Binding design (PRD R13) and the activation of its plan add no approval either.
+This document specifically does not approve:
+
+- creating, authoring, validating, promoting, or rolling back a Runtime Binding generation against any
+  real deployment, or writing any file under a real Binding root;
+- installing, relocating, or re-owning an external CLI artifact root, or changing artifact/ancestor
+  ownership or permissions on a host;
+- freezing any OpenCode identity, capability, or selector constant before the required non-prompt ACP
+  `initialize` discovery and code-owned CLI version probe evidence exist, or asserting that
+  `agentInfo.version` equals a CLI `--version`;
+- treating a Binding acceptance receipt as self-authorization, a `--force`/unvalidated promotion path,
+  any ARS-internal privilege escalation, or an `arsd` restart;
+- retaining a `session_compatibility_epoch` across a Binding change without an approved continuity
+  canary;
+- treating the PR-A authority update or the active plan as approval to land PR-B source, to publish, to
+  deploy, or to run a real provider — each remains a separate, narrow operator decision.
 
 The released v0.1.7 acpx path may receive separately approved compatibility/security maintenance. Such
 maintenance does not reopen its archived requirements as the vNext product direction.

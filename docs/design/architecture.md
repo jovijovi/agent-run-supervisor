@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext System Architecture"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-25
+last_validated_at: 2026-07-26
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/architecture.md"
 ---
 # agent-run-supervisor vNext System Architecture
@@ -17,10 +17,14 @@ Status markers:
 
 - ✅ released compatibility baseline reused unchanged;
 - 🟦 vNext supervision plane, implemented on `main` (Stage 0/1 and Stage 2 closed);
+- 🟨 accepted design whose source work is planned and not implemented — the Runtime Binding layer of
+  §3.1–§3.3 plus every 🟨-marked line in §3, §4, §8, §9, and §10;
 - ⏸ separately approved later integration.
 
 Marker 🟦 records the settled design, not an approval: per-stage implementation status, gates, and
-enablement decisions live in [`docs/roadmap/current-status.md`](../roadmap/current-status.md).
+enablement decisions live in [`docs/roadmap/current-status.md`](../roadmap/current-status.md). Marker
+🟨 is weaker still — it is accepted architecture with no source on `main`, carried by the board-linked
+active plan, and it approves no deployment, promotion, or rollout of any kind.
 
 ## 1. System context
 
@@ -87,9 +91,11 @@ The released `execute_subprocess → SubprocessOutcome` remains ✅ compatibilit
 AgentRunRequest
 → authenticate caller; bind owner/namespace/workspace/Session
 → validate frozen execution_grant and referenced resources
-→ resolve closed AgentProfile revision/snapshot/hash + config schema hash
-→ materialize ResolvedLaunchSpec
-→ seal immutable AgentRunSpec/spec_hash
+→ resolve closed AgentProfile revision/snapshot/hash + config schema hash + adapter_contract_hash
+→ read the Runtime Binding exactly once (active.json + selected generation) 🟨
+→ project only contract-accepted slots; revalidate contract match and artifact digest 🟨
+→ materialize ResolvedLaunchSpec incl. complete runtime identity
+→ seal immutable AgentRunSpec/spec_hash (launch sealed by launch_spec_hash)
 → spawn
 → observe EffectiveRunState
 → exact requested/effective comparison
@@ -98,8 +104,111 @@ AgentRunRequest
 
 `AgentProfile` owns registered launch/config compatibility. `execution_grant` owns per-Run authorization.
 `AgentRunSpec` owns immutable requested facts. `EffectiveRunState` owns observations only. No observed
-value flows backward into Profile or Spec. No caller-supplied executable, arbitrary argv/env/JSON, or
-credential value crosses admission.
+value flows backward into Profile, Binding, or Spec. No caller-supplied executable, arbitrary argv/env/
+JSON, credential value, runtime path/version/digest, or Binding generation crosses admission.
+
+### 3.1 Runtime authority layers 🟨
+
+```text
+LAYER 1 — code-closed AgentProfile / AdapterContract          owner: the registry
+  stable profile ID · revision · adapter_contract_hash
+  launch_kind: wrapped_acp | direct_acp
+  accepted Binding schema + slot projection
+  fixed executable/argv construction · code-known env keys only
+  ACP protocol/name · required + forbidden capabilities
+  permission / config / model / effort / session semantics
+  wrapped adapter + interpreter artifact identity
+  code-owned safe version-probe rule
+        │
+        │ accepts (profile_id, revision, adapter_contract_hash)
+        ▼
+LAYER 2 — operator-owned Runtime Binding generation           owner: the operator
+  declared contract identity: profile_id · profile_revision ·
+    adapter_contract_hash          ← the only acceptance inputs
+  external CLI artifact descriptor: immutable versioned path,
+    actual version, digest, complete executable code closure
+  optional values for Profile-declared config-root slots
+  positive session_compatibility_epoch
+  provenance block: created_at, accepted_by, accepted_at,
+    acceptance receipt ref/hash   ← recorded and reported, never consulted
+        │
+        │ read exactly once per Run, at admission
+        ▼
+LAYER 3 — per-Run sealed ResolvedLaunchSpec + provenance      owner: the Run
+  write-once launch.json · launch_spec_hash · never re-read after sealing
+```
+
+A Binding never declares a command, argv, env key, adapter, launch kind, capability, permission, or
+selector. Every slot binds to the exact profile ID, revision, and `adapter_contract_hash` that accepted
+it, so a contract revision fails stale generations closed rather than letting a new source contract
+reinterpret operator-authored values.
+
+Acceptance rests on those explicit machine fields plus trusted ownership and digest validation, and on
+nothing else. The provenance block is recorded and reported for audit; it never authorizes a generation,
+never substitutes for a missing or mismatched machine field, and never becomes part of profile identity.
+A generation with a valid acceptance receipt but the wrong declared contract identity is refused.
+
+Read-once is structural, not advisory: `arsd` admission opens the Binding root once per Run, and spawn,
+finalization, and reconciliation have no Binding read path at all. Two Runs admitted on either side of a
+promotion are each sealed to what they read; an in-flight Run is never re-pointed.
+
+### 3.2 Binding layout, validation, and operator surface 🟨
+
+```text
+<binding_root>/                     # operator/root-owned; outside the repository
+├── active.json                     # regular file, atomically replaced — never a symlink
+└── generations/<generation_id>/
+    └── manifest.json               # immutable once written
+```
+
+Validation is fail-closed on every read: strict canonical JSON, finite size bound, `O_NOFOLLOW`/dirfd
+walks, verified ownership, modes, and full ancestor chain, and refusal of traversal, symlink, FIFO,
+device, unknown fields, and unknown slots. There is no active symlink to retarget.
+
+The planned operator command surface is exactly these, and no command beyond them is defined:
+
+```text
+agent-run-supervisor runtime-binding validate     # probe-backed check of a generation
+agent-run-supervisor runtime-binding promote      # atomically replace active.json
+agent-run-supervisor runtime-binding rollback     # re-promote a previously validated generation
+agent-run-supervisor runtime-binding inspect-run  # per-Run provenance recomputation
+```
+
+No `--force` is defined and no command escalates privilege internally; preparing an immutable artifact root
+is an operator action outside ARS. `validate`/`promote` obtain the real external CLI version through the
+Profile's code-owned probe and compare it with the Binding — a manifest's version string alone is not
+proof. A pure Binding promotion does not restart `arsd`, because admission re-reads the active pointer
+per Run; changing the Binding root, the service unit, or the runtime does require a restart and stays
+separately approved.
+
+`inspect-run` recomputes the launch hash from the sealed launch record after excluding only the
+top-level `launch_spec_hash`, and reports profile/contract identity, adapter/protocol identity, Binding
+generation/set/slot hashes, the complete CLI artifact identity/version/digest, and the epoch.
+
+### 3.3 Launch kinds and artifact code closure 🟨
+
+| Launch kind | Source freezes | Binding freezes |
+|---|---|---|
+| `wrapped_acp` (Codex ACP, Claude Agent ACP) | interpreter/Node identity, ACP adapter artifact identity, argv construction, env keys, protocol/capability contract | downstream CLI artifact identity/version/digest, config-root slot values |
+| `direct_acp` (OpenCode) | direct launch, protocol, and capability semantics | that one executable's identity/version/digest |
+
+OpenCode is one artifact, not two: the same executable is the AGENT CLI and the ACP implementation, and
+the documentation must not pretend otherwise.
+
+Artifact identity must cover the complete executable code closure:
+
+- **Standalone native binary** — regular-file SHA-256, plus the interpreter/dynamic-loader policy where
+  one applies.
+- **Package or launcher CLI** — an immutable package root/tree or canonical manifest digest, the
+  launcher identity, and the required interpreter/runtime identity. A launcher-file hash alone never
+  freezes the sibling code the launcher loads.
+- The artifact and every path ancestor are operator- or root-owned and non-writable by the `arsd`/AGENT
+  UID.
+
+A `direct_acp` executable is pinned by descriptor and exec'd from that descriptor, with TOCTOU rechecks
+on both sides of the spawn window. A wrapped downstream CLI is reopened later by the adapter, which ARS
+cannot fd-pin on the adapter's behalf; the guarantee there is that the path and package closure remain
+under an immutable operator-owned root that the `arsd`/AGENT UID cannot rewrite.
 
 ## 4. Process-per-Run Session model
 
@@ -115,6 +224,14 @@ true parallelism = multiple Sessions
 Each Run launches a new AGENT process. The first Run uses `session/new`; later Runs use `session/load`
 with the same opaque external session ID. The AGENT owns conversation/context storage; ARS stores only
 the binding and observed metadata.
+
+🟨 The Session record also persists the `session_compatibility_epoch` in force when it was created.
+Reuse requires equal profile ID/revision/`adapter_contract_hash`, equal workspace/owner/namespace, and
+equal epoch. A missing or different epoch is rejected before any lease mutation and before
+`session/load`, and never degrades into `session/new` — a silent new external Session would be exactly
+the continuity failure R4 forbids. An epoch may be retained across a Binding change only after an
+approved continuity canary proves the external AGENT still loads its own prior Sessions; otherwise the
+operator bumps it, and every older Session becomes non-reusable by construction.
 
 Between completed Runs on the same Session, model/effort may change:
 
@@ -203,9 +320,16 @@ repository stores no production mapping value.
 │   ├── prompt-accepted
 │   └── evidence / redaction / bounded stderr
 └── native-sessions/<session_id>/
-    ├── session.json               # stable binding + last_effective_* + state
+    ├── session.json               # stable binding + last_effective_* + state (+ epoch 🟨)
     └── lock.json                  # lease/process identity while held
 ```
+
+🟨 `launch.json` gains the resolved runtime provenance — profile/contract identity, launch kind,
+adapter/interpreter identity for wrapped profiles, the complete external CLI artifact identity, the
+Binding generation/set/slot hashes, the epoch, and the acceptance receipt reference — and embeds its own
+`launch_spec_hash` so the record is self-verifying. The hash excludes exactly one top-level field,
+`launch_spec_hash`, and nothing else may be excluded. The Binding root itself is operator storage
+outside `.agent-run-supervisor/`; ARS reads it and never writes it.
 
 `native_acp/storage.py` is the only constructor seam for Native roots. Legacy `runs/`/`sessions/` and
 acpx storage are never read, written, imported, mirrored, or migrated by Native code.
@@ -235,6 +359,13 @@ Stage 1 is intentionally an intermediate implementation boundary, not a downgrad
 target. Production is achieved only after Stage 2 acceptance — which is closed on `main`; the board
 carries the closure and enablement facts. Publication and later integration are not implied by it.
 
+🟨 The Runtime Binding refactor is not a fourth stage. It is a change of authority shape on the closed
+Stage 2 line, delivered through two PR gates: PR-A updates this authority chain and activates one plan;
+PR-B lands one coherent vertical source/test/docs implementation whose work packages are internal
+commits. No separate unused foundation PR is landed, and neither gate is a rollout: promoting a Binding
+against a real deployment, real-provider acceptance, publication, and any service restart each remain
+separate operator decisions.
+
 ## 10. Legacy coexistence and rollback
 
 The released v0.1.7 acpx paths remain ✅ compatibility surfaces until a separate retirement decision.
@@ -243,6 +374,19 @@ failure never routes to them.
 
 Rollback disables Native/`arsd` ingress and stops new submissions. It never converts failures into acpx
 fallback and never rewrites terminal Run facts.
+
+🟨 Binding rollback is a distinct, narrower mechanism: `runtime-binding rollback` re-promotes a
+previously validated generation and affects only Runs admitted afterwards. It never rewrites a sealed
+`launch.json`, never changes a terminal Run fact, and never substitutes for a source revert or for
+disabling ingress.
+
+🟨 A *source* rollback that removes the Binding layer is fail-closed for Binding-era Sessions, not a
+return to pre-epoch reuse. The reverted runtime cannot enforce epoch or contract identity, so it must stop
+new admissions and must never silently `session/load` a Session created under the Binding era. Those
+Sessions stay read-only (`status`/`list`/`close`), closed, or quarantined; continuing that work needs a new
+Session, or an explicitly approved rollback procedure that states how epoch and contract identity are
+checked. Reuse is never inferred from a missing field. Terminal Run facts and sealed launch evidence
+remain immutable across any rollback.
 
 ## 11. Authority map
 

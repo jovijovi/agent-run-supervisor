@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext Technical Solution"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-25
+last_validated_at: 2026-07-26
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/technical-solution.md"
 ---
 # agent-run-supervisor vNext Technical Solution
@@ -17,6 +17,18 @@ v0.1.7/vNext solution is preserved at
 
 ARS stays Python. vNext extends the existing package additively, preserves the released acpx path as a
 compatibility baseline, and never uses it as Native driver or fallback.
+
+Everything marked **planned (PR-B)** below is accepted design with no source on `main`. Today
+`native_acp/profile.py` still carries deployment-specific downstream CLI paths, versions, and digests
+inside the profile constants; there is no Runtime Binding module, no `session_compatibility_epoch`, and
+no `runtime-binding` command surface. The board-linked active plan owns that work, and this document
+grants it no approval beyond its own PR gate.
+
+One prerequisite constrains the OpenCode examples below: no OpenCode identity, capability, or selector
+constant may be frozen until an operator-run discovery produces a real non-prompt ACP `initialize`
+exchange plus the code-owned CLI version probe output and artifact digest for the same executable. The
+registry on `main` still carries `opencode-1.18.4` at revision 2; the version the operator reports as
+installed is a dated local observation, not a proven or accepted fact.
 
 ## 1. Package shape
 
@@ -38,8 +50,9 @@ share their stdout consumer or wait-before-return contract.
 | Module | Responsibility |
 |---|---|
 | `spec.py` | versioned `AgentRunRequest`; immutable `AgentRunSpec/spec_hash`; controlled `ResolvedLaunchSpec`; observation-only `EffectiveRunState` |
-| `profile.py` | typed, versioned, closed `AgentProfile` registry; `OPENCODE_1_18_4` plus the official `CODEX_ACP_1_1_7` and `CLAUDE_AGENT_ACP_0_61_0` profiles with frozen expected runtime identity |
-| `attestation.py` | spawn-boundary proof that the frozen interpreter/adapter/CLI identity and launch env are what the profile registered |
+| `profile.py` | typed, versioned, closed `AgentProfile` registry; the OpenCode profile plus the official Codex ACP and Claude Agent ACP adapter profiles. **Planned (PR-B):** each profile carries an `AdapterContract` with `adapter_contract_hash`, `launch_kind`, accepted Binding schema/slot projection, and a code-owned version-probe rule; deployment-specific CLI path/version/digest move out to the Binding |
+| `runtime_binding.py` | **Planned (PR-B), new module:** the only reader of a Binding root — `active.json` + `generations/<id>/manifest.json` loading, canonical-JSON/size/ownership/mode/ancestor validation through `O_NOFOLLOW`/dirfd walks, contract-acceptance matching, slot projection, generation/set/slot hashing, and the typed fail-closed refusal surface |
+| `attestation.py` | spawn-boundary proof that the frozen interpreter/adapter/CLI identity and launch env are what the profile registered. **Planned (PR-B):** proves the sealed runtime identity instead of a profile constant, extends artifact identity to package/tree closures, and adds the ownership/ancestor and TOCTOU rechecks for both launch kinds |
 | `storage.py` | only Native root-binding constructors for `native-runs/` and `native-sessions/`; structural guard against direct legacy store construction |
 | `driver.py` | ACP wire/state machine over a supplied `ManagedProcess`; never spawns or selects policy/profile |
 | `config_fidelity.py` | exact-or-zero configuration and between-Run switch/rollback state machine |
@@ -56,13 +69,33 @@ share their stdout consumer or wait-before-return contract.
 | `server.py` | asyncio UDS accept loop, `SO_PEERCRED`, finite backlog, per-connection isolation |
 | `protocol.py` | bounded JSON frames, mandatory `api_version`, unknown-version rejection |
 | `handlers.py` | submit/status/events/cancel and Session status/list/close with owner checks; Session creation is part of `submit` |
-| `admission.py` | durable submission/idempotency records, keyed admission locks, typed terminal-result inspection |
+| `admission.py` | durable submission/idempotency records, keyed admission locks, typed terminal-result inspection. **Planned (PR-B):** the single per-Run Binding read — one `active.json` read plus one generation read, revalidation of contract match and artifact digest, then sealing; no other module reads the Binding root |
 | `reconcile.py` | startup-only reconciliation; no prompt replay/resume |
 | `client.py` | typed local caller for Hermes/CLI; explicit connect/close, no silent reconnect or replay |
 | `service_unit.py` | pure data→text renderer for the user-scope service unit; never installs, enables, or starts anything |
 | `__main__.py` | unprivileged daemon entrypoint (`python -m agent_run_supervisor.arsd`) and the side-effect-free `--print-service-unit` mode; no state authority beyond `arsd` core |
 
 No TCP, root mode, runtime plugin loader, arbitrary command adapter, or per-Run Worker is introduced.
+
+### 1.4 Operator command surface — planned (PR-B)
+
+`cli.py`/`commands.py` gain exactly one subcommand group, wired to `runtime_binding.py` and to the
+per-Run provenance reader:
+
+| Command | Reads | Writes | Side effects |
+|---|---|---|---|
+| `runtime-binding validate <generation>` | generation manifest, artifacts, live contract | nothing | runs the code-owned version probe |
+| `runtime-binding promote <generation>` | the same, revalidated | `active.json` (atomic replace) | none beyond that file; no daemon restart |
+| `runtime-binding rollback <generation>` | a previously validated generation | `active.json` (atomic replace) | none beyond that file |
+| `runtime-binding inspect-run <run_id>` | `spec.json`, `launch.json` | nothing | none |
+
+No `--force` flag is defined, no command shells out to `sudo` or otherwise escalates, and no command
+installs artifacts, edits a service unit, restarts `arsd`, or contacts a provider. `inspect-run`
+recomputes the launch hash after excluding only the top-level `launch_spec_hash`, compares it with both
+the embedded value and `spec.json`, and reports profile/contract, adapter/protocol, Binding
+generation/set/slot hashes, the complete CLI artifact identity/version/digest, and the epoch. A
+pre-PR-B `launch.json` has no embedded seal; `inspect-run` reports it as a legacy launch record and
+verifies it against `spec.json` alone rather than failing.
 
 ## 2. Admission data model
 
@@ -83,11 +116,105 @@ A code-registered profile contains:
 - registered config selectors/types/value domains;
 - optional built-in adapter ID only when conformance evidence proves a real standard-ACP gap.
 
+### `AdapterContract` — planned (PR-B)
+
+The profile's source-frozen compatibility contract, hashed canonically into `adapter_contract_hash`:
+
+- stable profile ID, revision, `adapter_contract_hash`;
+- `launch_kind`: `wrapped_acp` or `direct_acp`;
+- the accepted Binding schema and the slot projection it admits (slot names, kinds, and required
+  descriptor fields per kind);
+- fixed executable/argv construction and code-known env keys only — a Binding value may fill a
+  code-declared slot, never introduce a key;
+- ACP protocol version and agent name, required capabilities, and explicitly forbidden capabilities;
+- permission, config, model, effort, and session semantics (selectors, domains, permission mode,
+  frozen session metadata);
+- for `wrapped_acp`, the interpreter and adapter-entry artifact identity, which stay in source;
+- a code-owned safe version probe: a fixed non-prompt argv suffix, a hermetic environment with no
+  workspace, no credential, and no network dependence, bounded output and timeout, and a code-owned
+  parser. The probe is the only sanctioned way to learn an external CLI's real version.
+
+The contract hash changes whenever any of the above changes, and a changed hash invalidates every
+Binding generation accepted under the old one.
+
+### `RuntimeBinding` — planned (PR-B)
+
+Operator-authored, read-only to ARS, stored outside the repository:
+
+```json
+{
+  "schema_version": 1,
+  "generation_id": "gen-0007",
+  "contract_identity": {
+    "profile_id": "opencode-native-acp",
+    "profile_revision": 3,
+    "adapter_contract_hash": "[REDACTED-SHA256]"
+  },
+  "slots": {
+    "agent_cli": {
+      "kind": "native_binary",
+      "path": "/opt/[REDACTED]/opencode/1.18.5/bin/opencode",
+      "version": "1.18.5",
+      "sha256": "[REDACTED-SHA256]",
+      "interpreter": null
+    }
+  },
+  "session_compatibility_epoch": 3,
+  "provenance": {
+    "created_at": "2026-07-26T09:00:00+08:00",
+    "accepted_by": "[REDACTED-OPERATOR]",
+    "accepted_at": "2026-07-26T09:00:00+08:00",
+    "acceptance_receipt": {"ref": "receipt:[REDACTED]", "sha256": "[REDACTED-SHA256]"}
+  }
+}
+```
+
+Every value above is illustrative. The `1.18.5` strings mirror the operator's dated 2026-07-26 local
+observation of the installed OpenCode executable — an unproven deployment observation, never a registered
+version, product authority, or provider acceptance. The real values come from the operator's own artifact
+plus the code-owned probe, and no OpenCode version constant is frozen before the §0 discovery
+prerequisite is met.
+
+**Acceptance is decided by explicit machine fields only.** A generation is admissible only when
+`contract_identity.profile_id`, `profile_revision`, and `adapter_contract_hash` equal the live contract's,
+every slot projects onto a contract-declared slot of the declared kind, and the artifact plus every path
+ancestor pass the trusted-ownership, mode, and digest checks. Everything under `provenance` — including
+`created_at`, `accepted_by`, `accepted_at`, and the acceptance receipt reference/hash — is recorded and
+reported, never consulted: it cannot authorize a generation, cannot stand in for a missing or mismatched
+machine field, and never becomes part of profile identity. A generation carrying a well-formed receipt but
+an absent or mismatched `contract_identity` is refused exactly like any other identity mismatch.
+
+A `wrapped_acp` generation carries a `downstream_cli` slot of kind `package_tree` — package root, tree
+or canonical manifest digest, launcher path and digest, and the required interpreter identity — plus any
+`config_root` slot the profile declared. A `package_tree` slot that declares only a launcher digest is
+refused by schema validation: a launcher hash alone does not freeze the sibling code it loads.
+
+The active pointer is a regular file, replaced atomically:
+
+```json
+{"schema_version": 1, "generation_id": "gen-0007", "manifest_sha256": "[REDACTED-SHA256]"}
+```
+
+Refusal rules, all fail-closed: non-canonical JSON, byte size over the bound, unknown field, unknown
+slot, slot missing a required descriptor field, absent `contract_identity`, `contract_identity` mismatch
+against the live contract on profile ID, revision, or `adapter_contract_hash`, non-positive epoch, path
+traversal, symlink, FIFO, device, non-regular artifact, artifact or ancestor owned outside the trusted
+operator/root set, artifact or ancestor writable by the `arsd`/AGENT UID, and digest or probe-version
+mismatch. Every refusal names the failing rule.
+
 ### `ResolvedLaunchSpec`
 
 Resolved before Run sealing: executable, fixed argv, effective cwd, transport, env allowlist slots and
 credential references, profile revision/hash, and schema hash. Credential values enter only at spawn and
 are never serialized or represented in `repr`.
+
+**Planned (PR-B):** it additionally carries the resolved runtime provenance — `adapter_contract_hash`,
+`launch_kind`, wrapped adapter/interpreter identity, the complete external CLI artifact identity
+(path, version, digest, closure kind), Binding `generation_id` plus set and per-slot hashes, the
+`session_compatibility_epoch`, and the Binding's acceptance receipt reference carried for reporting
+only, never as an authorization input. `launch.json` embeds the resulting
+`launch_spec_hash`, and the hash covers the whole record minus exactly that one top-level field.
+`AgentRunSpec` keeps its existing field set and continues to seal launch through `launch_spec_hash`.
 
 ### `AgentRunSpec`
 
@@ -112,6 +239,13 @@ ID, discovery snapshots, and exact effective model/effort. It never alters Profi
 Stable identity: Agent type, profile revision/hash, external Session ID, owner/namespace, workspace and
 credential-slot compatibility. Mutable observations: `last_effective_model/effort`. Persistent state:
 `active | closed | quarantined`, reason, source Run. model/effort are not Session identity.
+
+**Planned (PR-B):** the record also persists `session_compatibility_epoch`. Reuse requires equal profile
+ID/revision/`adapter_contract_hash`, equal workspace/owner/namespace, and equal epoch; a missing or
+different epoch is refused before the lease is mutated and before `session/load`, with no `session/new`
+fallback. The field is additive and omit-when-unset, so legacy and pre-PR-B records keep their exact
+serialized shape and stay status/list/close-readable — only `load` fails closed on them. Retaining an
+epoch across a Binding change requires an approved continuity canary; otherwise the operator bumps it.
 
 Same Session has one lease and one active Run. A quarantined Session refuses new work. v1 has no
 unquarantine tool; successor work uses a new Session with caller-owned context handoff when needed.
@@ -162,6 +296,13 @@ initialize
 Any missing/unknown/inexact state raises a stable pre-dispatch failure. Prompt code is unreachable until
 the state machine reaches `ready-to-prompt`.
 
+**Planned (PR-B):** the post-`initialize` identity gate compares observed `agentInfo` name, protocol
+version, and advertised capabilities against the contract, and additionally refuses any capability the
+contract lists as forbidden. `agentInfo.version` is an ACP-reported fact about the running adapter or
+agent implementation; the external CLI `--version` is a separate fact obtained only through the
+code-owned probe at `validate`/`promote`. Neither is derived from the other, and no code path may assert
+they are equal.
+
 For reuse, `session/load` must return the unchanged external ID and must not emit/perform `session/new`.
 Switch rollback targets the prior `last_effective_*` pair and is itself exact-readback gated.
 
@@ -207,6 +348,13 @@ Files/directories use `0600`/`0700`, exclusive create or atomic replace as appro
 owns each event stream. Credential values, raw env, cookies, authorization headers, and unredacted bulk
 payloads never persist.
 
+**Planned (PR-B):** the Binding root is operator storage that ARS opens read-only and never creates,
+writes, repairs, or migrates. `runtime_binding.py` is the only module that opens it, `arsd/admission.py`
+is its only Run-path caller, and the read happens exactly once per Run. `run_task.py`,
+`reconcile.py`, and finalization have no Binding read path, so a promotion can never re-point work that
+is already sealed. `promote`/`rollback` write only `active.json`, atomically, and only from the operator
+command surface.
+
 ## 9. Service containment and bounded operation
 
 Stage 2 `arsd` starts reconciliation before accepting socket traffic. Per-Run and per-connection tasks
@@ -228,10 +376,21 @@ closed as a recorded operator decision. The values stay controller-only and reac
   Session binding/switch rollback, mediation mapping, event bounds, UDS frame/ownership helpers.
 - **L2 hermetic ACP child:** real stdio JSON-RPC framing for malformed/inexact/timeout/cancel/load/switch/
   rollback/event-flood/reconciliation faults. Fake is never product runtime or production evidence.
-- **L3 real:** registered closed profiles (OpenCode 1.18.4, Codex ACP 1.1.7, Claude Agent ACP 0.61.0)
-  with exact model/effort readback, same-Session historical token continuity, denied-action canary, and
-  cgroup crash containment. Real-runtime suites are opt-in, skip-by-default, and never run in CI;
-  sanitized evidence stays operator-held.
+- **L3 real:** the registered closed profiles with exact model/effort readback, same-Session historical
+  token continuity, denied-action canary, and cgroup crash containment. Real-runtime suites are opt-in,
+  skip-by-default, and never run in CI; sanitized evidence stays operator-held.
+
+**Planned (PR-B) test families**, all hermetic and built over synthetic Binding roots and fake artifacts:
+Binding schema/canonicalization/size/unknown-field refusals; path-shape refusals (traversal, symlink,
+FIFO, device, non-regular); ownership/mode/ancestor refusals including artifacts writable by the
+`arsd`/AGENT UID; contract-acceptance and stale-generation fail-closed; probe-versus-manifest version
+mismatch; digest mismatch at admission and again at the spawn-boundary recheck through the existing
+deterministic race seam; descriptor-pinned exec for `direct_acp` and package-closure enforcement for
+`wrapped_acp`; read-once instrumentation proving one `active.json` read plus one generation read per Run
+and zero reads during spawn, finalization, and reconciliation; epoch reuse/rejection with no
+`session/new` fallback; the absence of any caller-facing runtime-selection field; the absence of
+`--force` and of any privilege escalation in the command path; and provenance recomputation that
+excludes exactly one top-level field.
 
 Stage 1 direct-drive real evidence is B-grade only. Stage 2 socket-path S1–S5 is the only C-grade
 production acceptance.
@@ -245,6 +404,13 @@ production acceptance.
   wheel carries the Stage 0/1 core only.
 - Sachima `ArsdBackend` and pin changes are later work.
 - Rollback disables Native ingress; no auto-fallback to acpx and no terminal fact rewrite.
+- The Runtime Binding work lands as documentation authority (PR-A) and then one coherent vertical
+  source/test/docs PR (PR-B) with internal work-package commits. Landing PR-B authorizes no promotion
+  against a real Binding root, no artifact installation, no service restart, no publication, and no
+  real-provider acceptance; each remains a separate operator decision. Its compatibility invariant is
+  explicit: `AgentRunRequest`/`AgentRunSpec` field sets, the `arsd` v1 public wire, the result/event
+  grammar, reconcile semantics, and the `ManagedProcess` public API stay unchanged, old Runs stay
+  readable, and old Native Sessions stay status/list/close-readable while `load` fails closed.
 
 The executable slice sequence, fresh worktree/branch rules, exact commands, and separate push/PR/merge
 approvals live only in `docs/plans/active/`.

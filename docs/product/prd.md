@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext PRD"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-25
+last_validated_at: 2026-07-26
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/prd.md"
 ---
 # agent-run-supervisor vNext PRD
@@ -43,9 +43,13 @@ A technical `completed` result never means the caller's business task succeeded.
 - Authenticate the local caller and bind owner/namespace, workspace, Session, credential references,
   MCP/config snapshots, limits, evidence/recovery policy, and frozen `execution_grant`.
 - Resolve a closed, code-registered, versioned `AgentProfile` and config schema.
-- Materialize `ResolvedLaunchSpec`, then seal immutable `AgentRunSpec/spec_hash` before spawn.
+- Resolve the operator-owned Runtime Binding exactly once per Run (R13), project only the slots the
+  profile's `AdapterContract` accepts, and revalidate contract match plus artifact digest against the
+  trusted immutable paths. Callers never select a runtime, path, version, digest, or Binding generation.
+- Materialize `ResolvedLaunchSpec` — including the complete resolved runtime identity — then seal
+  immutable `AgentRunSpec/spec_hash` before spawn. `launch_spec_hash` remains the launch seal.
 - Store requested specification and observed effective state separately; observations never rewrite the
-  frozen request/profile.
+  frozen request/profile/Binding.
 
 ### R2 — Supervised live ACP process
 
@@ -79,10 +83,13 @@ produces zero Turn and no prompt. Literal `max` must never be downgraded to `hig
 ### R4 — Session continuity and between-Run switching
 
 - v1 is process-per-Run; the AGENT process lifetime is contained within one Run.
-- One ARS Session binds one external AGENT Session ID, AgentProfile revision/hash, owner/namespace, and
-  compatibility resources. The external AGENT remains conversation/context authority.
+- One ARS Session binds one external AGENT Session ID, AgentProfile revision/hash, owner/namespace,
+  compatibility resources, and the `session_compatibility_epoch` that was in force when it was created.
+  The external AGENT remains conversation/context authority.
 - Later Runs use real `session/load` on the unchanged external ID; silently creating a new external
-  Session is failure.
+  Session is failure. Reuse requires equal profile ID/revision/`adapter_contract_hash`,
+  workspace/owner/namespace, **and** equal epoch. A missing or different epoch is rejected before any
+  lease mutation and before `session/load`, and never falls back to `session/new`.
 - model/effort are immutable per Run but may change between completed Runs under the Session lease.
 - Partial switching failure sends no prompt. Exact rollback to the previous observed configuration
   reopens the Session; failed or unprovable rollback quarantines it.
@@ -175,15 +182,88 @@ caller-authorized Run linked by `retry_of_run_id`; it never rewrites the origina
 
 - ARS remains Python. The Native client pins and verifies the official Python ACP SDK in the consuming
   environment before implementation.
-- The first closed profile is OpenCode 1.18.4 with literal `model=kimi-for-coding/k3` and literal
-  `effort=max`, registered selectors, fixed executable/argv template, credential slots, and required
-  `session/load` capability.
+- Each profile carries an `AdapterContract`: the source-frozen compatibility contract described in R13.
+  A profile freezes `launch_kind`, argv construction, code-known env keys, ACP protocol/identity and
+  required plus forbidden capabilities, permission/config/model/effort/session semantics, and — for
+  wrapped adapters — the interpreter and adapter artifact identity. It does **not** freeze the
+  deployment-specific external CLI path, version, or digest; those are Binding facts (R13).
+- Three profiles are registered, and R13 gives each one a `launch_kind`. The OpenCode profile is
+  `direct_acp`: one OpenCode executable is both the AGENT CLI and the ACP implementation, so the profile
+  freezes direct launch/protocol/capability semantics while the Binding freezes that single executable's
+  identity. Its required stable ID is `opencode-native-acp`, which §5 records as approved and not yet
+  registered. The official Codex ACP and Claude Agent ACP profiles are `wrapped_acp`: source freezes the
+  interpreter plus the ACP adapter, and the Binding freezes the downstream CLI artifact and the
+  config-root values.
 - New profiles are typed, versioned, closed registrations. An Agent-specific adapter is allowed only
   after conformance evidence proves a standard ACP gap; v1 has no runtime plugin system.
-- Official-adapter profiles additionally freeze the runtime identity they launch (interpreter, adapter
-  entrypoint, downstream CLI — path plus hash) and the launch env, and prove it at the spawn boundary.
-  The registry on `main` holds OpenCode 1.18.4, Codex ACP 1.1.7, and Claude Agent ACP 0.61.0; adding or
-  revising one requires a fresh install/discovery/permission-canary cycle and independent review.
+- Adding a profile, or revising a registered one, requires a fresh install/discovery/permission-canary
+  cycle, a revision bump, and independent review. Discovery evidence must come from a real non-prompt
+  ACP `initialize` exchange; the ACP `agentInfo.version` and the external CLI `--version` are separate
+  facts and neither may be assumed equal to the other.
+
+### R13 — Runtime Binding: operator-owned deployment facts
+
+Three authority layers stay separate and are never merged:
+
+| Layer | Owner | Freezes | Never carries |
+|---|---|---|---|
+| `AgentProfile` / `AdapterContract` | code (registry) | compatibility semantics | deployment paths, versions, digests |
+| Runtime Binding | operator (outside the repository) | deployment facts | command, argv, env key, adapter, launch kind, capability, permission, selector |
+| `ResolvedLaunchSpec` / runtime provenance | one Run | the resolved, sealed launch and runtime identity | anything re-read after sealing |
+
+**Contract side.** `AdapterContract` source-freezes: stable profile ID, revision, and
+`adapter_contract_hash`; `launch_kind` (`wrapped_acp` or `direct_acp`); the accepted Binding schema and
+slot projection; the fixed executable/argv construction and code-known env keys only; ACP
+protocol/name plus required and forbidden capabilities; permission, config, model, effort, and session
+semantics; the wrapped adapter/interpreter artifact identity; and a code-owned safe version-probe rule.
+
+**Binding side.** A Binding generation supplies only: its declared contract identity (profile ID, profile
+revision, `adapter_contract_hash`), the external CLI artifact descriptor (immutable versioned path, actual
+version, digest), optional values for Profile-declared config-root slots, a positive
+`session_compatibility_epoch`, and a provenance block. Every slot binds to the exact profile ID, revision,
+and `adapter_contract_hash` that accepted it. After a contract revision, stale generations fail closed; a
+Binding is never reinterpreted by a new source contract.
+
+**Acceptance authority.** A generation is accepted only on those explicit machine identity fields plus
+trusted owner and artifact validation. Provenance metadata — creation time, `accepted_by`, `accepted_at`,
+and the acceptance receipt reference/hash — is recorded and reported, never consulted: it never
+self-authorizes, never substitutes for a missing or mismatched machine field, and never becomes a profile
+identity field. A generation with a valid receipt but the wrong declared contract identity is refused.
+
+**Artifact identity covers the complete executable code closure.**
+
+- Standalone native binary: regular-file SHA-256, plus the interpreter/dynamic-loader policy where one
+  applies.
+- Package or launcher CLI: an immutable package root/tree or canonical manifest digest, the launcher
+  identity, and the required interpreter/runtime identity. A launcher-file hash alone never freezes the
+  sibling code that launcher loads, and ARS must not claim that it does.
+- The artifact and every path ancestor are operator- or root-owned and non-writable by the `arsd`/AGENT
+  UID.
+
+**Layout and validation.** A Binding root holds a regular, atomically replaced `active.json` plus
+`generations/<id>/manifest.json`; there is no active symlink. Validation requires strict canonical JSON
+within a finite size bound, `O_NOFOLLOW`/dirfd walks, verified ownership, modes, and ancestors, and
+refusal of traversal, symlink, FIFO, device, unknown fields, and unknown slots.
+
+**Promotion and admission.** `validate` and `promote` obtain the real external CLI version through the
+Profile's code-owned version probe and compare it with the Binding; a manifest's version string alone is
+not proof. Admission reads `active.json` and the selected generation exactly once per Run, revalidates
+contract match and artifact digest against the trusted immutable paths, resolves the complete
+launch/runtime identity, writes write-once `launch.json`, and seals `launch_spec_hash`. Spawn,
+finalization, and reconciliation never reread the active Binding, and admission never accepts caller
+selection.
+
+**Operator surface.** The installed commands are `runtime-binding validate`, `promote`, `rollback`, and
+`inspect-run`. There is no `--force` and no internal `sudo`. Pure Binding promotion does not restart
+`arsd`; changing the Binding root, the service unit, or the runtime does, and remains separately
+approved. `inspect-run` recomputes the launch hash after excluding only the top-level
+`launch_spec_hash`, and reports profile/contract, adapter/protocol, Binding generation/set/slot hashes,
+the complete CLI artifact identity/version/digest, and the epoch.
+
+**Compatibility.** `AgentRunRequest` and `AgentRunSpec` field sets, the `arsd` v1 public wire, the
+result/event grammar, reconcile semantics, and the `ManagedProcess` public API are unchanged. Old Runs
+stay readable. Old Native Sessions stay status/list/close-readable, but `session/load` on a record
+without a matching epoch fails closed.
 
 ## 4. Acceptance and staged delivery
 
@@ -213,6 +293,22 @@ reconciliation, graceful shutdown, and service/cgroup containment. Production ac
 4. cgroup crash containment yielding `unknown/quarantined/retryable=false` and no redispatch;
 5. malformed/failed Run isolation, bounded behavior, and a subsequent successful Run.
 
+### Runtime Binding refactor — two PR gates
+
+R13 is delivered on the already-accepted Stage 2 line, not as a new stage, through exactly two PR gates:
+
+1. **PR-A** — this authority/design update plus one active implementation plan. It changes documentation
+   authority only and claims no source implementation, rollout, publication, deployment, service
+   restart, or real-provider acceptance.
+2. **PR-B** — one coherent vertical source/test/docs implementation whose work packages land as internal
+   commits inside that single PR. No separate unused foundation PR is landed.
+
+PR-B is complete when the contract/Binding split, the read-once sealed admission path, the epoch gate,
+the artifact/owner/TOCTOU refusals, and the operator command surface are proven by hermetic tests, and
+the compatibility surfaces above are unchanged. Real-runtime evidence, promotion against a real Binding
+root, rollout, and publication remain separate operator decisions after PR-B, exactly as for every prior
+stage.
+
 Sachima `ArsdBackend` is a later, separately approved integration after ARS production acceptance.
 
 ## 5. Current implementation status
@@ -227,6 +323,13 @@ section records only the coarse position.
 - Release/publication is not done: the published wheel predates `arsd` and the official adapter
   profiles. Sachima integration, public ingress, and Gateway/IM/live behavior remain unimplemented and
   separately authorized. Implementation status is never an approval for the next stage.
+- R13 is accepted design with no source yet. The registry on `main` still carries deployment-specific
+  downstream CLI paths, versions, and digests inside the profile constants, there is no Runtime Binding
+  layer, no `session_compatibility_epoch`, and no `runtime-binding` command surface. The OpenCode
+  profile ID and version string on `main` have drifted from the executable the operator reports as
+  installed; the stable ID `opencode-native-acp` required by R12 is approved but not yet registered,
+  and freezing it awaits discovery evidence. The board-linked active plan carries that work; nothing in
+  R13 is deployed.
 
 ## 6. Non-goals
 
@@ -235,6 +338,11 @@ Feishu/Gateway semantics, broad RBAC, per-Run Worker, arbitrary command/argv/env
 runtime adapter plugins, acpx fallback, shared/imported acpx sessions, cross-AGENT Session reuse,
 general rebind, automatic replay, content-digest service, filesystem watcher, and hostile-process sandbox
 claims.
+
+Runtime Binding adds four more: operator-declared launch semantics of any kind, caller-selected runtime
+or Binding generation, a forced/unvalidated promotion path, and any ARS-internal privilege escalation to
+prepare an artifact root. Artifact identity and ownership checks are fail-closed admission controls; they
+are not an OS sandbox and do not contain a hostile process.
 
 ## 7. Authority and archive rule
 

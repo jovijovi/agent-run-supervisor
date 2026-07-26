@@ -2,10 +2,11 @@
 
 # Documentation Index
 
-Total: 66 documents tracked across 2 statuses.
+Total: 67 documents tracked across 2 statuses.
 
-## Active (15)
+## Active (16)
 
+- [Runtime Binding refactor — contract/Binding split and sealed runtime provenance](plans/active/2026-07-26-runtime-binding-refactor.md) — created 2026-07-26
 - [agent-run-supervisor vNext System Architecture](design/architecture.md) — created 2026-07-21
 - [agent-run-supervisor vNext Technical Solution](design/technical-solution.md) — created 2026-07-21
 - [agent-run-supervisor vNext PRD](product/prd.md) — created 2026-07-21
