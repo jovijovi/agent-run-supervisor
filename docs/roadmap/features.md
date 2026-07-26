@@ -2,7 +2,7 @@
 title: "ARS vNext Feature and Capability Tracker"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-25
+last_validated_at: 2026-07-26
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/features.md"
 ---
 # ARS vNext Feature and Capability Tracker
@@ -39,10 +39,11 @@ Status legend: **Done** · **Planned** · **Parked** · **Non-goal**
 | Later integration | 0 | 0 | 1 | 0 |
 | Explicit exclusions | 0 | 0 | 0 | 1 |
 
-**Publication boundary.** `Done` means implemented in the current `main` source line. The published
-PyPI wheel is 0.2.0 and carries the Stage 0/1 Native ACP core only: `arsd` (F-ARSD-001) and the two
-official adapter profiles are unreleased, and local acceptance is not publication or deployment
-approval.
+**Publication boundary.** `Done` means implemented in the current `main` source line, whose package
+metadata is 0.5.0 and covers the Stage 0/1 Native ACP core, `arsd` (F-ARSD-001), and the three
+registered closed profiles. The live GitHub Releases and PyPI listings are authoritative for which
+versions are published; neither publication nor local acceptance is a deployment, enablement, or
+Sachima-integration approval.
 
 Update this tracker only when requirements, implementation state, or acceptance evidence changes. Keep
 evidence cells short; details belong in active plans or cold phase archives.

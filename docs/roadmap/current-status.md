@@ -2,7 +2,7 @@
 title: "ARS vNext Roadmap Current Status"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-25
+last_validated_at: 2026-07-26
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 ---
 # ARS vNext Roadmap Current Status
@@ -35,7 +35,7 @@ and cannot direct new work.
 - **What registration is not:** source registration plus operator-held local acceptance is not PyPI publication, not Sachima integration, not public ingress, and not a reusable approval for the next change. Each profile revision, publication, and deployment step stays a separate operator decision.
 - **Claude adapter facts worth pinning:** the ACP model readback literal is `opus[1m]` — `claude-opus-5[1m]` is the direct Claude Code author selector, a different namespace, and is not registered. The controller-side Python ACP SDK is `0.11.0`; the adapter bundles its own JavaScript ACP SDK `1.3.0`. The two are independent artifacts.
 - **Runtime invariant:** production `arsd` runs on CPython 3.12.3 — the interpreter that carried A4/A5 acceptance and whose build provides the pidfd APIs the crash-containment harness requires. Standalone Python 3.11.15 lacks those APIs and is not an equivalent runtime.
-- **Released vs source:** the published PyPI wheel is 0.2.0 and predates `arsd` and the Codex/Claude registrations. Source package metadata is 0.5.0; no tag, release, or publication of the current source line exists or is approved.
+- **Released vs source:** source package metadata is 0.5.0 and covers the Native ACP core, `arsd`, and the three registered closed profiles. The live GitHub Releases and PyPI listings are authoritative for which versions are published; this board records no published version number. Release authorization covers packaging and publication only; it carries no deployment, Sachima integration, or default-on production activation approval.
 - **Later integration:** Sachima has no `ArsdBackend`/UDS integration and remains parked; ARS production acceptance is closed, and the integration still requires its own separate approval.
 
 ## Phase board
@@ -44,9 +44,9 @@ and cannot direct new work.
 |---|---|---|---|
 | vNext authority reset | Documentation complete | GOAL/PRD/design/roadmap + cold archive | no implementation authority |
 | Stage 0/1 — Native ACP core | Closed; implemented on `main` | [phase archive](archive/phases/vnext-stage01-native-acp.md) | production claims rest on the closed Stage 2 acceptance |
-| Stage 2 — `arsd` production ingress (A1–A5) | Closed; production/default-on enabled 2026-07-23 | [phase archive](archive/phases/vnext-stage2-arsd-production-ingress.md) · [archived plan](../plans/archive/2026-07-22-vnext-stage2-arsd-production-ingress.md) | enabled local supervision service under the closed A2 caller policy; release/publication and external integration remain separately unapproved |
-| Codex official-adapter admission | Closed; registered on `main` | [archived plan](../plans/archive/2026-07-25-codex-official-adapter-admission.md) · F-NATIVE-ADAPTER-CODEX-001 | closed profile plus operator-held local acceptance only; publication, deployment, and enablement stay separately unapproved |
-| Claude official-adapter admission (B3/B4/B5) | Closed; registered on `main` | [archived plan](../plans/archive/2026-07-25-claude-official-adapter-b3-b5-closure.md) · F-NATIVE-ADAPTER-CLAUDE-001 | closed profile plus operator-held local acceptance only; publication, deployment, and enablement stay separately unapproved |
+| Stage 2 — `arsd` production ingress (A1–A5) | Closed; production/default-on enabled 2026-07-23 | [phase archive](archive/phases/vnext-stage2-arsd-production-ingress.md) · [archived plan](../plans/archive/2026-07-22-vnext-stage2-arsd-production-ingress.md) | enabled local supervision service under the closed A2 caller policy; closure grants no publication authority — publication proceeds only under the separate release authorization, which grants no external-integration or further-deployment approval |
+| Codex official-adapter admission | Closed; registered on `main` | [archived plan](../plans/archive/2026-07-25-codex-official-adapter-admission.md) · F-NATIVE-ADAPTER-CODEX-001 | closed profile plus operator-held local acceptance only; closure grants no publication authority — publication proceeds only under the separate release authorization, which grants no deployment, enablement, or external-integration approval |
+| Claude official-adapter admission (B3/B4/B5) | Closed; registered on `main` | [archived plan](../plans/archive/2026-07-25-claude-official-adapter-b3-b5-closure.md) · F-NATIVE-ADAPTER-CLAUDE-001 | closed profile plus operator-held local acceptance only; closure grants no publication authority — publication proceeds only under the separate release authorization, which grants no deployment, enablement, or external-integration approval |
 | Sachima integration | Parked | boundary only | after ARS production acceptance and separate approval |
 
 ## Gates

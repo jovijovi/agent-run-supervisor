@@ -9,9 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Changed
+
+### Fixed
+
+### Notes
+
+## [0.5.0] - 2026-07-26
+
+### Added
+
 - Stage 2 `arsd` — the local, unprivileged Unix-domain-socket ingress that is the
-  sole vNext production path (`agent_run_supervisor.arsd`), present in the source
-  line only:
+  sole vNext production path (`agent_run_supervisor.arsd`):
   - Daemon module entry point `python -m agent_run_supervisor.arsd` (no console
     script; `agent-run-supervisor` stays the acpx compatibility CLI), with a
     side-effect-free `--print-service-unit` renderer for a systemd `--user` unit
@@ -45,33 +54,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README / README.zh-CN and the current authority, design, and roadmap documents
   now describe `arsd` and the three registered profiles as implemented on `main`,
   label the acpx CLI/library as a compatibility surface rather than the vNext
-  production ingress, and separate released PyPI 0.2.0 from the current source
-  line.
+  production ingress, and read publication state from the live GitHub Releases
+  and PyPI surfaces instead of a hard-coded published version.
 
 ### Fixed
 
 ### Notes
 
-- Source-line only. The published PyPI wheel is 0.2.0 and predates `arsd` and the
-  official Codex/Claude registrations; source package metadata is now `0.5.0` and
-  no tag, GitHub Release, or PyPI upload covers this work.
-- Registration plus operator-held local socket-path acceptance is not
-  publication, not a deployment/enablement approval, and not transferable to the
-  next change. Sachima `ArsdBackend`/UDS integration remains separate and
-  unimplemented.
+- This release carries the Stage 2 `arsd` ingress and the official Codex/Claude
+  profile registrations; the previous published version, 0.2.0, carried the
+  Stage 0/1 Native ACP core only.
+- Installing the package enables nothing. `arsd` has no console script, installs
+  or starts no service unit, and refuses to listen without an operator-supplied
+  caller mapping. Publication is not deployment, service enablement, or
+  production activation, and registration plus operator-held local socket-path
+  acceptance is not transferable to the next change.
+- Sachima `ArsdBackend`/UDS integration remains separate and unimplemented.
 - Permission mediation is cooperative-agent policy enforcement against a
   caller-frozen grant — not an OS sandbox, hostile-process isolation, or
   multi-tenancy. ARS never emits a business verdict.
-
-## [0.5.0] - 2026-07-26
-
-### Added
-
-### Changed
-
-### Fixed
-
-### Notes
 
 ## [0.2.0] - 2026-07-22
 
