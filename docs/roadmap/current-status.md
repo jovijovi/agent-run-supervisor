@@ -35,7 +35,7 @@ and cannot direct new work.
 - **What registration is not:** source registration plus operator-held local acceptance is not PyPI publication, not Sachima integration, not public ingress, and not a reusable approval for the next change. Each profile revision, publication, and deployment step stays a separate operator decision.
 - **Claude adapter facts worth pinning:** the ACP model readback literal is `opus[1m]` — `claude-opus-5[1m]` is the direct Claude Code author selector, a different namespace, and is not registered. The controller-side Python ACP SDK is `0.11.0`; the adapter bundles its own JavaScript ACP SDK `1.3.0`. The two are independent artifacts.
 - **Runtime invariant:** production `arsd` runs on CPython 3.12.3 — the interpreter that carried A4/A5 acceptance and whose build provides the pidfd APIs the crash-containment harness requires. Standalone Python 3.11.15 lacks those APIs and is not an equivalent runtime.
-- **Released vs source:** the published PyPI wheel is 0.2.0 and predates `arsd` and the Codex/Claude registrations. Source package metadata is still 0.2.0; no tag, release, or publication of the current source line exists or is approved.
+- **Released vs source:** the published PyPI wheel is 0.2.0 and predates `arsd` and the Codex/Claude registrations. Source package metadata is 0.5.0; no tag, release, or publication of the current source line exists or is approved.
 - **Later integration:** Sachima has no `ArsdBackend`/UDS integration and remains parked; ARS production acceptance is closed, and the integration still requires its own separate approval.
 
 ## Phase board
