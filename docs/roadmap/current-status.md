@@ -11,7 +11,7 @@ supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 
 ```text
 base_branch: main
-active_plan: none
+active_plan: docs/plans/active/2026-07-26-runtime-binding-refactor.md
 ```
 
 ## Authority chain
@@ -36,6 +36,8 @@ and cannot direct new work.
 - **Claude adapter facts worth pinning:** the ACP model readback literal is `opus[1m]` — `claude-opus-5[1m]` is the direct Claude Code author selector, a different namespace, and is not registered. The controller-side Python ACP SDK is `0.11.0`; the adapter bundles its own JavaScript ACP SDK `1.3.0`. The two are independent artifacts.
 - **Runtime invariant:** production `arsd` runs on CPython 3.12.3 — the interpreter that carried A4/A5 acceptance and whose build provides the pidfd APIs the crash-containment harness requires. Standalone Python 3.11.15 lacks those APIs and is not an equivalent runtime.
 - **Released vs source:** source package metadata is 0.5.0 and covers the Native ACP core, `arsd`, and the three registered closed profiles. The live GitHub Releases and PyPI listings are authoritative for which versions are published; this board records no published version number. Release authorization covers packaging and publication only; it carries no deployment, Sachima integration, or default-on production activation approval.
+- **Runtime Binding (accepted design, no source):** the three-layer split — code-closed `AdapterContract`, operator-owned Runtime Binding, per-Run sealed launch/runtime provenance — is accepted authority as of 2026-07-26 (PRD R13). Source on `main` still mixes the adapter contract with deployment-specific downstream CLI paths, versions, and digests, has no Binding layer, no session compatibility epoch, and no `runtime-binding` command surface. Delivery is two PR gates: PR-A authority docs plus the active plan, then PR-B as one coherent vertical implementation. This is design authority only — no Binding root, promotion, artifact installation, restart, rollout, or real-provider evidence is approved.
+- **OpenCode profile drift (open):** the registered profile ID/version has drifted from the executable the operator reports as installed. The stable ID `opencode-native-acp` is approved with one revision bump and no compatibility alias, but freezing any OpenCode identity/capability constant is blocked until a real non-prompt ACP `initialize` discovery plus a code-owned CLI version probe produce evidence; `agentInfo` version and CLI version stay separate facts.
 - **Later integration:** Sachima has no `ArsdBackend`/UDS integration and remains parked; ARS production acceptance is closed, and the integration still requires its own separate approval.
 
 ## Phase board
@@ -47,6 +49,7 @@ and cannot direct new work.
 | Stage 2 — `arsd` production ingress (A1–A5) | Closed; production/default-on enabled 2026-07-23 | [phase archive](archive/phases/vnext-stage2-arsd-production-ingress.md) · [archived plan](../plans/archive/2026-07-22-vnext-stage2-arsd-production-ingress.md) | enabled local supervision service under the closed A2 caller policy; closure grants no publication authority — publication proceeds only under the separate release authorization, which grants no external-integration or further-deployment approval |
 | Codex official-adapter admission | Closed; registered on `main` | [archived plan](../plans/archive/2026-07-25-codex-official-adapter-admission.md) · F-NATIVE-ADAPTER-CODEX-001 | closed profile plus operator-held local acceptance only; closure grants no publication authority — publication proceeds only under the separate release authorization, which grants no deployment, enablement, or external-integration approval |
 | Claude official-adapter admission (B3/B4/B5) | Closed; registered on `main` | [archived plan](../plans/archive/2026-07-25-claude-official-adapter-b3-b5-closure.md) · F-NATIVE-ADAPTER-CLAUDE-001 | closed profile plus operator-held local acceptance only; closure grants no publication authority — publication proceeds only under the separate release authorization, which grants no deployment, enablement, or external-integration approval |
+| Runtime Binding refactor | PR-A authority docs; PR-B not started | [active plan](../plans/active/2026-07-26-runtime-binding-refactor.md) · F-RUNTIME-BINDING-001 | documentation/design authority only; PR-B implementation is its own gate, and promotion, artifact installation, restart, rollout, publication, and real-provider evidence each remain separate operator decisions |
 | Sachima integration | Parked | boundary only | after ARS production acceptance and separate approval |
 
 ## Gates
@@ -57,6 +60,7 @@ and cannot direct new work.
 | G12 caller UID/ownership policy | Closed by A2 | recorded operator policy decision; exact mapping values controller-only, delivered to the daemon only as `--caller-mapping` arguments in the mode-0600 user unit |
 | A5 live enablement | Closed 2026-07-23 | enabled+active user unit after exact-main runtime install, production canary, and independent blocker review PASS; sanitized closure evidence operator-held (phase archive) |
 | Registered-profile local acceptance | Passed for all three profiles | operator-held local socket-path E2E: exact model/effort readback, mediated permissions, no workspace mutation; not publication, deployment, or a reusable approval |
+| OpenCode ACP discovery evidence | Open | prerequisite of the Runtime Binding plan: a real non-prompt ACP `initialize` exchange plus the code-owned CLI version probe and artifact digest must exist before any OpenCode identity, capability, or selector constant is frozen |
 
 G12 closure is a recorded operator decision; the repository intentionally records no production
 mapping value. The A1 source/default-closed foundation still permits only the explicitly scoped
@@ -73,7 +77,9 @@ source behavior. Optional DLP enhancements remain future work.
 See [`non-approvals.md`](non-approvals.md). This board authorizes nothing by itself: the A1–A5
 and official-adapter closures are recorded operator decisions carried by their archives. A
 follow-on release or publication, Sachima/Gateway integration, and public ingress remain
-separately unapproved, and no closure here transfers to the next change.
+separately unapproved, and no closure here transfers to the next change. Activating the Runtime
+Binding plan authorizes its documentation and its own PR gates only — never a Binding root,
+promotion, artifact installation, service restart, rollout, or real-provider run.
 
 ## Verification
 

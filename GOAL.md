@@ -47,8 +47,11 @@ and result verification.
 
 ## vNext load-bearing contracts
 
-1. Resolve and freeze a typed, versioned `AgentProfile` and its launch/config schema; materialize a
-   controlled `ResolvedLaunchSpec`; then seal immutable `AgentRunSpec/spec_hash` before spawn.
+1. Three runtime-authority layers stay separate and are never merged: a code-closed
+   `AgentProfile`/`AdapterContract`, an operator-owned Runtime Binding, and a per-Run sealed
+   `ResolvedLaunchSpec` plus runtime provenance. Admission resolves the closed contract, projects the
+   accepted Binding slots, materializes a controlled `ResolvedLaunchSpec`, and seals immutable
+   `AgentRunSpec/spec_hash` before spawn.
 2. A supervised `ManagedProcess` owns PID/PGID/identity, bounded stderr, timeout, terminate/kill/reap;
    the ACP SDK exclusively owns the live stdin/stdout JSON-RPC wire.
 3. v1 uses process-per-Run. Same-Session continuity uses one external session ID and real
@@ -65,9 +68,22 @@ and result verification.
 8. Production crash containment uses a user-level service manager/cgroup: an `arsd` crash terminates
    all AGENT descendants; restart performs reconciliation only and never resends a prompt.
 9. Every AGENT is reached through a typed, versioned, code-registered closed profile with registered
-   selectors and no arbitrary command/argv/env/JSON passthrough. The first closed profile is OpenCode
-   1.18.4 with literal `kimi-for-coding/k3` and literal `max`; the registry on `main` also holds the
-   official Codex ACP 1.1.7 and Claude Agent ACP 0.61.0 profiles.
+   selectors and no arbitrary command/argv/env/JSON passthrough. The profile's `AdapterContract` is
+   the source-frozen compatibility contract: stable profile ID, revision, `adapter_contract_hash`,
+   `launch_kind` (`wrapped_acp` or `direct_acp`), the accepted Binding schema and slot projection,
+   executable/argv construction, code-known env keys only, ACP protocol/name and required plus
+   forbidden capabilities, permission/config/model/effort/session semantics, wrapped
+   adapter/interpreter artifact identity, and a code-owned safe version-probe rule. The registry
+   holds one direct-ACP profile (OpenCode) and two wrapped official adapters (Codex ACP, Claude
+   Agent ACP).
+10. A Runtime Binding carries operator-owned deployment facts only: the external CLI artifact
+    descriptor (immutable versioned path, actual version, digest), optional values for
+    Profile-declared config-root slots, a positive `session_compatibility_epoch`, and an acceptance
+    receipt reference recorded as provenance — never as self-authorization. A Binding never declares
+    a command, argv, env key, adapter, launch kind, capability, permission, or selector. Every slot
+    binds to the exact profile ID, revision, and `adapter_contract_hash` that accepted it; after a
+    contract revision a stale generation fails closed instead of being reinterpreted by a new source
+    contract.
 
 ## Released legacy line
 
@@ -90,6 +106,13 @@ with operator-held local acceptance. Release/publication, Sachima integration, p
 Gateway/IM/live behavior each still require separate, explicit authorization — and registration plus
 local acceptance never transfers approval to the next change.
 
+Contracts 1, 9, and 10 above state the **accepted target**, not the implemented source. The registry on
+`main` still mixes the adapter compatibility contract with deployment-specific downstream CLI paths,
+versions, and digests inside `native_acp/profile.py`, and no Runtime Binding layer exists yet. Separating
+them is planned source work carried by the board-linked active plan; it is authorized as documentation
+and design here and as implementation only through that plan's own PR gate. No Runtime Binding root,
+promotion, rollout, or deployment is approved by this document.
+
 ## Non-goals
 
 Public ingress, TCP/root service, distributed scheduling, multi-tenant cloud control plane, broad RBAC,
@@ -97,6 +120,10 @@ per-Run Worker, runtime plugin platform, arbitrary launch/config passthrough, ac
 imported acpx session storage, generalized Session rebind, cross-AGENT Session reuse, automatic replay,
 workspace content-digest service, filesystem watcher, hostile-process sandbox claims, and embedding
 Feishu/Gateway/business semantics in ARS.
+
+Runtime Binding adds no exception to that list: operator-declared launch commands, argv, env keys,
+adapters, launch kinds, capabilities, permissions, or selectors are a non-goal, and so is any
+caller-selected runtime, path, version, digest, or Binding generation.
 
 ## Development source of truth
 
