@@ -20,7 +20,18 @@ from agent_run_supervisor.exit_classifier import AgentRunStatus
 from agent_run_supervisor.native_acp import profile as profile_module
 from agent_run_supervisor.native_acp import storage
 from agent_run_supervisor.native_acp.driver import NativeAcpDriver
-from agent_run_supervisor.native_acp.profile import AgentProfile, ProfileRegistry
+from agent_run_supervisor.native_acp.profile import (
+    LAUNCH_KIND_DIRECT,
+    LAUNCH_KIND_WRAPPED,
+    SLOT_KIND_CONFIG_ROOT,
+    SLOT_KIND_PACKAGE_TREE,
+    AdapterContract,
+    AgentProfile,
+    BindingSlot,
+    ProfileRegistry,
+    VersionProbeRule,
+    WrappedRuntimeArtifacts,
+)
 from agent_run_supervisor.native_acp.run_task import (
     DISPATCH_STARTED_MARKER,
     NativeRunTaskError,
@@ -28,6 +39,8 @@ from agent_run_supervisor.native_acp.run_task import (
 )
 from agent_run_supervisor.native_acp.spec import AgentRunRequest, InputRef, RunLimits
 from agent_run_supervisor.session import SessionStore
+
+from . import binding_fixtures as bf
 
 FAKE_AGENT_PATH = Path(__file__).with_name("fake_agent.py")
 
@@ -58,8 +71,25 @@ HAPPY_SCRIPT = {
 }
 
 
-def _test_profile() -> AgentProfile:
-    return AgentProfile(
+def _bindingless_contract(**overrides) -> AdapterContract:
+    """A wholly source-frozen contract: no Binding slot, so no Binding needed.
+
+    The fake agent is not a deployment; its launch is entirely in this file, so
+    the contract accepts no operator value at all. The ACP identity is still
+    frozen and still checked after ``initialize``.
+    """
+    kwargs = dict(
+        launch_kind=LAUNCH_KIND_DIRECT,
+        acp_agent_name="fake-acp-agent",
+        acp_protocol_version="1",
+        version_probe=VersionProbeRule(argv_suffix=("--version",)),
+    )
+    kwargs.update(overrides)
+    return AdapterContract(**kwargs)
+
+
+def _test_profile(**overrides) -> AgentProfile:
+    kwargs = dict(
         profile_id="fake-agent-1.0",
         revision=1,
         executable_key="python-fake",
@@ -74,7 +104,10 @@ def _test_profile() -> AgentProfile:
         allowed_efforts=("low", "medium", "high", "max"),
         requires_session_load=False,
         config_schema={"selectors": {"model": "string", "effort": "string"}},
+        contract=_bindingless_contract(),
     )
+    kwargs.update(overrides)
+    return AgentProfile(**kwargs)
 
 
 def _request(**overrides) -> AgentRunRequest:
@@ -2704,10 +2737,7 @@ class CodexHarness:
     ) -> None:
         import shutil
 
-        from agent_run_supervisor.native_acp.attestation import (
-            ExpectedRuntimeIdentity,
-        )
-
+        self.tmp_path = tmp_path
         self.root = tmp_path / ".agent-run-supervisor"
         self.workspace = tmp_path / "workspace"
         self.workspace.mkdir(exist_ok=True)
@@ -2723,32 +2753,34 @@ class CodexHarness:
         # only this file.
         self.entry = stage / "codex_fake_entry.py"
         shutil.copy2(FAKE_AGENT_PATH, self.entry)
-        # sys.executable is executed, never modified; the attested identity is
-        # its resolved regular file (the venv path itself is a symlink).
-        self.interpreter = Path(os.path.realpath(sys.executable))
-        self.cli = stage / "codex"
-        self.cli.write_bytes(b"# private downstream cli placeholder\n")
+        # The interpreter is executed, never modified. It must be an artifact
+        # that actually satisfies C5 — the test runner's own uv-managed Python
+        # sits under a group-writable chain, so attesting it would be attesting
+        # something the service UID's group could rewrite.
+        self.interpreter = bf.trusted_system_interpreter()
+        # The downstream CLI is a package closure now: a launcher, the sibling
+        # code it loads, and its required interpreter — all private copies.
+        self.package_root = stage / "codex-pkg"
+        (self.package_root / "lib").mkdir(parents=True, exist_ok=True)
+        (self.package_root / "lib" / "sibling.py").write_bytes(b"# private sibling\n")
+        self.cli_interpreter = stage / "cli-runtime"
+        shutil.copy2(os.path.realpath("/bin/sh"), self.cli_interpreter)
+        os.chmod(self.cli_interpreter, 0o755)
+        # The launcher's shebang names the interpreter the descriptor freezes:
+        # a placeholder with no shebang would leave the real runtime unknown.
+        self.cli = self.package_root / "codex"
+        self.cli.write_bytes(
+            b"#!" + str(self.cli_interpreter).encode() + b"\n# private cli\n"
+        )
         self.cred_root = tmp_path / "codex-home"
         self.cred_root.mkdir(mode=0o700, exist_ok=True)
         os.chmod(self.cred_root, 0o700)
         self.auth = self.cred_root / "auth.json"
         self.auth.write_bytes(CODEX_AUTH_PLACEHOLDER)
         os.chmod(self.auth, 0o600)
+        bf.harden_tree(stage)
 
-        self.expected = ExpectedRuntimeIdentity(
-            node_path=str(self.interpreter),
-            node_sha256=_sha256_file(self.interpreter),
-            adapter_entry_path=str(self.entry),
-            adapter_entry_sha256=_sha256_file(self.entry),
-            cli_path=str(self.cli),
-            cli_sha256=_sha256_file(self.cli),
-            agent_info_name="fake-acp-agent",
-            agent_info_version="1.0.0",
-            protocol_version="1",
-        )
         self.fixed_env = (
-            ("CODEX_HOME", str(self.cred_root)),
-            ("CODEX_PATH", str(self.cli)),
             ("CODEX_CONFIG", CODEX_CANONICAL_CONFIG),
             ("INITIAL_AGENT_MODE", "read-only"),
             ("NO_BROWSER", "1"),
@@ -2761,8 +2793,69 @@ class CodexHarness:
         )
         monkeypatch.setenv("FAKE_AGENT_TRACE", str(self.trace))
         self.registry = ProfileRegistry((self.profile(),))
+        self.runtime = self.binding()
+
+    def cli_slot(self) -> dict:
+        return {
+            "kind": SLOT_KIND_PACKAGE_TREE,
+            "package_root": str(self.package_root),
+            "tree_sha256": bf.rb.package_tree_digest(self.package_root),
+            "launcher_path": str(self.cli),
+            "launcher_sha256": _sha256_file(self.cli),
+            "interpreter_path": str(self.cli_interpreter),
+            "interpreter_sha256": _sha256_file(self.cli_interpreter),
+            "version": "0.0.0-private",
+        }
+
+    def binding(self, profile: AgentProfile | None = None, **overrides):
+        """The Binding value admission would have read once for this Run."""
+        return bf.admitted(
+            self.tmp_path / f"binding-{overrides.pop('tag', 'default')}",
+            profile or self.profile(),
+            slots={
+                "downstream_cli": self.cli_slot(),
+                "codex_home": {
+                    "kind": SLOT_KIND_CONFIG_ROOT,
+                    "path": str(self.cred_root),
+                },
+            },
+            **overrides,
+        )
+
+    def contract(self, **overrides) -> AdapterContract:
+        kwargs = dict(
+            launch_kind=LAUNCH_KIND_WRAPPED,
+            acp_agent_name="fake-acp-agent",
+            acp_protocol_version="1",
+            acp_agent_version="1.0.0",
+            version_probe=VersionProbeRule(argv_suffix=("--version",)),
+            binding_slots=(
+                BindingSlot(
+                    name="downstream_cli",
+                    kind=SLOT_KIND_PACKAGE_TREE,
+                    env_key="CODEX_PATH",
+                ),
+                BindingSlot(
+                    name="codex_home",
+                    kind=SLOT_KIND_CONFIG_ROOT,
+                    env_key="CODEX_HOME",
+                ),
+            ),
+            wrapped_runtime=WrappedRuntimeArtifacts(
+                interpreter_path=str(self.interpreter),
+                interpreter_sha256=_sha256_file(self.interpreter),
+                adapter_entry_path=str(self.entry),
+                adapter_entry_sha256=_sha256_file(self.entry),
+            ),
+            cli_slot="downstream_cli",
+            credential_root_slot="codex_home",
+            project_config_relpath=".codex/config.toml",
+        )
+        kwargs.update(overrides)
+        return AdapterContract(**kwargs)
 
     def profile(self, **overrides) -> AgentProfile:
+        contract_overrides = overrides.pop("contract_overrides", {})
         kwargs = dict(
             profile_id="codex-fake-1.0",
             revision=1,
@@ -2799,7 +2892,7 @@ class CodexHarness:
                     },
                 },
             },
-            expected_runtime=self.expected,
+            contract=self.contract(**contract_overrides),
         )
         kwargs.update(overrides)
         return AgentProfile(**kwargs)
@@ -2824,6 +2917,7 @@ class CodexHarness:
             supervisor_root=self.root,
             submitted_at="2026-07-24T00:00:00+00:00",
             cwd=str(self.cwd) if self.cwd != self.workspace else None,
+            runtime_binding=self.runtime,
         )
         kwargs.update(overrides)
         return RunTask(**kwargs)
@@ -2927,6 +3021,7 @@ def test_artifact_tamper_before_run_refused_with_evidence(
     harness = CodexHarness(tmp_path, monkeypatch)
     spawned = _recording_spawn(monkeypatch)
     task = harness.task()
+    sealed_digest = harness.profile().contract.wrapped_runtime.adapter_entry_sha256
     # Tamper the per-test temporary copy of the fake-agent entry — never the
     # repository fixture — after construction and before run().
     harness.entry.write_bytes(b"# tampered private adapter entry copy\n")
@@ -2938,12 +3033,10 @@ def test_artifact_tamper_before_run_refused_with_evidence(
     run_dir = harness.run_dir()
     assert (run_dir / "spec.json").exists()
     launch = json.loads((run_dir / "launch.json").read_text(encoding="utf-8"))
-    assert launch["expected_runtime"]["adapter_entry_sha256"] == (
-        harness.expected.adapter_entry_sha256
-    )
+    assert launch["expected_runtime"]["adapter_entry_sha256"] == sealed_digest
     row = harness.rows()["adapter_entry_sha256"]
     assert row["passed"] is False
-    assert row["expected"] == harness.expected.adapter_entry_sha256
+    assert row["expected"] == sealed_digest
     payload = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
     assert payload["detail_code"] == "RUNTIME_IDENTITY_MISMATCH"
 
@@ -3187,9 +3280,12 @@ def test_codex_agent_info_mismatch_pre_dispatch_failed(
     artifact = harness.initialize_attestation()
     assert artifact["pass"] is False
     rows = {row["name"]: row for row in artifact["checks"]}
-    assert rows["agent_identity"]["expected"] == "fake-acp-agent@1.0.0"
-    assert rows["agent_identity"]["observed"] == "impostor-agent@9.9.9"
-    assert rows["agent_identity"]["passed"] is False
+    assert rows["agent_name"]["expected"] == "fake-acp-agent"
+    assert rows["agent_version"]["expected"] == "1.0.0"
+    assert rows["agent_name"]["observed"] == "impostor-agent"
+    assert rows["agent_name"]["passed"] is False
+    assert rows["agent_version"]["observed"] == "9.9.9"
+    assert rows["agent_version"]["passed"] is False
     # Zero session call, zero prompt, clean process group.
     assert "session/new" not in harness_methods(harness)
     assert "session/prompt" not in harness_methods(harness)
@@ -3273,7 +3369,8 @@ def test_initialize_attestation_sanitized_closed_keyset(
     assert set(artifact) == {"schema_version", "expected", "observed", "checks", "pass"}
     assert artifact["schema_version"] == 1
     assert {row["name"] for row in artifact["checks"]} == {
-        "agent_identity",
+        "agent_name",
+        "agent_version",
         "protocol_version",
         "load_session_advertised",
     }
@@ -3284,7 +3381,7 @@ def test_initialize_attestation_sanitized_closed_keyset(
             assert isinstance(row[key], str)
     for block in ("expected", "observed"):
         for value in artifact[block].values():
-            assert isinstance(value, (str, bool))
+            assert isinstance(value, (str, bool, list)) or value is None
     raw = (harness.run_dir() / "initialize_attestation.json").read_bytes()
     assert b"fake-external-session-1" not in raw   # no session id
     assert b"CODEX_FAKE_OK" not in raw             # no model body
@@ -3312,7 +3409,7 @@ def test_spawn_env_exact_composition_fixed_env_wins(
     assembler = RunSpecAssembler(harness.request())
     assembler.resolve_profile(harness.registry)
     assembler.bind_workspace(root=harness.workspace, cwd=str(harness.cwd))
-    assembler_launch = assembler.resolve_launch()
+    assembler_launch = assembler.resolve_launch(runtime=harness.runtime)
 
     env = task._spawn_env(assembler_launch)
 
@@ -3323,9 +3420,11 @@ def test_spawn_env_exact_composition_fixed_env_wins(
     }
     expected = dict(allowlisted)
     expected.update(dict(assembler_launch.permission_env))
-    expected.update(dict(harness.fixed_env))
+    expected.update(dict(assembler_launch.fixed_env))
     assert env == expected
-    # fixed_env wins, ambient values never leak in.
+    # The projected launch environment wins, ambient values never leak in, and
+    # the Binding-filled keys carry the *sealed* values rather than any ambient
+    # or source-frozen one.
     assert env["CODEX_HOME"] == str(harness.cred_root)
     assert env["CODEX_PATH"] == str(harness.cli)
     assert env["CODEX_CONFIG"] == CODEX_CANONICAL_CONFIG
@@ -3393,21 +3492,26 @@ def test_codex_quarantined_session_reuse_refused_before_attestation(
     assert not (run_dir / DISPATCH_STARTED_MARKER).exists()
 
 
-def test_opencode_run_writes_no_attestation_files(
+def test_bindingless_profile_writes_no_spawn_attestation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # expected_runtime is None for legacy profiles: no call, no file, byte-
-    # stable evidence surface.
+    # A contract that accepts no Binding seals no runtime identity, so there is
+    # no artifact to attest at the spawn boundary and no file to write. The
+    # post-initialize identity gate still runs: every contract has an ACP
+    # identity, and proving it costs no artifact.
     harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
     result = _run(harness.task())
 
     assert result.status is AgentRunStatus.COMPLETED
     run_dir = harness.run_dir()
     assert not (run_dir / "attestation.json").exists()
-    assert not (run_dir / "initialize_attestation.json").exists()
+    assert json.loads(
+        (run_dir / "initialize_attestation.json").read_text(encoding="utf-8")
+    )["pass"] is True
     launch = json.loads((run_dir / "launch.json").read_text(encoding="utf-8"))
     assert "fixed_env" not in launch
     assert "expected_runtime" not in launch
+    assert "runtime_provenance" not in launch
 
 
 # -- B4: frozen permission mode + execute mediation over a Claude-shaped Run --
@@ -3476,6 +3580,7 @@ def _claude_shaped_profile(**overrides) -> AgentProfile:
         config_schema={"selectors": {"model": "string", "effort": "string"}},
         permission_mode_selector_id="mode",
         required_permission_mode="default",
+        contract=_bindingless_contract(),
     )
     kwargs.update(overrides)
     return AgentProfile(**kwargs)
@@ -3780,3 +3885,85 @@ def test_post_load_mode_fidelity_failure_refuses_before_prompt(
     captured = _captured_meta(capture)
     assert captured[-1]["method"] == "session/load"
     assert captured[-1]["meta"] == FROZEN_CLAUDE_SESSION_META
+
+
+# -- PR-B WP4: the session compatibility epoch on the real reuse path ---------
+
+
+def test_epoch_is_persisted_from_the_sealed_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = CodexHarness(tmp_path, monkeypatch)
+    assert _run(harness.task()).status is AgentRunStatus.COMPLETED
+    record = harness.session_store().open_session("sess-native-1")
+    assert record.session_compatibility_epoch == (
+        harness.runtime.resolved.session_compatibility_epoch
+    )
+    assert record.native_adapter_contract_hash == (
+        harness.profile().adapter_contract_hash()
+    )
+
+
+def test_epoch_bump_refuses_reuse_before_the_lease_and_before_session_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C11: a promotion that bumps the epoch makes older Sessions non-reusable."""
+    harness = CodexHarness(tmp_path, monkeypatch)
+    assert _run(harness.task(run_id="run-codex-1")).status is AgentRunStatus.COMPLETED
+    store = harness.session_store()
+    assert store.open_session("sess-native-1").agent_session_id
+
+    spawned = _recording_spawn(monkeypatch)
+    # The trace is append-only across Runs, so the second Run's contribution is
+    # the delta — and it must be empty.
+    before = list(harness_methods(harness))
+    bumped = harness.binding(tag="bumped", epoch=2)
+    assert bumped.resolved.session_compatibility_epoch == 2
+    second = _run(harness.task(run_id="run-codex-2", runtime_binding=bumped))
+
+    assert second.status is AgentRunStatus.FAILED
+    # Refused before any spawn, so before session/load and before any prompt.
+    assert spawned == []
+    run_dir = harness.run_dir("run-codex-2")
+    payload = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    assert payload["detail_code"] == "RUN_EXCEPTION"
+    assert payload["retryable"] is False
+    assert not (run_dir / "attestation.json").exists()
+    assert not (run_dir / DISPATCH_STARTED_MARKER).exists()
+    # No wire frame at all on the refused reuse path: in particular no
+    # session/load and, critically, no session/new fallback.
+    assert harness_methods(harness) == before
+    # The lease was never mutated and the record is untouched.
+    record = store.open_session("sess-native-1")
+    assert record.state == "open"
+    assert record.session_compatibility_epoch == 1
+    assert not (Path(store.base_dir) / "sess-native-1" / "lock.json").exists()
+
+
+def test_a_pre_epoch_session_is_refused_by_a_binding_era_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Session created before the epoch existed cannot be silently loaded."""
+    harness = CodexHarness(tmp_path, monkeypatch)
+    store = storage.native_session_store(harness.root)
+    storage.create_native_session(
+        store,
+        session_id="sess-native-1",
+        profile_id="codex-fake-1.0",
+        profile_revision=1,
+        profile_hash=harness.profile().profile_hash(),
+        owner="hermes",
+        namespace="hermes/doc-check",
+        workspace_hash="0" * 64,
+        effective_cwd=str(harness.cwd),
+        matched_root=str(harness.workspace),
+    )
+    spawned = _recording_spawn(monkeypatch)
+    result = _run(harness.task())
+    assert result.status is AgentRunStatus.FAILED
+    assert spawned == []
+    # Still status/list/close-readable afterwards.
+    record = store.open_session("sess-native-1")
+    assert record.session_compatibility_epoch is None
+    assert "sess-native-1" in {row.session_id for row in store.list_records()}
+    assert store.mark_closed("sess-native-1").state == "closed"

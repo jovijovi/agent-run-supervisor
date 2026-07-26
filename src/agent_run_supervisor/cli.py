@@ -56,7 +56,94 @@ def _build_parser() -> argparse.ArgumentParser:
 
     _add_session_parser(subparsers)
     _add_cleanup_parser(subparsers)
+    _add_runtime_binding_parser(subparsers)
     return parser
+
+
+def _add_runtime_binding_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Operator surface for the Runtime Binding (PRD R13, C14).
+
+    Exactly four subcommands. There is no ``--force``: a generation that cannot
+    be validated is never promoted. No command escalates privilege, installs an
+    artifact, edits a service unit, restarts ``arsd``, or contacts a provider.
+    A pure promotion needs no restart because admission re-reads the active
+    pointer per Run — it takes effect on the *next* Run and never re-points one
+    that is already sealed.
+    """
+    binding = subparsers.add_parser(
+        "runtime-binding",
+        help="Validate, promote, roll back, or inspect an operator Runtime Binding.",
+        description=(
+            "Read-only inspection plus atomic replacement of active.json. "
+            "Preparing an immutable, non-service-writable artifact root is an "
+            "operator action outside this tool."
+        ),
+    )
+    binding_sub = binding.add_subparsers(
+        dest="runtime_binding_command", metavar="runtime_binding_command"
+    )
+
+    def _add_generation_args(sub: argparse.ArgumentParser) -> None:
+        sub.add_argument(
+            "--binding-root",
+            required=True,
+            help="Operator-owned Binding root (read-only except active.json).",
+        )
+        sub.add_argument(
+            "--profile",
+            required=True,
+            help="Registered profile id whose live contract must accept the generation.",
+        )
+        sub.add_argument("--generation", required=True, help="Generation id to act on.")
+        sub.add_argument(
+            "--trusted-uid",
+            type=int,
+            action="append",
+            default=None,
+            help=(
+                "UID permitted to own the artifact root and its ancestors "
+                "(repeatable). Root is always trusted; default is root only."
+            ),
+        )
+        sub.add_argument(
+            "--service-uid",
+            type=int,
+            default=None,
+            help=(
+                "The arsd/AGENT UID that must NOT be able to rewrite the "
+                "artifacts (defaults to this process's effective UID)."
+            ),
+        )
+
+    validate = binding_sub.add_parser(
+        "validate",
+        help="Probe-backed check of one generation against the live contract.",
+    )
+    _add_generation_args(validate)
+
+    promote = binding_sub.add_parser(
+        "promote",
+        help="Validate, then atomically replace active.json. No daemon restart.",
+    )
+    _add_generation_args(promote)
+
+    rollback = binding_sub.add_parser(
+        "rollback",
+        help=(
+            "Re-promote a previously validated generation: the target is "
+            "re-proven with the same validation and probe that promotion "
+            "required, and must not already be active."
+        ),
+    )
+    _add_generation_args(rollback)
+
+    inspect = binding_sub.add_parser(
+        "inspect-run",
+        help="Recompute one Run's launch seal and report its runtime provenance.",
+    )
+    inspect.add_argument(
+        "--run-dir", required=True, help="Native run directory holding launch.json."
+    )
 
 
 def _add_cleanup_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -196,6 +283,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from agent_run_supervisor.commands import cmd_cleanup
 
         return cmd_cleanup(args)
+    if args.command == "runtime-binding":
+        from agent_run_supervisor.commands import cmd_runtime_binding
+
+        return cmd_runtime_binding(args)
     parser.print_usage(sys.stderr)
     print(f"error: unknown command {args.command}", file=sys.stderr)
     return 2

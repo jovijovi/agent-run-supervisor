@@ -1215,6 +1215,7 @@ def test_production_default_factory_builds_runtask_on_native_stores(
                 allowed_efforts=("low", "medium", "high", "max"),
                 requires_session_load=False,
                 config_schema={"selectors": {}},
+                contract=bindingless_contract(),
             ),
         )
     )
@@ -1254,9 +1255,34 @@ def test_production_default_factory_builds_runtask_on_native_stores(
 CODEX_CANONICAL_CONFIG = '{"features":{"use_legacy_landlock":true}}'
 
 
-def codex_admission_profile(tmp_path: Path, **overrides):
-    from agent_run_supervisor.native_acp.attestation import ExpectedRuntimeIdentity
-    from agent_run_supervisor.native_acp.profile import AgentProfile
+def bindingless_contract(**overrides):
+    """A contract that accepts no operator Binding value at all."""
+    from agent_run_supervisor.native_acp.profile import (
+        LAUNCH_KIND_DIRECT,
+        AdapterContract,
+        VersionProbeRule,
+    )
+
+    kwargs = dict(
+        launch_kind=LAUNCH_KIND_DIRECT,
+        acp_agent_name="fake-acp-agent",
+        acp_protocol_version="1",
+        version_probe=VersionProbeRule(argv_suffix=("--version",)),
+    )
+    kwargs.update(overrides)
+    return AdapterContract(**kwargs)
+
+
+def codex_admission_contract(tmp_path: Path, **overrides):
+    from agent_run_supervisor.native_acp.profile import (
+        LAUNCH_KIND_WRAPPED,
+        SLOT_KIND_CONFIG_ROOT,
+        SLOT_KIND_PACKAGE_TREE,
+        AdapterContract,
+        BindingSlot,
+        VersionProbeRule,
+        WrappedRuntimeArtifacts,
+    )
 
     stage = tmp_path / "codex-stage"
     stage.mkdir(exist_ok=True)
@@ -1264,10 +1290,41 @@ def codex_admission_profile(tmp_path: Path, **overrides):
     node.write_bytes(b"# private node placeholder\n")
     entry = stage / "index.js"
     entry.write_bytes(b"// private adapter entry placeholder\n")
-    cli = stage / "codex"
-    cli.write_bytes(b"# private cli placeholder\n")
-    cred_root = tmp_path / "codex-home"
-    cred_root.mkdir(mode=0o700, exist_ok=True)
+    kwargs = dict(
+        launch_kind=LAUNCH_KIND_WRAPPED,
+        acp_agent_name="@agentclientprotocol/codex-acp",
+        acp_protocol_version="1",
+        acp_agent_version="1.1.7",
+        version_probe=VersionProbeRule(argv_suffix=("--version",)),
+        binding_slots=(
+            BindingSlot(
+                name="downstream_cli",
+                kind=SLOT_KIND_PACKAGE_TREE,
+                env_key="CODEX_PATH",
+            ),
+            BindingSlot(
+                name="codex_home", kind=SLOT_KIND_CONFIG_ROOT, env_key="CODEX_HOME"
+            ),
+        ),
+        wrapped_runtime=WrappedRuntimeArtifacts(
+            interpreter_path=str(node),
+            interpreter_sha256="0" * 64,
+            adapter_entry_path=str(entry),
+            adapter_entry_sha256="1" * 64,
+        ),
+        cli_slot="downstream_cli",
+        credential_root_slot="codex_home",
+        project_config_relpath=".codex/config.toml",
+    )
+    kwargs.update(overrides)
+    return AdapterContract(**kwargs)
+
+
+def codex_admission_profile(tmp_path: Path, **overrides):
+    from agent_run_supervisor.native_acp.profile import AgentProfile
+
+    contract = overrides.pop("contract", None) or codex_admission_contract(tmp_path)
+    entry = contract.wrapped_runtime.adapter_entry_path
 
     kwargs = dict(
         profile_id="codex-acp-admission-1.0",
@@ -1276,8 +1333,6 @@ def codex_admission_profile(tmp_path: Path, **overrides):
         argv_template=(str(entry),),
         env_allowlist=("HOME", "PATH"),
         fixed_env=(
-            ("CODEX_HOME", str(cred_root)),
-            ("CODEX_PATH", str(cli)),
             ("CODEX_CONFIG", CODEX_CANONICAL_CONFIG),
             ("INITIAL_AGENT_MODE", "read-only"),
             ("NO_BROWSER", "1"),
@@ -1306,17 +1361,7 @@ def codex_admission_profile(tmp_path: Path, **overrides):
                 },
             },
         },
-        expected_runtime=ExpectedRuntimeIdentity(
-            node_path=str(node),
-            node_sha256="0" * 64,
-            adapter_entry_path=str(entry),
-            adapter_entry_sha256="1" * 64,
-            cli_path=str(cli),
-            cli_sha256="2" * 64,
-            agent_info_name="@agentclientprotocol/codex-acp",
-            agent_info_version="1.1.7",
-            protocol_version="1",
-        ),
+        contract=contract,
     )
     kwargs.update(overrides)
     return AgentProfile(**kwargs)
@@ -1333,9 +1378,18 @@ def codex_wire_request(**overrides) -> dict:
     return valid_wire_request(**kwargs)
 
 
+def codex_binding_root(tmp_path: Path, profile) -> Path:
+    """A private Binding generation matching whatever the contract declares."""
+    from tests.native_acp import binding_fixtures as bf
+
+    return bf.build_binding_root(tmp_path, profile, dirname="private-binding-root")
+
+
 @contextlib.asynccontextmanager
 async def codex_socket_daemon(tmp_path: Path, profile):
     """In-process ephemeral daemon on a private socket (never production)."""
+    from tests.native_acp import binding_fixtures as bf
+
     from agent_run_supervisor.native_acp.profile import ProfileRegistry
 
     sock_dir = tmp_path / "sock"
@@ -1349,6 +1403,8 @@ async def codex_socket_daemon(tmp_path: Path, profile):
         event_store=event_store,
         supervisor_root=root,
         profile_registry=ProfileRegistry((profile,)),
+        binding_root=codex_binding_root(tmp_path, profile),
+        binding_ownership=bf.ownership(),
         cancel_wait_seconds=5.0,
     )
     srv = server.ArsdServer(
@@ -1559,8 +1615,15 @@ def claude_admission_profile(tmp_path: Path, **overrides):
 
     No real adapter tree, frozen Node copy, CLI, or credential is opened.
     """
-    from agent_run_supervisor.native_acp.attestation import ExpectedRuntimeIdentity
-    from agent_run_supervisor.native_acp.profile import AgentProfile
+    from agent_run_supervisor.native_acp.profile import (
+        LAUNCH_KIND_WRAPPED,
+        SLOT_KIND_PACKAGE_TREE,
+        AdapterContract,
+        AgentProfile,
+        BindingSlot,
+        VersionProbeRule,
+        WrappedRuntimeArtifacts,
+    )
 
     stage = tmp_path / "claude-stage"
     stage.mkdir(exist_ok=True)
@@ -1568,8 +1631,6 @@ def claude_admission_profile(tmp_path: Path, **overrides):
     node.write_bytes(b"# private node placeholder\n")
     entry = stage / "index.js"
     entry.write_bytes(b"// private adapter entry placeholder\n")
-    cli = stage / "claude"
-    cli.write_bytes(b"# private cli placeholder\n")
 
     kwargs = dict(
         profile_id="claude-agent-acp-admission-0.61.0",
@@ -1577,10 +1638,7 @@ def claude_admission_profile(tmp_path: Path, **overrides):
         executable_key="claude-agent-acp-admission",
         argv_template=(str(entry),),
         env_allowlist=("HOME", "PATH"),
-        fixed_env=(
-            ("CLAUDE_CODE_EXECUTABLE", str(cli)),
-            ("NO_BROWSER", "1"),
-        ),
+        fixed_env=(("NO_BROWSER", "1"),),
         credential_slots=(),
         required_credential_refs=(),
         model_selector_id="model",
@@ -1612,19 +1670,26 @@ def claude_admission_profile(tmp_path: Path, **overrides):
                 },
             },
         },
-        expected_runtime=ExpectedRuntimeIdentity(
-            node_path=str(node),
-            node_sha256="0" * 64,
-            adapter_entry_path=str(entry),
-            adapter_entry_sha256="1" * 64,
-            cli_path=str(cli),
-            cli_sha256="2" * 64,
-            agent_info_name="@agentclientprotocol/claude-agent-acp",
-            agent_info_version="0.61.0",
-            protocol_version="1",
-            cli_path_env="CLAUDE_CODE_EXECUTABLE",
-            credential_root_env=None,
-            project_config_relpath=None,
+        contract=AdapterContract(
+            launch_kind=LAUNCH_KIND_WRAPPED,
+            acp_agent_name="@agentclientprotocol/claude-agent-acp",
+            acp_protocol_version="1",
+            acp_agent_version="0.61.0",
+            version_probe=VersionProbeRule(argv_suffix=("--version",)),
+            binding_slots=(
+                BindingSlot(
+                    name="downstream_cli",
+                    kind=SLOT_KIND_PACKAGE_TREE,
+                    env_key="CLAUDE_CODE_EXECUTABLE",
+                ),
+            ),
+            wrapped_runtime=WrappedRuntimeArtifacts(
+                interpreter_path=str(node),
+                interpreter_sha256="0" * 64,
+                adapter_entry_path=str(entry),
+                adapter_entry_sha256="1" * 64,
+            ),
+            cli_slot="downstream_cli",
         ),
     )
     kwargs.update(overrides)

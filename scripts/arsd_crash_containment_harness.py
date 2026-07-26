@@ -792,7 +792,12 @@ def run_s4(inputs: dict[str, str]) -> int:
             "request": {
                 "owner": owner,
                 "namespace": namespace,
-                "profile_id": "opencode-1.18.4",
+                # C15: the stable ID replaced ``opencode-1.18.4`` with no
+                # compatibility alias, so the old ID is refused at admission.
+                # This harness also now requires the operator to have promoted
+                # a Runtime Binding generation for the profile: after the R13
+                # split there is no source constant naming the executable.
+                "profile_id": "opencode-native-acp",
                 "session_reuse": "reuse",
                 "ars_session_id": crash_session,
                 "expected_binding_hash": None,
@@ -806,7 +811,7 @@ def run_s4(inputs: dict[str, str]) -> int:
                 "grant_role_hash": "sha256:" + "2" * 64,
                 "grant_capabilities": ["read"],
                 "mcp_snapshot_hashes": [],
-                "credential_refs": ["kimi-for-coding", "deepseek"],
+                "credential_refs": ["kimi-for-coding"],
                 "limits": {},
                 "evidence_policy_hash": "sha256:" + "3" * 64,
                 "recovery_policy_hash": "sha256:" + "4" * 64,

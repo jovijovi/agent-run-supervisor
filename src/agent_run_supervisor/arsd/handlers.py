@@ -17,8 +17,12 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Iterator, Mapping
 
 from agent_run_supervisor import __version__ as PACKAGE_VERSION
 from agent_run_supervisor.event_store import EventStore, EventStoreError
-from agent_run_supervisor.native_acp import storage
-from agent_run_supervisor.native_acp.profile import DEFAULT_REGISTRY, ProfileRegistry
+from agent_run_supervisor.native_acp import runtime_binding, storage
+from agent_run_supervisor.native_acp.profile import (
+    DEFAULT_REGISTRY,
+    ProfileRegistry,
+    UnknownProfileError,
+)
 from agent_run_supervisor.native_acp.run_task import RunTask
 from agent_run_supervisor.native_acp.spec import LIMIT_MAX_EVENT_BYTES_MAX
 from agent_run_supervisor.session import (
@@ -124,15 +128,28 @@ def _require_closed_payload(op: str, payload: Mapping[str, Any]) -> None:
 
 
 def default_run_task_factory(
-    supervisor_root: Path, *, registry: ProfileRegistry = DEFAULT_REGISTRY
+    supervisor_root: Path,
+    *,
+    registry: ProfileRegistry = DEFAULT_REGISTRY,
+    binding_root: Path | None = None,
+    binding_ownership: runtime_binding.TrustedOwnership | None = None,
 ) -> RunTaskFactory:
-    """Production factory: RunTask bound to supervisor-root native stores."""
+    """Production factory: RunTask bound to supervisor-root native stores.
+
+    The factory runs once per admitted Run, inside the admission lock and
+    before the Run is registered — so the single Binding read happens exactly
+    there, and the resolved generation is handed to ``RunTask`` as a value.
+    """
 
     root = Path(supervisor_root)
     session_store = storage.native_session_store(root)
     event_store = storage.native_event_store(root)
 
     def factory(*, command, run_id, prepared_handle, submitted_at):
+        profile = registry.get(command.request.profile_id)
+        admitted = admission.resolve_runtime_binding(
+            profile, binding_root=binding_root, ownership=binding_ownership
+        )
         return RunTask(
             request=command.request,
             prompt_text=command.prompt_text,
@@ -145,6 +162,7 @@ def default_run_task_factory(
             retry_of_run_id=command.retry_of_run_id,
             cwd=command.cwd,
             prepared_handle=prepared_handle,
+            runtime_binding=admitted,
         )
 
     return factory
@@ -841,6 +859,8 @@ class ArsdHandlers:
         events_page_limit: int = DEFAULT_EVENTS_PAGE_LIMIT,
         supervisor_root: Path | None = None,
         profile_registry: ProfileRegistry = DEFAULT_REGISTRY,
+        binding_root: Path | None = None,
+        binding_ownership: runtime_binding.TrustedOwnership | None = None,
     ) -> None:
         self._session_store = session_store
         self._event_store = event_store
@@ -853,7 +873,10 @@ class ArsdHandlers:
             self._factory = run_task_factory
         elif supervisor_root is not None:
             self._factory = default_run_task_factory(
-                supervisor_root, registry=profile_registry
+                supervisor_root,
+                registry=profile_registry,
+                binding_root=binding_root,
+                binding_ownership=binding_ownership,
             )
         else:
             raise ValueError("run_task_factory or supervisor_root is required")
@@ -1005,13 +1028,25 @@ class ArsdHandlers:
                     prepared_handle=handle,
                     submitted_at=accepted_at,
                 )
-            except Exception:
+            except Exception as exc:
                 try:
                     admission.finalize_registration_failure(handle, run_id)
                 except Exception:
                     _LOGGER.exception(
                         "arsd: registration failure finalization failed for %s", run_id
                     )
+                # Existing error shapes only — the v1 wire gains no code. An
+                # unknown profile is a caller-visible request problem; a
+                # Binding refusal is a deployment fact the caller cannot fix,
+                # reported by its rule name and never with a path or a digest.
+                if isinstance(exc, UnknownProfileError):
+                    raise protocol.ProtocolError(
+                        protocol.INVALID_REQUEST, "unknown profile id"
+                    ) from None
+                if isinstance(exc, runtime_binding.BindingRefusal):
+                    raise protocol.ProtocolError(
+                        protocol.INTERNAL, f"runtime binding refused: {exc.rule}"
+                    ) from None
                 raise protocol.ProtocolError(
                     protocol.INTERNAL, "run registration failed"
                 ) from None

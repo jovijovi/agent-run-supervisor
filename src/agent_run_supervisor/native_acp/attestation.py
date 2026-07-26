@@ -1,6 +1,6 @@
-"""Spawn-boundary attestation for identity-pinned profiles (design D10).
+"""Spawn-boundary attestation of the per-Run sealed runtime identity (D10/R13).
 
-A profile that freezes an :class:`ExpectedRuntimeIdentity` gets one
+A Run whose admission sealed a :class:`SealedRuntimeIdentity` gets one
 deterministic check point immediately before its child is spawned:
 
 ``pin → credential-alias refusal → hash-through-inode → credential-root
@@ -9,16 +9,25 @@ write-once report``
 
 The gate is **detect-and-refuse at every Run**, not a runtime cage. It proves
 that the artifacts about to be executed, the credential root about to be used,
-and the configuration surfaces the agent will read are exactly the frozen ones
-*at check time*, on both sides of the race window, and refuses fail-closed
-otherwise. It never OS-sandboxes the launched runtime and makes no claim about
-an actor racing the residual window inside a single spawn.
+and the configuration surfaces the agent will read are exactly the ones this
+Run *sealed at admission* — not a profile constant — on both sides of the race
+window, and refuses fail-closed otherwise. It never OS-sandboxes the launched
+runtime and makes no claim about an actor racing the residual window inside a
+single spawn.
 
 Artifacts are pinned as ``O_PATH`` descriptors and hashed by reopening those
 descriptors through ``/proc/self/fd``, so identity is bound to inodes rather
-than to pathnames. On PASS the Node pin survives as ``interpreter_fd`` and the
-spawn exec's that descriptor directly, leaving the interpreter image with zero
-residual swap window.
+than to pathnames. On PASS the pin of the image that will actually be exec'd
+survives as ``exec_fd`` and the spawn exec's that descriptor directly, leaving
+zero residual swap window:
+
+- ``wrapped_acp`` pins the source-frozen interpreter, the source-frozen ACP
+  adapter entry, and the Binding-sealed downstream CLI closure. ARS cannot
+  fd-pin the CLI the adapter reopens later, so the honest guarantee there is
+  path-and-closure immutability under an operator-owned root, not descriptor
+  identity.
+- ``direct_acp`` pins the single Binding-sealed executable that is both the
+  AGENT CLI and the ACP implementation, and exec's that descriptor.
 
 Every persisted value is a path, a hex digest, an octal mode, an errno name, a
 boolean, or an integer. Credential bytes are never read, and digests of
@@ -41,11 +50,17 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from . import storage
+from .runtime_binding import BindingRefusal, TrustedOwnership  # noqa: F401 - re-exported
+from .runtime_binding import check_ancestors as _check_ancestors
+from .runtime_binding import check_ownership as _check_ownership
+from .runtime_binding import package_tree_digest
 
 ATTESTATION_SCHEMA_VERSION = 1
 ATTESTATION_FILENAME = "attestation.json"
 
-# Refusal classes. Every check row maps to exactly one of them.
+# Refusal classes. Every check row maps to exactly one of them. An artifact
+# that is not the frozen, non-rewritable one *is* a runtime identity mismatch,
+# so the artifact-trust rows reuse that class rather than inventing vocabulary.
 RUNTIME_IDENTITY_MISMATCH = "RUNTIME_IDENTITY_MISMATCH"
 PROJECT_CONFIG_LAYER_PRESENT = "PROJECT_CONFIG_LAYER_PRESENT"
 CREDENTIAL_ROOT_VIOLATION = "CREDENTIAL_ROOT_VIOLATION"
@@ -61,12 +76,17 @@ _CHECK_CLASSES: dict[str, str] = {
     "node_sha256": RUNTIME_IDENTITY_MISMATCH,
     "adapter_entry_sha256": RUNTIME_IDENTITY_MISMATCH,
     "cli_sha256": RUNTIME_IDENTITY_MISMATCH,
+    "cli_artifact_trust": RUNTIME_IDENTITY_MISMATCH,
+    "cli_package_closure": RUNTIME_IDENTITY_MISMATCH,
+    "cli_interpreter_sha256": RUNTIME_IDENTITY_MISMATCH,
     "argv_node_binding": RUNTIME_IDENTITY_MISMATCH,
     "argv_adapter_entry_binding": RUNTIME_IDENTITY_MISMATCH,
+    "argv_cli_binding": RUNTIME_IDENTITY_MISMATCH,
     "env_cli_path_binding": RUNTIME_IDENTITY_MISMATCH,
     "node_binding_lost": RUNTIME_IDENTITY_MISMATCH,
     "adapter_entry_binding_lost": RUNTIME_IDENTITY_MISMATCH,
     "cli_binding_lost": RUNTIME_IDENTITY_MISMATCH,
+    "cli_package_closure_recheck": RUNTIME_IDENTITY_MISMATCH,
     "credential_root_not_declared": CREDENTIAL_ROOT_VIOLATION,
     "project_config_not_declared": PROJECT_CONFIG_LAYER_PRESENT,
     "credential_root_structure": CREDENTIAL_ROOT_VIOLATION,
@@ -88,13 +108,6 @@ _HASH_BLOCK_BYTES = 1 << 20
 _CREDENTIAL_ALIAS_EXPECTED = "distinct from credential file"
 _NOT_DECLARED = "not declared"
 
-# Per-runtime bindings the gate needs but cannot infer. Their defaults are the
-# Codex values that were frozen before any second identity-pinned profile
-# existed; :meth:`ExpectedRuntimeIdentity.to_dict` omits each field at its
-# default so the merged Codex snapshot, profile hash, and launch hash stay
-# byte-identical while a second runtime declares its own bindings explicitly.
-DEFAULT_CLI_PATH_ENV = "CODEX_PATH"
-DEFAULT_CREDENTIAL_ROOT_ENV = "CODEX_HOME"
 DEFAULT_PROJECT_CONFIG_RELPATH = f"{PROJECT_CONFIG_DIRNAME}/{PROJECT_CONFIG_FILENAME}"
 
 # Documented test-only injection point sitting exactly between the
@@ -148,107 +161,174 @@ def _file_type(mode: int) -> str:
 
 
 @dataclass(frozen=True)
-class ExpectedRuntimeIdentity:
-    """Profile-frozen identity of the runtime a spawn is allowed to launch.
+class ArtifactClosure:
+    """The complete executable code closure of one external CLI artifact (C5).
 
-    The last three fields bind the gate to *this* runtime's surfaces: the
-    fixed-env key that must carry the CLI path, the fixed-env key holding an
-    ARS-managed credential root (``None`` when the downstream CLI owns its own
-    credential storage), and the workspace project-config path whose ancestor
-    chain must stay clean (``None`` when the profile freezes no such surface).
+    ``native_binary`` freezes a regular-file digest. ``package_tree`` freezes
+    the immutable package root's tree digest, the launcher identity, and the
+    required interpreter identity — because a launcher hash alone never freezes
+    the sibling code that launcher loads, and ARS must not claim that it does.
+    """
+
+    kind: str
+    path: str
+    sha256: str
+    version: str
+    package_root: str | None = None
+    tree_sha256: str | None = None
+    interpreter_path: str | None = None
+    interpreter_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in ("native_binary", "package_tree"):
+            raise ValueError(f"unknown artifact closure kind: {self.kind!r}")
+        _require_absolute(self.path, "artifact path")
+        _require_digest(self.sha256, "artifact sha256")
+        if not isinstance(self.version, str) or not self.version:
+            raise ValueError("artifact version must be a non-empty string")
+        if self.kind == "package_tree":
+            _require_absolute(self.package_root, "artifact package_root")
+            _require_digest(self.tree_sha256, "artifact tree_sha256")
+            _require_absolute(self.interpreter_path, "artifact interpreter_path")
+            _require_digest(self.interpreter_sha256, "artifact interpreter_sha256")
+        elif (self.interpreter_path is None) != (self.interpreter_sha256 is None):
+            # A native binary may need no interpreter, but a half-declared one
+            # would seal a path whose identity nothing froze.
+            raise ValueError("artifact interpreter path and digest travel together")
+        elif self.interpreter_path is not None:
+            _require_absolute(self.interpreter_path, "artifact interpreter_path")
+            _require_digest(self.interpreter_sha256, "artifact interpreter_sha256")
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "kind": self.kind,
+            "path": self.path,
+            "sha256": self.sha256,
+            "version": self.version,
+        }
+        for name in (
+            "package_root",
+            "tree_sha256",
+            "interpreter_path",
+            "interpreter_sha256",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                payload[name] = value
+        return payload
+
+
+@dataclass(frozen=True)
+class SealedRuntimeIdentity:
+    """The runtime identity one Run sealed at admission (R13 layer 3).
+
+    Its source half (interpreter, adapter entry, ACP name/protocol) comes from
+    the profile's :class:`~.profile.AdapterContract`; its deployment half
+    (``cli``, credential-root path) comes from the Binding generation that
+    admission read exactly once. ``agent_info_version`` is present only where
+    the ACP-reported version is itself a *source* artifact fact — a wrapped
+    adapter — and is ``None`` for ``direct_acp``, where it reports the
+    deployed executable and may never be asserted equal to a CLI ``--version``.
+
     A ``None`` surface never drops rows silently: the report records an
     explicit ``*_not_declared`` row instead.
     """
 
-    node_path: str
-    node_sha256: str
-    adapter_entry_path: str
-    adapter_entry_sha256: str
-    cli_path: str
-    cli_sha256: str
+    launch_kind: str
     agent_info_name: str
-    agent_info_version: str
     protocol_version: str
-    cli_path_env: str = DEFAULT_CLI_PATH_ENV
-    credential_root_env: str | None = DEFAULT_CREDENTIAL_ROOT_ENV
-    project_config_relpath: str | None = DEFAULT_PROJECT_CONFIG_RELPATH
+    cli: ArtifactClosure
+    agent_info_version: str | None = None
+    cli_path_env: str | None = None
+    node_path: str | None = None
+    node_sha256: str | None = None
+    adapter_entry_path: str | None = None
+    adapter_entry_sha256: str | None = None
+    credential_root_env: str | None = None
+    credential_root_path: str | None = None
+    project_config_relpath: str | None = None
 
     def __post_init__(self) -> None:
-        for field_name in (
-            "node_path",
-            "node_sha256",
-            "adapter_entry_path",
-            "adapter_entry_sha256",
-            "cli_path",
-            "cli_sha256",
-            "agent_info_name",
-            "agent_info_version",
-            "protocol_version",
-        ):
+        if self.launch_kind not in ("wrapped_acp", "direct_acp"):
+            raise ValueError(f"unknown launch kind: {self.launch_kind!r}")
+        for field_name in ("agent_info_name", "protocol_version"):
             value = getattr(self, field_name)
             if not isinstance(value, str) or not value:
                 raise ValueError(
-                    f"expected runtime identity {field_name} must be a non-empty string"
-                )
-        for field_name in ("node_path", "adapter_entry_path", "cli_path"):
-            if not Path(getattr(self, field_name)).is_absolute():
-                raise ValueError(
-                    f"expected runtime identity {field_name} must be an absolute path"
-                )
-        for field_name in ("node_sha256", "adapter_entry_sha256", "cli_sha256"):
-            value = getattr(self, field_name)
-            if len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
-                raise ValueError(
-                    f"expected runtime identity {field_name} must be a sha256 hex digest"
+                    f"sealed runtime identity {field_name} must be a non-empty string"
                 )
         if not self.protocol_version.isdigit():
             raise ValueError(
-                "expected runtime identity protocol_version must be a decimal string"
+                "sealed runtime identity protocol_version must be a decimal string"
             )
+        if self.launch_kind == "wrapped_acp":
+            _require_absolute(self.node_path, "sealed node_path")
+            _require_digest(self.node_sha256, "sealed node_sha256")
+            _require_absolute(self.adapter_entry_path, "sealed adapter_entry_path")
+            _require_digest(self.adapter_entry_sha256, "sealed adapter_entry_sha256")
+            if not self.cli_path_env:
+                raise ValueError("a wrapped runtime must bind its CLI path env key")
+        elif self.node_path is not None or self.adapter_entry_path is not None:
+            raise ValueError("a direct runtime seals no interpreter or adapter entry")
         for field_name in ("cli_path_env", "credential_root_env"):
             value = getattr(self, field_name)
-            if field_name == "credential_root_env" and value is None:
+            if value is None:
                 continue
             if not isinstance(value, str) or not value or "=" in value:
                 raise ValueError(
-                    f"expected runtime identity {field_name} must be an "
+                    f"sealed runtime identity {field_name} must be an "
                     "environment variable name"
                 )
         relpath = self.project_config_relpath
         if relpath is not None:
-            if not isinstance(relpath, str) or not relpath:
-                raise ValueError(
-                    "expected runtime identity project_config_relpath must be a "
-                    "non-empty relative path"
-                )
             parts = Path(relpath).parts
-            if Path(relpath).is_absolute() or not parts or ".." in parts:
+            if not relpath or Path(relpath).is_absolute() or not parts or ".." in parts:
                 raise ValueError(
-                    "expected runtime identity project_config_relpath must be a "
+                    "sealed runtime identity project_config_relpath must be a "
                     "relative path without parent references"
                 )
 
+    @property
+    def exec_path(self) -> str:
+        """The image the spawn will exec: the interpreter, or the CLI itself."""
+        return self.node_path if self.launch_kind == "wrapped_acp" else self.cli.path
+
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "node_path": self.node_path,
-            "node_sha256": self.node_sha256,
-            "adapter_entry_path": self.adapter_entry_path,
-            "adapter_entry_sha256": self.adapter_entry_sha256,
-            "cli_path": self.cli_path,
-            "cli_sha256": self.cli_sha256,
+            "launch_kind": self.launch_kind,
             "agent_info_name": self.agent_info_name,
-            "agent_info_version": self.agent_info_version,
             "protocol_version": self.protocol_version,
+            "cli": self.cli.to_dict(),
         }
-        # Omit-when-default: a runtime that keeps the pre-existing bindings
-        # serializes exactly as it did before they were expressible.
-        if self.cli_path_env != DEFAULT_CLI_PATH_ENV:
-            payload["cli_path_env"] = self.cli_path_env
-        if self.credential_root_env != DEFAULT_CREDENTIAL_ROOT_ENV:
-            payload["credential_root_env"] = self.credential_root_env
-        if self.project_config_relpath != DEFAULT_PROJECT_CONFIG_RELPATH:
-            payload["project_config_relpath"] = self.project_config_relpath
+        for name in (
+            "agent_info_version",
+            "cli_path_env",
+            "node_path",
+            "node_sha256",
+            "adapter_entry_path",
+            "adapter_entry_sha256",
+            "credential_root_env",
+            "credential_root_path",
+            "project_config_relpath",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                payload[name] = value
         return payload
+
+
+def _require_absolute(value: Any, name: str) -> None:
+    if not isinstance(value, str) or not value or not Path(value).is_absolute():
+        raise ValueError(f"{name} must be an absolute path")
+
+
+def _require_digest(value: Any, name: str) -> None:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(ch not in "0123456789abcdef" for ch in value)
+    ):
+        raise ValueError(f"{name} must be a sha256 hex digest")
 
 
 @dataclass(frozen=True)
@@ -287,8 +367,15 @@ class AttestationReport:
 
 @dataclass(frozen=True)
 class SpawnAttestation:
+    """``exec_fd`` pins the image the spawn will exec.
+
+    ``wrapped_acp``: the frozen interpreter. ``direct_acp``: the sealed AGENT
+    CLI itself, so C10's descriptor-exec holds for the one artifact that is
+    both CLI and ACP implementation.
+    """
+
     report: AttestationReport
-    interpreter_fd: int
+    exec_fd: int
 
 
 def project_config_closure(
@@ -395,19 +482,14 @@ class _AttestationState:
 
     # -- checks ----------------------------------------------------------
 
-    def pin_artifact(
-        self, artifact: str, name: str, path: str, *, nofollow: bool
-    ) -> None:
+    def pin_artifact(self, artifact: str, name: str, path: str) -> None:
         """O_PATH pin of a regular file; the descriptor carries the identity.
 
-        ``nofollow`` is False for the CLI only: its configured path is a
-        symlink by design, so the pin resolves to the final target inode.
+        Always ``O_NOFOLLOW``: a Binding names an immutable versioned path, and
+        the Binding reader already refused a symlinked artifact, so a symlink
+        appearing here is a swap between admission and spawn.
         """
-        flags = os.O_PATH | os.O_CLOEXEC
-        if nofollow:
-            # O_PATH|O_NOFOLLOW pins the symlink itself rather than failing, so
-            # the regular-file assertion below is what refuses a swapped link.
-            flags |= os.O_NOFOLLOW
+        flags = os.O_PATH | os.O_CLOEXEC | os.O_NOFOLLOW
         try:
             fd = os.open(path, flags)
         except OSError as exc:
@@ -575,12 +657,8 @@ class _AttestationState:
 
     # -- post-hook liveness recheck --------------------------------------
 
-    def recheck_artifact(
-        self, artifact: str, name: str, path: str, *, nofollow: bool
-    ) -> None:
-        flags = os.O_PATH | os.O_CLOEXEC
-        if nofollow:
-            flags |= os.O_NOFOLLOW
+    def recheck_artifact(self, artifact: str, name: str, path: str) -> None:
+        flags = os.O_PATH | os.O_CLOEXEC | os.O_NOFOLLOW
         pinned = self.binding[artifact]
         expected = f"{pinned['dev']}:{pinned['ino']}"
         try:
@@ -632,66 +710,152 @@ def _refusal_for(failure: _CheckFailed) -> AttestationRefusal:
     )
 
 
+def _require_artifact_trust(
+    state: _AttestationState, name: str, path: str, ownership: TrustedOwnership
+) -> None:
+    """C5 ownership: the artifact and every ancestor resist the service UID.
+
+    Re-proven here rather than trusted from admission, because ownership and
+    mode are exactly the properties an attacker would change inside the window
+    between the Binding read and the spawn.
+    """
+    try:
+        _check_ownership(os.lstat(path), ownership, "artifact")
+        _check_ancestors(Path(path), ownership, "artifact")
+    except BindingRefusal as refusal:
+        raise _CheckFailed(name, "operator-owned and non-writable", refusal.rule) from None
+    state.record(name, "operator-owned and non-writable", "trusted")
+
+
+def _require_package_closure(
+    state: _AttestationState, name: str, closure: ArtifactClosure, ownership: TrustedOwnership
+) -> None:
+    """The wrapped downstream CLI's sibling code, not just its launcher.
+
+    ARS cannot fd-pin the CLI the adapter reopens later, so the guarantee is
+    path-and-closure immutability under an operator-owned root: the package
+    tree digest plus the ownership/mode of the root and every ancestor.
+    """
+    root = closure.package_root
+    if root is None:
+        state.record(name, _NOT_DECLARED, _NOT_DECLARED)
+        return
+    try:
+        _check_ownership(os.lstat(root), ownership, "package root")
+        _check_ancestors(Path(root), ownership, "package root")
+        observed = package_tree_digest(Path(root), ownership=ownership)
+    except BindingRefusal as refusal:
+        raise _CheckFailed(name, closure.tree_sha256, refusal.rule) from None
+    except OSError as exc:
+        raise _CheckFailed(name, closure.tree_sha256, _errno_name(exc)) from None
+    if observed != closure.tree_sha256:
+        raise _CheckFailed(name, closure.tree_sha256, observed)
+    state.record(name, closure.tree_sha256, observed)
+
+
 def _perform(
     state: _AttestationState,
     *,
-    expected: ExpectedRuntimeIdentity,
+    expected: SealedRuntimeIdentity,
     launch: Any,
     fixed_env: Mapping[str, str],
     effective_cwd: str,
+    ownership: TrustedOwnership,
 ) -> None:
     if not hasattr(os, "O_PATH"):
         # Never degrade to pathname trust: descriptor pinning is the gate.
         raise _CheckFailed("platform_unsupported", "os.O_PATH", "unavailable")
 
-    # 1. Pin every artifact by descriptor before anything is measured.
-    state.pin_artifact("node", "node_pin", expected.node_path, nofollow=True)
-    state.pin_artifact(
-        "adapter_entry", "adapter_entry_pin", expected.adapter_entry_path, nofollow=True
-    )
-    state.pin_artifact("cli", "cli_pin", expected.cli_path, nofollow=False)
+    wrapped = expected.launch_kind == "wrapped_acp"
 
-    # 1b. Identify the declared credential root and auth.json structurally —
+    # 1. Pin every artifact by descriptor before anything is measured.
+    if wrapped:
+        state.pin_artifact("node", "node_pin", expected.node_path)
+        state.pin_artifact(
+            "adapter_entry", "adapter_entry_pin", expected.adapter_entry_path
+        )
+    state.pin_artifact("cli", "cli_pin", expected.cli.path)
+
+    # 1b. Identify the sealed credential root and auth.json structurally —
     #     stat facts only — and refuse any pinned artifact that resolves to
     #     that inode. This runs before step 2 so an aliased artifact is never
     #     read: hashing a credential file would both leak a credential-derived
     #     digest into the FAIL report and read bytes this gate must not touch.
     credential_env_key = expected.credential_root_env
-    root = fixed_env.get(credential_env_key) if credential_env_key else None
+    root = expected.credential_root_path if credential_env_key else None
     credential = _CredentialIdentity.identify(root)
-    state.require_not_credential_alias("node", "node_credential_alias", credential)
-    state.require_not_credential_alias(
-        "adapter_entry", "adapter_entry_credential_alias", credential
-    )
+    if wrapped:
+        state.require_not_credential_alias("node", "node_credential_alias", credential)
+        state.require_not_credential_alias(
+            "adapter_entry", "adapter_entry_credential_alias", credential
+        )
     state.require_not_credential_alias("cli", "cli_credential_alias", credential)
 
     # 2. Hash through the pinned inodes and bind argv/env to the same paths.
+    if wrapped:
+        state.hash_artifact(
+            "node", "node_sha256", expected.node_sha256, credential=credential
+        )
+        state.hash_artifact(
+            "adapter_entry",
+            "adapter_entry_sha256",
+            expected.adapter_entry_sha256,
+            credential=credential,
+        )
     state.hash_artifact(
-        "node", "node_sha256", expected.node_sha256, credential=credential
+        "cli", "cli_sha256", expected.cli.sha256, credential=credential
     )
-    state.hash_artifact(
-        "adapter_entry",
-        "adapter_entry_sha256",
-        expected.adapter_entry_sha256,
-        credential=credential,
-    )
-    state.hash_artifact(
-        "cli", "cli_sha256", expected.cli_sha256, credential=credential
-    )
+    # C5 applies to every artifact the launch depends on, not only the one the
+    # Binding named. Node and the adapter entry are source-frozen, but a frozen
+    # digest is a statement about bytes that anyone able to write them can
+    # falsify — and the adapter entry is the one artifact ARS hands onward by
+    # path, so its trust boundary is the only thing standing between this gate
+    # and Node's own open of argv[1].
+    _require_artifact_trust(state, "cli_artifact_trust", expected.cli.path, ownership)
+    if wrapped:
+        _require_artifact_trust(
+            state, "node_artifact_trust", expected.node_path, ownership
+        )
+        _require_artifact_trust(
+            state,
+            "adapter_entry_artifact_trust",
+            expected.adapter_entry_path,
+            ownership,
+        )
+    _require_package_closure(state, "cli_package_closure", expected.cli, ownership)
+    if expected.cli.interpreter_path is not None:
+        # The interpreter is an artifact of the launch like any other: a frozen
+        # digest without a trust boundary is a statement about bytes anyone able
+        # to write them can falsify.
+        _require_artifact_trust(
+            state, "cli_interpreter_trust", expected.cli.interpreter_path, ownership
+        )
+        observed = _digest_path(expected.cli.interpreter_path)
+        state.equality(
+            "cli_interpreter_sha256", expected.cli.interpreter_sha256, observed
+        )
+
     argv = tuple(getattr(launch, "argv", ()) or ())
-    state.equality(
-        "argv_node_binding", expected.node_path, argv[0] if len(argv) > 0 else None
-    )
-    state.equality(
-        "argv_adapter_entry_binding",
-        expected.adapter_entry_path,
-        argv[1] if len(argv) > 1 else None,
-    )
-    state.equality(
-        "env_cli_path_binding",
-        expected.cli_path,
-        fixed_env.get(expected.cli_path_env),
-    )
+    if wrapped:
+        state.equality(
+            "argv_node_binding", expected.node_path, argv[0] if len(argv) > 0 else None
+        )
+        state.equality(
+            "argv_adapter_entry_binding",
+            expected.adapter_entry_path,
+            argv[1] if len(argv) > 1 else None,
+        )
+        state.equality(
+            "env_cli_path_binding",
+            expected.cli.path,
+            fixed_env.get(expected.cli_path_env),
+        )
+    else:
+        # One executable is both AGENT CLI and ACP implementation: argv[0] is
+        # the sealed artifact, and no env key carries a downstream CLI path.
+        state.equality(
+            "argv_cli_binding", expected.cli.path, argv[0] if len(argv) > 0 else None
+        )
 
     # 3. Credential-root structure (never its bytes). A runtime whose CLI owns
     #    its own credential storage declares no root; the absence is recorded
@@ -721,14 +885,47 @@ def _perform(
 
     # 6. Liveness + absence recheck: every predicate the spawn depends on,
     #    re-evaluated post-hook so both sides of the window must hold.
-    state.recheck_artifact("node", "node_binding_lost", expected.node_path, nofollow=True)
-    state.recheck_artifact(
-        "adapter_entry",
-        "adapter_entry_binding_lost",
-        expected.adapter_entry_path,
-        nofollow=True,
+    if wrapped:
+        state.recheck_artifact("node", "node_binding_lost", expected.node_path)
+        state.recheck_artifact(
+            "adapter_entry",
+            "adapter_entry_binding_lost",
+            expected.adapter_entry_path,
+        )
+        _require_artifact_trust(
+            state, "node_trust_recheck", expected.node_path, ownership
+        )
+        _require_artifact_trust(
+            state,
+            "adapter_entry_trust_recheck",
+            expected.adapter_entry_path,
+            ownership,
+        )
+        # The inode rows above cannot see an in-place rewrite, which is exactly
+        # the shape a same-inode content swap takes. Node opens argv[1] by path
+        # after this gate closes its descriptor, so the adapter entry's bytes
+        # are re-proven through the still-open pin on the far side of the
+        # window. The residual gap — between this row and Node's own open — is
+        # closed by the trust rows, not by a descriptor: argv is contract-frozen
+        # and cannot be redirected to /proc/self/fd.
+        state.hash_artifact(
+            "adapter_entry",
+            "adapter_entry_sha256_recheck",
+            expected.adapter_entry_sha256,
+            credential=credential,
+        )
+    state.recheck_artifact("cli", "cli_binding_lost", expected.cli.path)
+    _require_artifact_trust(state, "cli_trust_recheck", expected.cli.path, ownership)
+    if expected.cli.interpreter_path is not None:
+        _require_artifact_trust(
+            state,
+            "cli_interpreter_trust_recheck",
+            expected.cli.interpreter_path,
+            ownership,
+        )
+    _require_package_closure(
+        state, "cli_package_closure_recheck", expected.cli, ownership
     )
-    state.recheck_artifact("cli", "cli_binding_lost", expected.cli_path, nofollow=False)
     if credential_env_key is not None:
         state.recheck_credential_root("credential_root_binding_lost", str(root))
         state.recheck_auth_file("auth_json_binding_lost")
@@ -739,23 +936,41 @@ def _perform(
         )
 
 
+def _digest_path(path: str) -> str:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        return _errno_name(exc)
+    try:
+        digest = hashlib.sha256()
+        while True:
+            block = os.read(fd, _HASH_BLOCK_BYTES)
+            if not block:
+                break
+            digest.update(block)
+        return digest.hexdigest()
+    finally:
+        os.close(fd)
+
+
 def attest_spawn_boundary(
     *,
-    expected: ExpectedRuntimeIdentity,
+    expected: SealedRuntimeIdentity,
     launch: Any,
     fixed_env: Mapping[str, str],
     effective_cwd: str,
     run_dir: Path,
+    ownership: TrustedOwnership,
 ) -> SpawnAttestation:
     """Attest the spawn boundary or refuse it fail-closed.
 
     ``attestation.json`` is written write-once in ``run_dir`` **before** any
-    refusal is raised, on PASS and on FAIL, so a refused Run leaves the
-    expected identity (``launch.json``) and the observed one side by side.
+    refusal is raised, on PASS and on FAIL, so a refused Run leaves the sealed
+    identity (``launch.json``) and the observed one side by side.
 
     On PASS the returned :class:`SpawnAttestation` carries the still-open
-    ``O_PATH`` pin of the interpreter; the caller owns closing it. Every other
-    descriptor opened here is closed on every path.
+    ``O_PATH`` pin of the image that will be exec'd; the caller owns closing
+    it. Every other descriptor opened here is closed on every path.
     """
     state = _AttestationState()
     try:
@@ -765,6 +980,7 @@ def attest_spawn_boundary(
             launch=launch,
             fixed_env=fixed_env,
             effective_cwd=effective_cwd,
+            ownership=ownership,
         )
     except _CheckFailed as failure:
         state.checks.append(
@@ -784,12 +1000,12 @@ def attest_spawn_boundary(
         state.close_all()
         raise
 
-    interpreter_fd = state.detach("node")
+    exec_fd = state.detach("node" if expected.launch_kind == "wrapped_acp" else "cli")
     state.close_all()
     report = state.report(passed=True)
     try:
         storage.write_once_json(Path(run_dir) / ATTESTATION_FILENAME, report.to_dict())
     except BaseException:
-        os.close(interpreter_fd)
+        os.close(exec_fd)
         raise
-    return SpawnAttestation(report=report, interpreter_fd=interpreter_fd)
+    return SpawnAttestation(report=report, exec_fd=exec_fd)

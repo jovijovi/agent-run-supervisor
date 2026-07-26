@@ -230,7 +230,13 @@ def test_session_lease_remains_authoritative_for_real_runtask(
     import sys
 
     from agent_run_supervisor.native_acp import profile as profile_module
-    from agent_run_supervisor.native_acp.profile import AgentProfile, ProfileRegistry
+    from agent_run_supervisor.native_acp.profile import (
+        LAUNCH_KIND_DIRECT,
+        AdapterContract,
+        AgentProfile,
+        ProfileRegistry,
+        VersionProbeRule,
+    )
     from agent_run_supervisor.native_acp.run_task import RunTask
     from agent_run_supervisor.arsd.protocol import parse_submit
 
@@ -254,6 +260,13 @@ def test_session_lease_remains_authoritative_for_real_runtask(
                 allowed_efforts=("low", "medium", "high", "max"),
                 requires_session_load=False,
                 config_schema={"selectors": {}},
+                # Wholly source-frozen: no operator Binding value is accepted.
+                contract=AdapterContract(
+                    launch_kind=LAUNCH_KIND_DIRECT,
+                    acp_agent_name="fake-acp-agent",
+                    acp_protocol_version="1",
+                    version_probe=VersionProbeRule(argv_suffix=("--version",)),
+                ),
             ),
         )
     )

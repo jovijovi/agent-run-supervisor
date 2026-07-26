@@ -62,6 +62,7 @@ from .event_writer import EventWriter, EventWriterOverflow
 from .events import NativeAcpEventNormalizer
 from .permissions import MediationEvent, PermissionBridge
 from .profile import DEFAULT_REGISTRY, ProfileRegistry
+from .runtime_binding import AdmittedRuntimeBinding
 from .spec import (
     AgentRunRequest,
     EffectiveRunState,
@@ -72,6 +73,10 @@ from .spec import (
 
 DISPATCH_STARTED_MARKER = "prompt-dispatch-started"
 PROMPT_ACCEPTED_MARKER = "prompt-accepted"
+
+# Recorded-only expectation marker for a fact the contract deliberately does
+# not freeze, so the report never shows an empty expectation as a silent pass.
+_OBSERVED_ONLY = "observed-only"
 
 
 class NativeRunTaskError(RuntimeError):
@@ -316,6 +321,7 @@ class RunTask:
         retry_of_run_id: str | None = None,
         cwd: str | None = None,
         prepared_handle: RunHandle | None = None,
+        runtime_binding: AdmittedRuntimeBinding | None = None,
     ) -> None:
         if supervisor_root is not None:
             session_store = storage.native_session_store(supervisor_root)
@@ -378,6 +384,10 @@ class RunTask:
         self._submitted_at = submitted_at or _utc_now_iso()
         self._retry_of_run_id = retry_of_run_id
         self._cwd = cwd
+        # Admission already performed the single per-Run Binding read; this is
+        # its result carried as a value. RunTask never opens a Binding root,
+        # so spawn, finalization, and reconciliation have no read path at all.
+        self._runtime_binding = runtime_binding
 
     # -- public entry ------------------------------------------------------
 
@@ -436,7 +446,7 @@ class RunTask:
         spec, launch, binding, profile = self._admit(ctx)
         limits = spec.limits
 
-        self._bind_session(ctx, spec, binding, profile)
+        self._bind_session(ctx, spec, binding, profile, launch)
 
         # Identity-pinned profiles attest the spawn boundary here: after the
         # session is bound and immediately before the child is created, so the
@@ -444,18 +454,20 @@ class RunTask:
         # verified on both sides of the deterministic race window. Profiles
         # without an expected runtime take no call and write no artifact.
         interpreter_fd: int | None = None
-        if profile.expected_runtime is not None:
+        if launch.expected_runtime is not None:
+            assert self._runtime_binding is not None
             try:
                 attestation = attest_spawn_boundary(
-                    expected=profile.expected_runtime,
+                    expected=launch.expected_runtime,
                     launch=launch,
                     fixed_env=dict(launch.fixed_env),
                     effective_cwd=binding.effective_cwd,
                     run_dir=ctx.handle.run_dir,
+                    ownership=self._runtime_binding.ownership,
                 )
             except AttestationRefusal as refusal:
                 raise _PreDispatchFailure(refusal.message, refusal.code) from refusal
-            interpreter_fd = attestation.interpreter_fd
+            interpreter_fd = attestation.exec_fd
 
         try:
             try:
@@ -538,7 +550,7 @@ class RunTask:
             binding = assembler.bind_workspace(
                 root=self._workspace_root, cwd=self._cwd
             )
-            launch = assembler.resolve_launch()
+            launch = assembler.resolve_launch(runtime=self._runtime_binding)
             spec = assembler.seal(
                 run_id=self._run_id,
                 submitted_at=self._submitted_at,
@@ -555,7 +567,13 @@ class RunTask:
         self._spec = spec
         return spec, launch, binding, profile
 
-    def _bind_session(self, ctx: _RunContext, spec, binding, profile) -> None:
+    def _bind_session(self, ctx: _RunContext, spec, binding, profile, launch) -> None:
+        # The Binding era this Run was sealed under (C11). Both are ``None``
+        # for a profile whose contract accepts no Binding, so such a Session
+        # keeps its exact pre-epoch shape and its exact reuse semantics.
+        provenance = launch.runtime_provenance
+        contract_hash = provenance.adapter_contract_hash if provenance else None
+        epoch = provenance.session_compatibility_epoch if provenance else None
         if spec.session.reuse == "reuse":
             session_id = spec.session.ars_session_id
             ctx.ephemeral = False
@@ -578,14 +596,19 @@ class RunTask:
                 workspace_hash=spec.workspace.workspace_hash,
                 effective_cwd=spec.workspace.cwd,
                 matched_root=spec.workspace.canonical_root,
+                adapter_contract_hash=contract_hash,
+                session_compatibility_epoch=epoch,
             )
         else:
+            # Before the lease is acquired and long before session/load.
             validate_native_binding(
                 record,
                 profile=profile,
                 workspace_result=binding,
                 owner=spec.identity.owner,
                 namespace=spec.identity.namespace,
+                expected_contract_hash=contract_hash,
+                expected_epoch=epoch,
             )
             if record.agent_session_id is not None:
                 # Later Runs on a bound session use real session/load with
@@ -623,9 +646,7 @@ class RunTask:
             ctx.effective.capabilities = summary.capabilities
             ctx.effective.load_session_advertised = summary.load_session_advertised
 
-            expected_runtime = getattr(ctx.profile, "expected_runtime", None)
-            if expected_runtime is not None:
-                self._attest_initialize(ctx, expected_runtime, summary)
+            self._attest_initialize(ctx, ctx.profile.contract, summary)
 
             if ctx.reuse_load:
                 if not summary.load_session_advertised:
@@ -693,34 +714,48 @@ class RunTask:
         ctx.effective_written = True
         self._write_progress(ctx, "running")
 
-    def _attest_initialize(self, ctx: _RunContext, expected, summary) -> None:
+    def _attest_initialize(self, ctx: _RunContext, contract, summary) -> None:
         """Post-initialize identity gate (D10c), before any session call.
 
         Runs on first *and* reused Runs. The write-once artifact is persisted
         before any refusal and strictly before ``session/new``/``session/load``
         or any prompt, so a mismatch leaves durable observed-vs-expected
         evidence and zero Turn. Sanitized by construction: names, versions, the
-        protocol integer, and one capability flag only.
+        protocol integer, and capability flags only.
+
+        ``agentInfo.version`` is asserted only where the contract froze it —
+        a wrapped adapter, whose entry digest the spawn boundary already
+        proves. For ``direct_acp`` it reports the *deployed* executable, so it
+        is recorded as an observation and never compared with a CLI
+        ``--version``: the two are independent facts.
         """
         agent_info = summary.agent_info or {}
         observed_name = str(agent_info.get("name", ""))
         observed_version = str(agent_info.get("version", ""))
-        observed_identity = f"{observed_name}@{observed_version}"
-        expected_identity = f"{expected.agent_info_name}@{expected.agent_info_version}"
         observed_protocol = str(summary.protocol_version)
         observed_load = bool(summary.load_session_advertised)
-        checks = [
+        advertised = summary.capabilities or {}
+        checks: list[dict[str, Any]] = [
             {
-                "name": "agent_identity",
-                "expected": expected_identity,
-                "observed": observed_identity,
-                "passed": observed_identity == expected_identity,
+                "name": "agent_name",
+                "expected": contract.acp_agent_name,
+                "observed": observed_name,
+                "passed": observed_name == contract.acp_agent_name,
+            },
+            {
+                "name": "agent_version",
+                "expected": contract.acp_agent_version or _OBSERVED_ONLY,
+                "observed": observed_version,
+                "passed": (
+                    contract.acp_agent_version is None
+                    or observed_version == contract.acp_agent_version
+                ),
             },
             {
                 "name": "protocol_version",
-                "expected": expected.protocol_version,
+                "expected": contract.acp_protocol_version,
                 "observed": observed_protocol,
-                "passed": observed_protocol == expected.protocol_version,
+                "passed": observed_protocol == contract.acp_protocol_version,
             },
             {
                 "name": "load_session_advertised",
@@ -729,15 +764,26 @@ class RunTask:
                 "passed": observed_load,
             },
         ]
+        for capability in contract.forbidden_capabilities:
+            present = bool(advertised.get(capability))
+            checks.append(
+                {
+                    "name": f"forbidden_capability:{capability}",
+                    "expected": "absent",
+                    "observed": "present" if present else "absent",
+                    "passed": not present,
+                }
+            )
         storage.write_once_json(
             ctx.handle.run_dir / "initialize_attestation.json",
             {
                 "schema_version": 1,
                 "expected": {
-                    "agent_info_name": expected.agent_info_name,
-                    "agent_info_version": expected.agent_info_version,
-                    "protocol_version": expected.protocol_version,
+                    "agent_info_name": contract.acp_agent_name,
+                    "agent_info_version": contract.acp_agent_version,
+                    "protocol_version": contract.acp_protocol_version,
                     "load_session_advertised": True,
+                    "forbidden_capabilities": list(contract.forbidden_capabilities),
                 },
                 "observed": {
                     "agent_info_name": observed_name,
@@ -750,15 +796,17 @@ class RunTask:
             },
         )
         identity_failures = [
-            check["name"] for check in checks[:2] if not check["passed"]
+            check["name"]
+            for check in checks
+            if not check["passed"] and check["name"] != "load_session_advertised"
         ]
         if identity_failures:
             raise _PreDispatchFailure(
-                "initialize identity does not match the frozen expected runtime: "
+                "initialize identity does not match the frozen contract: "
                 f"{', '.join(identity_failures)}",
                 "AGENT_IDENTITY_MISMATCH",
             )
-        if not checks[2]["passed"]:
+        if not observed_load:
             raise _PreDispatchFailure(
                 "agent does not advertise loadSession; the registered profile "
                 "requires it — escalate per G6",
