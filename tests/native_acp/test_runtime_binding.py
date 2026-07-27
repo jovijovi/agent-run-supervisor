@@ -1813,8 +1813,228 @@ def _facts_cli(
     return script
 
 
+#: How long the fixture below grants a parent-death signal, timed on its own
+#: clock and started from its own observation that its anchor is gone. The
+#: kernel raises that signal from inside the dying parent's exit path, so it is
+#: already pending by the time the reparenting this starts from is even visible:
+#: what the grace covers is delivery, not the mechanism working. It is spent by
+#: the process whose life is in question rather than by the test, so nothing
+#: that happens to the test's own scheduling can lengthen or shorten it.
+_PARENT_DEATH_GRACE_SECONDS = 1.0
+
+#: How long the fixture below may live once it is ready, if nothing else ends
+#: it. A leak bound and nothing else: the fixture writes down an alarm exactly
+#: as it writes down outliving its grace, so tidying up is never mistaken for
+#: the mechanism and no test here can pass on the strength of its own cleanup.
+_FIXTURE_ALARM_SECONDS = 30
+
+#: What the fixture exits with when its own alarm was what ended it — readable
+#: as a real exit status by a test whose anchor is still alive to report it.
+_FIXTURE_ALARM_EXIT = 6
+
+_PARENT_BOUND_CLI = '''\
+"""A probed CLI that writes down anything that ends it, bar the one thing.
+
+It publishes the same six facts as ``_facts_cli``, but only once it is bound to
+its anchor and able to answer for its own death, so reading those facts is
+proof that this process is still running -- and therefore that it cannot
+already have handed the anchor an exit status.
+
+The one end it cannot write down is the uncatchable signal the kernel sends
+when the anchor dies, which is the mechanism under test. Every other way out
+this process can observe is recorded before it is taken: outliving its own
+grace, its alarm, even an unexpected exception. So an empty record says what
+*ended* this, and goes on saying it however long afterwards it is read -- which
+is what asking whether the process is still around cannot do, because by then
+it never is, whichever of those things happened.
+
+``death_signal`` is the signal the kernel is asked for, and ``0`` is a real
+``prctl`` that succeeds while arming nothing at all -- the parent-death
+mechanism silently absent, which is the one failure a test of that mechanism
+has to be able to stage. Nothing else about this process changes with it.
+
+Nothing is published until all of it holds: the record's descriptor is open,
+the alarm is armed and provably deliverable, and the parent bound to is still
+the parent. Failing any of that this exits *before* it is ready, while the
+anchor is still alive and still responsible for tearing it down.
+"""
+import ctypes
+import os
+import signal
+import sys
+import time
+
+version, facts, ended_by = sys.argv[1], sys.argv[2], sys.argv[3]
+alarm_seconds, grace_seconds = int(sys.argv[4]), float(sys.argv[5])
+death_signal = int(sys.argv[6])
+
+PR_SET_PDEATHSIG = 1  # a prctl option from <linux/prctl.h>, not a syscall number
+libc = ctypes.CDLL(None, use_errno=True)
+libc.prctl.argtypes = [ctypes.c_int] + [ctypes.c_ulong] * 4
+anchor = os.getppid()
+if libc.prctl(PR_SET_PDEATHSIG, death_signal, 0, 0, 0) != 0:
+    sys.exit(3)  # unarmable, so never ready: the still-live anchor tears this down
+if os.getppid() != anchor:
+    sys.exit(4)  # the parent died inside the window prctl cannot itself cover
+
+# Opened before anything can need it, so that recording is one write to a
+# descriptor that already exists: being able to say what ended this is
+# established while there is still an anchor to fail in front of.
+note = os.open(ended_by, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+
+
+def record(reason, code):
+    signal.alarm(0)  # whichever way out arrived first is the one that is told
+    os.write(note, reason.encode("ascii"))
+    os._exit(code)
+
+
+def alarmed(number, frame):
+    record("alarm %d\\n" % alarm_seconds, 6)  # == _FIXTURE_ALARM_EXIT
+
+
+# The blocked set here is the launcher's: the anchor's ``posix_spawn`` supplies
+# ``setsigdef`` and no ``setsigmask``, so a runner holding SIGALRM blocked would
+# hand this process an alarm that is armed, pending and never delivered -- a
+# leak bound that bounds nothing, on the exact path where nothing else is left
+# to end it. The disposition can arrive as an inherited SIG_IGN for the same
+# reason. Both are normalised and the mask is read back, because an alarm that
+# cannot be delivered has to stop this while it is still someone else's problem.
+signal.signal(signal.SIGALRM, alarmed)
+signal.pthread_sigmask(signal.SIG_SETMASK, ())
+if signal.SIGALRM in signal.pthread_sigmask(signal.SIG_BLOCK, ()):
+    sys.exit(5)
+
+print(version, flush=True)
+with open("/proc/%d/stat" % anchor, encoding="utf-8") as handle:
+    state, ppid, pgrp, session = handle.read().rpartition(")")[2].split()[:4]
+line = "%d %d %s %s %s %s\\n" % (os.getpid(), anchor, state, ppid, pgrp, session)
+part = facts + ".part"
+with open(part, "w", encoding="ascii") as handle:
+    handle.write(line)
+signal.alarm(alarm_seconds)
+os.replace(part, facts)  # readiness is published last, and in one step
+
+try:
+    while os.getppid() == anchor:
+        time.sleep(0.02)
+    # Reparented, so the anchor is gone and any parent-death signal it was going
+    # to send is already pending. What is waited out here is delivery, on this
+    # process's own clock; living long enough to write the next line is what
+    # outliving a parent is, and it is this process that knows it.
+    time.sleep(grace_seconds)
+    record("outlived %d %g\\n" % (anchor, grace_seconds), 7)
+except BaseException as error:  # nothing gets to end this unrecorded
+    record("crashed %s\\n" % type(error).__name__, 8)
+'''
+
+
+def _parent_bound_cli(
+    tmp_path: Path,
+    *,
+    name: str,
+    facts: Path,
+    ended_by: Path,
+    version: str = "1.18.5",
+    death_signal: int = signal.SIGKILL,
+    alarm_seconds: int = _FIXTURE_ALARM_SECONDS,
+    grace_seconds: float = _PARENT_DEATH_GRACE_SECONDS,
+) -> list[str]:
+    """Argv for a CLI whose life the kernel ties to its anchor's.
+
+    Argv rather than a path: the fixture needs ``prctl`` and ``pthread_sigmask``,
+    and the probe's hermetic ``PATH`` carries no interpreter, so it runs under
+    this one's. ``death_signal=0`` asks the kernel for nothing and stages the
+    parent-death mechanism being silently absent, which is what the canary
+    below needs.
+    """
+    import sys
+
+    script = tmp_path / name
+    script.write_text(_PARENT_BOUND_CLI, encoding="utf-8")
+    return [
+        sys.executable,
+        "-I",
+        str(script),
+        version,
+        str(facts),
+        str(ended_by),
+        str(alarm_seconds),
+        str(grace_seconds),
+        str(int(death_signal)),
+    ]
+
+
+_LIVE, _GONE, _UNKNOWN = "live", "gone", "unknown"
+
+
+def _liveness(pid: int, since: str) -> str:
+    """Whether the exact process ``since`` identifies is still running.
+
+    Three answers rather than two. ``/proc/<pid>`` not being there at all is the
+    kernel saying the number is not in use, and a start time that no longer
+    matches is some other process wearing a recycled number: both are gone. Any
+    *other* error is this test being unable to look, which is not the same thing
+    as there being nothing to see, so it is reported as unknown — and a caller
+    that needs "gone" is then not being told it.
+    """
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return _GONE
+    except OSError:  # pragma: no cover - host-dependent
+        return _UNKNOWN
+    fields = raw.rpartition(")")[2].split()
+    if len(fields) <= 19:  # pragma: no cover - a torn read says nothing either
+        return _UNKNOWN
+    if fields[19] != since:
+        return _GONE  # recycled onto a process this test never started
+    return _GONE if fields[0] == "Z" else _LIVE
+
+
+def _settled(pid: int, since: str, *, seconds: float) -> str:
+    """Wait out ``pid``, then say what ``/proc`` last had to say about it.
+
+    Nothing is signalled from here at any point, on any path: every fixture this
+    waits on ends itself or is ended by the kernel, and a pid this test cannot
+    read is one it has no business naming, let alone aiming at.
+    """
+    deadline = time.monotonic() + seconds
+    while True:
+        state = _liveness(pid, since)
+        if state == _GONE or time.monotonic() >= deadline:
+            return state
+        time.sleep(0.02)
+
+
+def _outlived_its_anchor(
+    pid: int, since: str, ended_by: Path, *, seconds: float
+) -> str:
+    """Why the anchor's death was not what ended the CLI ``pid``, if it was not.
+
+    Read rather than timed. The fixture records every end of its own it can
+    observe and the one it cannot is the uncatchable signal its anchor's death
+    sends, so an empty record left by a process that is gone *is* the mechanism
+    having worked, and it is still that an hour later. A test that instead waits
+    and then looks is asking a question whose answer decays: the fixture's own
+    cleanup eventually makes "is it still there?" answer no whatever happened,
+    so a caller descheduled across that window would read failure as success.
+
+    Returns "" only for a CLI that is unambiguously gone and left nothing behind.
+    Never raises, so a caller can run it from a ``finally`` without masking
+    whatever sent it there.
+    """
+    state = _settled(pid, since, seconds=seconds)
+    if state != _GONE:
+        return f"the probed CLI {pid} could not be shown to have ended ({state})"
+    try:
+        return ended_by.read_text(encoding="ascii").strip()
+    except OSError:
+        return f"the record CLI {pid} would have left of its own end cannot be read"
+
+
 def _recorded_facts(path: Path, *, timeout: float = 5.0) -> dict[str, Any]:
-    """The six fields :func:`_facts_cli` records, once they are all there."""
+    """The six fields either facts fixture records, once they are all there."""
     deadline = time.monotonic() + timeout
     while True:
         try:
@@ -1832,6 +2052,34 @@ def _recorded_facts(path: Path, *, timeout: float = 5.0) -> dict[str, Any]:
             }
         assert time.monotonic() < deadline, f"the probe recorded no facts in {path}"
         time.sleep(0.02)
+
+
+def _probe_under_anchor(
+    tmp_path: Path, *, name: str, ended_by: Path, launch: Any = None, **fixture: Any
+) -> tuple[Any, int, str]:
+    """Start the parent-bound fixture through the real anchor, ready to be tested.
+
+    Readiness is the fixture's own statement that it is bound, recordable and
+    bounded, so what comes back is a CLI provably still running under the anchor
+    named in its own facts. A fixture that could not establish all of that
+    publishes nothing and this fails here — under an anchor that is still alive,
+    and so still able to tear its own group down.
+    """
+    facts = tmp_path / f"{name}.facts"
+    argv = _parent_bound_cli(
+        tmp_path, name=name, facts=facts, ended_by=ended_by, **fixture
+    )
+    anchor = (launch or rb._ProbeAnchor.launch)(argv, cwd=str(tmp_path))
+    try:
+        recorded = _recorded_facts(facts, timeout=10.0)
+        cli = recorded["cli"]
+        since = _running_since(cli)
+        assert recorded["parent"] == anchor.pid, recorded
+        assert since is not None, "the probed CLI was gone before the test could look"
+    except BaseException:
+        anchor.close()
+        raise
+    return anchor, cli, since
 
 
 def _assert_descendant_dies(pidfile: Path, *, why: str) -> None:
@@ -2567,25 +2815,44 @@ def test_probe_contains_its_group_even_after_its_anchor_is_destroyed(
     behind ``Popen``'s back, exactly as an external reaper would: its group id is
     now a number nothing guarantees, and no observation this process could take
     would change that. So no number is aimed at — the probe refuses with the
-    status it never received, promptly, and the descendant left behind is
-    reported by this test rather than papered over.
+    status it never received, promptly.
+
+    The CLI is bound to the anchor by ``PR_SET_PDEATHSIG`` and publishes its
+    facts only once that is armed, which is what makes the kill below land on a
+    *running* probe: a CLI that had already exited would have handed the anchor
+    a real status, and there would be none to lose. It is the kernel, not this
+    test, that then ends the CLI — nothing here signals it at all.
+
+    That is also the only thing allowed to end it, and what makes the pass here
+    mean that is not a stopwatch. The fixture writes down every end of its own
+    it can observe — outliving the grace it gives the parent-death signal, its
+    own alarm, anything unexpected — and the single end it cannot write down is
+    the uncatchable signal it is bound by. So the record it leaves is empty or
+    this test fails, and that holds when the answer is read late, read by a
+    process the runner descheduled across the entire window, or read once the
+    fixture's own cleanup has already tidied every trace of it off the host.
+    The three tests below are the sides of that, staged deliberately.
     """
     import dataclasses
 
     if _running_since(os.getpid()) is None:  # pragma: no cover - host-dependent
         pytest.skip("/proc is unavailable; cannot observe anchor liveness")
 
-    facts = tmp_path / "facts"
-    script = _facts_cli(tmp_path, name="orphaned-cli", facts=facts, exit_code=7)
+    ended_by = tmp_path / "ended-by"
     rule = dataclasses.replace(
         OPENCODE_NATIVE_ACP.contract.version_probe, timeout_seconds=20.0
     )
     witness = _GroupSignalWitness(monkeypatch)
 
+    breach = ""
     before = _open_fds()
-    anchor = rb._ProbeAnchor.launch([str(script)], cwd=str(tmp_path))
+    # An unarmable ``prctl``, an undeliverable alarm, an unwritable record: none
+    # of them get past this, because none of them publish facts, and the anchor
+    # is still able to tear its own group down when they do not.
+    anchor, cli, cli_since = _probe_under_anchor(
+        tmp_path, name="anchored-cli.py", ended_by=ended_by
+    )
     try:
-        _recorded_facts(facts)  # the CLI really ran under the anchor
         os.kill(anchor.pid, signal.SIGKILL)  # not this code's doing
         os.waitpid(anchor.pid, 0)  # ... and reaped behind ``Popen``'s back
 
@@ -2595,7 +2862,16 @@ def test_probe_contains_its_group_even_after_its_anchor_is_destroyed(
         elapsed = time.monotonic() - started
     finally:
         anchor.close()
+        # Unconditional, so no path returns while the fixture is still up, and
+        # recorded rather than raised, so it cannot mask a failure above. The
+        # CLI is never signalled from here: what may end it is its parent's
+        # death, the anchor's own teardown on the paths that still reach it, or
+        # its own hand — and only the first of those leaves nothing written.
+        breach = _outlived_its_anchor(
+            cli, cli_since, ended_by, seconds=_FIXTURE_ALARM_SECONDS + 5.0
+        )
 
+    assert not breach, breach
     assert excinfo.value.rule == "PROBE_STATUS_LOST"
     # Bounded: a status that can never arrive must not be waited out.
     assert elapsed < 5.0 < rule.timeout_seconds
@@ -2603,6 +2879,193 @@ def test_probe_contains_its_group_even_after_its_anchor_is_destroyed(
         "a group id with nothing holding it was still aimed at: "
         f"CALLS={witness.calls}"
     )
+    assert _open_fds() == before, "the anchor did not give every descriptor back"
+
+
+def test_a_probed_cli_that_outlives_its_anchor_is_caught_by_nothing_else(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The canary for the test above: the record is the only thing that can fail.
+
+    ``prctl(PR_SET_PDEATHSIG, 0)`` is a real call that succeeds and arms nothing
+    — the parent-death mechanism silently absent, the way it would be on a host
+    or in a sandbox that does not honour it. Underneath that, every other thing
+    the test above asserts still holds: the anchor's death closes the status
+    pipe either way, so the refusal is still ``PROBE_STATUS_LOST`` and still
+    prompt; no group id is aimed at; every descriptor still comes back; and the
+    fixture then clears itself off the host, so even the state the machine is
+    left in ends up the same. All of that is asserted here, on a CLI that
+    provably did outlive its anchor.
+
+    So the outliving has to be recorded by the only process in a position to
+    know it, or the test above would pass unchanged on a host where nothing
+    binds the probe to its anchor at all. This is that record, produced against
+    the failure it exists for.
+    """
+    import dataclasses
+
+    if _running_since(os.getpid()) is None:  # pragma: no cover - host-dependent
+        pytest.skip("/proc is unavailable; cannot observe anchor liveness")
+
+    ended_by = tmp_path / "ended-by"
+    rule = dataclasses.replace(
+        OPENCODE_NATIVE_ACP.contract.version_probe, timeout_seconds=20.0
+    )
+    witness = _GroupSignalWitness(monkeypatch)
+
+    breach = ""
+    before = _open_fds()
+    anchor, cli, cli_since = _probe_under_anchor(
+        tmp_path,
+        name="unbound-cli.py",
+        ended_by=ended_by,
+        death_signal=0,  # asked for nothing, and told the asking worked
+    )
+    try:
+        os.kill(anchor.pid, signal.SIGKILL)
+        os.waitpid(anchor.pid, 0)
+
+        started = time.monotonic()
+        with pytest.raises(rb.BindingRefusal) as excinfo:
+            anchor.capture(limit=rule.max_output_bytes, timeout=rule.timeout_seconds)
+        elapsed = time.monotonic() - started
+    finally:
+        anchor.close()
+        breach = _outlived_its_anchor(
+            cli, cli_since, ended_by, seconds=_FIXTURE_ALARM_SECONDS + 5.0
+        )
+
+    # Which is also the whole cleanup: an unbound CLI that saw its anchor go is
+    # gone by the time this is read, without anything here having signalled it.
+    assert breach.startswith("outlived "), (
+        f"the CLI {cli} outlived the anchor it was never bound to and left "
+        f"{breach!r} behind, so the same silence would pass the test above"
+    )
+    # None of the rest could have told the two apart, which is the whole point.
+    assert excinfo.value.rule == "PROBE_STATUS_LOST"
+    assert elapsed < 5.0 < rule.timeout_seconds
+    assert witness.calls == [], f"CALLS={witness.calls}"
+    assert _open_fds() == before, "the anchor did not give every descriptor back"
+
+
+def test_a_fixture_its_own_alarm_had_to_clear_can_never_read_as_a_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The descheduling the two tests above must survive, staged not argued.
+
+    Nothing binds this CLI to its anchor, and nothing looks at it between the
+    anchor's death and long after its alarm: the runner is loaded, the test is
+    off the CPU for the whole window, and by the time it is back the fixture's
+    own cleanup has happened. That is exactly the shape of a false pass — asked
+    now, every liveness question answers "gone", and a verdict made of waiting
+    and then looking would call the parent-death mechanism proven.
+
+    It is asked here, and answers exactly that. What refuses to go along with it
+    is the one thing in the arrangement that does not decay while nobody is
+    watching: what the fixture wrote down before it went.
+    """
+    if _running_since(os.getpid()) is None:  # pragma: no cover - host-dependent
+        pytest.skip("/proc is unavailable; cannot observe anchor liveness")
+
+    alarm = 2
+    ended_by = tmp_path / "ended-by"
+    witness = _GroupSignalWitness(monkeypatch)
+
+    before = _open_fds()
+    anchor, cli, cli_since = _probe_under_anchor(
+        tmp_path,
+        name="descheduled-cli.py",
+        ended_by=ended_by,
+        death_signal=0,  # bound to nothing, so its alarm is all that is left
+        alarm_seconds=alarm,
+        grace_seconds=alarm * 10,  # ... and its alarm therefore always gets there first
+    )
+    try:
+        os.kill(anchor.pid, signal.SIGKILL)
+        os.waitpid(anchor.pid, 0)
+    finally:
+        anchor.close()
+
+    time.sleep(alarm + 1.0)  # descheduled across the grace and the alarm alike
+    # Waited for and then looked for, which is the verdict this repair replaced:
+    # it is satisfied here, on a CLI that nothing bound to anything.
+    assert _settled(cli, cli_since, seconds=5.0) == _GONE, (
+        f"the unbound CLI {cli} outlived its own {alarm}s alarm, so this test "
+        "left a process on the host"
+    )
+    # Gone, and the host is clean — and still a failure, because being cleared
+    # by an alarm is not being ended by a parent's death.
+    assert _outlived_its_anchor(
+        cli, cli_since, ended_by, seconds=5.0
+    ) == f"alarm {alarm}"
+    assert witness.calls == [], f"CALLS={witness.calls}"
+    assert _open_fds() == before, "the anchor did not give every descriptor back"
+
+
+def test_the_fixture_alarm_survives_a_launcher_that_had_it_blocked(
+    tmp_path: Path,
+) -> None:
+    """The last bound holds even when the runner hands the probe a blocked alarm.
+
+    The anchor's ``posix_spawn`` supplies ``setsigdef`` and no ``setsigmask``, so
+    the blocked set a probed CLI starts life with is whichever one the launching
+    thread happened to be holding. A runner with SIGALRM blocked — an ordinary
+    thing for a harness or a timeout wrapper to do — would hand this file's
+    fixture an alarm that is armed, pending and never delivered: no bound at all
+    on the one path where nothing else is left, which is a test that leaves a
+    process running on the host.
+
+    Staged through the real anchor with the block held across the launch and
+    handed straight back, and answered by the fixture normalising its own mask
+    before it publishes readiness. The anchor is kept alive throughout, so the
+    alarm is the only thing that can end this CLI and the anchor is still there
+    to report the exit it caused: were the mask not normalised, this could only
+    end as a probe timeout, and the anchor's teardown would do the clearing up.
+    """
+    import dataclasses
+
+    if _running_since(os.getpid()) is None:  # pragma: no cover - host-dependent
+        pytest.skip("/proc is unavailable; cannot observe anchor liveness")
+
+    def launch_with_the_alarm_blocked(argv: list[str], *, cwd: str) -> Any:
+        inherited = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+        try:
+            return rb._ProbeAnchor.launch(argv, cwd=cwd)
+        finally:  # thread-local, and given back before anything else runs under it
+            signal.pthread_sigmask(signal.SIG_SETMASK, inherited)
+
+    alarm = 2
+    ended_by = tmp_path / "ended-by"
+    rule = dataclasses.replace(
+        OPENCODE_NATIVE_ACP.contract.version_probe, timeout_seconds=20.0
+    )
+
+    before, blocked = _open_fds(), signal.pthread_sigmask(signal.SIG_BLOCK, ())
+    anchor, cli, cli_since = _probe_under_anchor(
+        tmp_path,
+        name="blocked-alarm-cli.py",
+        ended_by=ended_by,
+        alarm_seconds=alarm,
+        launch=launch_with_the_alarm_blocked,
+    )
+    try:
+        # Bounded by the rule's own timeout, which is the failure this would be
+        # without the fixture's normalising: a probe that waits its deadline out
+        # on a CLI nothing can end, torn down by the anchor on the way past.
+        out, _err, code = anchor.capture(
+            limit=rule.max_output_bytes, timeout=rule.timeout_seconds
+        )
+    finally:
+        anchor.close()
+
+    assert signal.pthread_sigmask(signal.SIG_BLOCK, ()) == blocked, "mask not restored"
+    assert out == b"1.18.5\n"  # it really did run, through the real anchor
+    assert code == _FIXTURE_ALARM_EXIT, (
+        f"the fixture's {alarm}s alarm was not what ended it: exit {code}"
+    )
+    assert _outlived_its_anchor(
+        cli, cli_since, ended_by, seconds=5.0
+    ) == f"alarm {alarm}"
     assert _open_fds() == before, "the anchor did not give every descriptor back"
 
 
