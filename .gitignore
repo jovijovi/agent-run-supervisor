@@ -384,5 +384,8 @@ outputs/
 .tmp/
 .agent-run-supervisor/
 
+# Local Hermes workspace metadata
+/.hermes/
+
 # CodeGraph
 /.codegraph
