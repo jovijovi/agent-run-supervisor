@@ -246,7 +246,7 @@ unadvertised value, or an inexact readback fails the run before any prompt is di
 |---|---|---|---|---|
 | `opencode-native-acp` | OpenCode | direct ACP | `kimi-for-coding/k3` (default) | `low` / `high` / `max` (default `max`) |
 | `codex-acp-1.1.7` | Codex, via its official ACP adapter | wrapped ACP | `gpt-5.6-sol` | `max` |
-| `claude-agent-acp-0.61.0` | Claude, via its official ACP adapter | wrapped ACP | `claude-fable-5[1m]`, `opus[1m]` (default) | `max` |
+| `claude-agent-acp-0.63.0` | Claude, via its official ACP adapter | wrapped ACP | `claude-fable-5[1m]`, `opus[1m]` (default) | `max` |
 
 Submit every literal above verbatim — but they come from two different places. `profile_id` is ARS
 registry input: it names a contract in the code-registered registry and is matched exactly at
@@ -264,11 +264,12 @@ this is why speaking generic ACP does not remove the need for profiles: ACP stan
 not the launch, the selector names, the permission semantics, or the literals a given agent will
 actually accept and read back.
 
-**Next contract target: `claude-agent-acp-0.63.0`.** Current `main` registers
-`claude-agent-acp-0.61.0` only. `0.63.0` is the next source-contract target for the Claude official
-adapter — it is **not** registered, not accepted, and not usable, and admission refuses it as an
-unknown profile until that contract update lands in source with its own discovery evidence. Do not
-configure it yet.
+**The Claude contract moved to `claude-agent-acp-0.63.0`.** The registered Claude source contract is
+`claude-agent-acp-0.63.0` (revision 3), frozen against zero-prompt ACP discovery of the 0.63.0
+adapter. There is **no** `0.61.0` compatibility alias: the retired ID is now an unknown profile and
+admission refuses it. Registration is a source fact only — the new revision still needs its own
+operator acceptance and a Binding generation promoted at the new `adapter_contract_hash` before any
+Run can use it, and a generation accepted under the old contract fails closed by design.
 
 Each profile launches an agent runtime that you install and pin, but the split differs by launch
 kind. A **wrapped-ACP** profile source-freezes the interpreter and adapter entry by absolute path

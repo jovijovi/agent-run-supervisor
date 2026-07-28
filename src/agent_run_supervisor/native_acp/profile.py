@@ -871,7 +871,8 @@ CODEX_ACP_1_1_7 = AgentProfile(
 
 # Revision 1: the official Claude ACP adapter 0.61.0 over the operator-installed
 # downstream Claude CLI, admitted as a closed profile whose every value is a
-# byte-copy of the operator-frozen discovery manifest.
+# byte-copy of the operator-frozen discovery manifest. Revision 3 re-registers
+# the same shape against adapter 0.63.0 (below).
 #
 # ACP Opus alias distinction: ``claude-opus-5[1m]`` is the *direct Claude CLI*
 # author selector and is deliberately absent from the registered domain. A live
@@ -885,7 +886,7 @@ CODEX_ACP_1_1_7 = AgentProfile(
 # neither manages, stages, nor inspects — so admission requires exactly zero
 # caller credential references.
 CLAUDE_ADAPTER_ENTRY = (
-    "/home/ecs-user/.local/share/agent-run-supervisor/adapters/claude-agent-acp/0.61.0"
+    "/home/ecs-user/.local/share/agent-run-supervisor/adapters/claude-agent-acp/0.63.0"
     "/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js"
 )
 
@@ -895,9 +896,25 @@ CLAUDE_ADAPTER_ENTRY = (
 # from the contract-declared ``downstream_cli`` slot instead of being frozen
 # here — so the profile still forbids a PATH-resolved or bundled fallback CLI
 # while the deployment fact belongs to the operator.
-CLAUDE_AGENT_ACP_0_61_0 = AgentProfile(
-    profile_id="claude-agent-acp-0.61.0",
-    revision=2,
+#
+# Revision 3: the registered adapter is 0.63.0. There is no 0.61.0 alias — the
+# stable ID moves outright, exactly as the OpenCode ID did. A fresh zero-prompt
+# ACP discovery against the installed 0.63.0 adapter (initialize → session/new
+# → set mode/model/effort with exact readback → session/load) observed
+# ``agentInfo`` ``@agentclientprotocol/claude-agent-acp`` 0.63.0, protocol 1,
+# ``loadSession`` advertised, and byte-identical ``mode``/``model``/``effort``
+# select domains, so every compatibility literal below is retained as observed
+# and only the version-bound ones move.
+#
+# ``adapter_entry_sha256`` deliberately does NOT change: ``dist/index.js`` is a
+# launcher whose bytes are identical in 0.61.0 and 0.63.0, while the siblings it
+# imports and the ``package.json`` it reads its version from are what moved. The
+# entry path is therefore the only artifact identity here that separates the two
+# adapter versions. That is the known wrapped-adapter package-closure gap
+# (GOAL / PRD R13); this contract records it and does not close it.
+CLAUDE_AGENT_ACP_0_63_0 = AgentProfile(
+    profile_id="claude-agent-acp-0.63.0",
+    revision=3,
     executable_key="claude-agent-acp",
     argv_template=(CLAUDE_ADAPTER_ENTRY,),
     env_allowlist=(
@@ -964,7 +981,7 @@ CLAUDE_AGENT_ACP_0_61_0 = AgentProfile(
         launch_kind=LAUNCH_KIND_WRAPPED,
         acp_agent_name="@agentclientprotocol/claude-agent-acp",
         acp_protocol_version="1",
-        acp_agent_version="0.61.0",
+        acp_agent_version="0.63.0",
         version_probe=VersionProbeRule(argv_suffix=("--version",)),
         binding_slots=(
             BindingSlot(
@@ -995,5 +1012,5 @@ CLAUDE_AGENT_ACP_0_61_0 = AgentProfile(
 )
 
 DEFAULT_REGISTRY = ProfileRegistry(
-    (OPENCODE_NATIVE_ACP, CODEX_ACP_1_1_7, CLAUDE_AGENT_ACP_0_61_0)
+    (OPENCODE_NATIVE_ACP, CODEX_ACP_1_1_7, CLAUDE_AGENT_ACP_0_63_0)
 )
