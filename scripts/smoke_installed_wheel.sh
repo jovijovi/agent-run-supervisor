@@ -40,8 +40,30 @@ import agent_run_supervisor.arsd  # noqa: F401
 import agent_run_supervisor.arsd.service_unit  # noqa: F401
 PY
 "$VENV/bin/python" -m agent_run_supervisor.arsd --help >/dev/null
-unit="$("$VENV/bin/python" -m agent_run_supervisor.arsd --print-service-unit)"
+
+# R13: rendering a unit requires an explicit operator Binding root, so a
+# production unit can never silently omit it. This path is deliberately
+# synthetic: print mode treats it as argv data only.
+#
+# This smoke deliberately does not probe SMOKE_BINDING_ROOT. `[[ -e ... ]]` is
+# itself a metadata query on the Binding root, so "prove it was not created" and
+# "prove nothing queried it" cannot both be asserted from here — the probe would
+# be the very access the boundary forbids, and a smoke that performs it is
+# citing contradictory evidence. Non-creation and the no-query ordering are
+# covered hermetically in tests/arsd/, where the filesystem primitives are
+# instrumented and the assertion is made outside the recorded window. What is
+# checked here, and only here, is that the *installed wheel* exposes the flag,
+# refuses to render without it, and carries it into the unit's argv.
+SMOKE_BINDING_ROOT="/nonexistent/ars-smoke-binding-root"
+if "$VENV/bin/python" -m agent_run_supervisor.arsd --print-service-unit \
+    >/dev/null 2>&1; then
+  echo "error: --print-service-unit must refuse without --binding-root" >&2
+  exit 1
+fi
+unit="$("$VENV/bin/python" -m agent_run_supervisor.arsd --print-service-unit \
+  --binding-root "$SMOKE_BINDING_ROOT")"
 printf '%s\n' "$unit" | grep -F 'Restart=on-failure' >/dev/null
 printf '%s\n' "$unit" | grep -F 'KillMode=control-group' >/dev/null
+printf '%s\n' "$unit" | grep -F -- "--binding-root $SMOKE_BINDING_ROOT" >/dev/null
 
 echo "Installed wheel smoke passed."

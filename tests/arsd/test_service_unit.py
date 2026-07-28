@@ -7,17 +7,24 @@ reconcile / bind / process creation. Harness tests monkeypatch subprocess.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import importlib.util
 import json
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Operator-owned Runtime Binding root (PRD R13). Deliberately synthetic and
+# never created: print mode renders it as argv data and never accesses it.
+BINDING_ROOT = "/opt/ars-runtime-binding-root-that-does-not-exist"
 
 
 def _load_harness():
@@ -32,6 +39,9 @@ def _load_harness():
 def _required_lines(unit: str) -> None:
     assert "Restart=on-failure" in unit
     assert "KillMode=control-group" in unit
+    # A rendered production unit must never silently omit Binding config: a
+    # daemon started without it refuses every registered profile at admission.
+    assert "--binding-root" in unit
     timeout = re.search(r"^TimeoutStopSec=(\d+)\s*$", unit, re.M)
     assert timeout is not None
     assert 30 <= int(timeout.group(1)) <= 300
@@ -108,6 +118,7 @@ def test_render_contains_required_semantics(
     unit = render_service_unit(
         socket_path=socket_path,
         supervisor_root=supervisor_root,
+        binding_root=BINDING_ROOT,
         caller_mappings=(mapping,),
         python_executable=sys.executable,
     )
@@ -130,7 +141,11 @@ def test_render_defaults_preserve_user_scope_specifiers_without_mapping() -> Non
         render_service_unit,
     )
 
-    unit = render_service_unit(python_executable=sys.executable)
+    # Socket/supervisor-root keep renderer-owned %t/%h defaults; the Binding
+    # root has no safe default and stays an explicit operator input.
+    unit = render_service_unit(
+        binding_root=BINDING_ROOT, python_executable=sys.executable
+    )
     _required_lines(unit)
     _forbid_root_system(unit)
     assert DEFAULT_USER_SOCKET.startswith("%t/")
@@ -161,6 +176,7 @@ def test_caller_supplied_percent_specifiers_are_escaped(
     unit = render_service_unit(
         socket_path=socket_path,
         supervisor_root=supervisor_root,
+        binding_root=BINDING_ROOT,
         caller_mappings=(mapping,),
         python_executable=sys.executable,
     )
@@ -185,6 +201,7 @@ def test_caller_supplied_default_looking_paths_are_still_escaped() -> None:
     unit = render_service_unit(
         socket_path="%t/evil.sock",
         supervisor_root="%h/evil-root",
+        binding_root=BINDING_ROOT,
         python_executable=sys.executable,
     )
     assert "%%t/evil.sock" in unit
@@ -213,13 +230,521 @@ def test_render_rejects_control_and_directive_injection(
     )
 
     mappings = () if mapping is None else (mapping,)
+    # A valid Binding root is supplied so the refusal is provably about the
+    # injected socket/root/mapping, not about the missing-root gate below.
     with pytest.raises(ServiceUnitError):
         render_service_unit(
             socket_path=socket_path,
             supervisor_root=supervisor_root,
+            binding_root=BINDING_ROOT,
             caller_mappings=mappings,
             python_executable=sys.executable,
         )
+
+
+# --- operator Runtime Binding root in the rendered unit (PRD R13) ---------
+
+
+def test_binding_root_flag_in_help(capsys) -> None:
+    from agent_run_supervisor.arsd import __main__ as arsd_main
+
+    with pytest.raises(SystemExit) as exc:
+        arsd_main.build_arg_parser().parse_args(["--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "--binding-root" in out
+
+
+def test_render_carries_operator_binding_root_as_argv_data() -> None:
+    from agent_run_supervisor.arsd.service_unit import render_service_unit
+
+    unit = render_service_unit(
+        socket_path="/tmp/arsd-b.sock",
+        supervisor_root="/tmp/arsd-b-root",
+        binding_root=BINDING_ROOT,
+        caller_mappings=("4242:hermes-test:hermes:hermes/r13",),
+        python_executable=sys.executable,
+    )
+    _required_lines(unit)
+    _forbid_root_system(unit)
+    exec_line = next(
+        line for line in unit.splitlines() if line.startswith("ExecStart=")
+    )
+    assert "--binding-root" in exec_line
+    assert BINDING_ROOT in exec_line
+    assert exec_line.count("--binding-root") == 1
+    _assert_no_expandable_caller_specifiers(unit)
+
+
+@pytest.mark.parametrize(
+    "binding_root",
+    ["/srv/%n/binding", "/srv/binding-%i", "/srv/%s-binding", "/srv/%t/binding"],
+)
+def test_binding_root_percent_specifiers_are_escaped(binding_root: str) -> None:
+    from agent_run_supervisor.arsd.service_unit import render_service_unit
+
+    unit = render_service_unit(
+        socket_path="/tmp/ok.sock",
+        supervisor_root="/tmp/ok-root",
+        binding_root=binding_root,
+        python_executable=sys.executable,
+    )
+    assert binding_root.replace("%", "%%") in unit
+    _assert_no_expandable_caller_specifiers(unit)
+
+
+@pytest.mark.parametrize(
+    "binding_root",
+    [
+        "/srv/binding\nExecStart=/bin/evil",
+        "/srv/binding\nUser=root",
+        "/srv/binding\r",
+        "/srv/binding\x00",
+        "/srv/binding\x1b",
+    ],
+)
+def test_render_rejects_binding_root_control_injection(binding_root: str) -> None:
+    from agent_run_supervisor.arsd.service_unit import (
+        ServiceUnitError,
+        render_service_unit,
+    )
+
+    with pytest.raises(ServiceUnitError):
+        render_service_unit(
+            socket_path="/tmp/ok.sock",
+            supervisor_root="/tmp/ok-root",
+            binding_root=binding_root,
+            python_executable=sys.executable,
+        )
+
+
+@pytest.mark.parametrize(
+    "binding_root",
+    [
+        "",
+        "   ",
+        "relative/binding",
+        "./binding",
+        "~/binding",
+        # No service-UID-owned default: a %h-rooted path is not an absolute
+        # operator path and must not become the Binding root by accident.
+        "%h/.local/share/agent-run-supervisor/binding",
+    ],
+)
+def test_render_refuses_non_absolute_binding_root(binding_root: str) -> None:
+    from agent_run_supervisor.arsd.service_unit import (
+        ServiceUnitError,
+        render_service_unit,
+    )
+
+    with pytest.raises(ServiceUnitError):
+        render_service_unit(
+            socket_path="/tmp/ok.sock",
+            supervisor_root="/tmp/ok-root",
+            binding_root=binding_root,
+            python_executable=sys.executable,
+        )
+
+
+def test_render_refuses_to_omit_the_binding_root() -> None:
+    """The **pure renderer** — not just print mode — must fail closed.
+
+    ``--print-service-unit`` refuses first, but any other caller of the
+    renderer would otherwise get a syntactically valid unit that installs a
+    daemon refusing every registered profile. Omission is a refusal, never a
+    silently shorter ExecStart.
+    """
+    from agent_run_supervisor.arsd.service_unit import (
+        ServiceUnitError,
+        render_service_unit,
+    )
+
+    with pytest.raises(ServiceUnitError) as err:
+        render_service_unit(
+            socket_path="/tmp/ok.sock",
+            supervisor_root="/tmp/ok-root",
+            caller_mappings=("4242:hermes-test:hermes:hermes/r13",),
+            python_executable=sys.executable,
+        )
+    assert "binding" in str(err.value).lower()
+
+
+def test_render_refuses_explicit_none_binding_root() -> None:
+    """The ``None`` default exists only to make the refusal catchable."""
+    from agent_run_supervisor.arsd.service_unit import (
+        ServiceUnitError,
+        render_service_unit,
+    )
+
+    with pytest.raises(ServiceUnitError) as err:
+        render_service_unit(
+            socket_path="/tmp/ok.sock",
+            supervisor_root="/tmp/ok-root",
+            binding_root=None,
+            python_executable=sys.executable,
+        )
+    assert "binding" in str(err.value).lower()
+
+
+def test_render_all_defaults_still_refuses_without_binding_root() -> None:
+    """No ``%h``-rooted or service-UID-owned default may be invented."""
+    from agent_run_supervisor.arsd.service_unit import (
+        ServiceUnitError,
+        render_service_unit,
+    )
+
+    with pytest.raises(ServiceUnitError):
+        render_service_unit(python_executable=sys.executable)
+
+
+# --- inexact operands at the renderer boundary ------------------------------
+#
+# Every path-shaped token of ``render_service_unit`` is caller data that ends
+# up inside a systemd unit, and the renderer used to *coerce* each one with
+# ``str()`` before inspecting it. Coercion is not inspection: it runs the
+# operand's own code, and it hands the guards back whatever that code chose.
+#
+# The shared hostile-operand factory below lives here rather than in
+# ``test_client_daemon.py`` because both product-contract suites and
+# ``test_operand.py`` need it, and this module is already the shared-helper
+# home for this package's tests (``_record_fs_queries``). The dependency runs
+# one way only — ``test_client_daemon`` imports from here, never the reverse —
+# so promoting it in the other direction would be an import cycle.
+
+
+# Derived here rather than imported from the daemon, so the test states the
+# platform fact independently: this is the type ``Path(...)`` actually produces.
+_EXACT_PATH_TYPE = type(Path(os.sep))
+
+_LYING_BINDING_ROOT_KINDS = (
+    "class_property_liar",
+    "concrete_path_subclass",
+    "metaclass_equality_liar",
+    "pathlike_object",
+    "str_subclass",
+)
+
+
+def _lying_binding_root(kind: str, real: str) -> tuple[object, list[str]]:
+    """An operand whose advertised text is safe and whose real value is not.
+
+    ``__str__`` shows the pure gates a disjoint operator root; ``__fspath__`` —
+    what the kernel would be handed — keeps the daemon-owned one. Which of the
+    two wins in ``Path(operand)`` is a CPython implementation detail that has
+    changed across supported versions, which is the point: a value that answers
+    differently to different readers cannot be validated by reading it.
+
+    Each class is built per call so the probe log lives in this closure. No
+    instance state is used, so nothing here depends on ``str``/``PurePath`` slot
+    layout.
+    """
+    probes: list[str] = []
+    advertised = BINDING_ROOT
+
+    if kind == "str_subclass":
+
+        class _LyingStr(str):
+            def __str__(self) -> str:
+                probes.append("__str__")
+                return advertised
+
+            def __fspath__(self) -> str:
+                probes.append("__fspath__")
+                return real
+
+        return _LyingStr(real), probes
+
+    if kind == "concrete_path_subclass":
+
+        class _LyingPath(_EXACT_PATH_TYPE):  # type: ignore[misc,valid-type]
+            def __str__(self) -> str:
+                probes.append("__str__")
+                return advertised
+
+            def __fspath__(self) -> str:
+                probes.append("__fspath__")
+                return real
+
+        return _LyingPath(real), probes
+
+    if kind == "class_property_liar":
+        # Not a subclass at all: when the concrete type does not match,
+        # ``isinstance`` falls back to the operand's ``__class__`` attribute, and
+        # a property can answer ``str``.
+        class _ClassLiar:
+            @property
+            def __class__(self):  # type: ignore[override]
+                return str
+
+            def __str__(self) -> str:
+                probes.append("__str__")
+                return advertised
+
+            def __fspath__(self) -> str:
+                probes.append("__fspath__")
+                return real
+
+        return _ClassLiar(), probes
+
+    if kind == "metaclass_equality_liar":
+        # Guards the shape of the repair rather than the reported hole: a type
+        # claiming equality with anything satisfies ``type(value) in (str,
+        # Path)`` and fails ``type(value) is str``.
+        class _EqualToAnything(type):
+            def __eq__(cls, other: object) -> bool:
+                return True
+
+            def __hash__(cls) -> int:
+                return hash(_EXACT_PATH_TYPE)
+
+        class _MetaLiar(metaclass=_EqualToAnything):
+            def __str__(self) -> str:
+                probes.append("__str__")
+                return advertised
+
+            def __fspath__(self) -> str:
+                probes.append("__fspath__")
+                return real
+
+        return _MetaLiar(), probes
+
+    if kind == "pathlike_object":
+        # A genuine ``os.PathLike`` (the ABC hooks on ``__fspath__``) offering
+        # every other hook a gate might reach for: text, repr, truthiness,
+        # equality, length, iteration.
+        class _PathLike:
+            def __str__(self) -> str:
+                probes.append("__str__")
+                return advertised
+
+            def __repr__(self) -> str:
+                probes.append("__repr__")
+                return advertised
+
+            def __fspath__(self) -> str:
+                probes.append("__fspath__")
+                return real
+
+            def __bool__(self) -> bool:
+                probes.append("__bool__")
+                return True
+
+            def __eq__(self, other: object) -> bool:
+                probes.append("__eq__")
+                return True
+
+            def __hash__(self) -> int:
+                probes.append("__hash__")
+                return 0
+
+            def __len__(self) -> int:
+                probes.append("__len__")
+                return len(advertised)
+
+            def __iter__(self):
+                probes.append("__iter__")
+                return iter(advertised)
+
+        return _PathLike(), probes
+
+    raise AssertionError(f"unknown lying Binding root kind: {kind}")
+
+
+_INJECTED_DIRECTIVE = "ExecStartPre=/bin/evil"
+
+
+class _InjectingStr(str):
+    # Load-bearing, not decoration: PyObject_Str validates tp_str's result
+    # with PyUnicode_Check, which admits subclasses, so str(x) is x. Without
+    # this, str.__str__ hands back an exact-str copy of the real buffer at
+    # service_unit.py:144 and both lies below are discarded before they fire.
+    def __str__(self):
+        return self
+
+    def __iter__(self):
+        return iter("/opt/b")          # safe prefix only
+
+    def replace(self, *args, **kwargs):
+        return self
+
+
+def test_render_refuses_a_str_subclass_that_hides_a_directive() -> None:
+    """RED-1 (F5/F1, highest severity): a lying ``str`` subclass injects a directive.
+
+    One call, one thread: no concurrency, no timing, no filesystem, and no
+    interpreter-conditional premise, so this test has no skip path and must
+    never be given one. Every guard on the way through reads what the operand
+    chose to show it — ``_reject_controls`` clears ``isinstance`` and sees only
+    the safe prefix through the lying ``__iter__``; ``startswith`` reads the
+    real buffer and is genuinely true; ``_escape_data_percent``'s ``replace``
+    returns ``self`` and the safe-character scan is lied to again, so
+    ``_systemd_quote`` returns the operand itself — and then ``" ".join`` copies
+    its **raw buffer**, which no hook ever showed anyone. The ``user=root`` /
+    ``sudo`` backstop matches neither token.
+
+    The repair refuses at type identity, before ``__str__`` ever runs.
+    """
+    from agent_run_supervisor.arsd.service_unit import (
+        ServiceUnitError,
+        render_service_unit,
+    )
+
+    hostile = _InjectingStr("/opt/b\n" + _INJECTED_DIRECTIVE)
+    # Premise, asserted rather than assumed: identity survives the coercion,
+    # which is what carries both lies past the guards.
+    assert str(hostile) is hostile
+
+    rendered: str | None = None
+    refused = False
+    try:
+        rendered = render_service_unit(
+            socket_path="/tmp/ok.sock",
+            supervisor_root="/tmp/ok-root",
+            binding_root=hostile,
+            python_executable=sys.executable,
+        )
+    except ServiceUnitError:
+        refused = True
+
+    assert _INJECTED_DIRECTIVE not in (rendered or ""), (
+        "the rendered unit carries an attacker-authored systemd directive"
+    )
+    assert refused, "the renderer returned a unit for an inexact binding_root"
+
+
+# Absolute and control-free, so nothing but the missing type admission can
+# produce a refusal on the cells where the operand bypasses ``str()`` today.
+_INEXACT_OPERAND_REAL = "/tmp/ars-inexact-operand-real"
+
+_RENDERER_OPERANDS = (
+    "binding_root",
+    "caller_mapping",
+    "python_executable",
+    "socket_path",
+    "supervisor_root",
+)
+
+
+def _renderer_kwargs(operand: str, hostile: object) -> dict:
+    """A fully valid render call with exactly one operand replaced."""
+    kwargs: dict = {
+        "socket_path": "/tmp/ok.sock",
+        "supervisor_root": "/tmp/ok-root",
+        "binding_root": BINDING_ROOT,
+        "python_executable": sys.executable,
+    }
+    if operand == "caller_mapping":
+        kwargs["caller_mappings"] = (hostile,)
+    else:
+        kwargs[operand] = hostile
+    return kwargs
+
+
+@pytest.mark.parametrize("operand", _RENDERER_OPERANDS)
+@pytest.mark.parametrize("kind", _LYING_BINDING_ROOT_KINDS)
+def test_render_refuses_every_inexact_operand_without_running_a_hook(
+    monkeypatch, operand: str, kind: str
+) -> None:
+    """RED-2 (F5/F1): the whole token set, not only the Binding flag.
+
+    A renderer that hardens ``binding_root`` while ``socket_path``,
+    ``supervisor_root``, ``caller_mappings`` and ``python_executable`` remain
+    injectable by the identical construct has hardened nothing: they are the
+    same argv list, joined into the same artifact.
+    """
+    from agent_run_supervisor.arsd.service_unit import (
+        ServiceUnitError,
+        render_service_unit,
+    )
+
+    hostile, probes = _lying_binding_root(kind, _INEXACT_OPERAND_REAL)
+    kwargs = _renderer_kwargs(operand, hostile)
+
+    rendered: str | None = None
+    refused = False
+    with _record_fs_queries(monkeypatch) as log:
+        try:
+            rendered = render_service_unit(**kwargs)
+        except ServiceUnitError:
+            refused = True
+
+    assert refused, f"{operand} accepted an inexact {kind} operand"
+    assert rendered is None
+    # The type decided it: not one conversion hook ran, and nothing was queried.
+    assert probes == []
+    assert log.calls == []
+
+
+@pytest.mark.parametrize("binding_root", ["/opt/x/", "/srv//x"])
+def test_render_preserves_the_operator_binding_root_spelling(
+    binding_root: str,
+) -> None:
+    """G-2 — lasting guard, **not** RED evidence: green before and after.
+
+    The emitted ``ExecStart=`` is an operator-facing artifact that
+    ``scripts/smoke_installed_wheel.sh`` compares literally, so the admission
+    boundary must return frozen *text*. A ``Path`` round-trip would silently
+    rewrite ``/opt/x/`` to ``/opt/x`` and ``/srv//x`` to ``/srv/x``; this guard
+    is what makes a future ``-> Path`` return type fail loudly.
+    """
+    from agent_run_supervisor.arsd.service_unit import render_service_unit
+
+    unit = render_service_unit(
+        socket_path="/tmp/ok.sock",
+        supervisor_root="/tmp/ok-root",
+        binding_root=binding_root,
+        python_executable=sys.executable,
+    )
+    exec_line = next(
+        line for line in unit.splitlines() if line.startswith("ExecStart=")
+    )
+    assert f"--binding-root {binding_root}" in exec_line
+
+
+def test_print_service_unit_requires_binding_root(monkeypatch, capsys) -> None:
+    """A rendered production unit must not silently omit Binding configuration."""
+    from agent_run_supervisor.arsd import __main__ as arsd_main
+
+    def boom_geteuid() -> int:
+        raise AssertionError("geteuid must not run in print-service-unit mode")
+
+    async def boom_serve(*_a, **_k):
+        raise AssertionError("serve_daemon must not run in print-service-unit mode")
+
+    monkeypatch.setattr(arsd_main, "geteuid", boom_geteuid)
+    monkeypatch.setattr(arsd_main, "serve_daemon", boom_serve)
+
+    rc = arsd_main.main(["--print-service-unit"])
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "binding" in captured.err.lower()
+
+
+def test_print_service_unit_renders_binding_root_without_touching_it(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    from agent_run_supervisor.arsd import __main__ as arsd_main
+
+    missing = tmp_path / "never-created" / "binding-root"
+
+    monkeypatch.setattr(
+        arsd_main,
+        "geteuid",
+        lambda: (_ for _ in ()).throw(AssertionError("no euid")),
+    )
+    rc = arsd_main.main(
+        ["--print-service-unit", "--binding-root", str(missing)]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    _required_lines(out)
+    _forbid_root_system(out)
+    assert "--binding-root" in out
+    assert str(missing) in out
+    # Print mode is pure text: it never creates, repairs, or promotes a root.
+    assert not missing.exists()
+    assert not missing.parent.exists()
 
 
 def test_print_service_unit_zero_side_effects(monkeypatch, capsys) -> None:
@@ -243,14 +768,16 @@ def test_print_service_unit_zero_side_effects(monkeypatch, capsys) -> None:
     monkeypatch.setattr(arsd_main.reconcile, "reconcile", boom_reconcile)
     monkeypatch.setattr(arsd_main, "serve_daemon", boom_serve)
 
-    rc = arsd_main.main(["--print-service-unit"])
+    rc = arsd_main.main(["--print-service-unit", "--binding-root", BINDING_ROOT])
     assert rc == 0
     out = capsys.readouterr().out
     _required_lines(out)
     _forbid_root_system(out)
     assert "--caller-mapping" not in out
     assert "%t/" in out and "%h/" in out
+    assert BINDING_ROOT in out
     assert called == {"geteuid": 0, "reconcile": 0, "serve": 0}
+    assert not Path(BINDING_ROOT).exists()
 
 
 def test_print_service_unit_with_explicit_args(monkeypatch, capsys) -> None:
@@ -269,6 +796,8 @@ def test_print_service_unit_with_explicit_args(monkeypatch, capsys) -> None:
             "/tmp/arsd-print.sock",
             "--supervisor-root",
             "/tmp/arsd-print-root",
+            "--binding-root",
+            BINDING_ROOT,
             "--caller-mapping",
             mapping,
         ]
@@ -278,6 +807,7 @@ def test_print_service_unit_with_explicit_args(monkeypatch, capsys) -> None:
     _required_lines(out)
     assert "/tmp/arsd-print.sock" in out
     assert "/tmp/arsd-print-root" in out
+    assert BINDING_ROOT in out
     assert mapping in out
 
 
@@ -335,6 +865,57 @@ def test_normal_daemon_mode_requires_supervisor_root(monkeypatch, capsys) -> Non
 # --- hermetic crash-harness gate / cleanup tests (no real systemctl) --------
 
 
+# A Binding root that shares no path component with ``tmp_path``, ``$HOME``, or
+# the worktree, so every recorded query against it — or against ``/opt`` — is
+# unambiguously a Binding-root read. It is deliberately never created: nothing
+# in ARS may create, repair, or promote operator storage.
+_UNQUERIED_BINDING_ROOT = "/opt/ars-operator-binding-root-never-queried"
+
+
+def _harness_binding_root(tmp_path: Path) -> str:
+    """Operator-owned Binding root fixture for the crash harness.
+
+    Reusable pre-existing operator storage — never a harness-owned surface, and
+    deliberately **not** created here so tests can prove the harness never
+    creates it.
+
+    It used to be a *sibling* of the harness surfaces under ``tmp_path``, which
+    the containment-only gate accepted. That fixture was the bug's shape: every
+    resolve/stat of a sibling surface walks the parent they share, which is a
+    component of the Binding root. A valid operator layout separates the two at
+    the top level instead, so the fixture ignores ``tmp_path`` and models that.
+    """
+    return _UNQUERIED_BINDING_ROOT
+
+
+def _harness_socket(tmp_path: Path, name: str = "arsd.sock") -> str:
+    """Socket inside its own directory, disjoint from the Binding root.
+
+    The socket's parent is a writable surface: the daemon creates it before it
+    binds, and both the daemon and this harness refuse a Binding root that
+    shares any component with it. A valid operator layout therefore cannot park
+    the socket beside Binding storage — the fixture models that instead of
+    weakening the production check.
+    """
+    return str(tmp_path / "sock" / name)
+
+
+def test_operator_binding_root_fixture_is_genuinely_disjoint(tmp_path: Path) -> None:
+    """Guard the fixture itself: a shared component would mask every gate below.
+
+    If the checkout, ``$HOME``, or the pytest temp root ever moved under the same
+    top-level directory as this synthetic root, the harness and daemon tests
+    would start refusing their own valid-layout fixture and fail obscurely. Fail
+    loudly and locally instead.
+    """
+    from agent_run_supervisor.arsd import __main__ as arsd_main
+
+    for surface in (tmp_path, REPO_ROOT, Path.home(), Path(tempfile.gettempdir())):
+        assert not arsd_main._binding_query_conflict(
+            _UNQUERIED_BINDING_ROOT, surface
+        ), surface
+
+
 def test_harness_help_never_invokes_systemctl(monkeypatch) -> None:
     harness = _load_harness()
     calls: list[tuple] = []
@@ -385,11 +966,12 @@ def test_harness_cleanup_order_on_failure(monkeypatch, tmp_path: Path) -> None:
 
     inputs = {
         "unit_name": unit_name,
-        "socket": str(tmp_path / "arsd.sock"),
+        "socket": _harness_socket(tmp_path),
         "supervisor_root": str(tmp_path / "sv"),
         "caller_mapping": f"{os.getuid()}:p:o:n",
         "evidence_dir": str(evidence),
         "workspace": str(ws),
+        "binding_root": _harness_binding_root(tmp_path),
     }
     with pytest.raises(harness.HarnessGateError):
         harness.run_s4(inputs)
@@ -412,7 +994,7 @@ def test_harness_rejects_bad_unit_names(tmp_path: Path) -> None:
     evidence = tmp_path / "evidence"
     evidence.mkdir()
     root = tmp_path / "sv-missing"
-    sock = tmp_path / "arsd.sock"
+    sock = Path(_harness_socket(tmp_path))
     for bad in (
         "../escape.service",
         "foo/bar.service",
@@ -429,6 +1011,7 @@ def test_harness_rejects_bad_unit_names(tmp_path: Path) -> None:
             caller_mapping=f"{os.getuid()}:p:o:n",
             evidence_dir=str(evidence),
             workspace=str(ws),
+            binding_root=_harness_binding_root(tmp_path),
             dry_validate=True,
         )
         with pytest.raises(harness.HarnessGateError):
@@ -443,11 +1026,12 @@ def test_harness_rejects_evidence_inside_repo(tmp_path: Path) -> None:
     args = SimpleNamespace(
         i_acknowledge_a3_crash_harness=True,
         unit_name="arsd-slice6a-test.service",
-        socket=str(tmp_path / "arsd.sock"),
+        socket=_harness_socket(tmp_path),
         supervisor_root=str(tmp_path / "sv"),
         caller_mapping=f"{os.getuid()}:p:o:n",
         evidence_dir=str(inside),
         workspace=str(ws),
+        binding_root=_harness_binding_root(tmp_path),
         dry_validate=True,
     )
     with pytest.raises(harness.HarnessGateError) as err:
@@ -465,11 +1049,12 @@ def test_harness_rejects_nonempty_workspace(tmp_path: Path) -> None:
     args = SimpleNamespace(
         i_acknowledge_a3_crash_harness=True,
         unit_name="arsd-slice6a-test.service",
-        socket=str(tmp_path / "arsd.sock"),
+        socket=_harness_socket(tmp_path),
         supervisor_root=str(tmp_path / "sv"),
         caller_mapping=f"{os.getuid()}:p:o:n",
         evidence_dir=str(evidence),
         workspace=str(ws),
+        binding_root=_harness_binding_root(tmp_path),
         dry_validate=True,
     )
     with pytest.raises(harness.HarnessGateError) as err:
@@ -489,11 +1074,12 @@ def test_harness_rejects_nonempty_supervisor_root(tmp_path: Path) -> None:
     args = SimpleNamespace(
         i_acknowledge_a3_crash_harness=True,
         unit_name="arsd-slice6a-test.service",
-        socket=str(tmp_path / "arsd.sock"),
+        socket=_harness_socket(tmp_path),
         supervisor_root=str(root),
         caller_mapping=f"{os.getuid()}:p:o:n",
         evidence_dir=str(evidence),
         workspace=str(ws),
+        binding_root=_harness_binding_root(tmp_path),
         dry_validate=True,
     )
     with pytest.raises(harness.HarnessGateError) as err:
@@ -507,7 +1093,8 @@ def test_harness_rejects_preexisting_socket(tmp_path: Path) -> None:
     ws.mkdir()
     evidence = tmp_path / "evidence"
     evidence.mkdir()
-    sock = tmp_path / "arsd.sock"
+    sock = Path(_harness_socket(tmp_path))
+    sock.parent.mkdir(parents=True, exist_ok=True)
     sock.write_text("stale", encoding="utf-8")
     args = SimpleNamespace(
         i_acknowledge_a3_crash_harness=True,
@@ -517,6 +1104,7 @@ def test_harness_rejects_preexisting_socket(tmp_path: Path) -> None:
         caller_mapping=f"{os.getuid()}:p:o:n",
         evidence_dir=str(evidence),
         workspace=str(ws),
+        binding_root=_harness_binding_root(tmp_path),
         dry_validate=True,
     )
     with pytest.raises(harness.HarnessGateError) as err:
@@ -540,6 +1128,7 @@ def test_harness_rejects_path_overlap(tmp_path: Path) -> None:
         caller_mapping=f"{os.getuid()}:p:o:n",
         evidence_dir=str(evidence),
         workspace=str(ws),
+        binding_root=_harness_binding_root(tmp_path),
         dry_validate=True,
     )
     with pytest.raises(harness.HarnessGateError) as err:
@@ -583,11 +1172,12 @@ def test_harness_rejects_preexisting_unit_file(
 
     inputs = {
         "unit_name": "arsd-slice6a-test.service",
-        "socket": str(tmp_path / "arsd.sock"),
+        "socket": _harness_socket(tmp_path),
         "supervisor_root": str(tmp_path / "sv"),
         "caller_mapping": f"{os.getuid()}:p:o:n",
         "evidence_dir": str(evidence),
         "workspace": str(ws),
+        "binding_root": _harness_binding_root(tmp_path),
     }
     with pytest.raises(harness.HarnessGateError) as err:
         harness.run_s4(inputs)
@@ -887,7 +1477,7 @@ def test_harness_dry_validate_no_mutation(monkeypatch, tmp_path: Path, capsys) -
             "--unit-name",
             "arsd-slice6a-dry.service",
             "--socket",
-            str(tmp_path / "arsd-dry.sock"),
+            _harness_socket(tmp_path, "arsd-dry.sock"),
             "--supervisor-root",
             str(tmp_path / "arsd-dry-root"),
             "--caller-mapping",
@@ -896,12 +1486,1511 @@ def test_harness_dry_validate_no_mutation(monkeypatch, tmp_path: Path, capsys) -
             str(evidence),
             "--workspace",
             str(ws),
+            "--binding-root",
+            _harness_binding_root(tmp_path),
         ]
     )
     assert rc == 0
     assert calls == []
     plan = json.loads(capsys.readouterr().out)
     assert plan["mutates_host"] is False
+
+
+# --- crash-harness operator Runtime Binding root (PRD R13) ------------------
+#
+# The harness submits ``opencode-native-acp``, so the Binding root is not
+# optional: the shipped ``--print-service-unit`` refuses without it, which made
+# ``run_s4`` die with CalledProcessError before rendering or installing
+# anything. The root is reusable pre-existing operator storage: the harness
+# validates operator-input shape and non-overlap only, and never creates,
+# empties, writes, promotes, or mutates it. Binding/artifact trust validation
+# stays with BindingReader.
+
+
+_STUB_RENDERED_UNIT = (
+    "[Unit]\nDescription=agent-run-supervisor arsd (user)\n\n"
+    "[Service]\nType=simple\n"
+    "ExecStart=/usr/bin/python3 -m agent_run_supervisor.arsd "
+    "--binding-root /srv/ars-binding\n"
+    "Restart=on-failure\nRestartSec=10\nKillMode=control-group\n"
+    "TimeoutStopSec=120\n"
+)
+
+
+def _harness_args(tmp_path: Path, **overrides) -> SimpleNamespace:
+    """Valid operator inputs for ``_require_operator_inputs``, minus overrides."""
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    evidence = tmp_path / "evidence"
+    evidence.mkdir(exist_ok=True)
+    values: dict[str, object] = {
+        "i_acknowledge_a3_crash_harness": True,
+        "unit_name": "arsd-r13-test.service",
+        "socket": _harness_socket(tmp_path),
+        "supervisor_root": str(tmp_path / "sv"),
+        "caller_mapping": f"{os.getuid()}:p:o:n",
+        "evidence_dir": str(evidence),
+        "workspace": str(ws),
+        "binding_root": _harness_binding_root(tmp_path),
+        "dry_validate": True,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _tree_snapshot(root: Path) -> list[tuple[str, str]]:
+    return sorted(
+        (
+            str(path.relative_to(root)),
+            path.read_text(encoding="utf-8") if path.is_file() else "<dir>",
+        )
+        for path in root.rglob("*")
+    )
+
+
+def test_harness_help_lists_binding_root(capsys) -> None:
+    harness = _load_harness()
+    with pytest.raises(SystemExit) as exc:
+        harness.main(["--help"])
+    assert exc.value.code == 0
+    assert "--binding-root" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_harness_requires_operator_binding_root(blank: str, tmp_path: Path) -> None:
+    """Missing Binding root is a fail-closed operator-input error, not a render.
+
+    Blank/whitespace input joins the same "missing operator-supplied inputs"
+    bucket as every other required path.
+    """
+    harness = _load_harness()
+    args = _harness_args(tmp_path, binding_root=blank)
+    with pytest.raises(harness.HarnessGateError) as err:
+        harness._require_operator_inputs(args)
+    msg = str(err.value).lower()
+    assert "binding_root" in msg
+    assert "missing" in msg
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "relative/binding",
+        "./binding",
+        "~/binding",
+        "srv/binding",
+        "/srv/binding\nExecStart=/bin/evil",
+        "/srv/binding\r",
+        "/srv/binding\x00",
+        "/srv/binding\x1b",
+    ],
+)
+def test_harness_rejects_unsafe_binding_root(bad: str, tmp_path: Path) -> None:
+    harness = _load_harness()
+    args = _harness_args(tmp_path, binding_root=bad)
+    with pytest.raises(harness.HarnessGateError) as err:
+        harness._require_operator_inputs(args)
+    msg = str(err.value).lower()
+    assert "binding_root" in msg
+    assert "absolute" in msg or "control" in msg
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "same_as_workspace",
+        "parent_of_supervisor_root",
+        "inside_evidence_dir",
+        "contains_socket",
+    ],
+)
+def test_harness_rejects_binding_root_overlap(case: str, tmp_path: Path) -> None:
+    """Nothing the harness creates, empties, or writes may alias operator storage."""
+    harness = _load_harness()
+    overrides: dict[str, object] = {}
+    if case == "same_as_workspace":
+        overrides["binding_root"] = str(tmp_path / "ws")
+    elif case == "parent_of_supervisor_root":
+        overrides["binding_root"] = str(tmp_path / "outer")
+        overrides["supervisor_root"] = str(tmp_path / "outer" / "sv")
+    elif case == "inside_evidence_dir":
+        overrides["binding_root"] = str(tmp_path / "evidence" / "binding")
+    elif case == "contains_socket":
+        binding = tmp_path / "operator-binding-root"
+        overrides["binding_root"] = str(binding)
+        overrides["socket"] = str(binding / "arsd.sock")
+    args = _harness_args(tmp_path, **overrides)
+    with pytest.raises(harness.HarnessGateError) as err:
+        harness._require_operator_inputs(args)
+    msg = str(err.value).lower()
+    assert "overlap" in msg or "inside" in msg
+    assert "binding_root" in msg
+
+
+def test_harness_never_reads_or_mutates_a_prepopulated_binding_root(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The Binding root is reusable operator storage, not fresh test state.
+
+    A populated root cannot be *accepted* here any more: real operator storage
+    and the harness's own surfaces must not share a path component, and two
+    genuinely disjoint real trees are not something a hermetic test can create
+    (every pytest temp path lives under one root). What the populated tree still
+    proves is the stronger half — that a Binding root the harness must refuse is
+    neither read nor written on the way to that refusal, so no emptiness or
+    freshness gate can ever reach it.
+
+    The accepted half is covered by
+    ``test_harness_preflight_never_queries_the_binding_root``: zero recorded
+    queries against a disjoint root implies zero mutations *and* implies that the
+    supervisor-root/workspace emptiness gates never touch it.
+    """
+    harness = _load_harness()
+    binding = tmp_path / "operator-binding-root"
+    (binding / "generations" / "g1").mkdir(parents=True)
+    (binding / "generations" / "g1" / "manifest.json").write_text(
+        "{}", encoding="utf-8"
+    )
+    (binding / "current").write_text("g1", encoding="utf-8")
+    before = _tree_snapshot(binding)
+
+    with _record_fs_queries(monkeypatch) as log:
+        with pytest.raises(harness.HarnessGateError) as err:
+            harness._require_operator_inputs(
+                _harness_args(tmp_path, binding_root=str(binding))
+            )
+
+    assert "binding_root" in str(err.value).lower()
+    assert log.calls == []
+    assert _tree_snapshot(binding) == before
+
+
+def test_harness_never_creates_a_missing_binding_root(tmp_path: Path) -> None:
+    """Existence/trust checks belong to BindingReader, not to this harness."""
+    harness = _load_harness()
+    binding = Path(_harness_binding_root(tmp_path))
+    resolved = harness._require_operator_inputs(_harness_args(tmp_path))
+    assert resolved["binding_root"] == str(binding)
+    assert not binding.exists()
+
+
+def test_harness_render_unit_passes_binding_root_to_the_cli(monkeypatch) -> None:
+    """Regression: the harness rendered with no ``--binding-root`` at all."""
+    harness = _load_harness()
+    seen: dict[str, list[str]] = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = list(cmd)
+        assert kwargs.get("check") is True
+        assert kwargs.get("capture_output") is True
+        return SimpleNamespace(returncode=0, stdout=_STUB_RENDERED_UNIT, stderr="")
+
+    monkeypatch.setattr(harness.subprocess, "run", fake_run)
+    harness._render_unit(
+        "/tmp/s4.sock",
+        "/tmp/s4-root",
+        f"{os.getuid()}:p:o:n",
+        binding_root=BINDING_ROOT,
+    )
+    cmd = seen["cmd"]
+    assert "--print-service-unit" in cmd
+    assert cmd.count("--binding-root") == 1
+    assert cmd[cmd.index("--binding-root") + 1] == BINDING_ROOT
+    # argv data only — never shell, never an env/default substitute.
+    assert all(isinstance(token, str) for token in cmd)
+
+
+def test_harness_render_unit_refuses_a_unit_that_dropped_the_binding_root(
+    monkeypatch,
+) -> None:
+    """Defense in depth: propagation is verified in the rendered artifact."""
+    harness = _load_harness()
+    stripped = _STUB_RENDERED_UNIT.replace(
+        "--binding-root /srv/ars-binding", ""
+    )
+
+    monkeypatch.setattr(
+        harness.subprocess,
+        "run",
+        lambda cmd, **kwargs: SimpleNamespace(
+            returncode=0, stdout=stripped, stderr=""
+        ),
+    )
+    with pytest.raises(harness.HarnessGateError) as err:
+        harness._render_unit(
+            "/tmp/s4.sock",
+            "/tmp/s4-root",
+            f"{os.getuid()}:p:o:n",
+            binding_root=BINDING_ROOT,
+        )
+    assert "binding" in str(err.value).lower()
+
+
+def test_harness_rendered_argv_is_accepted_by_the_shipped_cli(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    """The exact harness argv must render — not exit 2 / CalledProcessError.
+
+    Hermetic: the harness argv is captured, then replayed in-process through
+    the real ``arsd`` entrypoint, so this holds against the source under test
+    rather than an installed wheel.
+    """
+    harness = _load_harness()
+    from agent_run_supervisor.arsd import __main__ as arsd_main
+
+    binding = tmp_path / "operator-binding-root"
+    seen: dict[str, list[str]] = {}
+
+    def capture(cmd, **kwargs):
+        seen["cmd"] = list(cmd)
+        return SimpleNamespace(returncode=0, stdout=_STUB_RENDERED_UNIT, stderr="")
+
+    monkeypatch.setattr(harness.subprocess, "run", capture)
+    harness._render_unit(
+        "/tmp/s4.sock",
+        "/tmp/s4-root",
+        f"{os.getuid()}:hermes-test:hermes:hermes/s4",
+        binding_root=str(binding),
+    )
+    cmd = seen["cmd"]
+    assert cmd[:3] == [sys.executable, "-m", "agent_run_supervisor.arsd"]
+
+    def boom_geteuid() -> int:
+        raise AssertionError("geteuid must not run in print-service-unit mode")
+
+    monkeypatch.setattr(arsd_main, "geteuid", boom_geteuid)
+    rc = arsd_main.main(cmd[3:])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    _required_lines(captured.out)
+    _forbid_root_system(captured.out)
+    assert str(binding) in captured.out
+    assert not binding.exists()
+
+
+def test_harness_run_s4_renders_with_the_operator_binding_root(
+    monkeypatch, tmp_path: Path
+) -> None:
+    harness = _load_harness()
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    unit_dir = tmp_path / "systemd-user"
+    unit_dir.mkdir()
+    # Pre-existing unit file → run_s4 fails right after the render, so the
+    # captured call is the real propagation path with no host mutation.
+    unit_path = unit_dir / "arsd-r13-test.service"
+    unit_path.write_text("[Unit]\nDescription=preexisting\n", encoding="utf-8")
+    monkeypatch.setattr(harness, "_user_unit_path", lambda name: unit_dir / name)
+    calls: list[list[str]] = []
+
+    def fake_systemctl(*cmd, check=True):
+        calls.append(list(cmd))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(harness, "_systemctl_user", fake_systemctl)
+    seen: dict[str, object] = {}
+
+    def recording_render(*args, **kwargs):
+        seen["args"] = args
+        seen["kwargs"] = kwargs
+        return _STUB_RENDERED_UNIT
+
+    monkeypatch.setattr(harness, "_render_unit", recording_render)
+    binding = _harness_binding_root(tmp_path)
+    inputs = {
+        "unit_name": "arsd-r13-test.service",
+        "socket": _harness_socket(tmp_path),
+        "supervisor_root": str(tmp_path / "sv"),
+        "caller_mapping": f"{os.getuid()}:p:o:n",
+        "evidence_dir": str(evidence),
+        "workspace": str(ws),
+        "binding_root": binding,
+    }
+    with pytest.raises(harness.HarnessGateError):
+        harness.run_s4(inputs)
+    assert seen["kwargs"]["binding_root"] == binding
+    assert calls == []
+    assert not Path(binding).exists()
+
+
+def test_harness_dry_validate_plan_reports_binding_root(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    harness = _load_harness()
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    binding = Path(_harness_binding_root(tmp_path))
+
+    def boom_run(*a, **k):
+        raise AssertionError("no subprocess in dry-validate")
+
+    monkeypatch.setattr(harness.subprocess, "run", boom_run)
+    monkeypatch.setenv("ARS_ARSD_A3_CRASH_HARNESS", "1")
+    rc = harness.main(
+        [
+            "--i-acknowledge-a3-crash-harness",
+            "--dry-validate",
+            "--unit-name",
+            "arsd-r13-dry.service",
+            "--socket",
+            _harness_socket(tmp_path, "arsd-dry.sock"),
+            "--supervisor-root",
+            str(tmp_path / "arsd-dry-root"),
+            "--caller-mapping",
+            f"{os.getuid()}:hermes-test:hermes:hermes/dry",
+            "--evidence-dir",
+            str(evidence),
+            "--workspace",
+            str(ws),
+            "--binding-root",
+            str(binding),
+        ]
+    )
+    assert rc == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["binding_root"] == str(binding)
+    assert plan["mutates_host"] is False
+    # Dry validation is a path/config fact only: nothing is created or probed
+    # into existence.
+    assert not binding.exists()
+
+
+# --- crash-harness Binding-root metadata boundary ---------------------------
+#
+# The Binding root is operator-supplied configuration *text* until the per-Run
+# BindingReader opens it. Help, dry validation, and full-harness preflight must
+# therefore never resolve/stat/lstat/readlink/open/list the Binding root or any
+# of its path components — non-creation and unchanged-contents assertions do not
+# cover that, because ``Path.resolve(strict=False)`` reads symlink and directory
+# metadata without writing anything. These tests instrument the filesystem-query
+# primitives themselves so any reintroduced query fails here.
+
+
+_FS_QUERY_PRIMITIVES = (
+    "stat",
+    "lstat",
+    "readlink",
+    "open",
+    "access",
+    "listdir",
+    "scandir",
+)
+
+
+class _FsQueryLog:
+    """Every filesystem metadata query made while the recorder is installed."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def touching(self, target: Path) -> list[tuple[str, str]]:
+        """Queries whose operand is ``target``, anything under it, or a component of it.
+
+        Component (ancestor) hits count: ``Path.resolve`` walks the whole chain,
+        so lstat-ing ``/opt`` on the way to ``/opt/<root>`` is exactly the
+        metadata read this boundary forbids.
+        """
+        wanted = os.path.normpath(str(target))
+        under = wanted.rstrip(os.sep) + os.sep
+        components = {
+            str(parent) for parent in Path(wanted).parents if str(parent) != os.sep
+        }
+        return [
+            (op, raw)
+            for op, raw in self.calls
+            for operand in [os.path.normpath(raw)]
+            if operand == wanted or operand.startswith(under) or operand in components
+        ]
+
+
+@contextlib.contextmanager
+def _record_fs_queries(monkeypatch):
+    """Record every path-metadata primitive pathlib and the harness can reach.
+
+    ``pathlib`` delegates ``exists``/``is_dir``/``is_symlink``/``iterdir`` to the
+    ``os`` functions at call time, and ``Path.resolve`` delegates to
+    ``os.path.realpath``, so wrapping this set observes every filesystem query
+    regardless of which spelling the production code uses.
+    """
+    log = _FsQueryLog()
+
+    def wrap(op, real):
+        def probe(path=".", *args, **kwargs):
+            log.calls.append((op, str(path)))
+            return real(path, *args, **kwargs)
+
+        return probe
+
+    for name in _FS_QUERY_PRIMITIVES:
+        monkeypatch.setattr(os, name, wrap(f"os.{name}", getattr(os, name)))
+    monkeypatch.setattr(os.path, "realpath", wrap("realpath", os.path.realpath))
+
+    real_resolve = Path.resolve
+
+    def recording_resolve(self, strict=False):
+        log.calls.append(("Path.resolve", str(self)))
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", recording_resolve)
+    yield log
+
+
+def test_harness_preflight_never_queries_the_binding_root(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Blocker regression: validation resolved the Binding root before BindingReader."""
+    harness = _load_harness()
+    binding = Path(_UNQUERIED_BINDING_ROOT)
+    args = _harness_args(tmp_path, binding_root=str(binding))
+
+    with _record_fs_queries(monkeypatch) as log:
+        resolved = harness._require_operator_inputs(args)
+
+    assert resolved["binding_root"] == str(binding)
+    assert log.touching(binding) == []
+    # Paired guard: the surfaces this harness really does own are still checked
+    # through the resolution boundary, so the fix cannot be "validate nothing".
+    assert log.touching(Path(resolved["workspace"]))
+    assert log.touching(Path(resolved["supervisor_root"]))
+    assert log.touching(Path(resolved["evidence_dir"]))
+
+
+def test_harness_dry_validate_never_queries_the_binding_root(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """The whole ``--dry-validate`` path, not just the input validator."""
+    harness = _load_harness()
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    binding = Path(_UNQUERIED_BINDING_ROOT)
+
+    monkeypatch.setattr(
+        harness.subprocess,
+        "run",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("no subprocess in dry-validate")
+        ),
+    )
+    monkeypatch.setenv("ARS_ARSD_A3_CRASH_HARNESS", "1")
+    with _record_fs_queries(monkeypatch) as log:
+        rc = harness.main(
+            [
+                "--i-acknowledge-a3-crash-harness",
+                "--dry-validate",
+                "--unit-name",
+                "arsd-r13-noquery.service",
+                "--socket",
+                str(tmp_path / "arsd-dry.sock"),
+                "--supervisor-root",
+                str(tmp_path / "arsd-dry-root"),
+                "--caller-mapping",
+                f"{os.getuid()}:hermes-test:hermes:hermes/dry",
+                "--evidence-dir",
+                str(evidence),
+                "--workspace",
+                str(ws),
+                "--binding-root",
+                str(binding),
+            ]
+        )
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["binding_root"] == str(binding)
+    assert log.touching(binding) == []
+
+
+@pytest.mark.parametrize("case", ["parent_of_supervisor_root", "inside_evidence_dir"])
+def test_harness_binding_root_overlap_refusal_never_resolves_it(
+    monkeypatch, tmp_path: Path, case: str
+) -> None:
+    """Overlap protection stays fail-closed, but proven from the supplied text.
+
+    Overlapping roots share ancestors with the writable surfaces, so this pairs
+    with the query-boundary test by instrumenting the harness resolution helper
+    instead: on an overlap the refusal comes first, so *nothing* is resolved.
+    Resolving even a harness-owned surface here would walk the Binding root as
+    one of its path components. The paired "surfaces are still validated" guard
+    therefore belongs to the disjoint case, not this one — see
+    ``test_harness_disjoint_binding_root_still_passes_through_as_a_value``.
+    """
+    harness = _load_harness()
+    overrides: dict[str, object] = {}
+    if case == "parent_of_supervisor_root":
+        overrides["binding_root"] = str(tmp_path / "outer")
+        overrides["supervisor_root"] = str(tmp_path / "outer" / "sv")
+    else:
+        overrides["binding_root"] = str(tmp_path / "evidence" / "binding")
+    args = _harness_args(tmp_path, **overrides)
+
+    operands: list[str] = []
+    real_resolve = harness._resolve
+
+    def recording_resolve(path):
+        operands.append(str(path))
+        return real_resolve(path)
+
+    monkeypatch.setattr(harness, "_resolve", recording_resolve)
+    with pytest.raises(harness.HarnessGateError) as err:
+        harness._require_operator_inputs(args)
+
+    msg = str(err.value).lower()
+    assert "binding_root" in msg
+    assert "overlap" in msg or "inside" in msg
+    assert str(overrides["binding_root"]) not in operands
+    assert operands == []
+
+
+def test_harness_rejects_binding_root_inside_repo_without_resolving_it(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Repo containment stays refused for the Binding root — lexically."""
+    harness = _load_harness()
+    inside = REPO_ROOT / "docs"
+    args = _harness_args(tmp_path, binding_root=str(inside))
+
+    operands: list[str] = []
+    real_resolve = harness._resolve
+
+    def recording_resolve(path):
+        operands.append(str(path))
+        return real_resolve(path)
+
+    monkeypatch.setattr(harness, "_resolve", recording_resolve)
+    with pytest.raises(harness.HarnessGateError) as err:
+        harness._require_operator_inputs(args)
+
+    msg = str(err.value).lower()
+    assert "binding_root" in msg
+    assert "repository" in msg or "worktree" in msg
+    assert str(inside) not in operands
+
+
+def test_harness_rejects_dot_dot_spelled_binding_root_alias(tmp_path: Path) -> None:
+    """A ``..`` spelling that only normalization exposes is still an overlap.
+
+    Guard against a lexical check so naive it compares raw text only. The
+    ``neutral`` hop is deliberately not one of the validated surfaces, so no
+    as-written prefix of ``<tmp>/neutral/../ws`` matches the workspace, the
+    supervisor root, the evidence dir, the socket, or the socket's parent —
+    only the collapsed spelling reveals that it *is* the workspace.
+    """
+    harness = _load_harness()
+    alias = str(tmp_path / "neutral" / ".." / "ws")
+    with pytest.raises(harness.HarnessGateError) as err:
+        harness._require_operator_inputs(_harness_args(tmp_path, binding_root=alias))
+    msg = str(err.value).lower()
+    assert "binding_root" in msg
+    assert "overlap" in msg
+
+
+# --- the whole Binding-root path-safety class (one gate, not four bugs) -----
+#
+# Refusing an overlapping Binding root is not enough: the refusal has to land
+# before the *first* filesystem query of any surface. Resolving a writable
+# surface that overlaps the Binding root reads the Binding root itself as a
+# path component — ``os.path.realpath`` lstats every prefix — so an overlap
+# that is only caught after ``_forbid_inside_repo`` has already leaked the
+# operator's storage to the harness. The matrix below therefore asserts an
+# empty primitive log, not merely that the Binding text never reached
+# ``_resolve``. The derived systemd user-unit path is in the matrix because the
+# harness mkdirs its parent and exclusively creates the file; the ``//`` cases
+# are in it because Linux aliases ``//x`` to ``/x`` while ``os.path.normpath``
+# and ``pathlib`` both keep the two spellings distinct.
+
+_UNIT_NAME = "arsd-r13-test.service"
+
+
+def _double_slash(path: Path | str) -> str:
+    """The exactly-two-leading-slash alias of an absolute path (text only)."""
+    return "//" + str(path).lstrip("/")
+
+
+def _binding_overlap_cases(tmp_path: Path, unit_dir: Path) -> dict[str, dict[str, str]]:
+    """Materially distinct overlaps between the Binding root and a written surface."""
+    ws = tmp_path / "ws"
+    unit_path = unit_dir / _UNIT_NAME
+    return {
+        "binding_equals_supervisor_root": {"binding_root": str(tmp_path / "sv")},
+        "binding_parent_of_supervisor_root": {
+            "binding_root": str(tmp_path / "outer"),
+            "supervisor_root": str(tmp_path / "outer" / "sv"),
+        },
+        "binding_child_of_supervisor_root": {
+            "binding_root": str(tmp_path / "sv" / "generations")
+        },
+        "binding_equals_workspace": {"binding_root": str(ws)},
+        "binding_parent_of_workspace": {
+            "binding_root": str(tmp_path / "outer-ws"),
+            "workspace": str(tmp_path / "outer-ws" / "ws"),
+        },
+        "binding_child_of_workspace": {"binding_root": str(ws / "inner")},
+        "binding_equals_evidence_dir": {"binding_root": str(tmp_path / "evidence")},
+        "binding_parent_of_evidence_dir": {
+            "binding_root": str(tmp_path / "outer-ev"),
+            "evidence_dir": str(tmp_path / "outer-ev" / "evidence"),
+        },
+        "binding_child_of_evidence_dir": {
+            "binding_root": str(tmp_path / "evidence" / "inner")
+        },
+        "binding_equals_socket_path": {
+            "binding_root": _harness_socket(tmp_path)
+        },
+        "socket_directly_inside_binding": {
+            "binding_root": str(tmp_path / "bind"),
+            "socket": str(tmp_path / "bind" / "arsd.sock"),
+        },
+        "socket_deep_inside_binding": {
+            "binding_root": str(tmp_path / "bind"),
+            "socket": str(tmp_path / "bind" / "run" / "arsd.sock"),
+        },
+        # The socket's *directory* is written too — the daemon mkdirs it before
+        # it binds — so it belongs in the same symmetric matrix as the socket
+        # path itself. Checking only Binding-vs-socket calls ``/x/binding`` and
+        # ``/x/arsd.sock`` disjoint while the daemon (correctly) refuses it.
+        "binding_equals_socket_directory": {
+            "binding_root": str(tmp_path / "sockdir"),
+            "socket": str(tmp_path / "sockdir" / "arsd.sock"),
+        },
+        "binding_inside_socket_directory": {
+            "binding_root": str(tmp_path / "sockdir" / "binding"),
+            "socket": str(tmp_path / "sockdir" / "arsd.sock"),
+        },
+        "binding_parent_of_socket_directory": {
+            "binding_root": str(tmp_path / "outer-sock"),
+            "socket": str(tmp_path / "outer-sock" / "sockdir" / "arsd.sock"),
+        },
+        "double_slash_binding_aliases_socket_directory": {
+            "binding_root": _double_slash(tmp_path / "sockdir"),
+            "socket": str(tmp_path / "sockdir" / "arsd.sock"),
+        },
+        "double_slash_socket_aliases_binding_directory": {
+            "binding_root": str(tmp_path / "sockdir"),
+            "socket": _double_slash(tmp_path / "sockdir" / "arsd.sock"),
+        },
+        # Derived writable surface: dry validation stats it, full execution
+        # mkdirs its parent and exclusively creates the unit file.
+        "binding_equals_unit_path": {"binding_root": str(unit_path)},
+        "binding_child_of_unit_path": {"binding_root": str(unit_path / "inner")},
+        "binding_equals_unit_directory": {"binding_root": str(unit_dir)},
+        "binding_inside_unit_directory": {"binding_root": str(unit_dir / "binding")},
+        # Exactly-two-leading-slash aliases, on either operand.
+        "double_slash_binding_aliases_workspace": {"binding_root": _double_slash(ws)},
+        "double_slash_binding_aliases_unit_directory": {
+            "binding_root": _double_slash(unit_dir)
+        },
+        "double_slash_workspace_aliases_binding": {
+            "binding_root": str(ws),
+            "workspace": _double_slash(ws),
+        },
+        "double_slash_supervisor_root_aliases_binding_parent": {
+            "binding_root": str(tmp_path / "outer"),
+            "supervisor_root": _double_slash(tmp_path / "outer" / "sv"),
+        },
+    }
+
+
+_BINDING_OVERLAP_CASE_IDS = sorted(_binding_overlap_cases(Path("/x"), Path("/x/u")))
+
+
+@pytest.mark.parametrize("case", _BINDING_OVERLAP_CASE_IDS)
+def test_harness_refuses_binding_overlap_before_any_filesystem_query(
+    monkeypatch, tmp_path: Path, case: str
+) -> None:
+    """Every overlap direction refuses from text alone, querying nothing."""
+    harness = _load_harness()
+    unit_dir = tmp_path / "systemd-user"
+    monkeypatch.setattr(harness, "_user_unit_path", lambda name: unit_dir / name)
+    overrides = _binding_overlap_cases(tmp_path, unit_dir)[case]
+    args = _harness_args(tmp_path, unit_name=_UNIT_NAME, **overrides)
+    # The Linux-equivalent spelling: '//x' and '/x' name the same directory.
+    binding = Path("/" + str(args.binding_root).lstrip("/"))
+
+    with _record_fs_queries(monkeypatch) as log:
+        with pytest.raises(harness.HarnessGateError) as err:
+            harness._require_operator_inputs(args)
+
+    msg = str(err.value).lower()
+    assert "binding_root" in msg
+    assert "overlap" in msg or "inside" in msg
+    assert log.touching(binding) == []
+    # The ordering claim: refusal precedes the first query of *any* surface,
+    # because resolving an overlapping surface reads the Binding root itself.
+    assert log.calls == []
+
+
+def _harness_shared_ancestor_cases(
+    tmp_path: Path, unit_dir: Path
+) -> dict[str, dict[str, str]]:
+    """Binding roots that share an ancestor with a queried surface, containing none.
+
+    Every surface below is resolved, stat-ed, listed, mkdir-ed, or created by
+    this harness before any ``BindingReader`` exists, and each of those walks the
+    surface's whole component chain. A sibling under a shared parent therefore
+    leaks exactly the metadata read the boundary forbids, even though no path
+    contains any other.
+    """
+    ws = tmp_path / "ws"
+    return {
+        "beside_supervisor_root": {
+            "binding_root": str(tmp_path / "binding"),
+            "supervisor_root": str(tmp_path / "sv"),
+        },
+        "beside_workspace": {
+            "binding_root": str(ws.parent / "binding-beside-ws"),
+            "workspace": str(ws),
+        },
+        "beside_evidence_dir": {
+            "binding_root": str(tmp_path / "evidence-sibling"),
+            "evidence_dir": str(tmp_path / "evidence"),
+        },
+        "beside_socket": {
+            "binding_root": str(tmp_path / "sock" / "binding"),
+            "socket": _harness_socket(tmp_path),
+        },
+        "beside_socket_parent": {
+            "binding_root": str(tmp_path / "sock-sibling"),
+            "socket": _harness_socket(tmp_path),
+        },
+        "beside_unit_path": {
+            "binding_root": str(unit_dir / "binding-beside-unit"),
+        },
+        "beside_unit_directory": {
+            "binding_root": str(unit_dir.parent / "binding-beside-unit-dir"),
+        },
+        # Prefix siblings of the *names* themselves, not merely of the parent.
+        "prefix_sibling_of_supervisor_root": {
+            "binding_root": str(tmp_path / "sv-binding"),
+            "supervisor_root": str(tmp_path / "sv"),
+        },
+        # Alias spellings of the same shared-ancestor collision.
+        "double_slash_shared_ancestor": {
+            "binding_root": _double_slash(tmp_path / "binding"),
+            "supervisor_root": str(tmp_path / "sv"),
+        },
+        "dot_hop_shared_ancestor": {
+            "binding_root": str(tmp_path / "." / "binding"),
+            "supervisor_root": str(tmp_path / "sv"),
+        },
+        "dot_dot_hop_shared_ancestor": {
+            "binding_root": str(tmp_path / "neutral" / ".." / "binding"),
+            "supervisor_root": str(tmp_path / "sv"),
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "case", sorted(_harness_shared_ancestor_cases(Path("/x"), Path("/x/u")))
+)
+def test_harness_refuses_shared_binding_component_before_any_query(
+    monkeypatch, tmp_path: Path, case: str
+) -> None:
+    """Blocker regression: sibling layouts resolved a Binding component pre-reader."""
+    harness = _load_harness()
+    unit_dir = tmp_path / "systemd-user"
+    monkeypatch.setattr(harness, "_user_unit_path", lambda name: unit_dir / name)
+    overrides = _harness_shared_ancestor_cases(tmp_path, unit_dir)[case]
+    args = _harness_args(tmp_path, unit_name=_UNIT_NAME, **overrides)
+
+    with _record_fs_queries(monkeypatch) as log:
+        with pytest.raises(harness.HarnessGateError) as err:
+            harness._require_operator_inputs(args)
+
+    msg = str(err.value).lower()
+    assert "binding_root" in msg
+    assert "overlap" in msg or "inside" in msg
+    assert log.calls == []
+
+
+def test_harness_refuses_a_binding_root_sharing_the_repository_ancestor(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The worktree path is a queried surface too — ``_forbid_inside_repo`` resolves it."""
+    harness = _load_harness()
+    binding = REPO_ROOT.parents[1] / "ars-operator-binding-beside-the-worktree"
+
+    with _record_fs_queries(monkeypatch) as log:
+        with pytest.raises(harness.HarnessGateError) as err:
+            harness._require_operator_inputs(
+                _harness_args(tmp_path, binding_root=str(binding))
+            )
+
+    msg = str(err.value).lower()
+    assert "binding_root" in msg
+    assert "overlap" in msg or "inside" in msg
+    assert log.calls == []
+
+
+def test_harness_disjoint_binding_root_still_passes_through_as_a_value(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The gate refuses overlap only — a disjoint root stays an accepted value."""
+    harness = _load_harness()
+    unit_dir = tmp_path / "systemd-user"
+    monkeypatch.setattr(harness, "_user_unit_path", lambda name: unit_dir / name)
+    binding = Path(_UNQUERIED_BINDING_ROOT)
+    args = _harness_args(tmp_path, unit_name=_UNIT_NAME, binding_root=str(binding))
+
+    with _record_fs_queries(monkeypatch) as log:
+        resolved = harness._require_operator_inputs(args)
+
+    assert resolved["binding_root"] == str(binding)
+    assert log.touching(binding) == []
+    # Paired guard: the real checks on harness-owned surfaces are still run, so
+    # the fix cannot be "stop validating".
+    assert log.touching(Path(resolved["workspace"]))
+    assert log.touching(Path(resolved["supervisor_root"]))
+    assert log.touching(Path(resolved["evidence_dir"]))
+    assert not binding.exists()
+
+
+def test_harness_dry_validate_refuses_unit_path_overlap_before_probing_it(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """``--dry-validate`` reports ``unit_file_exists`` — that probe must not run."""
+    harness = _load_harness()
+    unit_dir = tmp_path / "systemd-user"
+    monkeypatch.setattr(harness, "_user_unit_path", lambda name: unit_dir / name)
+    monkeypatch.setattr(
+        harness.subprocess,
+        "run",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no subprocess")),
+    )
+    monkeypatch.setenv("ARS_ARSD_A3_CRASH_HARNESS", "1")
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    evidence = tmp_path / "evidence"
+    evidence.mkdir(exist_ok=True)
+    argv = [
+        "--i-acknowledge-a3-crash-harness",
+        "--dry-validate",
+        "--unit-name",
+        _UNIT_NAME,
+        "--socket",
+        _harness_socket(tmp_path),
+        "--supervisor-root",
+        str(tmp_path / "sv"),
+        "--caller-mapping",
+        f"{os.getuid()}:hermes-test:hermes:hermes/dry",
+        "--evidence-dir",
+        str(evidence),
+        "--workspace",
+        str(ws),
+        "--binding-root",
+        str(unit_dir),
+    ]
+
+    with _record_fs_queries(monkeypatch) as log:
+        rc = harness.main(argv)
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    assert "binding_root" in captured.err.lower()
+    assert log.touching(unit_dir) == []
+    # No operator-supplied or derived surface is probed at all before the
+    # refusal: every one of them lives under tmp_path. (``log.calls`` itself is
+    # not empty here — argparse stats gettext catalogs under the interpreter
+    # prefix, which touches nothing this gate is about.)
+    assert log.touching(tmp_path) == []
+
+
+def test_harness_full_preflight_refuses_unit_path_overlap_before_any_unit_write(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """Same refusal without ``--dry-validate``: no mkdir, no unit file, no systemctl."""
+    harness = _load_harness()
+    unit_dir = tmp_path / "systemd-user"
+    unit_path = unit_dir / _UNIT_NAME
+    monkeypatch.setattr(harness, "_user_unit_path", lambda name: unit_dir / name)
+
+    def boom(*_a, **_k):
+        raise AssertionError("must refuse before any host mutation")
+
+    monkeypatch.setattr(harness.subprocess, "run", boom)
+    monkeypatch.setattr(harness, "_systemctl_user", boom)
+    monkeypatch.setattr(harness, "_render_unit", boom)
+    monkeypatch.setattr(harness, "run_s4", boom)
+    monkeypatch.setenv("ARS_ARSD_A3_CRASH_HARNESS", "1")
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    evidence = tmp_path / "evidence"
+    evidence.mkdir(exist_ok=True)
+
+    rc = harness.main(
+        [
+            "--i-acknowledge-a3-crash-harness",
+            "--unit-name",
+            _UNIT_NAME,
+            "--socket",
+            _harness_socket(tmp_path),
+            "--supervisor-root",
+            str(tmp_path / "sv"),
+            "--caller-mapping",
+            f"{os.getuid()}:hermes-test:hermes:hermes/full",
+            "--evidence-dir",
+            str(evidence),
+            "--workspace",
+            str(ws),
+            "--binding-root",
+            str(unit_path),
+        ]
+    )
+
+    assert rc == 2
+    assert "binding_root" in capsys.readouterr().err.lower()
+    assert not unit_dir.exists()
+    assert not unit_path.exists()
+
+
+_QUERY_CONFLICT_TABLE = [
+    # Equality and containment, both directions.
+    ("/srv/binding", "/srv/binding", True),
+    ("/srv/binding", "/srv/binding/sub", True),
+    ("/srv/binding/sub", "/srv/binding", True),
+    # Shared ancestors and prefix siblings: neither contains the other, but
+    # resolving the surface walks a component of the Binding root.
+    ("/srv/binding", "/srv/binding-sibling", True),
+    ("/srv/binding", "/srv/sv", True),
+    ("/srv/a/binding", "/srv/b/sv", True),
+    ("/opt/ars-binding", "/opt/ars-state", True),
+    # Alias spellings of the same collision, on either operand.
+    ("//srv/binding", "/srv/binding/sub", True),
+    ("/srv/binding", "//srv/binding/sub", True),
+    ("///srv/binding", "/srv/binding", True),
+    ("/srv/binding", "/srv/neutral/../binding/sub", True),
+    ("/srv/neutral/../binding", "/srv/binding/sub", True),
+    ("/srv/binding", "/srv/./sv", True),
+    # As-written and collapsed spellings walk different trees; both count.
+    ("/srv/binding", "/other/../srv/sv", True),
+    ("/srv/binding", "/srv/x/../../other/sv", True),
+    # The filesystem root contains everything, however it is spelled.
+    ("/", "/srv/sv", True),
+    ("/srv/..", "/other/sv", True),
+    ("/srv/binding", "/", True),
+    # Genuinely disjoint: only ``/`` in common.
+    ("/srv/binding", "/other/root", False),
+    ("//srv/binding", "//other/root", False),
+    ("/opt/binding", "/tmp/sv", False),
+    ("/opt/binding", "/home/op/.config/systemd/user", False),
+    ("/srv/binding", "/srv2/sv", False),
+    # Fail-closed: a relative operand names no fixed location, so no text
+    # comparison can decide it and the answer must be "conflict".
+    ("/srv/binding", "relative-sv", True),
+    ("relative-binding", "/srv/sv", True),
+]
+
+
+@pytest.mark.parametrize(("binding", "surface", "expected"), _QUERY_CONFLICT_TABLE)
+def test_harness_and_daemon_agree_on_the_binding_query_conflict_rule(
+    binding: str, surface: str, expected: bool
+) -> None:
+    """One rule, mirrored in two modules; divergence is how aliases slip through.
+
+    The harness cannot import the package (it must stay runnable from a bare
+    checkout), so the daemon helper is duplicated rather than shared. That makes
+    semantic parity a test obligation: the harness installs the unit that this
+    very daemon runs, so a layout one accepts and the other refuses is either a
+    unit that can never start or a Binding component read before ``BindingReader``.
+    """
+    from agent_run_supervisor.arsd import __main__ as arsd_main
+
+    harness = _load_harness()
+    assert harness._binding_query_conflict(binding, surface) is expected
+    assert arsd_main._binding_query_conflict(binding, surface) is expected
+    # ``Path`` operands must answer identically to their text spelling: the
+    # daemon's declared union accepts both and the two must not diverge.
+    assert harness._binding_query_conflict(Path(binding), Path(surface)) is expected
+    assert arsd_main._binding_query_conflict(Path(binding), Path(surface)) is expected
+
+
+def test_harness_and_daemon_agree_on_the_queried_component_set() -> None:
+    """Parity of the underlying enumeration, not merely of its boolean verdict."""
+    from agent_run_supervisor.arsd import __main__ as arsd_main
+
+    harness = _load_harness()
+    for spelling in (
+        "/srv/binding",
+        "//srv/binding",
+        "///srv/binding/",
+        "/srv/./binding",
+        "/srv/neutral/../binding",
+        "/srv/x/../../other/sv",
+        "/",
+        "/srv/..",
+    ):
+        assert harness._lexical_query_components(
+            spelling
+        ) == arsd_main._lexical_query_components(spelling), spelling
+
+
+def test_queried_components_enumerate_the_whole_ancestor_chain() -> None:
+    """The rule's premise: an operation on a path may query every component of it."""
+    from agent_run_supervisor.arsd import __main__ as arsd_main
+
+    assert arsd_main._lexical_query_components("/srv/a/b") == frozenset(
+        {"/srv", "/srv/a", "/srv/a/b"}
+    )
+    # ``/`` is excluded: every absolute path shares it, so counting it would
+    # refuse every possible layout.
+    assert "/" not in arsd_main._lexical_query_components("/srv/a/b")
+    assert arsd_main._lexical_query_components("/") == frozenset()
+    # Both spellings contribute: the kernel walks ``/srv/neutral`` on the way
+    # to a destination that only the collapsed spelling names.
+    assert arsd_main._lexical_query_components("/srv/neutral/../b") == frozenset(
+        {"/srv", "/srv/neutral", "/srv/b"}
+    )
+
+
+# --- the socket directory is a written surface on both boundaries -----------
+#
+# Helper agreement (above) is necessary but not sufficient: the two boundaries
+# can answer the same containment question and still disagree about *which*
+# surfaces they ask it about. The harness asked about the socket path and then
+# only about equality of the socket's parent, so Binding ``/x/binding`` beside
+# socket ``/x/arsd.sock`` passed here and was refused by the very daemon this
+# harness renders and installs — after the harness had already resolved the
+# shared writable directory. These tests compare the two boundaries end to end,
+# by running the shipped ``serve_daemon`` gate rather than restating its rules.
+
+
+class _LeaseReached(Exception):
+    """Sentinel wall proving the daemon's pure gate accepted a layout."""
+
+
+def _daemon_refuses_layout(
+    monkeypatch, *, binding: str, socket: str, supervisor_root: str
+) -> bool:
+    """Does the shipped ``serve_daemon`` refuse this layout before the lease?"""
+    from agent_run_supervisor.arsd import __main__ as arsd_main
+    from agent_run_supervisor.arsd.server import CallerPolicy, Principal
+
+    def wall(_root):
+        raise _LeaseReached
+
+    monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", wall)
+    principal = Principal(
+        principal_id="hermes-test", owner_namespaces=frozenset([("hermes", "hermes/x")])
+    )
+    try:
+        asyncio.run(
+            arsd_main.serve_daemon(
+                socket_path=socket,
+                supervisor_root=supervisor_root,
+                policy=CallerPolicy(dict([(os.getuid(), principal)])),
+                binding_root=binding,
+                install_signals=False,
+            )
+        )
+    except arsd_main.DaemonStartupError as err:
+        assert "binding" in str(err).lower(), err
+        return True
+    except _LeaseReached:
+        return False
+    raise AssertionError("serve_daemon returned without reaching the lease")
+
+
+def _harness_refuses_layout(
+    harness, tmp_path: Path, *, binding: str, socket: str, supervisor_root: str
+) -> bool:
+    """Does the crash harness refuse the same layout, for the same reason?"""
+    args = _harness_args(
+        tmp_path,
+        binding_root=binding,
+        socket=socket,
+        supervisor_root=supervisor_root,
+    )
+    try:
+        harness._require_operator_inputs(args)
+    except harness.HarnessGateError as err:
+        assert "binding_root" in str(err), err
+        return True
+    return False
+
+
+def _agreement_layouts(tmp_path: Path) -> dict[str, dict[str, object]]:
+    """Layouts differing only in how the Binding root relates to written surfaces."""
+    sock_dir = tmp_path / "sock"
+    return {
+        "binding_inside_socket_directory": {
+            "binding": str(sock_dir / "binding"),
+            "socket": str(sock_dir / "arsd.sock"),
+            "refused": True,
+        },
+        "binding_equals_socket_directory": {
+            "binding": str(sock_dir),
+            "socket": str(sock_dir / "arsd.sock"),
+            "refused": True,
+        },
+        "binding_parent_of_socket_directory": {
+            "binding": str(tmp_path / "outer-sock"),
+            "socket": str(tmp_path / "outer-sock" / "sock" / "arsd.sock"),
+            "refused": True,
+        },
+        "socket_inside_binding": {
+            "binding": str(tmp_path / "bind"),
+            "socket": str(tmp_path / "bind" / "arsd.sock"),
+            "refused": True,
+        },
+        "binding_equals_supervisor_root": {
+            "binding": str(tmp_path / "sv"),
+            "socket": str(sock_dir / "arsd.sock"),
+            "refused": True,
+        },
+        "double_slash_binding_aliases_socket_directory": {
+            "binding": _double_slash(sock_dir),
+            "socket": str(sock_dir / "arsd.sock"),
+            "refused": True,
+        },
+        "double_slash_socket_aliases_binding": {
+            "binding": str(sock_dir),
+            "socket": _double_slash(sock_dir / "arsd.sock"),
+            "refused": True,
+        },
+        # A prefix sibling contains nothing and is contained by nothing, yet
+        # every query on the socket directory walks the parent both share.
+        "sibling_prefix_of_socket_directory": {
+            "binding": str(tmp_path / "sock-sibling"),
+            "socket": str(sock_dir / "arsd.sock"),
+            "refused": True,
+        },
+        # Control: neither boundary may refuse a genuinely disjoint layout —
+        # no non-root component in common with the socket, the supervisor root,
+        # the workspace, the evidence dir, the unit path, or the worktree.
+        "disjoint_control": {
+            "binding": _UNQUERIED_BINDING_ROOT,
+            "socket": str(sock_dir / "arsd.sock"),
+            "refused": False,
+        },
+    }
+
+
+_AGREEMENT_CASE_IDS = sorted(_agreement_layouts(Path("/x")))
+
+
+@pytest.mark.parametrize("case", _AGREEMENT_CASE_IDS)
+def test_harness_and_daemon_agree_on_written_surface_overlap(
+    monkeypatch, tmp_path: Path, case: str
+) -> None:
+    """The harness must accept exactly the layouts its generated daemon can start."""
+    harness = _load_harness()
+    layout = _agreement_layouts(tmp_path)[case]
+    supervisor = str(tmp_path / "sv")
+
+    daemon_refused = _daemon_refuses_layout(
+        monkeypatch,
+        binding=str(layout["binding"]),
+        socket=str(layout["socket"]),
+        supervisor_root=supervisor,
+    )
+    harness_refused = _harness_refuses_layout(
+        harness,
+        tmp_path,
+        binding=str(layout["binding"]),
+        socket=str(layout["socket"]),
+        supervisor_root=supervisor,
+    )
+
+    assert daemon_refused is layout["refused"], ("daemon", case)
+    assert harness_refused is layout["refused"], ("harness", case)
+
+
+def test_harness_refuses_binding_beside_the_socket_before_any_query(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Blocker regression: ``/x/binding`` + ``/x/arsd.sock`` was accepted and probed.
+
+    The old check asked Binding-vs-socket (disjoint) and then only whether the
+    socket's parent *equalled* the Binding root (it does not). The refusal has
+    to come from the same symmetric containment rule as every other surface,
+    and it has to precede the first query — resolving the shared directory
+    ``/x`` is a metadata read of the Binding root's own parent.
+    """
+    harness = _load_harness()
+    shared = tmp_path / "shared"
+    binding = shared / "binding"
+    args = _harness_args(
+        tmp_path, binding_root=str(binding), socket=str(shared / "arsd.sock")
+    )
+
+    with _record_fs_queries(monkeypatch) as log:
+        with pytest.raises(harness.HarnessGateError) as err:
+            harness._require_operator_inputs(args)
+
+    msg = str(err.value).lower()
+    assert "binding_root" in msg
+    assert "overlap" in msg or "inside" in msg
+    assert log.touching(shared) == []
+    assert log.calls == []
+
+
+def test_harness_dry_validate_refuses_socket_directory_overlap(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """The whole ``--dry-validate`` path refuses before ``unit_file_exists`` probing."""
+    harness = _load_harness()
+    unit_dir = tmp_path / "systemd-user"
+    monkeypatch.setattr(harness, "_user_unit_path", lambda name: unit_dir / name)
+    monkeypatch.setattr(
+        harness.subprocess,
+        "run",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no subprocess")),
+    )
+    monkeypatch.setenv("ARS_ARSD_A3_CRASH_HARNESS", "1")
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    evidence = tmp_path / "evidence"
+    evidence.mkdir(exist_ok=True)
+    shared = tmp_path / "shared"
+
+    with _record_fs_queries(monkeypatch) as log:
+        rc = harness.main(
+            [
+                "--i-acknowledge-a3-crash-harness",
+                "--dry-validate",
+                "--unit-name",
+                _UNIT_NAME,
+                "--socket",
+                str(shared / "arsd.sock"),
+                "--supervisor-root",
+                str(tmp_path / "sv"),
+                "--caller-mapping",
+                f"{os.getuid()}:hermes-test:hermes:hermes/dry",
+                "--evidence-dir",
+                str(evidence),
+                "--workspace",
+                str(ws),
+                "--binding-root",
+                str(shared / "binding"),
+            ]
+        )
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    assert "binding_root" in captured.err.lower()
+    assert log.touching(tmp_path) == []
+
+
+def test_harness_full_preflight_refuses_socket_directory_overlap(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """Same refusal without ``--dry-validate``: no mkdir, no unit file, no systemctl."""
+    harness = _load_harness()
+    unit_dir = tmp_path / "systemd-user"
+    monkeypatch.setattr(harness, "_user_unit_path", lambda name: unit_dir / name)
+
+    def boom(*_a, **_k):
+        raise AssertionError("must refuse before any host mutation")
+
+    monkeypatch.setattr(harness.subprocess, "run", boom)
+    monkeypatch.setattr(harness, "_systemctl_user", boom)
+    monkeypatch.setattr(harness, "_render_unit", boom)
+    monkeypatch.setattr(harness, "run_s4", boom)
+    monkeypatch.setenv("ARS_ARSD_A3_CRASH_HARNESS", "1")
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    evidence = tmp_path / "evidence"
+    evidence.mkdir(exist_ok=True)
+    shared = tmp_path / "shared"
+
+    rc = harness.main(
+        [
+            "--i-acknowledge-a3-crash-harness",
+            "--unit-name",
+            _UNIT_NAME,
+            "--socket",
+            str(shared / "arsd.sock"),
+            "--supervisor-root",
+            str(tmp_path / "sv"),
+            "--caller-mapping",
+            f"{os.getuid()}:hermes-test:hermes:hermes/full",
+            "--evidence-dir",
+            str(evidence),
+            "--workspace",
+            str(ws),
+            "--binding-root",
+            str(shared / "binding"),
+        ]
+    )
+
+    assert rc == 2
+    assert "binding_root" in capsys.readouterr().err.lower()
+    assert not shared.exists()
+    assert not unit_dir.exists()
+
+
+# --- repository containment: lexical at import, refused in both directions ---
+#
+# Two independent defects lived here. ``_REPO_ROOT = Path(__file__).resolve()``
+# lstats every component of the repository path the moment the module is
+# executed — a filesystem query performed before the operator's Binding input is
+# even parsed, in a module whose whole contract is "query nothing before
+# BindingReader". And ``_forbid_inside_repo_lexically`` only asked whether the
+# Binding root was *inside* the repository; a Binding root that **contains** the
+# worktree makes every harness-owned surface a Binding subpath, which is the
+# same collision seen from the other end.
+
+
+def test_harness_repo_root_is_derived_without_any_filesystem_query(monkeypatch) -> None:
+    """Blocker regression: import resolved the repository path.
+
+    The instrumentation must be installed *before* module execution, so this
+    re-executes the module source in a fresh namespace rather than inspecting a
+    module ``_load_harness()`` already imported. Stdlib imports are warmed
+    first, so the recorder observes the module's own derivation and not Python's
+    import machinery.
+    """
+    source_path = REPO_ROOT / "scripts" / "arsd_crash_containment_harness.py"
+    code = compile(source_path.read_text(encoding="utf-8"), str(source_path), "exec")
+    _load_harness()
+
+    namespace: dict = {
+        "__file__": str(source_path),
+        "__name__": "arsd_crash_harness_import_probe",
+    }
+    cwd_reads: list[int] = []
+    with _record_fs_queries(monkeypatch) as log:
+        # ``os.getcwd`` is not a path-metadata query, but the absolute spelling
+        # must not need it at all: it is reserved for a relative ``__file__``.
+        monkeypatch.setattr(os, "getcwd", lambda: cwd_reads.append(1) or "/")
+        exec(code, namespace)
+        import_calls = list(log.calls)
+        # Positive control: the recorder is demonstrably live at this point, so
+        # an empty import log is a real observation and not a broken probe.
+        os.stat(str(source_path))
+
+    assert import_calls == []
+    assert log.calls
+    assert cwd_reads == []
+    assert namespace["_REPO_ROOT"] == REPO_ROOT
+
+
+def test_harness_repo_root_anchors_a_relative_file_spelling_at_import(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The ``os.getcwd()`` branch, exercised end to end rather than by injection.
+
+    Python has made ``__file__`` absolute since 3.9, so this drives the branch
+    the way an older interpreter or an odd loader would: a relative spelling
+    executed from a known cwd. The derived root must still be absolute — a
+    relative one would compare against nothing and silently disable the gate.
+    """
+    source_path = REPO_ROOT / "scripts" / "arsd_crash_containment_harness.py"
+    code = compile(source_path.read_text(encoding="utf-8"), str(source_path), "exec")
+    _load_harness()
+
+    monkeypatch.chdir(REPO_ROOT)
+    namespace: dict = {
+        "__file__": "scripts/arsd_crash_containment_harness.py",
+        "__name__": "arsd_crash_harness_relative_probe",
+    }
+    with _record_fs_queries(monkeypatch) as log:
+        exec(code, namespace)
+
+    assert log.calls == []
+    assert namespace["_REPO_ROOT"] == REPO_ROOT
+    assert namespace["_REPO_ROOT"].is_absolute()
+
+
+@pytest.mark.parametrize(
+    ("spelling", "cwd", "expected"),
+    [
+        ("/srv/checkout/scripts/harness.py", None, "/srv/checkout"),
+        ("//srv/checkout/scripts/harness.py", None, "/srv/checkout"),
+        ("///srv/checkout/scripts/harness.py", None, "/srv/checkout"),
+        ("/srv/checkout/./scripts/harness.py", None, "/srv/checkout"),
+        ("/srv/checkout/tools/../scripts/harness.py", None, "/srv/checkout"),
+        ("scripts/harness.py", "/srv/checkout", "/srv/checkout"),
+        ("./scripts/harness.py", "/srv/checkout", "/srv/checkout"),
+        ("harness.py", "/srv/checkout/scripts", "/srv/checkout"),
+    ],
+)
+def test_harness_repo_root_handles_absolute_and_relative_file_spellings(
+    spelling: str, cwd: str | None, expected: str
+) -> None:
+    """Both ``__file__`` spellings resolve to one absolute root, from text alone.
+
+    A relative spelling must never degrade into a relative root: the Binding
+    root is required absolute, so a relative repository root would silently
+    turn the containment gate into a no-op.
+    """
+    harness = _load_harness()
+    derived = (
+        harness._lexical_repo_root(spelling)
+        if cwd is None
+        else harness._lexical_repo_root(spelling, cwd=cwd)
+    )
+    assert derived == Path(expected)
+    assert derived.is_absolute()
+
+
+def _repo_overlap_cases() -> dict[str, str]:
+    """Binding roots that collide with the repository/worktree, in both directions."""
+    return {
+        "equals_repo": str(REPO_ROOT),
+        "inside_repo": str(REPO_ROOT / "docs"),
+        "deep_inside_repo": str(REPO_ROOT / "src" / "agent_run_supervisor"),
+        "dot_dot_alias_of_repo": str(REPO_ROOT / "docs" / ".."),
+        "contains_repo": str(REPO_ROOT.parent),
+        "far_ancestor_of_repo": str(REPO_ROOT.parents[2]),
+        "filesystem_root": "/",
+        "double_slash_equals_repo": _double_slash(REPO_ROOT),
+        "double_slash_contains_repo": _double_slash(REPO_ROOT.parent),
+    }
+
+
+@pytest.mark.parametrize("case", sorted(_repo_overlap_cases()))
+def test_harness_refuses_repository_overlap_in_both_directions(
+    monkeypatch, tmp_path: Path, case: str
+) -> None:
+    """Inside-the-repo and containing-the-repo are the same collision."""
+    harness = _load_harness()
+    binding = _repo_overlap_cases()[case]
+    args = _harness_args(
+        tmp_path, binding_root=binding, socket=_harness_socket(tmp_path)
+    )
+
+    with _record_fs_queries(monkeypatch) as log:
+        with pytest.raises(harness.HarnessGateError) as err:
+            harness._require_operator_inputs(args)
+
+    msg = str(err.value).lower()
+    assert "binding_root" in msg
+    assert "repository" in msg or "worktree" in msg
+    assert log.calls == []
+
+
+def test_harness_refuses_a_binding_root_that_only_shares_a_repo_prefix(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Blocker regression: a worktree sibling was accepted, then the repo resolved.
+
+    ``_forbid_inside_repo`` calls ``_REPO_ROOT.resolve()``, which lstats every
+    component of the worktree path — including the parent this sibling shares
+    with the Binding root. Containment in neither direction is not the question;
+    "may a harness query walk a Binding component" is, and here it does.
+    """
+    harness = _load_harness()
+    sibling = REPO_ROOT.parent / (REPO_ROOT.name + "-operator-binding")
+    args = _harness_args(
+        tmp_path, binding_root=str(sibling), socket=_harness_socket(tmp_path)
+    )
+
+    with _record_fs_queries(monkeypatch) as log:
+        with pytest.raises(harness.HarnessGateError) as err:
+            harness._require_operator_inputs(args)
+
+    msg = str(err.value).lower()
+    assert "binding_root" in msg
+    assert "overlap" in msg or "inside" in msg
+    assert log.calls == []
 
 
 # --- A1 Codex-review repair R3: AGENT identity gates (hermetic) -------------

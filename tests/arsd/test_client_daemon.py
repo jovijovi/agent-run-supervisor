@@ -17,12 +17,13 @@ import stat
 import tempfile
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
 from agent_run_supervisor.arsd import protocol, server
 from agent_run_supervisor.arsd import client as arsd_client
+from agent_run_supervisor.arsd import operand as arsd_operand
 from agent_run_supervisor.arsd import __main__ as arsd_main
 from agent_run_supervisor.native_acp import storage
 
@@ -32,6 +33,11 @@ from tests.arsd.test_admission import (
     valid_wire_request,
 )
 from tests.arsd.test_handlers_registry import CancelFactory, seed_events, seed_session
+from tests.arsd.test_service_unit import (
+    _LYING_BINDING_ROOT_KINDS,
+    _lying_binding_root,
+    _record_fs_queries,
+)
 
 
 SECRET_SENTINEL = "sk-live-" + "LEAKCANARY"
@@ -176,6 +182,7 @@ class ThreadedDaemon:
             socket_path=self.path,
             supervisor_root=self.root,
             policy=self.policy,
+            binding_root=BINDING_ROOT,
             max_concurrent_runs=self.max_concurrent_runs,
             max_connections=self.max_connections,
             run_task_factory=self.factory,
@@ -310,6 +317,1475 @@ def test_argparse_requires_supervisor_root_and_accepts_flags() -> None:
     assert ns.log_level == "DEBUG"
 
 
+# --- operator Runtime Binding root (R13 daemon wiring) --------------------
+
+# Deliberately synthetic and never created: configuration is a value here, and
+# ARS must not create, repair, promote, or even stat the operator's root.
+BINDING_ROOT = "/opt/ars-runtime-binding-root-that-does-not-exist"
+
+
+def test_argparse_accepts_absolute_binding_root() -> None:
+    parser = arsd_main.build_arg_parser()
+    ns = parser.parse_args(
+        [
+            "--supervisor-root",
+            "/tmp/sv",
+            "--binding-root",
+            BINDING_ROOT,
+        ]
+    )
+    assert ns.binding_root == Path(BINDING_ROOT)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        "   ",
+        "relative/binding",
+        "./binding",
+        "~/binding",
+        "/srv/binding\nExecStart=/bin/evil",
+        "/srv/binding\r",
+        "/srv/binding\x00",
+        "/srv/binding\x1b",
+    ],
+)
+def test_argparse_refuses_unsafe_binding_root(bad: str, capsys) -> None:
+    """Relative / empty / control input fails closed at the operator boundary."""
+    parser = arsd_main.build_arg_parser()
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(
+            ["--supervisor-root", "/tmp/sv", "--binding-root", bad]
+        )
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    # Refused as an unsafe *value*, not as an unknown flag.
+    assert "--binding-root" in err
+    assert "unrecognized" not in err.lower()
+
+
+def test_serve_daemon_refuses_without_binding_root_before_lease_or_reconcile(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def case():
+        path = sock_path(sock_root)
+        root = supervisor_root(sock_root)
+        order: list[str] = []
+
+        def boom_lease(_root):
+            order.append("lease")
+            raise AssertionError("lease must not run without a Binding root")
+
+        def boom_reconcile(_root):
+            order.append("reconcile")
+            raise AssertionError("reconcile must not run without a Binding root")
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", boom_lease)
+        monkeypatch.setattr(arsd_main.reconcile, "reconcile", boom_reconcile)
+        with pytest.raises(arsd_main.DaemonStartupError) as err:
+            await arsd_main.serve_daemon(
+                socket_path=path,
+                supervisor_root=root,
+                policy=same_uid_policy(),
+                install_signals=False,
+            )
+        assert "binding" in str(err.value).lower()
+        assert order == []
+        assert not path.exists()
+
+    run_async(case())
+
+
+def test_serve_daemon_requires_binding_root_even_with_an_injected_factory(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Blocker regression: an injected factory used to excuse the omission.
+
+    ``serve_daemon`` is the one programmatic entry that *listens*. Whatever it
+    binds is a production ingress for whoever can reach the socket, so operator
+    Binding configuration is a property of the daemon, not of the factory that
+    happens to be wired into it. The old exemption let
+    ``serve_daemon(binding_root=None, run_task_factory=...)`` take the instance
+    lease, mkdir the supervisor root, reconcile, and listen — with no operator
+    root configured anywhere.
+    """
+
+    async def case():
+        path = sock_path(sock_root)
+        root = supervisor_root(sock_root)
+        reached: list[str] = []
+
+        def boom_lease(_root):
+            reached.append("lease")
+            raise AssertionError("lease must not run without a Binding root")
+
+        def boom_reconcile(_root):
+            reached.append("reconcile")
+            raise AssertionError("reconcile must not run without a Binding root")
+
+        def boom_server(**_kwargs):
+            reached.append("server")
+            raise AssertionError("server must not be constructed")
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", boom_lease)
+        monkeypatch.setattr(arsd_main.reconcile, "reconcile", boom_reconcile)
+        monkeypatch.setattr(arsd_main.server, "ArsdServer", boom_server)
+
+        stop = asyncio.Event()
+        stop.set()
+        with _record_fs_queries(monkeypatch) as log:
+            with pytest.raises(arsd_main.DaemonStartupError) as err:
+                await arsd_main.serve_daemon(
+                    socket_path=path,
+                    supervisor_root=root,
+                    policy=same_uid_policy(),
+                    run_task_factory=CompletingFactory(),
+                    stop_event=stop,
+                    install_signals=False,
+                )
+
+        assert "binding" in str(err.value).lower()
+        assert reached == []
+        assert log.calls == []
+        assert not path.exists()
+        assert not root.exists()
+
+    run_async(case())
+
+
+def test_serve_daemon_passes_binding_root_into_handlers(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """serve_daemon → ArsdHandlers carries the operator-configured root."""
+
+    async def case():
+        path = sock_path(sock_root)
+        root = supervisor_root(sock_root)
+        seen: dict = {}
+        real_cls = arsd_main.handlers.ArsdHandlers
+
+        def capturing(**kwargs):
+            seen.update(kwargs)
+            passthrough = dict(kwargs)
+            passthrough.pop("binding_root", None)
+            passthrough.pop("binding_ownership", None)
+            passthrough.pop("supervisor_root", None)
+            passthrough["run_task_factory"] = CompletingFactory()
+            return real_cls(**passthrough)
+
+        monkeypatch.setattr(arsd_main.handlers, "ArsdHandlers", capturing)
+        stop = asyncio.Event()
+        stop.set()
+        rc = await arsd_main.serve_daemon(
+            socket_path=path,
+            supervisor_root=root,
+            policy=same_uid_policy(),
+            binding_root=Path(BINDING_ROOT),
+            stop_event=stop,
+            install_signals=False,
+        )
+        assert rc == 0
+        assert seen["binding_root"] == Path(BINDING_ROOT)
+        assert seen["supervisor_root"] == root
+        # Read-once stays per Run: startup never opens the operator root.
+        assert not Path(BINDING_ROOT).exists()
+
+    run_async(case())
+
+
+def test_main_passes_binding_root_to_serve_daemon(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = sock_path(sock_root)
+    root = supervisor_root(sock_root)
+    seen: dict = {}
+
+    async def fake_serve(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(arsd_main, "serve_daemon", fake_serve)
+    rc = arsd_main.main(
+        [
+            "--supervisor-root",
+            str(root),
+            "--socket",
+            str(path),
+            "--caller-mapping",
+            mapping_flag(),
+            "--binding-root",
+            BINDING_ROOT,
+        ]
+    )
+    assert rc == 0
+    assert seen["binding_root"] == Path(BINDING_ROOT)
+    assert seen["supervisor_root"] == root
+
+
+def test_main_daemon_mode_refuses_without_binding_root(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    path = sock_path(sock_root)
+    root = supervisor_root(sock_root)
+    calls = {"n": 0}
+
+    async def boom_serve(**_kwargs):
+        calls["n"] += 1
+        raise AssertionError("must refuse before serve")
+
+    monkeypatch.setattr(arsd_main, "serve_daemon", boom_serve)
+    rc = arsd_main.main(
+        [
+            "--supervisor-root",
+            str(root),
+            "--socket",
+            str(path),
+            "--caller-mapping",
+            mapping_flag(),
+        ]
+    )
+    assert rc == 2
+    assert calls["n"] == 0
+    assert not path.exists()
+    err = capsys.readouterr().err.lower()
+    assert "binding" in err
+
+
+# --- Binding root vs. daemon-owned surfaces (pure text, before the lease) ---
+#
+# The stock daemon creates the supervisor root, the lease directory, the lease
+# file, reconciliation state, the socket directory, and the socket. If the
+# operator's Binding root equals, contains, or sits inside any of them, that
+# state lands in Binding storage and ``durable_secure_mkdir`` / ``secure_mkdir``
+# lstat the Binding root itself long before the per-Run ``BindingReader`` — the
+# single, sole metadata reader. The refusal must therefore be pure text work
+# ordered ahead of the lease and every filesystem query.
+
+
+def _daemon_overlap_cases(root: Path, path: Path) -> dict[str, dict[str, object]]:
+    """Materially distinct Binding/daemon-surface overlaps for ``serve_daemon``."""
+    return {
+        "binding_equals_supervisor_root": {"binding_root": str(root)},
+        "binding_parent_of_supervisor_root": {"binding_root": str(root.parent)},
+        "binding_child_of_supervisor_root": {
+            "binding_root": str(root / "native-runs")
+        },
+        "binding_equals_socket_path": {"binding_root": str(path)},
+        "socket_directly_inside_binding": {"binding_root": str(path.parent)},
+        "socket_deep_inside_binding": {
+            "binding_root": str(path.parent),
+            "socket_path": str(path.parent / "run" / "arsd.sock"),
+        },
+        "binding_inside_socket_directory": {
+            "binding_root": str(path.parent / "binding")
+        },
+        "double_slash_binding_aliases_supervisor_root": {
+            "binding_root": "//" + str(root).lstrip("/")
+        },
+        "double_slash_socket_aliases_binding": {
+            "binding_root": str(path.parent),
+            "socket_path": "//" + str(path).lstrip("/"),
+        },
+    }
+
+
+_DAEMON_OVERLAP_CASE_IDS = sorted(
+    _daemon_overlap_cases(Path("/x/sv"), Path("/x/s/arsd.sock"))
+)
+
+
+@pytest.mark.parametrize("case", _DAEMON_OVERLAP_CASE_IDS)
+def test_serve_daemon_refuses_binding_overlap_before_lease_or_query(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    async def run_case():
+        path = sock_path(sock_root)
+        root = supervisor_root(sock_root)
+        overrides = _daemon_overlap_cases(root, path)[case]
+        binding = Path("/" + str(overrides["binding_root"]).lstrip("/"))
+        reached: list[str] = []
+
+        def boom_lease(_root):
+            reached.append("lease")
+            raise AssertionError("lease must not run for an overlapping Binding root")
+
+        def boom_reconcile(_root):
+            reached.append("reconcile")
+            raise AssertionError("reconcile must not run")
+
+        def boom_handlers(**_kwargs):
+            reached.append("handlers")
+            raise AssertionError("handlers must not be constructed")
+
+        def boom_server(**_kwargs):
+            reached.append("server")
+            raise AssertionError("server must not be constructed")
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", boom_lease)
+        monkeypatch.setattr(arsd_main.reconcile, "reconcile", boom_reconcile)
+        monkeypatch.setattr(arsd_main.handlers, "ArsdHandlers", boom_handlers)
+        monkeypatch.setattr(arsd_main.server, "ArsdServer", boom_server)
+
+        kwargs: dict = {
+            "socket_path": str(path),
+            "supervisor_root": str(root),
+            "policy": same_uid_policy(),
+            "install_signals": False,
+        }
+        kwargs.update(overrides)
+
+        with _record_fs_queries(monkeypatch) as log:
+            with pytest.raises(arsd_main.DaemonStartupError) as err:
+                await arsd_main.serve_daemon(**kwargs)
+
+        message = str(err.value).lower()
+        assert "binding" in message
+        assert "overlap" in message or "inside" in message
+        assert reached == []
+        assert log.touching(binding) == []
+        # Ordering: nothing is queried at all, so no daemon-owned surface can
+        # read the Binding root as one of its path components.
+        assert log.calls == []
+        assert not path.exists()
+        assert not root.exists()
+
+    run_async(run_case())
+
+
+def test_serve_daemon_refuses_binding_overlap_even_with_injected_factory(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An injected factory needs no root, but a supplied one is still checked."""
+
+    async def case():
+        path = sock_path(sock_root)
+        root = supervisor_root(sock_root)
+
+        def boom_lease(_root):
+            raise AssertionError("lease must not run for an overlapping Binding root")
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", boom_lease)
+        with pytest.raises(arsd_main.DaemonStartupError) as err:
+            await arsd_main.serve_daemon(
+                socket_path=path,
+                supervisor_root=root,
+                policy=same_uid_policy(),
+                binding_root=root,
+                run_task_factory=CompletingFactory(),
+                install_signals=False,
+            )
+        assert "binding" in str(err.value).lower()
+        assert not path.exists()
+
+    run_async(case())
+
+
+def test_serve_daemon_disjoint_binding_root_is_never_queried_at_startup(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Disjoint roots keep working, and startup still never touches the root."""
+
+    async def case():
+        path = sock_path(sock_root)
+        root = supervisor_root(sock_root)
+        binding = Path(BINDING_ROOT)
+        real_cls = arsd_main.handlers.ArsdHandlers
+
+        def capturing(**kwargs):
+            passthrough = dict(kwargs)
+            passthrough.pop("binding_root", None)
+            passthrough.pop("binding_ownership", None)
+            passthrough.pop("supervisor_root", None)
+            passthrough["run_task_factory"] = CompletingFactory()
+            return real_cls(**passthrough)
+
+        monkeypatch.setattr(arsd_main.handlers, "ArsdHandlers", capturing)
+        stop = asyncio.Event()
+        stop.set()
+        with _record_fs_queries(monkeypatch) as log:
+            rc = await arsd_main.serve_daemon(
+                socket_path=path,
+                supervisor_root=root,
+                policy=same_uid_policy(),
+                binding_root=binding,
+                stop_event=stop,
+                install_signals=False,
+            )
+        assert rc == 0
+        assert log.touching(binding) == []
+        # Paired guard: the daemon-owned surfaces really were created.
+        assert log.touching(root)
+        assert not binding.exists()
+
+    run_async(case())
+
+
+# --- daemon-owned runtime paths must be absolute ---------------------------
+#
+# A relative ``--supervisor-root`` / ``--socket`` has no fixed meaning until the
+# kernel joins it to whatever cwd the daemon happens to inherit, so the lexical
+# Binding-overlap matrix cannot judge it: ``relative-sv`` and
+# ``<cwd>/relative-sv`` are the same directory but share no text. The daemon
+# would then take the instance lease, mkdir, and reconcile *inside* operator
+# Binding storage while the overlap gate reported "disjoint". Refusing a
+# non-absolute runtime path is what makes the overlap answer meaningful, so it
+# has to land before the lease and before the first filesystem query — proving
+# it needs the same empty-primitive-log assertion, not just "no lease".
+#
+# Absolute is decided from text alone: anchoring a relative path to the cwd
+# would invent exactly the daemon-owned location this boundary refuses to guess.
+
+
+def _relative_runtime_cases() -> dict[str, dict[str, str]]:
+    """Non-absolute daemon-owned surfaces, one materially distinct spelling each."""
+    return {
+        "bare_relative_supervisor_root": {"supervisor_root": "relative-sv"},
+        "dot_relative_supervisor_root": {"supervisor_root": "./relative-sv"},
+        "dot_dot_relative_supervisor_root": {"supervisor_root": "../relative-sv"},
+        "empty_supervisor_root": {"supervisor_root": ""},
+        "tilde_supervisor_root": {"supervisor_root": "~/relative-sv"},
+        "bare_relative_socket": {"socket_path": "relative-arsd.sock"},
+        "dot_relative_socket": {"socket_path": "./s/relative-arsd.sock"},
+        "empty_socket": {"socket_path": ""},
+    }
+
+
+_RELATIVE_RUNTIME_CASE_IDS = sorted(_relative_runtime_cases())
+
+
+@pytest.mark.parametrize("case", _RELATIVE_RUNTIME_CASE_IDS)
+def test_serve_daemon_refuses_relative_runtime_path_before_lease_or_query(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """Blocker regression: a relative surface reached the lease with cwd-owned state."""
+
+    async def run_case():
+        # Contain the blast radius: if the refusal regresses, the daemon
+        # mkdirs its state under this disposable cwd, never the repository.
+        monkeypatch.chdir(sock_root)
+        overrides = _relative_runtime_cases()[case]
+        reached: list[str] = []
+
+        def boom_lease(_root):
+            reached.append("lease")
+            raise AssertionError("lease must not run for a relative runtime path")
+
+        def boom_reconcile(_root):
+            reached.append("reconcile")
+            raise AssertionError("reconcile must not run")
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", boom_lease)
+        monkeypatch.setattr(arsd_main.reconcile, "reconcile", boom_reconcile)
+
+        kwargs: dict = {
+            "socket_path": str(sock_path(sock_root)),
+            "supervisor_root": str(supervisor_root(sock_root)),
+            "policy": same_uid_policy(),
+            # Deliberately disjoint *as text* from every relative spelling
+            # above, so only the absoluteness rule can produce this refusal.
+            "binding_root": BINDING_ROOT,
+            "install_signals": False,
+        }
+        kwargs.update(overrides)
+
+        with _record_fs_queries(monkeypatch) as log:
+            with pytest.raises(arsd_main.DaemonStartupError) as err:
+                await arsd_main.serve_daemon(**kwargs)
+
+        message = str(err.value).lower()
+        assert "absolute" in message
+        assert reached == []
+        assert log.calls == []
+        # Nothing was created against the inherited cwd.
+        assert sorted(p.name for p in Path(sock_root).iterdir()) == []
+
+    run_async(run_case())
+
+
+def test_serve_daemon_refuses_relative_runtime_path_with_injected_factory(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An injected factory owns Binding resolution — never the daemon's own paths."""
+
+    async def case():
+        monkeypatch.chdir(sock_root)
+
+        def boom_lease(_root):
+            raise AssertionError("lease must not run for a relative runtime path")
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", boom_lease)
+        with pytest.raises(arsd_main.DaemonStartupError) as err:
+            await arsd_main.serve_daemon(
+                socket_path="relative-arsd.sock",
+                supervisor_root="relative-sv",
+                policy=same_uid_policy(),
+                binding_root=BINDING_ROOT,
+                run_task_factory=CompletingFactory(),
+                install_signals=False,
+            )
+        assert "absolute" in str(err.value).lower()
+        assert not (Path(sock_root) / "relative-sv").exists()
+
+    run_async(case())
+
+
+def test_serve_daemon_accepts_the_double_slash_absolute_alias(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rule refuses *relative*, not merely "does not start with one slash".
+
+    Linux resolves ``//tmp/x`` and ``/tmp/x`` to the same directory, so the
+    alias must clear the gate. The lease is a sentinel wall: reaching it proves
+    the pure gate accepted the layout without starting a real daemon.
+    """
+
+    class _LeaseReached(Exception):
+        pass
+
+    async def case():
+        alias_root = "//" + str(supervisor_root(sock_root)).lstrip("/")
+
+        def wall(_root):
+            raise _LeaseReached
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", wall)
+        with pytest.raises(_LeaseReached):
+            await arsd_main.serve_daemon(
+                socket_path="//" + str(sock_path(sock_root)).lstrip("/"),
+                supervisor_root=alias_root,
+                policy=same_uid_policy(),
+                binding_root=BINDING_ROOT,
+                install_signals=False,
+            )
+
+    run_async(case())
+
+
+@pytest.mark.parametrize("case", _RELATIVE_RUNTIME_CASE_IDS)
+def test_main_refuses_relative_runtime_path_before_serve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, case: str
+) -> None:
+    """The shipped CLI is the operator's real entrypoint; it must refuse too."""
+    monkeypatch.chdir(tmp_path)
+    overrides = _relative_runtime_cases()[case]
+    calls = {"n": 0}
+
+    async def boom_serve(**_kwargs):
+        calls["n"] += 1
+        raise AssertionError("must refuse before serve_daemon")
+
+    monkeypatch.setattr(arsd_main, "serve_daemon", boom_serve)
+    argv = [
+        "--supervisor-root",
+        overrides.get("supervisor_root", str(tmp_path / "sv")),
+        "--socket",
+        overrides.get("socket_path", str(tmp_path / "s" / "arsd.sock")),
+        "--caller-mapping",
+        mapping_flag(),
+        "--binding-root",
+        BINDING_ROOT,
+    ]
+    rc = arsd_main.main(argv)
+
+    assert rc == 2
+    assert calls["n"] == 0
+    err = capsys.readouterr().err.lower()
+    assert "absolute" in err
+    assert sorted(p.name for p in tmp_path.iterdir()) == []
+
+
+def test_main_refuses_a_relative_xdg_derived_socket_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """``--socket`` is optional; the derived default is daemon-owned all the same."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "relative-runtime-dir")
+    calls = {"n": 0}
+
+    async def boom_serve(**_kwargs):
+        calls["n"] += 1
+        raise AssertionError("must refuse before serve_daemon")
+
+    monkeypatch.setattr(arsd_main, "serve_daemon", boom_serve)
+    rc = arsd_main.main(
+        [
+            "--supervisor-root",
+            str(tmp_path / "sv"),
+            "--caller-mapping",
+            mapping_flag(),
+            "--binding-root",
+            BINDING_ROOT,
+        ]
+    )
+
+    assert rc == 2
+    assert calls["n"] == 0
+    assert "absolute" in capsys.readouterr().err.lower()
+    assert not (tmp_path / "relative-runtime-dir").exists()
+
+
+def test_main_still_starts_with_absolute_runtime_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Paired guard: the absoluteness rule must not refuse a valid operator layout."""
+    seen: dict = {}
+
+    async def fake_serve(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(arsd_main, "serve_daemon", fake_serve)
+    rc = arsd_main.main(
+        [
+            "--supervisor-root",
+            str(tmp_path / "sv"),
+            "--socket",
+            str(tmp_path / "s" / "arsd.sock"),
+            "--caller-mapping",
+            mapping_flag(),
+            "--binding-root",
+            BINDING_ROOT,
+        ]
+    )
+    assert rc == 0
+    assert seen["supervisor_root"] == tmp_path / "sv"
+
+
+def test_service_unit_specifiers_stay_rendered_data_not_daemon_paths(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """``%h``/``%t`` survive the render and are refused if they ever reach the daemon.
+
+    systemd expands the specifiers before ExecStart runs, so the daemon never
+    sees them — which is exactly why the renderer may keep emitting them and the
+    daemon may still refuse every non-absolute runtime path it is handed.
+    """
+    monkeypatch.setattr(
+        arsd_main,
+        "geteuid",
+        lambda: (_ for _ in ()).throw(AssertionError("print mode: no euid check")),
+    )
+    rc = arsd_main.main(["--print-service-unit", "--binding-root", BINDING_ROOT])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "%t/" in out and "%h/" in out
+
+    # Print mode is done; restore the real check for the daemon half.
+    monkeypatch.setattr(arsd_main, "geteuid", os.getuid)
+
+    async def unexpanded():
+        with pytest.raises(arsd_main.DaemonStartupError) as err:
+            await arsd_main.serve_daemon(
+                socket_path="%t/agent-run-supervisor/arsd.sock",
+                supervisor_root="%h/.local/share/agent-run-supervisor",
+                policy=same_uid_policy(),
+                binding_root=BINDING_ROOT,
+                install_signals=False,
+            )
+        assert "absolute" in str(err.value).lower()
+
+    run_async(unexpanded())
+
+
+# --- the programmatic Binding-root contract (blockers 2 and 3) --------------
+#
+# ``main()`` validates its argv through ``parse_binding_root``, but argv is not
+# the only way in: ``serve_daemon`` is an exported coroutine and is what every
+# embedder, test, and future supervisor entry actually calls. Whatever it binds
+# is a listening ingress, so it owns the same operator contract as the CLI —
+# text-only shape first, then the query-overlap gate — and both must land before
+# the instance lease, which is the first side effect and the first metadata read.
+
+
+class _HostileBindingRoot:
+    """Outside the declared ``Path | str`` union; refused, never stringified.
+
+    A refusal that coerces the operand first has already handed control to
+    attacker code: ``__str__``/``__fspath__`` run arbitrary work and could
+    return one spelling to the validator and another to the kernel. Counting the
+    coercions is the only way to prove the gate judged the *type* and stopped.
+    """
+
+    def __init__(self) -> None:
+        self.coercions = 0
+
+    def __str__(self) -> str:  # pragma: no cover - must never be called
+        self.coercions += 1
+        return BINDING_ROOT
+
+    def __fspath__(self) -> str:  # pragma: no cover - must never be called
+        self.coercions += 1
+        return BINDING_ROOT
+
+
+def _malformed_binding_roots() -> dict[str, object]:
+    """Binding roots the programmatic contract must refuse from text/type alone."""
+    return {
+        # The reported blocker: relative text that lexical overlap calls
+        # "disjoint" from an absolute supervisor root naming the same directory.
+        "bare_relative": "ars-review-binding",
+        "bare_relative_path_object": Path("ars-review-binding"),
+        "dot_relative": "./ars-review-binding",
+        "dot_dot_relative": "../ars-review-binding",
+        "nested_relative": "ars-review/binding",
+        # ``~`` is shell syntax; nothing in ARS expands it, so it would be
+        # created literally in the cwd.
+        "tilde": "~/ars-review-binding",
+        "empty": "",
+        "blank": "   ",
+        "dot": ".",
+        # ``Path("")`` stringifies to ``"."`` — same refusal, different spelling.
+        "empty_path_object": Path(""),
+        # Unexpanded systemd specifiers: unit text, never a daemon runtime path.
+        "systemd_home_specifier": "%h/ars-review-binding",
+        # Control characters would be carried verbatim into a rendered unit.
+        "newline_control": "/opt/ars-review-binding\nExecStart=/bin/evil",
+        "carriage_return_control": "/opt/ars-review-binding\r",
+        "nul_control": "/opt/ars-review-binding\x00",
+        "escape_control": "/opt/ars-review-binding\x1b",
+        # Not in the declared union: refused without coercion.
+        "bytes": b"/opt/ars-review-binding",
+        "integer": 13,
+        "purepath_outside_union": PurePosixPath("/opt/ars-review-binding"),
+    }
+
+
+@pytest.mark.parametrize("case", sorted(_malformed_binding_roots()))
+def test_serve_daemon_refuses_malformed_binding_root_before_lease_or_query(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """Blocker regression: a relative Binding root reached the instance lease."""
+
+    async def run_case():
+        # If the refusal regresses, a relative root is created under this
+        # disposable cwd rather than anywhere the operator owns.
+        monkeypatch.chdir(sock_root)
+        reached: list[str] = []
+
+        def boom_lease(_root):
+            reached.append("lease")
+            raise AssertionError("lease must not run for a malformed Binding root")
+
+        def boom_reconcile(_root):
+            reached.append("reconcile")
+            raise AssertionError("reconcile must not run")
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", boom_lease)
+        monkeypatch.setattr(arsd_main.reconcile, "reconcile", boom_reconcile)
+
+        with _record_fs_queries(monkeypatch) as log:
+            with pytest.raises(arsd_main.DaemonStartupError) as err:
+                await arsd_main.serve_daemon(
+                    socket_path=str(sock_path(sock_root)),
+                    supervisor_root=str(supervisor_root(sock_root)),
+                    policy=same_uid_policy(),
+                    binding_root=_malformed_binding_roots()[case],
+                    install_signals=False,
+                )
+
+        assert "binding" in str(err.value).lower()
+        assert reached == []
+        assert log.calls == []
+        assert sorted(p.name for p in Path(sock_root).iterdir()) == []
+
+    run_async(run_case())
+
+
+def test_serve_daemon_refuses_a_hostile_binding_root_without_coercing_it(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The union is checked by type; the operand is never handed to ``str``."""
+
+    async def case():
+        hostile = _HostileBindingRoot()
+
+        def boom_lease(_root):
+            raise AssertionError("lease must not run for a hostile Binding root")
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", boom_lease)
+        with pytest.raises(arsd_main.DaemonStartupError) as err:
+            await arsd_main.serve_daemon(
+                socket_path=str(sock_path(sock_root)),
+                supervisor_root=str(supervisor_root(sock_root)),
+                policy=same_uid_policy(),
+                binding_root=hostile,
+                install_signals=False,
+            )
+        assert "binding" in str(err.value).lower()
+        assert hostile.coercions == 0
+
+    run_async(case())
+
+
+# --- the Binding root's *type* contract: exact values, frozen once -----------
+#
+# ``isinstance(value, (str, Path))`` is the wrong question for a boundary that
+# reads its operand again afterwards. It admits *subclasses*, and a subclass owns
+# every conversion hook: it can show the shape gate and the overlap matrix a
+# disjoint ``/opt`` root, then hand the kernel — and the per-Run reader — a value
+# sitting on the daemon's own state. No amount of text comparison sees through
+# that, because the text was never a fact about the operand; it was an answer the
+# operand chose. So the type is judged by identity first, and the value is then
+# frozen into a plain standard path that every later reader consumes.
+#
+# Identity (``type(value) is str``) rather than membership (``type(value) in
+# (...)``): a tuple membership test compares with ``==``, and a hostile metaclass
+# can answer that. ``is`` is the one question no user code can intercept.
+
+# Derived here rather than imported from the daemon, so the test states the
+# platform fact independently: this is the type ``Path(...)`` actually produces.
+_EXACT_PATH_TYPE = type(Path(os.sep))
+
+# ``_LYING_BINDING_ROOT_KINDS`` / ``_lying_binding_root`` are imported from
+# ``tests.arsd.test_service_unit``: the renderer needs the same hostile-operand
+# factory, and that module is this suite's existing shared-helper home. The
+# import direction is one-way, so the factory cannot live here.
+
+
+@pytest.mark.parametrize("kind", _LYING_BINDING_ROOT_KINDS)
+def test_capture_binding_root_refuses_inexact_types_untouched(kind: str) -> None:
+    """The union means exact types: a subclass is refused before any hook runs."""
+    hostile, probes = _lying_binding_root(kind, "/tmp/ars-daemon-state/sv")
+    with pytest.raises(arsd_operand.OperandError) as err:
+        arsd_operand.capture_binding_root(hostile)
+    problem = str(err.value)
+    assert "binding" in problem.lower()
+    # Fixed, sanitized text: no spelling of the operand, no ``repr`` of it.
+    assert BINDING_ROOT not in problem
+    assert "/tmp/ars-daemon-state/sv" not in problem
+    assert probes == []
+
+
+def test_capture_binding_root_accepts_both_exact_types() -> None:
+    """Paired guard: the two types the declared API promises still pass."""
+    assert arsd_operand.capture_binding_root(BINDING_ROOT) == BINDING_ROOT
+    assert type(BINDING_ROOT) is str
+    assert arsd_operand.capture_binding_root(Path(BINDING_ROOT)) == BINDING_ROOT
+    assert type(Path(BINDING_ROOT)) is _EXACT_PATH_TYPE
+
+
+@pytest.mark.parametrize("kind", _LYING_BINDING_ROOT_KINDS)
+def test_serve_daemon_refuses_a_lying_binding_root_before_lease_or_query(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """Blocker regression: a ``str``/``Path`` subclass cleared every text gate.
+
+    The operand's real value here *is* the supervisor root, so a gate reading the
+    truth refuses the layout outright. Reading the advertised text instead, the
+    shape gate passed, overlap said "disjoint", and the lease — the first side
+    effect and the first metadata read — was taken on a value the daemon had
+    never actually seen.
+    """
+
+    async def run_case():
+        real = str(supervisor_root(sock_root))
+        hostile, probes = _lying_binding_root(kind, real)
+        reached: list[str] = []
+
+        def boom_lease(_root):
+            reached.append("lease")
+            raise AssertionError("lease must not run for a lying Binding root")
+
+        def boom_reconcile(_root):
+            reached.append("reconcile")
+            raise AssertionError("reconcile must not run")
+
+        def boom_handlers(**_kwargs):
+            reached.append("handlers")
+            raise AssertionError("handlers must not be constructed")
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", boom_lease)
+        monkeypatch.setattr(arsd_main.reconcile, "reconcile", boom_reconcile)
+        monkeypatch.setattr(arsd_main.handlers, "ArsdHandlers", boom_handlers)
+
+        with _record_fs_queries(monkeypatch) as log:
+            with pytest.raises(arsd_main.DaemonStartupError) as err:
+                await arsd_main.serve_daemon(
+                    socket_path=str(sock_path(sock_root)),
+                    supervisor_root=real,
+                    policy=same_uid_policy(),
+                    binding_root=hostile,
+                    install_signals=False,
+                )
+
+        message = str(err.value)
+        assert "binding" in message.lower()
+        assert BINDING_ROOT not in message and real not in message
+        # The type decided it: not one conversion hook ran.
+        assert probes == []
+        assert reached == []
+        assert log.calls == []
+
+    run_async(run_case())
+
+
+@pytest.mark.parametrize("kind", ("exact_path", "exact_str"))
+def test_serve_daemon_accepts_an_exact_disjoint_binding_root(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """Paired guard: exactness is the rule, not "refuse anything typed"."""
+
+    class _LeaseReached(Exception):
+        pass
+
+    async def case():
+        supplied = BINDING_ROOT if kind == "exact_str" else Path(BINDING_ROOT)
+
+        def wall(_root):
+            raise _LeaseReached
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", wall)
+        with pytest.raises(_LeaseReached):
+            await arsd_main.serve_daemon(
+                socket_path=str(sock_path(sock_root)),
+                supervisor_root=str(supervisor_root(sock_root)),
+                policy=same_uid_policy(),
+                binding_root=supplied,
+                install_signals=False,
+            )
+
+    run_async(case())
+
+
+@pytest.mark.parametrize("kind", ("exact_path", "exact_str"))
+def test_serve_daemon_hands_handlers_a_frozen_standard_binding_root(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """What the per-Run factory receives is the daemon's snapshot, not the operand.
+
+    Freezing is the half of the contract the type gate cannot supply: a value
+    validated as text and then read again is still two reads. The propagated
+    value must be a plain standard path the daemon built itself — for a ``Path``
+    operand, provably a different object.
+    """
+
+    async def case():
+        supplied = BINDING_ROOT if kind == "exact_str" else Path(BINDING_ROOT)
+        seen: dict = {}
+        real_cls = arsd_main.handlers.ArsdHandlers
+
+        def capturing(**kwargs):
+            seen.update(kwargs)
+            passthrough = dict(kwargs)
+            passthrough.pop("binding_root", None)
+            passthrough.pop("binding_ownership", None)
+            passthrough.pop("supervisor_root", None)
+            passthrough["run_task_factory"] = CompletingFactory()
+            return real_cls(**passthrough)
+
+        monkeypatch.setattr(arsd_main.handlers, "ArsdHandlers", capturing)
+        stop = asyncio.Event()
+        stop.set()
+        rc = await arsd_main.serve_daemon(
+            socket_path=sock_path(sock_root),
+            supervisor_root=supervisor_root(sock_root),
+            policy=same_uid_policy(),
+            binding_root=supplied,
+            stop_event=stop,
+            install_signals=False,
+        )
+        assert rc == 0
+        propagated = seen["binding_root"]
+        assert type(propagated) is _EXACT_PATH_TYPE
+        assert propagated == Path(BINDING_ROOT)
+        assert propagated is not supplied
+        # Read-once stays per Run: startup still never opens the operator root.
+        assert not Path(BINDING_ROOT).exists()
+
+    run_async(case())
+
+
+def test_argparse_binding_root_stays_an_exact_concrete_path() -> None:
+    """argv keeps its shape: an exact ``str`` in, an ordinary ``Path`` out.
+
+    The programmatic gate has to accept what the CLI produces, or the two doors
+    disagree and ``main()`` locks itself out of its own daemon.
+    """
+    parser = arsd_main.build_arg_parser()
+    ns = parser.parse_args(
+        ["--supervisor-root", "/tmp/sv", "--binding-root", BINDING_ROOT]
+    )
+    assert type(ns.binding_root) is _EXACT_PATH_TYPE
+    assert ns.binding_root == Path(BINDING_ROOT)
+    assert arsd_operand.capture_binding_root(ns.binding_root) == BINDING_ROOT
+
+
+# --- reading an operand is not inspecting it --------------------------------
+#
+# The type gate above settles what the operand *is*. These tests cover the two
+# halves it cannot settle on its own: the *result* of the one permitted read
+# has to be admitted too (a concrete path keeps its text in an assignable slot,
+# so the read can hand back caller code), and the daemon's own surfaces —
+# ``supervisor_root`` and ``socket_path``, the other two operands of the very
+# same overlap matrix — must be admitted before they are coerced. A matrix is
+# exactly as strong as its weakest operand.
+
+
+class _LeaseWall(Exception):
+    """Sentinel proving the daemon's pure gates let a layout through."""
+
+
+def _lease_wall(_root):
+    raise _LeaseWall
+
+
+def _poisoned_exact_path(text: str, poison: str) -> Path:
+    """An exact concrete ``Path`` whose one textual read answers ``poison``.
+
+    ``pytest.skip`` — never a silent pass — if an interpreter makes
+    ``PurePath._str`` unpoisonable: the repair does not depend on the slot being
+    assignable (it refuses anything non-exact), but this test's premise does.
+    """
+    node = Path(text)
+    str(node)
+    try:
+        node._str = poison  # type: ignore[attr-defined]
+    except AttributeError:
+        pytest.skip("PurePath._str is not assignable on this interpreter")
+    if str(node) is not poison:
+        pytest.skip(
+            "this interpreter does not return the poisoned PurePath._str from "
+            "str(); F3's premise does not hold here"
+        )
+    assert type(node) is _EXACT_PATH_TYPE
+    return node
+
+
+def test_serve_daemon_refuses_a_poisoned_binding_root_read(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RED-3 (F3): a poisoned ``_str`` carried a control-bearing root to the lease.
+
+    ``PyObject_Str`` validates its result with ``PyUnicode_Check``, which admits
+    subclasses, and ``PurePath.__str__`` returns the assignable ``_str`` slot.
+    So an operand of the *exact* admitted type can still hand the gate a ``str``
+    subclass, and every ``strip``/``for ch in``/``startswith`` after that point
+    is attacker code.
+
+    The lies are only believed by the *text* rules: ``H[:1]`` slicing inside
+    ``posixpath`` returns a genuine ``str``, so ``Path(H)`` parses the **real**
+    buffer. The result is a Binding root the shape rules would have refused —
+    control-bearing — reaching the lease and the per-Run factory, while the
+    overlap matrix reports "disjoint" about the real spelling.
+    """
+
+    async def case():
+        real = "/opt/ars-binding\nX"
+
+        class _PoisonText(str):
+            def __str__(self) -> str:
+                return self
+
+            def strip(self, *args, **kwargs) -> str:
+                return "/opt/ars-binding"
+
+            def __iter__(self):
+                return iter("/opt/ars-binding")
+
+            def startswith(self, *args, **kwargs) -> bool:
+                return True
+
+        poison = _PoisonText(real)
+        supplied = _poisoned_exact_path("/opt/ars-binding", poison)
+
+        reached: list[str] = []
+
+        def boom_lease(_root):
+            reached.append("lease")
+            raise _LeaseWall
+
+        def boom_reconcile(_root):
+            reached.append("reconcile")
+            raise AssertionError("reconcile must not run")
+
+        def boom_handlers(**_kwargs):
+            reached.append("handlers")
+            raise AssertionError("handlers must not be constructed")
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", boom_lease)
+        monkeypatch.setattr(arsd_main.reconcile, "reconcile", boom_reconcile)
+        monkeypatch.setattr(arsd_main.handlers, "ArsdHandlers", boom_handlers)
+
+        outcome: list[str] = []
+        message = ""
+        with _record_fs_queries(monkeypatch) as log:
+            try:
+                await arsd_main.serve_daemon(
+                    socket_path=str(sock_path(sock_root)),
+                    supervisor_root=str(supervisor_root(sock_root)),
+                    policy=same_uid_policy(),
+                    binding_root=supplied,
+                    install_signals=False,
+                )
+            except arsd_main.DaemonStartupError as err:
+                outcome.append("refused")
+                message = str(err)
+            except _LeaseWall:
+                outcome.append("lease")
+
+        assert outcome == ["refused"], (
+            "a Binding root whose text was never admitted reached the lease"
+        )
+        assert "binding" in message.lower()
+        # Sanitized: neither the advertised nor the real spelling is quoted back.
+        assert "/opt/ars-binding" not in message
+        assert reached == []
+        assert log.calls == []
+
+    run_async(case())
+
+
+def test_serve_daemon_admits_supervisor_root_before_any_path_protocol_call(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RED-4(a) (F4): ``Path(supervisor_root)`` ran caller code before admission.
+
+    ``Path()`` calls ``os.fspath``, which invokes ``__fspath__`` — arbitrary
+    caller code — on the pre-``BindingReader`` startup path, *before* the overlap
+    matrix. An embedder can therefore make daemon startup lstat the operator
+    Binding root, which is precisely the read the established contract forbids.
+    """
+
+    async def case():
+        class _LstatOnPathProtocol:
+            def __fspath__(self) -> str:
+                # The forbidden pre-BindingReader read, swallowed so the daemon
+                # keeps going and the *refusal path* is what the test measures.
+                with contextlib.suppress(OSError):
+                    os.lstat(BINDING_ROOT)
+                return "relative-sv"
+
+        reached: list[str] = []
+
+        def boom_lease(_root):
+            reached.append("lease")
+            raise _LeaseWall
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", boom_lease)
+        monkeypatch.chdir(sock_root)
+
+        outcome: list[str] = []
+        with _record_fs_queries(monkeypatch) as log:
+            try:
+                await arsd_main.serve_daemon(
+                    socket_path=str(sock_path(sock_root)),
+                    supervisor_root=_LstatOnPathProtocol(),
+                    policy=same_uid_policy(),
+                    binding_root=BINDING_ROOT,
+                    install_signals=False,
+                )
+            except arsd_main.DaemonStartupError:
+                outcome.append("refused")
+            except _LeaseWall:
+                outcome.append("lease")
+
+        assert outcome == ["refused"]
+        assert reached == []
+        assert log.touching(Path(BINDING_ROOT)) == []
+        assert log.calls == []
+
+    run_async(case())
+
+
+@pytest.mark.parametrize("operand", ("socket_path", "supervisor_root"))
+@pytest.mark.parametrize("kind", _LYING_BINDING_ROOT_KINDS)
+def test_serve_daemon_refuses_an_inexact_surface_before_lease_or_query(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch, operand: str, kind: str
+) -> None:
+    """RED-4(b) (F4): the matrix's other two operands were never admitted.
+
+    ``binding_root`` was gated by type identity while the two surfaces it is
+    compared against were coerced with ``Path()``. A hostile object can then
+    show the matrix one location and hand the kernel another.
+    """
+
+    async def case():
+        real = (
+            str(sock_path(sock_root))
+            if operand == "socket_path"
+            else str(supervisor_root(sock_root))
+        )
+        hostile, probes = _lying_binding_root(kind, real)
+
+        reached: list[str] = []
+
+        def boom_lease(_root):
+            reached.append("lease")
+            raise _LeaseWall
+
+        def boom_reconcile(_root):
+            reached.append("reconcile")
+            raise AssertionError("reconcile must not run")
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", boom_lease)
+        monkeypatch.setattr(arsd_main.reconcile, "reconcile", boom_reconcile)
+
+        kwargs: dict = {
+            "socket_path": str(sock_path(sock_root)),
+            "supervisor_root": str(supervisor_root(sock_root)),
+            "policy": same_uid_policy(),
+            "binding_root": BINDING_ROOT,
+            "install_signals": False,
+        }
+        kwargs[operand] = hostile
+
+        outcome: list[str] = []
+        message = ""
+        with _record_fs_queries(monkeypatch) as log:
+            try:
+                await arsd_main.serve_daemon(**kwargs)
+            except arsd_main.DaemonStartupError as err:
+                outcome.append("refused")
+                message = str(err)
+            except _LeaseWall:
+                outcome.append("lease")
+
+        assert outcome == ["refused"], f"an inexact {operand} reached the lease"
+        assert BINDING_ROOT not in message and real not in message
+        assert probes == []
+        assert reached == []
+        assert log.calls == []
+
+    run_async(case())
+
+
+def test_binding_root_operand_is_unreachable_after_capture(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G-1 — lasting guard, **not** RED evidence: green before and after.
+
+    The durable replacement for the transitional read-count proof. A late read
+    of the caller's operand — anywhere after capture — would answer with the
+    mutated text here, and the mutated text names the supervisor root itself,
+    so the overlap matrix would have refused the layout. Reaching ``rc == 0``
+    with the pre-mutation value propagated is the whole property: after capture
+    there is no name left through which the operand can be read again.
+    """
+
+    async def case():
+        overlapping = str(supervisor_root(sock_root))
+        supplied = Path(BINDING_ROOT)
+        str(supplied)
+        try:
+            supplied._str = overlapping  # type: ignore[attr-defined]
+        except AttributeError:
+            pytest.skip("PurePath._str is not assignable on this interpreter")
+        if str(supplied) != overlapping:
+            pytest.skip("PurePath._str is not observable through str() here")
+        supplied._str = BINDING_ROOT  # type: ignore[attr-defined]
+
+        real_lease = arsd_main.acquire_daemon_instance_lease
+
+        def mutating_lease(root):
+            # Any later reader of the operand now gets a different answer.
+            supplied._str = overlapping  # type: ignore[attr-defined]
+            return real_lease(root)
+
+        monkeypatch.setattr(
+            arsd_main, "acquire_daemon_instance_lease", mutating_lease
+        )
+
+        seen: dict = {}
+        real_cls = arsd_main.handlers.ArsdHandlers
+
+        def capturing(**kwargs):
+            seen.update(kwargs)
+            passthrough = dict(kwargs)
+            passthrough.pop("binding_root", None)
+            passthrough.pop("binding_ownership", None)
+            passthrough.pop("supervisor_root", None)
+            passthrough["run_task_factory"] = CompletingFactory()
+            return real_cls(**passthrough)
+
+        monkeypatch.setattr(arsd_main.handlers, "ArsdHandlers", capturing)
+        stop = asyncio.Event()
+        stop.set()
+        rc = await arsd_main.serve_daemon(
+            socket_path=sock_path(sock_root),
+            supervisor_root=supervisor_root(sock_root),
+            policy=same_uid_policy(),
+            binding_root=supplied,
+            stop_event=stop,
+            install_signals=False,
+        )
+        # The overlap decision used the pre-mutation text: the mutated spelling
+        # *is* the supervisor root, and would have been refused.
+        assert rc == 0
+        propagated = seen["binding_root"]
+        assert type(propagated) is _EXACT_PATH_TYPE
+        assert propagated == Path(BINDING_ROOT)
+        assert str(supplied) == overlapping
+        assert not Path(BINDING_ROOT).exists()
+
+    run_async(case())
+
+
+# A synthetic tree no test creates: only its *spelling* is used, so a shared
+# ancestor is a text fact, never a directory anyone has to make.
+_SHARED = "/opt/ars-shared-ancestor"
+
+
+def _shared_ancestor_cases() -> dict[str, dict[str, str]]:
+    """Layouts where no path contains another, yet a Binding component is queried.
+
+    Every case pairs a Binding root with a daemon-owned surface that shares a
+    lexical ancestor. ``durable_secure_mkdir`` walks upward with ``os.lstat``
+    until it finds an existing ancestor, and the kernel resolves every component
+    of every surface it is handed, so a shared ancestor *is* a pre-``BindingReader``
+    read of a Binding path component — even though neither path contains the other.
+    """
+    return {
+        # The reported blocker, verbatim in shape.
+        "supervisor_root_beside_binding": {
+            "binding_root": f"{_SHARED}/binding",
+            "supervisor_root": f"{_SHARED}/sv",
+            "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
+        },
+        "socket_beside_binding": {
+            "binding_root": f"{_SHARED}/binding",
+            "supervisor_root": "/tmp/ars-elsewhere/sv",
+            "socket_path": f"{_SHARED}/s/arsd.sock",
+        },
+        "socket_parent_is_the_binding_parent": {
+            "binding_root": f"{_SHARED}/binding",
+            "supervisor_root": "/tmp/ars-elsewhere/sv",
+            "socket_path": f"{_SHARED}/arsd.sock",
+        },
+        # Prefix siblings: pure text prefix, no containment either way.
+        "prefix_sibling_supervisor_root": {
+            "binding_root": f"{_SHARED}/binding",
+            "supervisor_root": f"{_SHARED}/binding-state",
+            "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
+        },
+        "top_level_component_shared": {
+            "binding_root": "/opt/ars-binding",
+            "supervisor_root": "/opt/ars-state",
+            "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
+        },
+        # Alias spellings of the same collision.
+        "double_slash_binding_alias": {
+            "binding_root": f"/{_SHARED}/binding",
+            "supervisor_root": f"{_SHARED}/sv",
+            "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
+        },
+        "double_slash_surface_alias": {
+            "binding_root": f"{_SHARED}/binding",
+            "supervisor_root": f"/{_SHARED}/sv",
+            "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
+        },
+        "dot_hop_in_surface": {
+            "binding_root": f"{_SHARED}/binding",
+            "supervisor_root": f"{_SHARED}/./sv",
+            "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
+        },
+        "dot_dot_hop_in_surface": {
+            "binding_root": f"{_SHARED}/binding",
+            "supervisor_root": f"{_SHARED}/neutral/../sv",
+            "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
+        },
+        "dot_dot_hop_in_binding_root": {
+            "binding_root": f"{_SHARED}/neutral/../binding",
+            "supervisor_root": f"{_SHARED}/sv",
+            "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
+        },
+        # The as-written spelling walks a *different* tree than the collapsed
+        # one, and the kernel really does traverse both: the raw components are
+        # queried on the way, the collapsed ones name the destination.
+        "surface_normalizes_into_the_binding_tree": {
+            "binding_root": f"{_SHARED}/binding",
+            "supervisor_root": f"/tmp/ars-elsewhere/../..{_SHARED}/sv",
+            "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
+        },
+        # The filesystem root contains — and is contained by — everything.
+        "binding_is_the_filesystem_root": {
+            "binding_root": "/",
+            "supervisor_root": "/tmp/ars-elsewhere/sv",
+            "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
+        },
+        "binding_normalizes_to_the_filesystem_root": {
+            "binding_root": "/opt/..",
+            "supervisor_root": "/tmp/ars-elsewhere/sv",
+            "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
+        },
+    }
+
+
+@pytest.mark.parametrize("case", sorted(_shared_ancestor_cases()))
+def test_serve_daemon_refuses_shared_binding_component_before_lease_or_query(
+    monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """Blocker regression: sibling layouts lstat-ed a Binding component pre-reader."""
+
+    async def run_case():
+        overrides = _shared_ancestor_cases()[case]
+        reached: list[str] = []
+
+        def boom_lease(_root):
+            reached.append("lease")
+            raise AssertionError("lease must not run for a shared Binding component")
+
+        def boom_reconcile(_root):
+            reached.append("reconcile")
+            raise AssertionError("reconcile must not run")
+
+        def boom_handlers(**_kwargs):
+            reached.append("handlers")
+            raise AssertionError("handlers must not be constructed")
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", boom_lease)
+        monkeypatch.setattr(arsd_main.reconcile, "reconcile", boom_reconcile)
+        monkeypatch.setattr(arsd_main.handlers, "ArsdHandlers", boom_handlers)
+
+        with _record_fs_queries(monkeypatch) as log:
+            with pytest.raises(arsd_main.DaemonStartupError) as err:
+                await arsd_main.serve_daemon(
+                    policy=same_uid_policy(), install_signals=False, **overrides
+                )
+
+        message = str(err.value).lower()
+        assert "binding" in message
+        assert "overlap" in message or "inside" in message
+        assert reached == []
+        # The ordering claim, stated as the absence of every query: a refusal
+        # that merely precedes the *lease* would still have let the surface
+        # resolution walk the Binding root's own ancestors.
+        assert log.calls == []
+
+    run_async(run_case())
+
+
+def test_serve_daemon_accepts_a_genuinely_disjoint_operator_layout(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Paired guard: the gate refuses shared components, not every real layout.
+
+    Binding under ``/opt``, daemon state and socket under the disposable test
+    root: no non-root component is shared, so the layout must clear the pure
+    gate and reach the lease. Without this the whole class could be "fixed" by
+    refusing everything.
+    """
+
+    class _LeaseReached(Exception):
+        pass
+
+    async def case():
+        def wall(_root):
+            raise _LeaseReached
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", wall)
+        with pytest.raises(_LeaseReached):
+            await arsd_main.serve_daemon(
+                socket_path=str(sock_path(sock_root)),
+                supervisor_root=str(supervisor_root(sock_root)),
+                policy=same_uid_policy(),
+                binding_root=BINDING_ROOT,
+                install_signals=False,
+            )
+
+    run_async(case())
+
+
 # --- startup fail-closed --------------------------------------------------
 
 
@@ -322,6 +1798,7 @@ def test_zero_mappings_refuse_before_listen(sock_root: Path) -> None:
                 socket_path=path,
                 supervisor_root=root,
                 policy=server.CallerPolicy({}),
+                binding_root=BINDING_ROOT,
                 run_task_factory=CompletingFactory(),
                 install_signals=False,
             )
@@ -350,6 +1827,7 @@ def test_root_euid_refused_before_reconcile_or_listen(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
+                binding_root=BINDING_ROOT,
                 run_task_factory=CompletingFactory(),
                 install_signals=False,
             )
@@ -386,6 +1864,7 @@ def test_reconcile_runs_before_listen_and_failure_means_nothing_listens(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
+                binding_root=BINDING_ROOT,
                 run_task_factory=CompletingFactory(),
                 install_signals=False,
             )
@@ -441,6 +1920,7 @@ def test_same_root_second_daemon_fails_before_reconcile(
                     socket_path=path2,
                     supervisor_root=root,
                     policy=same_uid_policy(),
+                    binding_root=BINDING_ROOT,
                     run_task_factory=CompletingFactory(),
                     install_signals=False,
                 )
@@ -615,6 +2095,7 @@ def test_r8_b1_parent_fsync_failure_blocks_flock_reconcile_listen(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
+                binding_root=BINDING_ROOT,
                 run_task_factory=CompletingFactory(),
                 install_signals=False,
             )
@@ -657,6 +2138,7 @@ def test_r8_b1_supervisor_root_symlink_or_nondir_refused(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
+                binding_root=BINDING_ROOT,
                 run_task_factory=CompletingFactory(),
                 install_signals=False,
             )
@@ -729,6 +2211,7 @@ def test_root_refusal_still_precedes_lease_and_reconcile(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
+                binding_root=BINDING_ROOT,
                 run_task_factory=CompletingFactory(),
                 install_signals=False,
             )
@@ -777,6 +2260,7 @@ def test_lease_lock_dir_symlink_or_nondir_refused_before_reconcile(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
+                binding_root=BINDING_ROOT,
                 run_task_factory=CompletingFactory(),
                 install_signals=False,
             )
@@ -1473,6 +2957,7 @@ def test_sigterm_shutdown_shutting_down_unlink_bounded_exit(sock_root: Path) -> 
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
+                binding_root=BINDING_ROOT,
                 run_task_factory=factory,
                 cancel_wait_seconds=1.0,
                 shutdown_timeout=5.0,
@@ -1596,6 +3081,7 @@ def test_r11_b3_shutdown_holds_lease_until_registry_drained(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
+                binding_root=BINDING_ROOT,
                 run_task_factory=factory,
                 cancel_wait_seconds=0.05,
                 shutdown_timeout=0.2,
@@ -1712,6 +3198,7 @@ def test_r11b_serve_task_cancel_holds_lease_until_registry_idle(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
+                binding_root=BINDING_ROOT,
                 run_task_factory=factory,
                 cancel_wait_seconds=0.05,
                 shutdown_timeout=0.2,
@@ -1804,6 +3291,7 @@ def test_r12_cancel_during_stop_wait_closes_admission_before_lease_release(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
+                binding_root=BINDING_ROOT,
                 run_task_factory=factory,
                 cancel_wait_seconds=0.05,
                 shutdown_timeout=0.2,
@@ -1926,6 +3414,7 @@ def test_r12b_lifecycle_ordinary_failure_retries_before_lease_release(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
+                binding_root=BINDING_ROOT,
                 run_task_factory=factory,
                 cancel_wait_seconds=0.05,
                 shutdown_timeout=0.2,
@@ -2029,6 +3518,7 @@ def test_r12b_cancel_during_lifecycle_retry_propagates_after_release(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
+                binding_root=BINDING_ROOT,
                 run_task_factory=factory,
                 cancel_wait_seconds=0.05,
                 shutdown_timeout=0.2,
@@ -2112,6 +3602,7 @@ def test_r12b_permanent_lifecycle_failure_holds_lease_until_unblocked(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
+                binding_root=BINDING_ROOT,
                 run_task_factory=factory,
                 cancel_wait_seconds=0.05,
                 shutdown_timeout=0.2,
@@ -2229,6 +3720,7 @@ def test_r13_b1_handlers_descriptor_raise_cleans_lifecycle_once(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
+                binding_root=BINDING_ROOT,
                 run_task_factory=factory,
                 cancel_wait_seconds=0.05,
                 shutdown_timeout=0.2,
@@ -2304,6 +3796,7 @@ def test_r13_b1_startup_before_handlers_still_releases_lease(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
+                binding_root=BINDING_ROOT,
                 run_task_factory=CompletingFactory(),
                 install_signals=False,
             )
