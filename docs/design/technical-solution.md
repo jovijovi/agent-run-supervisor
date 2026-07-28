@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext Technical Solution"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-26
+last_validated_at: 2026-07-28
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/technical-solution.md"
 ---
 # agent-run-supervisor vNext Technical Solution
@@ -18,17 +18,23 @@ v0.1.7/vNext solution is preserved at
 ARS stays Python. vNext extends the existing package additively, preserves the released acpx path as a
 compatibility baseline, and never uses it as Native driver or fallback.
 
-Everything marked **planned (PR-B)** below is accepted design with no source on `main`. Today
-`native_acp/profile.py` still carries deployment-specific downstream CLI paths, versions, and digests
-inside the profile constants; there is no Runtime Binding module, no `session_compatibility_epoch`, and
-no `runtime-binding` command surface. The board-linked active plan owns that work, and this document
-grants it no approval beyond its own PR gate.
+The Runtime Binding layer described below is merged source on `main`: `native_acp/runtime_binding.py`
+is the only reader of a Binding root, every registered profile carries an `AdapterContract`,
+deployment-specific downstream CLI paths, versions, and digests have moved out of the profile constants,
+`session_compatibility_epoch` is persisted, and the `runtime-binding` command surface exists. One part
+of the design remains open source work: `WrappedRuntimeArtifacts` freezes the interpreter and the
+adapter entry path and digest only, not the complete wrapped adapter package tree.
 
-One prerequisite constrains the OpenCode examples below: no OpenCode identity, capability, or selector
-constant may be frozen until an operator-run discovery produces a real non-prompt ACP `initialize`
-exchange plus the code-owned CLI version probe output and artifact digest for the same executable. The
-registry on `main` still carries `opencode-1.18.4` at revision 2; the version the operator reports as
-installed is a dated local observation, not a proven or accepted fact.
+Merged source is not operator activation. No immutable artifact root, promoted generation, re-acceptance
+at a current profile revision, permission canary, rollout, release, or deployment follows from it, and
+this document grants none of them.
+
+The OpenCode examples below rest on completed evidence: an operator-run zero-prompt ACP `initialize`
+discovery, plus the code-owned CLI version probe output and artifact digest for the same executable,
+produced the identity, capabilities, and selector domains that `opencode-native-acp` revision 3
+registers, retiring `opencode-1.18.4` with no compatibility alias. That is source registration only —
+not operator activation, re-acceptance at the current revision, or provider acceptance — and the ACP
+`agentInfo.version` and the CLI `--version` stay two independent facts.
 
 ## 1. Package shape
 
@@ -50,9 +56,9 @@ share their stdout consumer or wait-before-return contract.
 | Module | Responsibility |
 |---|---|
 | `spec.py` | versioned `AgentRunRequest`; immutable `AgentRunSpec/spec_hash`; controlled `ResolvedLaunchSpec`; observation-only `EffectiveRunState` |
-| `profile.py` | typed, versioned, closed `AgentProfile` registry; the OpenCode profile plus the official Codex ACP and Claude Agent ACP adapter profiles. **Planned (PR-B):** each profile carries an `AdapterContract` with `adapter_contract_hash`, `launch_kind`, accepted Binding schema/slot projection, and a code-owned version-probe rule; deployment-specific CLI path/version/digest move out to the Binding |
-| `runtime_binding.py` | **Planned (PR-B), new module:** the only reader of a Binding root — `active.json` + `generations/<id>/manifest.json` loading, canonical-JSON/size/ownership/mode/ancestor validation through `O_NOFOLLOW`/dirfd walks, contract-acceptance matching, slot projection, generation/set/slot hashing, and the typed fail-closed refusal surface |
-| `attestation.py` | spawn-boundary proof that the frozen interpreter/adapter/CLI identity and launch env are what the profile registered. **Planned (PR-B):** proves the sealed runtime identity instead of a profile constant, extends artifact identity to package/tree closures, and adds the ownership/ancestor and TOCTOU rechecks for both launch kinds |
+| `profile.py` | typed, versioned, closed `AgentProfile` registry; the OpenCode profile plus the official Codex ACP and Claude Agent ACP adapter profiles. Each profile carries an `AdapterContract` with `adapter_contract_hash`, `launch_kind`, accepted Binding schema/slot projection, and a code-owned version-probe rule; deployment-specific CLI path/version/digest live in the Binding, not here |
+| `runtime_binding.py` | the only reader of a Binding root — `active.json` + `generations/<id>/manifest.json` loading, canonical-JSON/size/ownership/mode/ancestor validation through `O_NOFOLLOW`/dirfd walks, contract-acceptance matching, slot projection, generation/set/slot hashing, and the typed fail-closed refusal surface |
+| `attestation.py` | spawn-boundary proof that the frozen interpreter/adapter/CLI identity and launch env are what the profile registered. It proves the *sealed* runtime identity rather than a profile constant, extends artifact identity to package/tree closures, and adds the ownership/ancestor and TOCTOU rechecks for both launch kinds |
 | `storage.py` | only Native root-binding constructors for `native-runs/` and `native-sessions/`; structural guard against direct legacy store construction |
 | `driver.py` | ACP wire/state machine over a supplied `ManagedProcess`; never spawns or selects policy/profile |
 | `config_fidelity.py` | exact-or-zero configuration and between-Run switch/rollback state machine |
@@ -69,7 +75,7 @@ share their stdout consumer or wait-before-return contract.
 | `server.py` | asyncio UDS accept loop, `SO_PEERCRED`, finite backlog, per-connection isolation |
 | `protocol.py` | bounded JSON frames, mandatory `api_version`, unknown-version rejection |
 | `handlers.py` | submit/status/events/cancel and Session status/list/close with owner checks; Session creation is part of `submit` |
-| `admission.py` | durable submission/idempotency records, keyed admission locks, typed terminal-result inspection. **Planned (PR-B):** the single per-Run Binding read — one `active.json` read plus one generation read, revalidation of contract match and artifact digest, then sealing; no other module reads the Binding root |
+| `admission.py` | durable submission/idempotency records, keyed admission locks, typed terminal-result inspection; also the single per-Run Binding read — one `active.json` read plus one generation read, revalidation of contract match and artifact digest, then sealing; no other module reads the Binding root |
 | `reconcile.py` | startup-only reconciliation; no prompt replay/resume |
 | `client.py` | typed local caller for Hermes/CLI; explicit connect/close, no silent reconnect or replay |
 | `service_unit.py` | pure data→text renderer for the user-scope service unit; never installs, enables, or starts anything |
@@ -77,9 +83,9 @@ share their stdout consumer or wait-before-return contract.
 
 No TCP, root mode, runtime plugin loader, arbitrary command adapter, or per-Run Worker is introduced.
 
-### 1.4 Operator command surface — planned (PR-B)
+### 1.4 Operator command surface
 
-`cli.py`/`commands.py` gain exactly one subcommand group, wired to `runtime_binding.py` and to the
+`cli.py`/`commands.py` carry exactly one subcommand group, wired to `runtime_binding.py` and to the
 per-Run provenance reader:
 
 | Command | Reads | Writes | Side effects |
@@ -116,7 +122,7 @@ A code-registered profile contains:
 - registered config selectors/types/value domains;
 - optional built-in adapter ID only when conformance evidence proves a real standard-ACP gap.
 
-### `AdapterContract` — planned (PR-B)
+### `AdapterContract`
 
 The profile's source-frozen compatibility contract, hashed canonically into `adapter_contract_hash`:
 
@@ -137,7 +143,7 @@ The profile's source-frozen compatibility contract, hashed canonically into `ada
 The contract hash changes whenever any of the above changes, and a changed hash invalidates every
 Binding generation accepted under the old one.
 
-### `RuntimeBinding` — planned (PR-B)
+### `RuntimeBinding`
 
 Operator-authored, read-only to ARS, stored outside the repository:
 
@@ -169,11 +175,10 @@ Operator-authored, read-only to ARS, stored outside the repository:
 }
 ```
 
-Every value above is illustrative. The `1.18.5` strings mirror the operator's dated 2026-07-26 local
-observation of the installed OpenCode executable — an unproven deployment observation, never a registered
-version, product authority, or provider acceptance. The real values come from the operator's own artifact
-plus the code-owned probe, and no OpenCode version constant is frozen before the §0 discovery
-prerequisite is met.
+Every value above is illustrative. The `1.18.5` strings mirror the executable the operator discovered
+locally; they are never a registered version, product authority, or provider acceptance, and the profile
+freezes no OpenCode version constant at all — a deployed version is a Binding fact. The real values come
+from the operator's own artifact plus the code-owned probe.
 
 **Acceptance is decided by explicit machine fields only.** A generation is admissible only when
 `contract_identity.profile_id`, `profile_revision`, and `adapter_contract_hash` equal the live contract's,
@@ -208,7 +213,7 @@ Resolved before Run sealing: executable, fixed argv, effective cwd, transport, e
 credential references, profile revision/hash, and schema hash. Credential values enter only at spawn and
 are never serialized or represented in `repr`.
 
-**Planned (PR-B):** it additionally carries the resolved runtime provenance — `adapter_contract_hash`,
+It additionally carries the resolved runtime provenance — `adapter_contract_hash`,
 `launch_kind`, wrapped adapter/interpreter identity, the complete external CLI artifact identity
 (path, version, digest, closure kind), Binding `generation_id` plus set and per-slot hashes, the
 `session_compatibility_epoch`, and the Binding's acceptance receipt reference carried for reporting
@@ -240,7 +245,7 @@ Stable identity: Agent type, profile revision/hash, external Session ID, owner/n
 credential-slot compatibility. Mutable observations: `last_effective_model/effort`. Persistent state:
 `active | closed | quarantined`, reason, source Run. model/effort are not Session identity.
 
-**Planned (PR-B):** the record also persists `session_compatibility_epoch`. Reuse requires equal profile
+The record also persists `session_compatibility_epoch`. Reuse requires equal profile
 ID/revision/`adapter_contract_hash`, equal workspace/owner/namespace, and equal epoch; a missing or
 different epoch is refused before the lease is mutated and before `session/load`, with no `session/new`
 fallback. The field is additive and omit-when-unset, so legacy and pre-PR-B records keep their exact
@@ -296,7 +301,7 @@ initialize
 Any missing/unknown/inexact state raises a stable pre-dispatch failure. Prompt code is unreachable until
 the state machine reaches `ready-to-prompt`.
 
-**Planned (PR-B):** the post-`initialize` identity gate compares observed `agentInfo` name, protocol
+The post-`initialize` identity gate compares observed `agentInfo` name, protocol
 version, and advertised capabilities against the contract, and additionally refuses any capability the
 contract lists as forbidden. `agentInfo.version` is an ACP-reported fact about the running adapter or
 agent implementation; the external CLI `--version` is a separate fact obtained only through the
@@ -348,7 +353,7 @@ Files/directories use `0600`/`0700`, exclusive create or atomic replace as appro
 owns each event stream. Credential values, raw env, cookies, authorization headers, and unredacted bulk
 payloads never persist.
 
-**Planned (PR-B):** the Binding root is operator storage that ARS opens read-only and never creates,
+The Binding root is operator storage that ARS opens read-only and never creates,
 writes, repairs, or migrates. `runtime_binding.py` is the only module that opens it, `arsd/admission.py`
 is its only Run-path caller, and the read happens exactly once per Run. `run_task.py`,
 `reconcile.py`, and finalization have no Binding read path, so a promotion can never re-point work that
@@ -380,7 +385,7 @@ closed as a recorded operator decision. The values stay controller-only and reac
   token continuity, denied-action canary, and cgroup crash containment. Real-runtime suites are opt-in,
   skip-by-default, and never run in CI; sanitized evidence stays operator-held.
 
-**Planned (PR-B) test families**, all hermetic and built over synthetic Binding roots and fake artifacts:
+**Runtime Binding test families**, all hermetic and built over synthetic Binding roots and fake artifacts:
 Binding schema/canonicalization/size/unknown-field refusals; path-shape refusals (traversal, symlink,
 FIFO, device, non-regular); ownership/mode/ancestor refusals including artifacts writable by the
 `arsd`/AGENT UID; contract-acceptance and stale-generation fail-closed; probe-versus-manifest version
@@ -404,13 +409,14 @@ production acceptance.
   wheel carries the Stage 0/1 core only.
 - Sachima `ArsdBackend` and pin changes are later work.
 - Rollback disables Native ingress; no auto-fallback to acpx and no terminal fact rewrite.
-- The Runtime Binding work lands as documentation authority (PR-A) and then one coherent vertical
-  source/test/docs PR (PR-B) with internal work-package commits. Landing PR-B authorizes no promotion
-  against a real Binding root, no artifact installation, no service restart, no publication, and no
-  real-provider acceptance; each remains a separate operator decision. Its compatibility invariant is
-  explicit: `AgentRunRequest`/`AgentRunSpec` field sets, the `arsd` v1 public wire, the result/event
-  grammar, reconcile semantics, and the `ManagedProcess` public API stay unchanged, old Runs stay
-  readable, and old Native Sessions stay status/list/close-readable while `load` fails closed.
+- The Runtime Binding source framework has landed. That merge authorizes no promotion against a real
+  Binding root, no artifact-root preparation or installation, no re-acceptance at a current profile
+  revision, no service restart, no publication, and no real-provider acceptance; each remains a separate
+  operator decision. Completing the wrapped adapter's package-tree closure is open source work under its
+  own approval. The compatibility invariant is explicit and held: `AgentRunRequest`/`AgentRunSpec` field
+  sets, the `arsd` v1 public wire, the result/event grammar, reconcile semantics, and the
+  `ManagedProcess` public API stay unchanged, old Runs stay readable, and old Native Sessions stay
+  status/list/close-readable while `load` fails closed.
 
 The executable slice sequence, fresh worktree/branch rules, exact commands, and separate push/PR/merge
 approvals live only in `docs/plans/active/`.

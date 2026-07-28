@@ -4,9 +4,8 @@
 
 Total: 67 documents tracked across 2 statuses.
 
-## Active (16)
+## Active (15)
 
-- [Runtime Binding refactor — contract/Binding split and sealed runtime provenance](plans/active/2026-07-26-runtime-binding-refactor.md) — created 2026-07-26
 - [agent-run-supervisor vNext System Architecture](design/architecture.md) — created 2026-07-21
 - [agent-run-supervisor vNext Technical Solution](design/technical-solution.md) — created 2026-07-21
 - [agent-run-supervisor vNext PRD](product/prd.md) — created 2026-07-21
@@ -23,8 +22,9 @@ Total: 67 documents tracked across 2 statuses.
 - [Engineering practices](practices/README.md) — created 2026-05-28
 - [Verification gates for implementation PRs](roadmap/verification.md) — created 2026-05-28
 
-## Archived (51)
+## Archived (52)
 
+- [Runtime Binding refactor — contract/Binding split and sealed runtime provenance](plans/archive/2026-07-26-runtime-binding-refactor.md) — created 2026-07-26
 - [Claude official ACP adapter — B3/B4/B5 closure](plans/archive/2026-07-25-claude-official-adapter-b3-b5-closure.md) — created 2026-07-25
 - [Codex official ACP adapter — closed-profile admission](plans/archive/2026-07-25-codex-official-adapter-admission.md) — created 2026-07-25
 - [Official-adapter shared blocker repair — B1/B2 run boundaries](plans/archive/2026-07-24-official-adapter-run-boundaries.md) — created 2026-07-24
