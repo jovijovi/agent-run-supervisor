@@ -3,11 +3,17 @@
 
 Production-usable harness source. Execution requires an explicit A3
 acknowledgment flag/env plus operator-supplied user-unit name, socket,
-supervisor root, test-scoped caller mapping, and evidence directory.
+supervisor root, test-scoped caller mapping, evidence directory, and Runtime
+Binding root.
 
 Import, ``--help``, and dry validation must not mutate the host (no
 systemctl/loginctl/cgroup writes). Never embeds real mapping/credentials.
-Never enables a unit; always cleans up a unit file this run created.
+Never enables a unit; always cleans up a unit file this run created. The
+Binding root is reusable pre-existing operator storage: it is validated for
+operator-input shape and lexical non-overlap only, and is never created,
+emptied, written, promoted, or otherwise mutated here. It is also never *read*
+— no resolve/stat/lstat/readlink/open/list touches it or its path components,
+so the per-Run ``BindingReader`` remains the first and only metadata reader.
 """
 
 from __future__ import annotations
@@ -22,13 +28,14 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 _A3_ENV = "ARS_ARSD_A3_CRASH_HARNESS"
 _A3_FLAG = "--i-acknowledge-a3-crash-harness"
 _UNIT_NAME_RE = re.compile(r"^[A-Za-z0-9@_.+-]+\.service$")
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+# _REPO_ROOT is derived below, once ``_lexical_repo_root`` exists — deriving it
+# needs pure text work, not ``Path.resolve``.
 _REQUIRED_MODEL = "kimi-for-coding/k3"
 _REQUIRED_EFFORT = "max"
 _FRESH_MARKER = "S4_FRESH_OK"
@@ -89,6 +96,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="",
         help="Absolute known-empty disposable workspace",
     )
+    parser.add_argument(
+        "--binding-root",
+        default="",
+        help=(
+            "Absolute operator-owned Runtime Binding root (PRD R13). Required: "
+            "the submitted profile refuses admission without it. Read-only "
+            "reusable storage — never created, emptied, or written here"
+        ),
+    )
     return parser
 
 
@@ -136,6 +152,157 @@ def _forbid_inside_repo(path: Path, *, label: str) -> None:
     )
 
 
+def _collapse_leading_slashes(text: str) -> str:
+    """Reduce a leading run of separators to exactly one. Pure string work.
+
+    POSIX leaves a path beginning with *exactly* two slashes
+    implementation-defined and ``os.path.normpath`` preserves it, but Linux
+    resolves ``//srv/x`` and ``/srv/x`` to the same directory. ``pathlib`` gives
+    the two spellings different anchors, so without this neither ``==`` nor
+    ``is_relative_to`` sees through the alias. Mirrors the identical guard in
+    ``agent_run_supervisor.arsd.__main__``; this script stays importable and
+    fail-closed without the package, so the two agree by test, not by import.
+    """
+    stripped = text.lstrip("/")
+    return "/" + stripped if len(stripped) != len(text) else text
+
+
+def _lexical_repo_root(file_spelling: str, *, cwd: str | None = None) -> Path:
+    """This file's repository/worktree root, derived from text at import time.
+
+    ``Path(__file__).resolve()`` lstats every component of the repository path
+    the moment this module is executed — a filesystem query made before the
+    operator's Binding root has even been parsed, inside a module whose contract
+    is to query nothing before ``BindingReader``. ``os.path.normpath`` and
+    ``os.path.dirname`` are pure string work, so the same root is available
+    without a single syscall; ``_forbid_inside_repo`` still resolves this value
+    at *call* time for the surfaces it is allowed to touch.
+
+    ``__file__`` is absolute for imported modules and, since Python 3.9, for
+    ``__main__`` too, but a relative spelling is handled all the same: the
+    Binding root is required absolute, so a relative repository root would
+    silently degrade the containment gate below into a no-op. Anchoring reads
+    ``os.getcwd()`` — the process's own working directory, taken once at import,
+    before any operator input exists. It reads no path's metadata, walks no
+    components, and cannot be steered by the Binding root.
+    """
+    text = _collapse_leading_slashes(str(file_spelling))
+    if not text.startswith("/"):
+        base = os.getcwd() if cwd is None else cwd
+        text = _collapse_leading_slashes(os.path.join(base, text))
+    return Path(os.path.dirname(os.path.dirname(os.path.normpath(text))))
+
+
+# Derived from this file's own spelling; never from a filesystem query.
+_REPO_ROOT = _lexical_repo_root(__file__)
+
+
+def _lexical_forms(path: Path) -> tuple[Path, Path]:
+    """The as-written and ``normpath``-collapsed spellings of ``path``.
+
+    ``os.path.normpath`` is pure string work — it collapses ``.``, ``..``, and
+    duplicate separators without a single syscall — so both forms can be
+    compared for a path this harness is forbidden to query. Leading separators
+    are canonicalized first: ``normpath`` is the one collapse it will not do.
+    """
+    raw = _collapse_leading_slashes(str(path))
+    return (Path(raw), Path(_collapse_leading_slashes(os.path.normpath(raw))))
+
+
+def _is_lexically_absolute(value: Path | str) -> bool:
+    """POSIX-absolute judged from text alone: no cwd, resolve, abspath, or stat."""
+    return str(value).startswith("/")
+
+
+def _lexical_is_filesystem_root(value: Path | str) -> bool:
+    """Does this spelling name ``/`` itself? Pure string work.
+
+    Its own question because the root is the one path whose component set is
+    *empty* while its reach is total. Spelling matters: ``/srv/..`` is the root
+    but leaves ``/srv`` behind in the as-written walk.
+    """
+    raw = _collapse_leading_slashes(str(value))
+    return _collapse_leading_slashes(os.path.normpath(raw)) == "/"
+
+
+def _lexical_query_components(value: Path | str) -> frozenset[str]:
+    """Every non-root path a filesystem operation on ``value`` may query.
+
+    Containment was the wrong question. Asking the kernel for ``/x/ws`` — to
+    lstat it, mkdir it, list it, or resolve it — makes the kernel walk ``/x``
+    first: look it up, check it is a traversable directory, follow it if it is a
+    symlink. The surface this harness names is therefore never the only path the
+    operation touches; the whole ancestor chain is, and that chain is exactly
+    what a ``BindingReader``-first boundary must protect.
+
+    Both spellings contribute, because the kernel really does visit both trees:
+    ``/x/neutral/../ws`` walks ``/x/neutral`` on the way to a destination that
+    only the collapsed spelling names. The filesystem root is excluded — every
+    absolute path shares it, so counting it would refuse every layout.
+
+    Mirrors the identical helper in ``agent_run_supervisor.arsd.__main__``; this
+    script stays runnable from a bare checkout without the package installed, so
+    the two agree by test, not by import.
+    """
+    components: set[str] = set()
+    raw = _collapse_leading_slashes(str(value))
+    for spelling in (raw, _collapse_leading_slashes(os.path.normpath(raw))):
+        node = PurePosixPath(spelling)
+        for ancestor in (node, *node.parents):
+            text = _collapse_leading_slashes(os.path.normpath(str(ancestor)))
+            if text != "/":
+                components.add(text)
+    return frozenset(components)
+
+
+def _binding_query_conflict(binding_root: Path | str, surface: Path | str) -> bool:
+    """May a filesystem operation on ``surface`` query the Binding root or a component?
+
+    One rule for the whole class, not a conditional per layout. Equality,
+    containment in either direction, prefix siblings, and shared-ancestor
+    layouts are the same fact from different angles: the two component chains
+    intersect somewhere above ``/``. No resolve/stat/lstat/readlink/open/list
+    touches either operand — the Runtime Binding root stays operator-supplied
+    configuration *text* until the per-Run ``BindingReader`` opens it, and
+    symlinked aliases are deliberately out of scope because exposing one needs
+    precisely the read this boundary forbids.
+
+    Fail closed on a relative operand, which names no fixed location until the
+    kernel joins it to an inherited cwd, and on the filesystem root, which
+    contains and is contained by everything and must be asked about directly
+    (its "total reach" shows up here as an *empty* component set).
+    """
+    for operand in (binding_root, surface):
+        if not _is_lexically_absolute(operand) or _lexical_is_filesystem_root(operand):
+            return True
+    protected = _lexical_query_components(binding_root)
+    queried = _lexical_query_components(surface)
+    if not protected or not queried:
+        return True
+    return not protected.isdisjoint(queried)
+
+
+def _forbid_inside_repo_lexically(path: Path, *, label: str) -> None:
+    """``_forbid_inside_repo`` for a path this harness must never query.
+
+    ``_REPO_ROOT`` comes from this file's own spelling by pure string work (see
+    ``_lexical_repo_root``) — no query, on the repository or on ``path``.
+
+    Containment is refused in **both** directions. A Binding root inside the
+    worktree would put operator storage under version control; a Binding root
+    that *contains* the worktree is the same collision seen from the other end —
+    every repository file, including this harness and the surfaces it derives
+    from ``Path.home()``, becomes a Binding subpath. A symlinked spelling of the
+    worktree is outside what a no-stat check can see; that is the accepted cost
+    of not touching the Binding root.
+    """
+    for candidate in _lexical_forms(path):
+        if candidate.is_relative_to(_REPO_ROOT) or _REPO_ROOT.is_relative_to(candidate):
+            raise HarnessGateError(
+                f"refusing: {label} must not overlap the repository/worktree"
+            )
+
+
 def _same_or_nested(a: Path, b: Path) -> bool:
     ar, br = _resolve(a), _resolve(b)
     if ar == br:
@@ -161,6 +328,7 @@ def _require_operator_inputs(args: argparse.Namespace) -> dict[str, str]:
         "caller_mapping": args.caller_mapping,
         "evidence_dir": args.evidence_dir,
         "workspace": args.workspace,
+        "binding_root": args.binding_root,
     }
     missing = [name for name, value in required.items() if not str(value).strip()]
     if missing:
@@ -200,6 +368,51 @@ def _require_operator_inputs(args: argparse.Namespace) -> dict[str, str]:
     root = _require_absolute(required["supervisor_root"], label="supervisor_root")
     evidence = _require_absolute(required["evidence_dir"], label="evidence_dir")
     workspace = _require_absolute(required["workspace"], label="workspace")
+    # Shape only. Existence, generation layout, and artifact trust belong to
+    # the per-Run BindingReader — this harness must never read or repair them.
+    binding = _require_absolute(required["binding_root"], label="binding_root")
+
+    # Binding root guards, decided from the operator's text alone and run before
+    # *any* surface is probed. Nothing this harness resolves, stats, lists,
+    # creates, empties, or writes may let a kernel path walk reach the reusable
+    # operator storage — and proving that must not itself resolve, stat, lstat,
+    # readlink, open, or list the Binding root or its components: the first and
+    # only metadata read belongs to the per-Run BindingReader.
+    #
+    # The ordering *is* the guard. `_resolve` walks every path component, so
+    # resolving any surface that shares an ancestor with the Binding root lstats
+    # that ancestor — a Binding path component — and a refusal placed after the
+    # repo check below would already have leaked the read it exists to prevent.
+    unit_path = _user_unit_path(unit_name)
+    _forbid_inside_repo_lexically(binding, label="binding_root")
+    for label, path in (
+        ("supervisor_root", root),
+        ("workspace", workspace),
+        ("evidence_dir", evidence),
+        ("socket", socket),
+        # The socket's directory is a written surface in its own right: the
+        # daemon creates it before it binds. It gets the same treatment as
+        # everything else — an equality-only special case called binding
+        # `/x/binding` disjoint from socket `/x/arsd.sock`, which the daemon
+        # (correctly) refuses, so this harness would have installed a unit that
+        # could never start and resolved `/x` on the way there.
+        ("socket_parent", socket.parent),
+        # Derived rather than operator-supplied, and written twice over: full
+        # execution mkdirs the directory and exclusively creates the unit file,
+        # and dry validation stats the file to report `unit_file_exists`.
+        ("systemd_user_unit", unit_path),
+        ("systemd_user_unit_dir", unit_path.parent),
+        # Derived too, and genuinely queried: `_forbid_inside_repo` calls
+        # `_REPO_ROOT.resolve()` on every operator surface below, which lstats
+        # each component of the worktree path. `_forbid_inside_repo_lexically`
+        # above only answers the containment question; a Binding root that
+        # merely shares an ancestor with the worktree is refused right here.
+        ("repository_root", _REPO_ROOT),
+    ):
+        if _binding_query_conflict(binding, path):
+            raise HarnessGateError(
+                f"refusing: path overlap between binding_root and {label}"
+            )
 
     for label, path in (
         ("socket", socket),
@@ -228,7 +441,10 @@ def _require_operator_inputs(args: argparse.Namespace) -> dict[str, str]:
     if socket.exists() or socket.is_symlink():
         raise HarnessGateError("refusing: socket path already exists")
 
-    # Path overlap / alias guards among durable surfaces.
+    # Path overlap / alias guards among the durable surfaces this harness owns.
+    # These may be resolved: the harness creates, empties, or writes every one of
+    # them. The Binding root is deliberately absent — it was cleared lexically
+    # above and carries no freshness/emptiness gate of its own.
     durable = {
         "supervisor_root": root,
         "workspace": workspace,
@@ -255,6 +471,7 @@ def _require_operator_inputs(args: argparse.Namespace) -> dict[str, str]:
     required["supervisor_root"] = str(root)
     required["evidence_dir"] = str(evidence)
     required["workspace"] = str(workspace)
+    required["binding_root"] = str(binding)
     return required
 
 
@@ -276,7 +493,20 @@ def _sanitize_cmd_failure(err: subprocess.CalledProcessError) -> str:
     return f"command failed: exit={err.returncode} argv0={argv0}"
 
 
-def _render_unit(socket: str, supervisor_root: str, mapping: str) -> str:
+def _render_unit(
+    socket: str,
+    supervisor_root: str,
+    mapping: str,
+    *,
+    binding_root: str,
+) -> str:
+    """Render the unit via the shipped CLI. ``binding_root`` is keyword-only.
+
+    Print mode refuses without ``--binding-root``, so the operator root is
+    mandatory here too; keyword-only keeps it from ever being swapped with the
+    caller mapping positionally. The path is argv data — the CLI does not open
+    it, and this harness never creates or mutates it.
+    """
     proc = subprocess.run(
         [
             sys.executable,
@@ -287,6 +517,8 @@ def _render_unit(socket: str, supervisor_root: str, mapping: str) -> str:
             socket,
             "--supervisor-root",
             supervisor_root,
+            "--binding-root",
+            binding_root,
             "--caller-mapping",
             mapping,
         ],
@@ -299,6 +531,9 @@ def _render_unit(socket: str, supervisor_root: str, mapping: str) -> str:
         raise HarnessGateError("rendered unit missing required containment directives")
     if "RestartSec=" not in unit:
         raise HarnessGateError("rendered unit missing RestartSec")
+    # Never install a unit whose Binding configuration silently vanished.
+    if "--binding-root" not in unit:
+        raise HarnessGateError("rendered unit missing --binding-root")
     return unit
 
 
@@ -750,6 +985,7 @@ def run_s4(inputs: dict[str, str]) -> int:
     socket = inputs["socket"]
     root = inputs["supervisor_root"]
     mapping = inputs["caller_mapping"]
+    binding_root = inputs["binding_root"]
     evidence_dir = Path(inputs["evidence_dir"])
     workspace = Path(inputs["workspace"])
     unit_path = _user_unit_path(unit_name)
@@ -759,7 +995,7 @@ def run_s4(inputs: dict[str, str]) -> int:
     fresh_session = f"arsd-s4-fresh-{int(time.time())}"
 
     try:
-        unit_text = _render_unit(socket, root, mapping)
+        unit_text = _render_unit(socket, root, mapping, binding_root=binding_root)
         unit_path.parent.mkdir(parents=True, exist_ok=True)
 
         def _mark_created() -> None:
@@ -1027,6 +1263,8 @@ def main(argv: list[str] | None = None) -> int:
             "supervisor_root": inputs["supervisor_root"],
             "evidence_dir": inputs["evidence_dir"],
             "workspace": inputs["workspace"],
+            # Path/config fact only: never opened, created, or promoted here.
+            "binding_root": inputs["binding_root"],
             "caller_mapping_supplied": True,
             "unit_file_exists": _user_unit_path(inputs["unit_name"]).exists(),
             "next_step_if_authorized": (
