@@ -31,7 +31,8 @@ default or use them to choose product scope, modules, branches, gates, acceptanc
 
 Concrete **active** implementation plans live under `docs/plans/active/` (see
 `docs/plans/README.md`). Non-approvals: `docs/roadmap/non-approvals.md`. The released v0.1.7 acpx code
-and `docs/design/result-event-schema.md` remain compatibility baselines only; they do not redefine vNext.
+and `docs/design/result-event-schema.md` are historical reference only; they never define vNext
+behavior, requirements, or acceptance (see Product boundaries).
 
 ## Development workflow
 
@@ -80,8 +81,23 @@ immediately after merge without an explicit request.
 
 The only new-development target is the vNext supervision architecture in GOAL/PRD/design: local `arsd`
 production ingress, ars-core/Native ACP, process-per-Run plus real Session load, immutable per-Run config,
-and fail-closed evidence/recovery. The v0.1.7 acpx modes remain compatibility-only and never become
-Native driver/fallback or a reason to restore archived product requirements.
+and fail-closed evidence/recovery.
+
+`acpx` is **not** a product, runtime, or compatibility surface. It is never a Native ACP driver,
+fallback, or degraded path, and never a reason to restore archived product requirements. It is
+retained only as a bounded differential/comparison test reference. Removing the remaining acpx
+product, runtime, and compatibility content is separately authorized source work: do not treat that
+removal as already done, do not extend or re-document acpx as a supported surface in the meantime,
+and do not add new acpx capability.
+
+Native ACP state stays in its own isolated run/session roots. Native code never reads, writes,
+imports, mirrors, or migrates acpx/legacy session storage in either direction.
+
+Runtime Binding source work — contract, reader, admission, sealed provenance, operator CLI, or daemon
+wiring — authorizes source, tests, and docs only. It never authorizes installing an artifact, creating
+a Binding root, authoring or promoting a Binding generation, re-accepting a profile revision,
+restarting a service, rollout, release, publication, or deployment. Each of those remains a separate
+explicit operator decision, and none of them is implied by a merged source change.
 
 Do not infer Stage 0/1 implementation, Stage 2 `arsd`, service/cgroup enablement, release/publication,
 Sachima integration, real AGENT auto-replies, public ingress, delivery, Gateway lifecycle, production

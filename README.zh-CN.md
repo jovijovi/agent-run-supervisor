@@ -65,6 +65,19 @@ agent 进程、在默认拒绝（default-deny）策略下中介每一次权限�
 返回方向上，你会通过同一个套接字拿到归一化、按 `seq` 有序的事件与一个由监督层拥有的状态，以及落
 在本地磁盘上的脱敏工件。ARS 只报告**技术监督事实**，业务结论归你的应用。
 
+### 两个协议，两个不同的 `1`
+
+ARS 夹在两个独立演进的协议之间。它们当前都写作 `1`，但绝不是同一个 `1`：
+
+- **ACP Protocol v1** —— **下游**的 Agent Client Protocol，由 ARS 与外部 AGENT 进程之间通过 stdio
+  JSON-RPC 讲。每个已注册 profile 都在其契约里冻结 ACP 协议版本 `1`；活动 agent 若报出别的版本，
+  该 Run 会在 `initialize` 阶段、派发任何提示词之前就失败。
+- **`arsd` API v1** —— **上游**由 ARS 自己拥有的协议，即你的应用与 `arsd` 之间经 Unix 套接字的那一
+  层。每一帧都带 `api_version`（当前为 `1`）；未知版本一律拒绝，而不是猜测。
+
+两者各走各的版本线：ACP 协议变化是 agent 兼容性事实，`arsd` API 变化是调用方兼容性事实，谁也推不
+出谁。
+
 设计细节见 [`docs/design/architecture.md`](docs/design/architecture.md)。
 
 ## 安装
@@ -91,8 +104,8 @@ pip install -e .
 pip install -e '.[dev,native]'
 ```
 
-ARS 不会隐式启动任何 agent。`doctor`、`replay`、`--print-service-unit`、`session list` 与各类
-dry-run 都是只读的，不会拉起 agent 进程。
+ARS 不会隐式启动任何 agent。`doctor`、`replay`、`--print-service-unit` 与
+`runtime-binding inspect-run` 都是只读的，不会拉起 agent 进程。
 
 ## 在本地运行 `arsd`
 
@@ -104,23 +117,57 @@ PYTHONPATH=src python3 -m agent_run_supervisor.arsd --help
 
 # 把 user 作用域的 systemd unit 渲染到 stdout 后退出。
 # 纯文本：不检查权限、不做 reconciliation、不绑定套接字 —— 不安装、不启用、不启动任何东西。
-PYTHONPATH=src python3 -m agent_run_supervisor.arsd --print-service-unit
+# 这里同样必须给 --binding-root，渲染出的 unit 才不会静默漏掉它；该路径只是 argv 数据，不会被访问。
+PYTHONPATH=src python3 -m agent_run_supervisor.arsd \
+  --binding-root <binding-root> \
+  --print-service-unit
 
 # 启动守护进程
 PYTHONPATH=src python3 -m agent_run_supervisor.arsd \
   --supervisor-root <supervisor-root> \
+  --binding-root <binding-root> \
   --caller-mapping <UID>:<principal_id>:<owner>:<namespace>
 ```
 
-守护进程模式必须提供 `--supervisor-root` 和至少一条 `--caller-mapping` —— **零条映射会拒绝监听**，
-以 root 身份启动同样会被拒绝。`--socket` 默认取 `$XDG_RUNTIME_DIR/agent-run-supervisor/arsd.sock`，
-否则退化为 `<supervisor-root>/arsd/arsd.sock`；`--max-concurrent-runs`、`--max-connections`、
-`--log-level` 约束其余行为。
+守护进程模式必须提供 `--supervisor-root`、`--binding-root` 和至少一条 `--caller-mapping` ——
+**零条映射会拒绝监听**，以 root 身份启动同样会被拒绝。`--socket` 默认取
+`$XDG_RUNTIME_DIR/agent-run-supervisor/arsd.sock`，否则退化为 `<supervisor-root>/arsd/arsd.sock`；
+`--max-concurrent-runs`、`--max-connections`、`--log-level` 约束其余行为。
 
-caller 映射与套接字路径属于部署侧的值，应放在权限为 `0600` 的 unit 文件里，绝不进入仓库。
+caller 映射、套接字路径与 Binding root 都属于部署侧的值，应放在权限为 `0600` 的 unit 文件里，
+绝不进入仓库。
 
 守护进程重启后只对持久事实做 reconciliation：可能已派发、但没有可信终态结果的 Run 会落到
 `unknown` / `quarantined` / `retryable=false`，且永不重发提示词。
+
+### Runtime Binding
+
+`--binding-root` 指向**由运维方拥有的 Runtime Binding**，也就是一次运行的部署那一半。源码契约拥有
+启动与兼容性语义 —— 启动形态、ACP 协议与能力、选择器、权限与会话语义 —— 对 wrapped ACP profile
+还额外拥有由 ARS 控制的解释器与适配器入口的身份，因为那是 ARS 自己的工件，而不是运维方的部署事实。
+Binding 拥有的则是运维方的部署事实：装了哪个下游或直连 AGENT CLI 工件、位于哪个不可变路径、什么
+版本与摘要，以及 profile 声明过的 config-root 取值。它绝不声明 command、argv、环境变量键、适配器、
+能力或选择器。两边调用方都无从挑选。
+
+ARS **只读打开 Binding root，且每次运行恰好读一次**，从不创建、写入或提升它。在运维方准备好一个
+守护进程自身 UID 无法改写的不可变工件根、并为该 profile 提升（promote）一个 generation 之前，每个
+已注册 profile 都会失败关闭地拒绝准入 —— 因此一个刚启动、没有已提升 Binding 的守护进程跑不了
+任何东西。
+
+运维侧是一套独立的 CLI：
+
+```bash
+agent-run-supervisor runtime-binding validate    --binding-root <root> --profile <id> --generation <gen>
+agent-run-supervisor runtime-binding promote     --binding-root <root> --profile <id> --generation <gen>
+agent-run-supervisor runtime-binding rollback    --binding-root <root> --profile <id> --generation <gen>
+agent-run-supervisor runtime-binding inspect-run --run-dir <native-run-dir>
+```
+
+未安装时从检出运行，把 `agent-run-supervisor` 换成 `PYTHONPATH=src python3 -m agent_run_supervisor`。
+
+这里没有 `--force`：校验不通过的 generation 永远不会被提升。其中没有任何命令会安装工件、修改 unit
+文件、提升权限或重启守护进程。提升无需重启，并在**下一次**运行时生效 —— 因为准入按 Run 重新读取
+active 指针，且绝不改写一个已经封存的 Run。
 
 ## 用 Python 调用
 
@@ -172,72 +219,38 @@ with ArsdClient(socket_path) as client:
 
 ## Agent profile
 
-profile 是封闭、带版本、在代码中注册的启动定义。model 与 effort 必须从活动的 agent 那里**精确**
-读回 —— 能力缺失、未广告的取值或读回不精确，都会在派发任何提示词之前让该 Run 失败。
+profile 是封闭、带版本、在代码中注册的启动定义；每个已注册 profile 讲的都是 **ACP Protocol v1** ——
+与你的应用所讲的 `arsd` API v1 是两回事，见上文。model 与 effort 必须从活动的 agent 那里**精确**
+读回：能力缺失、未广告的取值或读回不精确，都会在派发任何提示词之前让该 Run 失败。
 
-| `profile_id` | Agent | `requested_model` | `requested_effort` |
-|---|---|---|---|
-| `opencode-1.18.4` | OpenCode | `kimi-for-coding/k3`（默认）、`deepseek/deepseek-v4-pro` | `low` / `medium` / `high` / `max`（默认 `max`） |
-| `codex-acp-1.1.7` | Codex，经其官方 ACP 适配器 | `gpt-5.6-sol` | `max` |
-| `claude-agent-acp-0.61.0` | Claude，经其官方 ACP 适配器 | `claude-fable-5[1m]`、`opus[1m]`（默认） | `max` |
+| `profile_id` | Agent | 启动形态 | `requested_model` | `requested_effort` |
+|---|---|---|---|---|
+| `opencode-native-acp` | OpenCode | direct ACP | `kimi-for-coding/k3`（默认） | `low` / `high` / `max`（默认 `max`） |
+| `codex-acp-1.1.7` | Codex，经其官方 ACP 适配器 | wrapped ACP | `gpt-5.6-sol` | `max` |
+| `claude-agent-acp-0.61.0` | Claude，经其官方 ACP 适配器 | wrapped ACP | `claude-fable-5[1m]`、`opus[1m]`（默认） | `max` |
 
-请逐字使用上表中的字面量：它们是 agent 自己通过 ACP 广告出来的标识，与厂商自家 CLI 接受的选择器
-名称并不通用。
+上表中的字面量都必须逐字提交，但它们的来源是两回事。`profile_id` 是 ARS 的注册表输入：它指向代码
+中已注册的某份契约，在准入时被精确匹配。model 与 effort 字面量则是活动的 ACP 取值：由 agent 在协议
+上广告出来，并且必须被精确读回。这两类都不能与厂商自家 CLI 接受的选择器名称混用 —— 那是第三个
+命名空间。
 
-每个 profile 启动的都是你自己安装并钉住的 agent 运行时 —— 解释器、适配器入口与下游 CLI 都以绝对
-路径**加**哈希钉住，并在派生边界上验证身份。仅有一份代码检出并不能让 agent 可启动，你仍需在本地
-安装对应的 agent。
+**`profile_id` 不是 CLI 版本号。** 它是 ARS 自有的、指向一份封闭启动与兼容性契约的标识：启动形态、
+ACP 协议与必需/禁止能力、选择器 ID、由 discovery 证明过的 model/effort 精确取值域，以及权限、配置
+与会话语义。实际部署的是哪一版下游 CLI —— 路径、版本、摘要 —— 属于运维方拥有的 Runtime Binding
+事实，从不是源码常量；因此一个仍带版本号的 profile ID 钉住的是**适配器契约**，而不是你装的那个
+agent CLI。这也正是「讲通用 ACP 就不再需要 profile」不成立的原因：ACP 统一的是协议线，而不是启动
+方式、选择器名称、权限语义，也不是某个 agent 实际接受并读回的字面量。
 
-## 兼容面：`acpx` CLI 与库
+**下一个契约目标：`claude-agent-acp-0.63.0`。** 当前 `main` 只注册了 `claude-agent-acp-0.61.0`。
+`0.63.0` 是 Claude 官方适配器的下一个源码契约目标 —— 它**尚未**注册、尚未验收、也无法使用；在该
+契约更新连同其自身的 discovery 证据落到源码之前，准入会把它当作未知 profile 拒绝。现在不要配置它。
 
-仓库还提供一套免守护进程的、基于 `acpx` 的兼容面。它支持一次性 `exec` 与本地持久会话生命周期，
-并写出同一类脱敏工件。当一次运行需要经过监督守护进程时，用 `arsd`：对端认证准入、调用方持有的
-幂等键、按 owner 归属的运行与会话，以及守护进程级并发上限。当由单个本地进程自己驱动一个 agent、
-部署里没有守护进程时，直接用这套兼容面。
-
-```bash
-agent-run-supervisor validate-role <role>.json      # 校验角色规格并打印稳定哈希
-agent-run-supervisor doctor                         # 只读就绪探测，不启动 agent
-agent-run-supervisor replay <events>.ndjson         # 确定性回放，不启动 agent
-agent-run-supervisor run --role <role>.json --prompt-file <p>.txt --no-real-run   # 编译 + 预览
-agent-run-supervisor run --role <role>.json --prompt-file <p>.txt                 # 启动一个本地 agent
-agent-run-supervisor session create|send|status|close|abort|list ...              # 持久会话
-agent-run-supervisor cleanup                        # 规划保留策略；--apply 才真正删除
-```
-
-未安装时从检出运行，把 `agent-run-supervisor` 换成
-`PYTHONPATH=src python3 -m agent_run_supervisor`。真实的 `run` 与 `session` 轮次需要本地具备
-Node、`acpx` 与目标 agent CLI。
-
-程序化集成优先使用 [`caller.py`](src/agent_run_supervisor/caller.py) 中的通用调用方边界：
-
-```python
-from agent_run_supervisor.caller import CallerInvocationSpec, invoke_caller
-
-result = invoke_caller(
-    CallerInvocationSpec(
-        mode="exec",
-        role_file="reviewer.json",
-        prompt="用平实的语言总结这个 diff。",
-        cwd="/path/to/repo",
-    )
-)
-print(result.supervisor_status)  # 例如 "completed"
-print(result.run_dir)            # 脱敏工件目录
-assert result.business_verdict is None
-```
-
-支持的模式：`exec`、`exec_dry_run`、`session_create`、`session_send`、`session_status`、
-`session_close`、`session_abort`、`session_list`。
-
-另有两个值得一提的辅助接口：
-[`session_inspect`](src/agent_run_supervisor/session_inspect.py) 只读取本地工件来回答存活与健康
-问题 —— 因为它不派生任何子进程，可安全用于热轮询路径；
-[`hermes_caller.events`](src/agent_run_supervisor/hermes_caller/events.py) 则可在运行仍在进行时
-分页读取结构化进度，且不暴露 raw agent 文本。
-
-工件写入 `.agent-run-supervisor/runs/<run_id>/` 与 `.agent-run-supervisor/sessions/<session_id>/`。
-载荷契约见 [`docs/design/result-event-schema.md`](docs/design/result-event-schema.md)。
+每个 profile 启动的都是你自己安装并钉住的 agent 运行时，但按启动形态划分方式不同。**wrapped ACP**
+profile 在源码中以绝对路径**加**哈希冻结解释器与适配器入口，下游 CLI 则由 Binding 以不可变路径、
+版本与摘要闭包冻结。**direct ACP** profile 没有独立适配器 —— 部署的那个可执行文件既是 agent CLI
+也是 ACP 实现 —— 因此它的可执行文件与解释器闭包完全经由 Runtime Binding 绑定。无论哪种，身份都在
+派生之前完成验证。仅有一份代码检出并不能让 agent 可启动 —— 你仍需在本地安装对应的 agent，并为其
+profile 提升一个 Binding generation。
 
 ## 保证与边界
 
@@ -268,10 +281,9 @@ assert result.business_verdict is None
 | 需求 | 要求 |
 |---|---|
 | 运行时 | **Python ≥ 3.11**，仅标准库 —— 零第三方运行时依赖。 |
-| 运行 `arsd` | Linux，且有可放置 AF_UNIX 套接字的 POSIX 用户会话，另需你提供 supervisor root 与至少一条 caller 映射。崩溃遏制还需要用户级 service manager 的 cgroup，以及带 pidfd 支持的 CPython 构建。 |
-| 运行 agent | 每个 profile 启动的都是你自己安装并钉住的 agent 运行时；仅有代码检出并不提供 OpenCode、Codex 或 Claude。 |
-| `acpx` 兼容运行 | 本地具备 Node、`acpx` 与目标 agent CLI —— 仅真实的 `run` 与 `session` 轮次需要。 |
-| 测试（可选） | `dev` 额外依赖用于测试套件；`native` 额外依赖提供 Native ACP 与 `arsd` 套件所用的 ACP 客户端库。 |
+| 运行 `arsd` | Linux，且有可放置 AF_UNIX 套接字的 POSIX 用户会话，另需你提供 supervisor root、Runtime Binding root 与至少一条 caller 映射。崩溃遏制还需要用户级 service manager 的 cgroup，以及带 pidfd 支持的 CPython 构建。 |
+| 运行 agent | 每个 profile 启动的都是你自己安装并钉住的 agent 运行时，并且该 profile 需要一个已提升的 Binding generation；仅有代码检出并不提供 OpenCode、Codex 或 Claude。 |
+| 测试（可选） | `dev` 额外依赖用于测试套件；`native` 额外依赖提供 Native ACP 与 `arsd` 套件所用的 ACP 客户端库（`agent-client-protocol`，锁定 `0.11.1`）。 |
 
 ## 开发
 

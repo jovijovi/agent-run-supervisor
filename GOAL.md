@@ -28,8 +28,8 @@ model / provider
 - Direct `ars-core` use is test/dev-only. Production fails closed when `arsd` is unavailable.
 - There is no durable per-Run Worker. One `arsd` directly owns each in-process `RunTask`, Native ACP
   connection, and external AGENT process tree.
-- Native ACP never falls back to acpx. acpx is retained only for released compatibility paths and
-  diagnostic/differential reference.
+- Native ACP never falls back to acpx. acpx is not a product, runtime, or compatibility surface; it
+  is retained only as a bounded differential/comparison test reference.
 
 ## Authority split
 
@@ -85,11 +85,17 @@ and result verification.
     contract revision a stale generation fails closed instead of being reinterpreted by a new source
     contract.
 
-## Released legacy line
+## acpx removal direction
 
-v0.1.7 acpx one-shot and persistent-session behavior remains a supported compatibility baseline until
-separately retired. It may receive compatibility/security maintenance, but its old requirements,
-architecture, plans, and phase vocabulary are archived and **must not direct vNext development**.
+acpx is not a supported product, runtime, or compatibility baseline. The product direction is to
+**remove all acpx product, runtime, and compatibility content from ARS** and to retain acpx only as a
+bounded differential/comparison test reference.
+
+That removal has not landed. acpx code paths still exist in source, and removing them — together with
+the user-facing and design documentation that describes them — is separately authorized source/docs
+work that this document does not perform or approve. Until it lands, acpx receives no new capability,
+is never a Native ACP driver, fallback, or degraded path, and never directs vNext development. Its
+old requirements, architecture, plans, and phase vocabulary are archived.
 
 The cold snapshot is `docs/archive/pre-vnext-reset-2026-07-21/`. Closed plans and phases remain under
 their archive directories. Git history remains the implementation audit trail.
@@ -97,21 +103,31 @@ their archive directories. Git history remains the implementation audit trail.
 ## Current status and authorization
 
 This goal, the PRD, architecture, and technical solution are documentation authority. They describe the
-target and do not authorize work by their existence; volatile implementation status lives in
-`docs/roadmap/current-status.md`.
+target and do not authorize work by their existence. Volatile implementation status belongs in
+`docs/roadmap/current-status.md`, which is where each merged change is expected to be recorded; that
+board is not restated here and does not, by itself, evidence the source facts below.
 
-As of that board, Stage 0/1 Native ACP and Stage 2 `arsd` (A1–A5, including the caller-UID policy and
-user-service/cgroup enablement) are implemented on `main`, and the closed registry holds three profiles
-with operator-held local acceptance. Release/publication, Sachima integration, public ingress, and any
-Gateway/IM/live behavior each still require separate, explicit authorization — and registration plus
-local acceptance never transfers approval to the next change.
+On current `main`, Stage 0/1 Native ACP and Stage 2 `arsd` (A1–A5, including the caller-UID policy and
+user-service/cgroup enablement) are merged, and the closed registry holds three profiles.
+Release/publication, Sachima integration, public ingress, and any Gateway/IM/live behavior each still
+require separate, explicit authorization — and registration plus local acceptance never transfers
+approval to the next change.
 
-Contracts 1, 9, and 10 above state the **accepted target**, not the implemented source. The registry on
-`main` still mixes the adapter compatibility contract with deployment-specific downstream CLI paths,
-versions, and digests inside `native_acp/profile.py`, and no Runtime Binding layer exists yet. Separating
-them is planned source work carried by the board-linked active plan; it is authorized as documentation
-and design here and as implementation only through that plan's own PR gate. No Runtime Binding root,
-promotion, rollout, or deployment is approved by this document.
+The three-layer split in contracts 1, 9, and 10 is implemented in source on `main`. Each registered
+profile carries a source-frozen `AdapterContract`; a single Binding reader module is the only reader of
+an operator-owned Binding root; admission performs exactly one Binding read per Run, projects the
+accepted slots, and seals the resulting `ResolvedLaunchSpec` plus runtime provenance before spawn;
+`arsd` requires an explicit Binding root (`--binding-root`) both in daemon mode and when rendering a
+service unit; and every registered profile refuses admission fail-closed when no Binding is configured,
+validated, or promoted.
+
+Implemented source is not closure. The wrapped-adapter artifact identity still freezes only the
+interpreter and the adapter **entry**, not the complete wrapped adapter package tree; closing that
+package-closure gap is open source work, so the Runtime Binding layer is not finished. Operator gates
+are separate and open in their own right: preparing an immutable, non-service-writable artifact root,
+authoring/validating/promoting a Binding generation, and re-accepting each profile at its current
+revision are operator actions. No Binding root creation, generation promotion, profile acceptance,
+artifact installation, service restart, rollout, or deployment is approved by this document.
 
 ## Non-goals
 

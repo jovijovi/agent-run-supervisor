@@ -70,6 +70,22 @@ Coming back, you get normalized, seq-ordered events and a supervisor-owned statu
 socket, plus redacted local artifacts on disk. ARS reports **technical supervision facts only**;
 your application owns the business verdict.
 
+### Two protocols, two different `1`s
+
+ARS sits between two independently versioned protocols. Both currently say `1`, and they are not the
+same `1`:
+
+- **ACP Protocol v1** — the *downstream* Agent Client Protocol, spoken over stdio JSON-RPC between
+  ARS and the external AGENT process. Every registered profile freezes ACP protocol version `1` in
+  its contract, and a live agent that reports anything else fails the run at `initialize`, before any
+  prompt is dispatched.
+- **`arsd` API v1** — the *upstream* ARS-owned wire between your application and `arsd` over the Unix
+  socket. Every frame carries `api_version` (currently `1`); an unknown version is rejected rather
+  than guessed.
+
+They move independently: an ACP protocol change is an agent-compatibility fact, an `arsd` API change
+is a caller-compatibility fact, and neither implies the other.
+
 Design detail lives in [`docs/design/architecture.md`](docs/design/architecture.md).
 
 ## Install
@@ -97,8 +113,8 @@ pip install -e .
 pip install -e '.[dev,native]'
 ```
 
-Nothing in ARS launches an agent implicitly. `doctor`, `replay`, `--print-service-unit`,
-`session list`, and dry runs are read-only and start no agent process.
+Nothing in ARS launches an agent implicitly. `doctor`, `replay`, `--print-service-unit`, and
+`runtime-binding inspect-run` are read-only and start no agent process.
 
 ## Run `arsd` locally
 
@@ -110,27 +126,64 @@ PYTHONPATH=src python3 -m agent_run_supervisor.arsd --help
 
 # Render a user-scope systemd unit to stdout and exit.
 # Pure text: no privilege check, no reconciliation, no socket bind — nothing is
-# installed, enabled, or started.
-PYTHONPATH=src python3 -m agent_run_supervisor.arsd --print-service-unit
+# installed, enabled, or started. --binding-root is required here too, so a
+# rendered unit can never silently omit it; the path is argv data, not accessed.
+PYTHONPATH=src python3 -m agent_run_supervisor.arsd \
+  --binding-root <binding-root> \
+  --print-service-unit
 
 # Start the daemon
 PYTHONPATH=src python3 -m agent_run_supervisor.arsd \
   --supervisor-root <supervisor-root> \
+  --binding-root <binding-root> \
   --caller-mapping <UID>:<principal_id>:<owner>:<namespace>
 ```
 
-Daemon mode requires `--supervisor-root` and at least one `--caller-mapping` — **zero mappings
-refuse to listen**, and the daemon refuses to start as root. `--socket` defaults to
+Daemon mode requires `--supervisor-root`, `--binding-root`, and at least one `--caller-mapping` —
+**zero mappings refuse to listen**, and the daemon refuses to start as root. `--socket` defaults to
 `$XDG_RUNTIME_DIR/agent-run-supervisor/arsd.sock`, falling back to
 `<supervisor-root>/arsd/arsd.sock`. `--max-concurrent-runs`, `--max-connections`, and `--log-level`
 bound the rest.
 
-Caller mappings and socket paths are deployment values. Keep them in a mode-`0600` unit file, never
-in a repository.
+Caller mappings, socket paths, and the Binding root are deployment values. Keep them in a
+mode-`0600` unit file, never in a repository.
 
 If the daemon is restarted, it reconciles durable facts only: a run that may have been dispatched
 without a trustworthy terminal result ends `unknown` / `quarantined` / `retryable=false` and is
 never re-prompted.
+
+### The Runtime Binding
+
+`--binding-root` points at the **operator-owned Runtime Binding**, the deployment half of a run.
+The source contract owns the launch and compatibility semantics — launch shape, ACP protocol and
+capabilities, selectors, permission and session semantics — and, for a wrapped-ACP profile, also the
+identity of the ARS-controlled interpreter and adapter entry, which are ARS artifacts rather than
+operator deployment facts. The Binding owns the operator's deployment facts: which downstream or
+direct AGENT CLI artifact is installed, at which immutable path, at which version and digest, plus
+any config-root value the profile declared. It never declares a command, argv, env key, adapter,
+capability, or selector. A caller chooses neither side.
+
+ARS opens the Binding root **read-only, exactly once per run**, and never creates, writes, or
+promotes it. Every registered profile refuses admission fail-closed until an operator has prepared an
+immutable artifact root the daemon's own UID cannot rewrite and promoted a generation for that
+profile — so a freshly started daemon with no promoted Binding runs nothing.
+
+The operator surface is a separate CLI:
+
+```bash
+agent-run-supervisor runtime-binding validate    --binding-root <root> --profile <id> --generation <gen>
+agent-run-supervisor runtime-binding promote     --binding-root <root> --profile <id> --generation <gen>
+agent-run-supervisor runtime-binding rollback    --binding-root <root> --profile <id> --generation <gen>
+agent-run-supervisor runtime-binding inspect-run --run-dir <native-run-dir>
+```
+
+From a checkout without installing, replace `agent-run-supervisor` with
+`PYTHONPATH=src python3 -m agent_run_supervisor`.
+
+There is no `--force`: a generation that does not validate is never promoted. Nothing here installs
+an artifact, edits a unit file, escalates privilege, or restarts the daemon. Promotion needs no
+restart and takes effect on the *next* run, because admission re-reads the active pointer per run and
+never re-points a run that is already sealed.
 
 ## Call it from Python
 
@@ -184,77 +237,47 @@ message text is never echoed back into an exception.
 
 ## Agent profiles
 
-A profile is a closed, versioned, code-registered launch definition. Model and effort must read back
-**exactly** from the live agent — a missing capability, an unadvertised value, or an inexact
-readback fails the run before any prompt is dispatched.
+A profile is a closed, versioned, code-registered launch definition, and every registered profile
+speaks **ACP Protocol v1** — distinct from the `arsd` API v1 your application speaks, as described
+above. Model and effort must read back **exactly** from the live agent: a missing capability, an
+unadvertised value, or an inexact readback fails the run before any prompt is dispatched.
 
-| `profile_id` | Agent | `requested_model` | `requested_effort` |
-|---|---|---|---|
-| `opencode-1.18.4` | OpenCode | `kimi-for-coding/k3` (default), `deepseek/deepseek-v4-pro` | `low` / `medium` / `high` / `max` (default `max`) |
-| `codex-acp-1.1.7` | Codex, via its official ACP adapter | `gpt-5.6-sol` | `max` |
-| `claude-agent-acp-0.61.0` | Claude, via its official ACP adapter | `claude-fable-5[1m]`, `opus[1m]` (default) | `max` |
+| `profile_id` | Agent | Launch | `requested_model` | `requested_effort` |
+|---|---|---|---|---|
+| `opencode-native-acp` | OpenCode | direct ACP | `kimi-for-coding/k3` (default) | `low` / `high` / `max` (default `max`) |
+| `codex-acp-1.1.7` | Codex, via its official ACP adapter | wrapped ACP | `gpt-5.6-sol` | `max` |
+| `claude-agent-acp-0.61.0` | Claude, via its official ACP adapter | wrapped ACP | `claude-fable-5[1m]`, `opus[1m]` (default) | `max` |
 
-Use the literals above verbatim. They are the identifiers the agent itself advertises over ACP, and
-they are not interchangeable with the selector names a vendor's own CLI accepts.
+Submit every literal above verbatim — but they come from two different places. `profile_id` is ARS
+registry input: it names a contract in the code-registered registry and is matched exactly at
+admission. The model and effort literals are live ACP values: the agent advertises them over the
+wire and must read them back exactly. Neither kind is interchangeable with the selector names a
+vendor's own CLI accepts — that is a third namespace.
 
-Each profile launches an agent runtime that you install and pin — by absolute path *and* hash for
-the interpreter, adapter entrypoint, and downstream CLI, proven at the spawn boundary. A source
-checkout does not, by itself, make an agent launchable; you still install the agent locally.
+**A `profile_id` is not a CLI version.** It is an ARS-owned identifier for a closed launch and
+compatibility contract: the launch shape, the ACP protocol and required/forbidden capabilities, the
+selector IDs, the exact model/effort domains proven by discovery, and the permission, config, and
+session semantics. Which downstream CLI build is actually deployed — path, version, digest — is a
+Runtime Binding fact owned by the operator, never a source constant, which is why a profile ID that
+still carries an adapter version pins the *adapter contract*, not the agent CLI you installed. And
+this is why speaking generic ACP does not remove the need for profiles: ACP standardizes the wire,
+not the launch, the selector names, the permission semantics, or the literals a given agent will
+actually accept and read back.
 
-## Compatibility surface: `acpx` CLI and library
+**Next contract target: `claude-agent-acp-0.63.0`.** Current `main` registers
+`claude-agent-acp-0.61.0` only. `0.63.0` is the next source-contract target for the Claude official
+adapter — it is **not** registered, not accepted, and not usable, and admission refuses it as an
+unknown profile until that contract update lands in source with its own discovery evidence. Do not
+configure it yet.
 
-The repository also provides a daemon-free compatibility interface built on `acpx`. It runs one-shot
-`exec` and a local persistent-session lifecycle, and writes the same kind of redacted artifacts. Use
-`arsd` when a run should pass through the supervisor daemon: peer-authenticated admission,
-caller-owned idempotency, owner-scoped runs and sessions, and daemon-wide concurrency limits. Use the
-compatibility interface directly when a single local process drives one agent itself and no daemon is
-part of the deployment.
-
-```bash
-agent-run-supervisor validate-role <role>.json      # validate a role spec, print its stable hash
-agent-run-supervisor doctor                         # read-only readiness probe, starts no agent
-agent-run-supervisor replay <events>.ndjson         # deterministic replay, starts no agent
-agent-run-supervisor run --role <role>.json --prompt-file <p>.txt --no-real-run   # compile + preview
-agent-run-supervisor run --role <role>.json --prompt-file <p>.txt                 # one local agent
-agent-run-supervisor session create|send|status|close|abort|list ...              # persistent session
-agent-run-supervisor cleanup                        # plan retention; --apply actually deletes
-```
-
-From a checkout without installing, replace `agent-run-supervisor` with
-`PYTHONPATH=src python3 -m agent_run_supervisor`. Real `run` and `session` turns need Node, `acpx`,
-and the target agent CLI available locally.
-
-Programmatically, prefer the generic caller boundary in
-[`caller.py`](src/agent_run_supervisor/caller.py):
-
-```python
-from agent_run_supervisor.caller import CallerInvocationSpec, invoke_caller
-
-result = invoke_caller(
-    CallerInvocationSpec(
-        mode="exec",
-        role_file="reviewer.json",
-        prompt="Summarize the diff in plain language.",
-        cwd="/path/to/repo",
-    )
-)
-print(result.supervisor_status)  # e.g. "completed"
-print(result.run_dir)            # redacted artifact directory
-assert result.business_verdict is None
-```
-
-Supported modes: `exec`, `exec_dry_run`, `session_create`, `session_send`, `session_status`,
-`session_close`, `session_abort`, `session_list`.
-
-Two helpers are worth knowing about:
-[`session_inspect`](src/agent_run_supervisor/session_inspect.py) answers liveness and health
-questions by reading local artifacts only — safe on a hot polling path because it spawns nothing —
-and [`hermes_caller.events`](src/agent_run_supervisor/hermes_caller/events.py) pages through
-structural progress while a run is still in flight, without exposing raw agent text.
-
-Artifacts land under `.agent-run-supervisor/runs/<run_id>/` and
-`.agent-run-supervisor/sessions/<session_id>/`. The payload contract is documented in
-[`docs/design/result-event-schema.md`](docs/design/result-event-schema.md).
+Each profile launches an agent runtime that you install and pin, but the split differs by launch
+kind. A **wrapped-ACP** profile source-freezes the interpreter and adapter entry by absolute path
+*and* hash, while the Binding freezes the downstream CLI by immutable path, version, and digest
+closure. The **direct-ACP** profile has no separate adapter — the deployed executable is both the
+agent CLI and the ACP implementation — so its executable and interpreter closure is bound entirely
+through the Runtime Binding. Either way, identity is attested before spawn. A source checkout does
+not, by itself, make an agent launchable: you still install the agent locally and promote a Binding
+generation for its profile.
 
 ## Guarantees and boundaries
 
@@ -288,10 +311,9 @@ Artifacts land under `.agent-run-supervisor/runs/<run_id>/` and
 | Need | Requirement |
 |---|---|
 | Runtime | **Python ≥ 3.11**, standard library only — zero third-party runtime dependencies. |
-| Running `arsd` | Linux with a POSIX user session for the AF_UNIX socket, plus a supervisor root and at least one caller mapping you supply. Crash containment additionally needs a user-level service manager cgroup and a CPython build with pidfd support. |
-| Running an agent | Each profile launches an agent runtime you install and pin locally. A checkout alone does not provide OpenCode, Codex, or Claude. |
-| `acpx` compatibility runs | Node, `acpx`, and the target agent CLI available locally — needed only for real `run` and `session` turns. |
-| Tests (optional) | The `dev` extra for the suite; the `native` extra adds the ACP client library used by the Native ACP and `arsd` suites. |
+| Running `arsd` | Linux with a POSIX user session for the AF_UNIX socket, plus a supervisor root, a Runtime Binding root, and at least one caller mapping you supply. Crash containment additionally needs a user-level service manager cgroup and a CPython build with pidfd support. |
+| Running an agent | Each profile launches an agent runtime you install and pin locally, plus a promoted Binding generation for that profile. A checkout alone does not provide OpenCode, Codex, or Claude. |
+| Tests (optional) | The `dev` extra for the suite; the `native` extra adds the ACP client library (`agent-client-protocol`, pinned to `0.11.1`) used by the Native ACP and `arsd` suites. |
 
 ## Development
 
