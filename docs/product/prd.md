@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext PRD"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-26
+last_validated_at: 2026-07-28
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/prd.md"
 ---
 # agent-run-supervisor vNext PRD
@@ -190,8 +190,8 @@ caller-authorized Run linked by `retry_of_run_id`; it never rewrites the origina
 - Three profiles are registered, and R13 gives each one a `launch_kind`. The OpenCode profile is
   `direct_acp`: one OpenCode executable is both the AGENT CLI and the ACP implementation, so the profile
   freezes direct launch/protocol/capability semantics while the Binding freezes that single executable's
-  identity. Its required stable ID is `opencode-native-acp`, which §5 records as approved and not yet
-  registered. The official Codex ACP and Claude Agent ACP profiles are `wrapped_acp`: source freezes the
+  identity. Its required stable ID is `opencode-native-acp`, which §5 records as registered on `main`.
+  The official Codex ACP and Claude Agent ACP profiles are `wrapped_acp`: source freezes the
   interpreter plus the ACP adapter, and the Binding freezes the downstream CLI artifact and the
   config-root values.
 - New profiles are typed, versioned, closed registrations. An Agent-specific adapter is allowed only
@@ -323,13 +323,18 @@ section records only the coarse position.
 - Release/publication is not done: the published wheel predates `arsd` and the official adapter
   profiles. Sachima integration, public ingress, and Gateway/IM/live behavior remain unimplemented and
   separately authorized. Implementation status is never an approval for the next stage.
-- R13 is accepted design with no source yet. The registry on `main` still carries deployment-specific
-  downstream CLI paths, versions, and digests inside the profile constants, there is no Runtime Binding
-  layer, no `session_compatibility_epoch`, and no `runtime-binding` command surface. The OpenCode
-  profile ID and version string on `main` have drifted from the executable the operator reports as
-  installed; the stable ID `opencode-native-acp` required by R12 is approved but not yet registered,
-  and freezing it awaits discovery evidence. The board-linked active plan carries that work; nothing in
-  R13 is deployed.
+- The R13 Runtime Binding source framework is merged on `main`: the contract/Binding split, one
+  read-once Binding resolution per Run with sealed launch and runtime provenance, the
+  `session_compatibility_epoch` reuse gate, the `runtime-binding` operator commands, and an `arsd` that
+  requires an explicit `--binding-root`. Deployment-specific downstream CLI paths, versions, and digests
+  are no longer profile constants, and the stable ID `opencode-native-acp` is registered on its
+  discovery evidence.
+- Merged source is not closure. The wrapped artifact identity still freezes the interpreter and the
+  adapter entry only, not the complete adapter package tree, so package-tree closure stays open source
+  work. No immutable operator-owned artifact root, promoted current generation, re-acceptance at the
+  current profile revisions, permission canary owed by the current Claude revision, rollout, release, or
+  deployment follows from that merge; each remains a separate operator decision, and nothing in R13 is
+  deployed.
 
 ## 6. Non-goals
 

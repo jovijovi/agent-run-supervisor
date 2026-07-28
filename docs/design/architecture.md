@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext System Architecture"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-26
+last_validated_at: 2026-07-28
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/architecture.md"
 ---
 # agent-run-supervisor vNext System Architecture
@@ -16,15 +16,19 @@ target, not the released v0.1.7 topology. The previous mixed document is preserv
 Status markers:
 
 - ✅ released compatibility baseline reused unchanged;
-- 🟦 vNext supervision plane, implemented on `main` (Stage 0/1 and Stage 2 closed);
-- 🟨 accepted design whose source work is planned and not implemented — the Runtime Binding layer of
-  §3.1–§3.3 plus every 🟨-marked line in §3, §4, §8, §9, and §10;
+- 🟦 vNext supervision plane, implemented on `main` (Stage 0/1 closed, Stage 2 closed, and the Runtime
+  Binding layer of §3.1–§3.3 merged as source);
+- 🟨 accepted design whose source work is still open — the complete wrapped-adapter package-tree
+  closure noted in §3.3;
 - ⏸ separately approved later integration.
 
-Marker 🟦 records the settled design, not an approval: per-stage implementation status, gates, and
-enablement decisions live in [`docs/roadmap/current-status.md`](../roadmap/current-status.md). Marker
-🟨 is weaker still — it is accepted architecture with no source on `main`, carried by the board-linked
-active plan, and it approves no deployment, promotion, or rollout of any kind.
+Marker 🟦 records the settled design and the merged source that implements it, not an approval:
+per-stage implementation status, gates, and enablement decisions live in
+[`docs/roadmap/current-status.md`](../roadmap/current-status.md). Merged source is never operator
+activation — preparing an immutable artifact root, promoting a Binding generation, re-accepting a
+profile at its current revision, the permission canary owed at the current Claude revision, rollout,
+release, and deployment each remain separate operator decisions. Marker 🟨 is weaker still: accepted
+architecture whose source is not written, and it approves nothing at all.
 
 ## 1. System context
 
@@ -92,8 +96,8 @@ AgentRunRequest
 → authenticate caller; bind owner/namespace/workspace/Session
 → validate frozen execution_grant and referenced resources
 → resolve closed AgentProfile revision/snapshot/hash + config schema hash + adapter_contract_hash
-→ read the Runtime Binding exactly once (active.json + selected generation) 🟨
-→ project only contract-accepted slots; revalidate contract match and artifact digest 🟨
+→ read the Runtime Binding exactly once (active.json + selected generation)
+→ project only contract-accepted slots; revalidate contract match and artifact digest
 → materialize ResolvedLaunchSpec incl. complete runtime identity
 → seal immutable AgentRunSpec/spec_hash (launch sealed by launch_spec_hash)
 → spawn
@@ -107,7 +111,7 @@ AgentRunRequest
 value flows backward into Profile, Binding, or Spec. No caller-supplied executable, arbitrary argv/env/
 JSON, credential value, runtime path/version/digest, or Binding generation crosses admission.
 
-### 3.1 Runtime authority layers 🟨
+### 3.1 Runtime authority layers 🟦
 
 ```text
 LAYER 1 — code-closed AgentProfile / AdapterContract          owner: the registry
@@ -152,7 +156,7 @@ Read-once is structural, not advisory: `arsd` admission opens the Binding root o
 finalization, and reconciliation have no Binding read path at all. Two Runs admitted on either side of a
 promotion are each sealed to what they read; an in-flight Run is never re-pointed.
 
-### 3.2 Binding layout, validation, and operator surface 🟨
+### 3.2 Binding layout, validation, and operator surface 🟦
 
 ```text
 <binding_root>/                     # operator/root-owned; outside the repository
@@ -165,7 +169,7 @@ Validation is fail-closed on every read: strict canonical JSON, finite size boun
 walks, verified ownership, modes, and full ancestor chain, and refusal of traversal, symlink, FIFO,
 device, unknown fields, and unknown slots. There is no active symlink to retarget.
 
-The planned operator command surface is exactly these, and no command beyond them is defined:
+The operator command surface is exactly these, and no command beyond them is defined:
 
 ```text
 agent-run-supervisor runtime-binding validate     # probe-backed check of a generation
@@ -185,7 +189,7 @@ separately approved.
 top-level `launch_spec_hash`, and reports profile/contract identity, adapter/protocol identity, Binding
 generation/set/slot hashes, the complete CLI artifact identity/version/digest, and the epoch.
 
-### 3.3 Launch kinds and artifact code closure 🟨
+### 3.3 Launch kinds and artifact code closure 🟦
 
 | Launch kind | Source freezes | Binding freezes |
 |---|---|---|
@@ -210,6 +214,12 @@ on both sides of the spawn window. A wrapped downstream CLI is reopened later by
 cannot fd-pin on the adapter's behalf; the guarantee there is that the path and package closure remain
 under an immutable operator-owned root that the `arsd`/AGENT UID cannot rewrite.
 
+🟨 Source does not yet satisfy that closure rule on the wrapped **adapter** side. The Binding-side
+downstream CLI is closed as a package tree, but `WrappedRuntimeArtifacts` still freezes the interpreter
+and the adapter *entry* path and digest only, not the complete wrapped adapter package tree — so an
+entry file's digest does not freeze the sibling code it loads. Closing that gap is open source work,
+tracked as its own capability on the roadmap; nothing here approves or schedules it.
+
 ## 4. Process-per-Run Session model
 
 Cardinality:
@@ -225,7 +235,7 @@ Each Run launches a new AGENT process. The first Run uses `session/new`; later R
 with the same opaque external session ID. The AGENT owns conversation/context storage; ARS stores only
 the binding and observed metadata.
 
-🟨 The Session record also persists the `session_compatibility_epoch` in force when it was created.
+🟦 The Session record also persists the `session_compatibility_epoch` in force when it was created.
 Reuse requires equal profile ID/revision/`adapter_contract_hash`, equal workspace/owner/namespace, and
 equal epoch. A missing or different epoch is rejected before any lease mutation and before
 `session/load`, and never degrades into `session/new` — a silent new external Session would be exactly
@@ -320,11 +330,11 @@ repository stores no production mapping value.
 │   ├── prompt-accepted
 │   └── evidence / redaction / bounded stderr
 └── native-sessions/<session_id>/
-    ├── session.json               # stable binding + last_effective_* + state (+ epoch 🟨)
+    ├── session.json               # stable binding + last_effective_* + state + epoch
     └── lock.json                  # lease/process identity while held
 ```
 
-🟨 `launch.json` gains the resolved runtime provenance — profile/contract identity, launch kind,
+🟦 `launch.json` carries the resolved runtime provenance — profile/contract identity, launch kind,
 adapter/interpreter identity for wrapped profiles, the complete external CLI artifact identity, the
 Binding generation/set/slot hashes, the epoch, and the acceptance receipt reference — and embeds its own
 `launch_spec_hash` so the record is self-verifying. The hash excludes exactly one top-level field,
@@ -359,12 +369,11 @@ Stage 1 is intentionally an intermediate implementation boundary, not a downgrad
 target. Production is achieved only after Stage 2 acceptance — which is closed on `main`; the board
 carries the closure and enablement facts. Publication and later integration are not implied by it.
 
-🟨 The Runtime Binding refactor is not a fourth stage. It is a change of authority shape on the closed
-Stage 2 line, delivered through two PR gates: PR-A updates this authority chain and activates one plan;
-PR-B lands one coherent vertical source/test/docs implementation whose work packages are internal
-commits. No separate unused foundation PR is landed, and neither gate is a rollout: promoting a Binding
-against a real deployment, real-provider acceptance, publication, and any service restart each remain
-separate operator decisions.
+🟦 The Runtime Binding refactor is not a fourth stage. It changed the authority shape on the closed
+Stage 2 line and its source framework is merged on `main`. Merging it was not a rollout: preparing an
+immutable artifact root, promoting a Binding against a real deployment, re-accepting a profile at its
+current revision, real-provider acceptance, publication, and any service restart each remain separate
+operator decisions.
 
 ## 10. Legacy coexistence and rollback
 
@@ -375,12 +384,12 @@ failure never routes to them.
 Rollback disables Native/`arsd` ingress and stops new submissions. It never converts failures into acpx
 fallback and never rewrites terminal Run facts.
 
-🟨 Binding rollback is a distinct, narrower mechanism: `runtime-binding rollback` re-promotes a
+🟦 Binding rollback is a distinct, narrower mechanism: `runtime-binding rollback` re-promotes a
 previously validated generation and affects only Runs admitted afterwards. It never rewrites a sealed
 `launch.json`, never changes a terminal Run fact, and never substitutes for a source revert or for
 disabling ingress.
 
-🟨 A *source* rollback that removes the Binding layer is fail-closed for Binding-era Sessions, not a
+🟦 A *source* rollback that removes the Binding layer is fail-closed for Binding-era Sessions, not a
 return to pre-epoch reuse. The reverted runtime cannot enforce epoch or contract identity, so it must stop
 new admissions and must never silently `session/load` a Session created under the Binding era. Those
 Sessions stay read-only (`status`/`list`/`close`), closed, or quarantined; continuing that work needs a new

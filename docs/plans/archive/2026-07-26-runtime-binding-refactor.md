@@ -1,8 +1,9 @@
 ---
 title: "Runtime Binding refactor — contract/Binding split and sealed runtime provenance"
-status: active
+status: archived
 created_at: 2026-07-26
-last_validated_at: 2026-07-26
+last_validated_at: 2026-07-28
+archived_at: 2026-07-28
 ---
 # Runtime Binding refactor — contract/Binding split and sealed runtime provenance
 
@@ -387,9 +388,9 @@ disabling ingress.
 - [x] PR-B WP4: session compatibility epoch (RED → GREEN).
 - [x] PR-B WP5: operator surface, provenance inspector, OpenCode re-registration (RED → GREEN).
 - [x] PR-B: full pytest, canonical verifier, docs tooling, governance check, `git diff --check`.
-- [ ] PR-B: independent fresh-context blocker review.
-- [ ] On merge: `git mv` this plan to `docs/plans/archive/`, set `status: archived`, update board and
-      feature tracker.
+- [x] PR-B: independent fresh-context blocker review; PR-B merged to `main`.
+- [x] On merge: this plan moved to `docs/plans/archive/` with `status: archived`, board `active_plan`
+      set back to `none`, and the feature tracker updated.
 
 ## PR-B implementation notes
 
@@ -423,10 +424,32 @@ Recorded because they are decisions a reviewer would otherwise have to re-derive
   required, and is refused when it is already active.
 - **`arsd/__main__.py` is untouched.** No daemon flag carries the Binding root, so a production daemon
   has no configured root and refuses admission fail-closed. Wiring it is an operator rollout step
-  outside this gate, exactly like preparing the artifact root.
+  outside this gate, exactly like preparing the artifact root. *(Superseded after PR-B: a follow-on
+  merged source change added a required `--binding-root` to daemon mode and to service-unit rendering.
+  Installing a unit, creating a root, and promoting a generation remain operator actions.)*
 - **The opt-in Codex socket acceptance harness now requires Binding inputs to opt in at all**
   (`ARS_CODEX_ACCEPTANCE_BINDING_ROOT`, `_TRUSTED_UID`, `_REAL_CREDENTIAL_ROOT`), and its credential
   isolation comes from the promoted generation's `codex_home` slot instead of a derived profile. Two
   negative cases (`n3_retargeted_cli_symlink`, `n5_credential_root_symlink`) moved from the
   `attestation` stage to a new `binding` stage because the single per-Run Binding read refuses them
   strictly earlier. The harness itself was not executed here; only its hermetic contract suite was.
+
+## Archival note (2026-07-28)
+
+Archived as **closed for its merged source scope only**. Both PR gates and the follow-on daemon
+`--binding-root` wiring are merged into `main`; the historical text above is preserved as written and
+is not re-derived here.
+
+What this closure does **not** cover:
+
+- **Wrapped-adapter package closure (open source work).** The frozen wrapped artifact identity still
+  covers the interpreter and the adapter *entry* path/digest only, not the complete adapter package
+  tree that C5 requires. That gap is tracked as its own open capability in the feature tracker and is
+  the next separately authorized source phase; this plan neither closes nor carries it.
+- **Every operator action.** No Binding root exists, no generation is authored, validated, or promoted,
+  no artifact root is prepared, no profile is re-accepted at its bumped revision, and no unit carries a
+  configured root. Artifact installation, service restart, rollout, release/publication, and
+  real-provider evidence remain separate operator decisions, unapproved by this archive.
+
+Archived plans are cold history: nothing here selects scope, a branch, a gate, or an approval for new
+work.
