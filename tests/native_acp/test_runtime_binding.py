@@ -20,7 +20,7 @@ import pytest
 
 from agent_run_supervisor.native_acp import runtime_binding as rb
 from agent_run_supervisor.native_acp.profile import (
-    CLAUDE_AGENT_ACP_0_61_0,
+    CLAUDE_AGENT_ACP_0_63_0,
     CODEX_ACP_1_1_7,
     DEFAULT_REGISTRY,
     LAUNCH_KIND_DIRECT,
@@ -223,7 +223,7 @@ def test_registered_contracts_declare_exactly_one_artifact_slot() -> None:
     expected = {
         "opencode-native-acp": (LAUNCH_KIND_DIRECT, SLOT_KIND_NATIVE_BINARY),
         "codex-acp-1.1.7": (LAUNCH_KIND_WRAPPED, SLOT_KIND_PACKAGE_TREE),
-        "claude-agent-acp-0.61.0": (LAUNCH_KIND_WRAPPED, SLOT_KIND_PACKAGE_TREE),
+        "claude-agent-acp-0.63.0": (LAUNCH_KIND_WRAPPED, SLOT_KIND_PACKAGE_TREE),
     }
     for profile_id, (launch_kind, artifact_kind) in expected.items():
         contract = DEFAULT_REGISTRY.get(profile_id).contract
@@ -448,11 +448,11 @@ def test_launcher_only_package_tree_is_refused(tmp_path: Path) -> None:
     descriptor.pop("interpreter_sha256")
     built = build_root(
         tmp_path,
-        profile=CLAUDE_AGENT_ACP_0_61_0,
+        profile=CLAUDE_AGENT_ACP_0_63_0,
         slots={"downstream_cli": {"kind": SLOT_KIND_PACKAGE_TREE, **descriptor}},
     )
     with pytest.raises(rb.BindingRefusal) as excinfo:
-        _resolve(built, CLAUDE_AGENT_ACP_0_61_0)
+        _resolve(built, CLAUDE_AGENT_ACP_0_63_0)
     assert excinfo.value.rule == "SLOT_DESCRIPTOR_FIELDS"
 
 
@@ -676,15 +676,15 @@ def test_wrapped_package_tree_resolves_and_refuses_a_writable_package_root(
     descriptor = make_package_tree(tmp_path / "wrapped")
     built = build_root(
         tmp_path,
-        profile=CLAUDE_AGENT_ACP_0_61_0,
+        profile=CLAUDE_AGENT_ACP_0_63_0,
         slots={"downstream_cli": {"kind": SLOT_KIND_PACKAGE_TREE, **descriptor}},
     )
-    resolved = _resolve(built, CLAUDE_AGENT_ACP_0_61_0)
+    resolved = _resolve(built, CLAUDE_AGENT_ACP_0_63_0)
     assert resolved.slots["downstream_cli"].kind == SLOT_KIND_PACKAGE_TREE
 
     Path(descriptor["package_root"]).chmod(0o777)
     with pytest.raises(rb.BindingRefusal) as excinfo:
-        _resolve(built, CLAUDE_AGENT_ACP_0_61_0)
+        _resolve(built, CLAUDE_AGENT_ACP_0_63_0)
     assert excinfo.value.rule == "GROUP_OR_OTHER_WRITABLE"
 
 
@@ -693,12 +693,12 @@ def test_writable_sibling_code_inside_the_closure_is_refused(tmp_path: Path) -> 
     descriptor = make_package_tree(tmp_path / "wrapped")
     built = build_root(
         tmp_path,
-        profile=CLAUDE_AGENT_ACP_0_61_0,
+        profile=CLAUDE_AGENT_ACP_0_63_0,
         slots={"downstream_cli": {"kind": SLOT_KIND_PACKAGE_TREE, **descriptor}},
     )
     (Path(descriptor["package_root"]) / "lib" / "cli.js").chmod(0o666)
     with pytest.raises(rb.BindingRefusal) as excinfo:
-        _resolve(built, CLAUDE_AGENT_ACP_0_61_0)
+        _resolve(built, CLAUDE_AGENT_ACP_0_63_0)
     assert excinfo.value.rule == "GROUP_OR_OTHER_WRITABLE"
 
 
@@ -715,7 +715,7 @@ def test_sticky_world_writable_package_root_is_refused(tmp_path: Path) -> None:
     descriptor = make_package_tree(tmp_path / "wrapped")
     built = build_root(
         tmp_path,
-        profile=CLAUDE_AGENT_ACP_0_61_0,
+        profile=CLAUDE_AGENT_ACP_0_63_0,
         slots={"downstream_cli": {"kind": SLOT_KIND_PACKAGE_TREE, **descriptor}},
     )
     package_root = Path(descriptor["package_root"])
@@ -724,7 +724,7 @@ def test_sticky_world_writable_package_root_is_refused(tmp_path: Path) -> None:
     # so the digest alone cannot be what refuses this.
     assert rb.package_tree_digest(package_root) == descriptor["tree_sha256"]
     with pytest.raises(rb.BindingRefusal) as excinfo:
-        _resolve(built, CLAUDE_AGENT_ACP_0_61_0)
+        _resolve(built, CLAUDE_AGENT_ACP_0_63_0)
     assert excinfo.value.rule == "GROUP_OR_OTHER_WRITABLE"
 
 
@@ -735,14 +735,14 @@ def test_sticky_world_writable_directory_inside_the_closure_is_refused(
     descriptor = make_package_tree(tmp_path / "wrapped")
     built = build_root(
         tmp_path,
-        profile=CLAUDE_AGENT_ACP_0_61_0,
+        profile=CLAUDE_AGENT_ACP_0_63_0,
         slots={"downstream_cli": {"kind": SLOT_KIND_PACKAGE_TREE, **descriptor}},
     )
     package_root = Path(descriptor["package_root"])
     (package_root / "lib").chmod(0o1777)
     assert rb.package_tree_digest(package_root) == descriptor["tree_sha256"]
     with pytest.raises(rb.BindingRefusal) as excinfo:
-        _resolve(built, CLAUDE_AGENT_ACP_0_61_0)
+        _resolve(built, CLAUDE_AGENT_ACP_0_63_0)
     assert excinfo.value.rule == "GROUP_OR_OTHER_WRITABLE"
 
 
@@ -788,7 +788,7 @@ def test_package_tree_digest_change_is_refused(tmp_path: Path) -> None:
     descriptor = make_package_tree(tmp_path / "wrapped")
     built = build_root(
         tmp_path,
-        profile=CLAUDE_AGENT_ACP_0_61_0,
+        profile=CLAUDE_AGENT_ACP_0_63_0,
         slots={"downstream_cli": {"kind": SLOT_KIND_PACKAGE_TREE, **descriptor}},
     )
     sibling = Path(descriptor["package_root"]) / "lib" / "cli.js"
@@ -796,7 +796,7 @@ def test_package_tree_digest_change_is_refused(tmp_path: Path) -> None:
     sibling.write_text("// swapped sibling code\n", encoding="utf-8")
     sibling.chmod(mode)  # only the bytes changed, not the permissions
     with pytest.raises(rb.BindingRefusal) as excinfo:
-        _resolve(built, CLAUDE_AGENT_ACP_0_61_0)
+        _resolve(built, CLAUDE_AGENT_ACP_0_63_0)
     assert excinfo.value.rule == "PACKAGE_TREE_DIGEST_MISMATCH"
 
 
@@ -1122,10 +1122,10 @@ def test_group_writable_binding_root_ancestor_is_refused(tmp_path: Path) -> None
 def _resolve_wrapped(tmp_path: Path, descriptor: dict[str, Any]):
     built = build_root(
         tmp_path,
-        profile=CLAUDE_AGENT_ACP_0_61_0,
+        profile=CLAUDE_AGENT_ACP_0_63_0,
         slots={"downstream_cli": {"kind": SLOT_KIND_PACKAGE_TREE, **descriptor}},
     )
-    return _resolve(built, CLAUDE_AGENT_ACP_0_61_0)
+    return _resolve(built, CLAUDE_AGENT_ACP_0_63_0)
 
 
 def _resolve_native(tmp_path: Path, descriptor: dict[str, Any]):

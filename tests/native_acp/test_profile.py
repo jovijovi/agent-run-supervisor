@@ -286,7 +286,7 @@ def test_codex_profile_snapshot_golden() -> None:
     }
     assert DEFAULT_REGISTRY.get("codex-acp-1.1.7") is CODEX_ACP_1_1_7
     assert DEFAULT_REGISTRY.ids() == (
-        "claude-agent-acp-0.61.0",
+        "claude-agent-acp-0.63.0",
         "codex-acp-1.1.7",
         "opencode-native-acp",
     )
@@ -405,9 +405,12 @@ def test_codex_carries_no_opencode_permission_binding() -> None:
 # -- Claude closed-profile admission (B3) ------------------------------------
 
 FROZEN_CLAUDE_ENTRY = (
-    "/home/ecs-user/.local/share/agent-run-supervisor/adapters/claude-agent-acp/0.61.0"
+    "/home/ecs-user/.local/share/agent-run-supervisor/adapters/claude-agent-acp/0.63.0"
     "/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js"
 )
+# Unchanged across 0.61.0 -> 0.63.0: ``dist/index.js`` is a launcher that
+# imports its siblings, and only those siblings plus ``package.json`` moved.
+# See ``test_claude_adapter_entry_digest_does_not_discriminate_the_version``.
 FROZEN_CLAUDE_ENTRY_SHA256 = (
     "260aac90bf75f197b93640087c1de66441761d43c2784efa035fdcee60b5dacd"
 )
@@ -423,13 +426,26 @@ CODEX_CONFIG_SCHEMA_HASH_GOLDEN = (
 CODEX_CONTRACT_HASH_GOLDEN = (
     "36b85cd59f12ffdb431bdd7989beaaa11f5c7272a895b7ad4060cb00d1c8fa89"
 )
-CLAUDE_CONTRACT_HASH_GOLDEN = (
+# The retired 0.61.0 revision-2 contract hash. Kept only so the 0.63.0 source
+# contract must prove it is a *different* acceptance input: a Binding
+# generation accepted under the old hash has to fail closed rather than be
+# reinterpreted by this contract (PRD R13).
+CLAUDE_CONTRACT_HASH_RETIRED_0_61_0_R2 = (
     "0e62e4cbba144fc5954502e5b66222fc11891d1d566816e372b596ec88a1a38b"
+)
+CLAUDE_CONTRACT_HASH_GOLDEN = (
+    "0c822c665dd2df52924a0dbabfdf976e554bf1f774c1b089a60951c5548f4e18"
 )
 
 
 def test_claude_profile_snapshot_golden() -> None:
     """Every registered value is a byte-copy of the frozen discovery manifest.
+
+    The manifest is the zero-prompt ACP discovery run against the installed
+    ``@agentclientprotocol/claude-agent-acp`` 0.63.0: ``agentInfo`` reports
+    name ``@agentclientprotocol/claude-agent-acp`` version ``0.63.0``,
+    ``protocolVersion`` 1, ``loadSession`` advertised, and the ``mode`` /
+    ``model`` / ``effort`` select domains that this profile registers.
 
     The ACP model domain is exactly ``claude-fable-5[1m]`` and ``opus[1m]``.
     ``claude-opus-5[1m]`` is the *direct Claude CLI* author selector and is
@@ -437,11 +453,11 @@ def test_claude_profile_snapshot_golden() -> None:
     returns ``opus[1m]``, so the CLI-side string could never pass exact
     readback.
     """
-    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_61_0
+    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_63_0
 
-    profile = CLAUDE_AGENT_ACP_0_61_0
-    assert profile.profile_id == "claude-agent-acp-0.61.0"
-    assert profile.revision == 2
+    profile = CLAUDE_AGENT_ACP_0_63_0
+    assert profile.profile_id == "claude-agent-acp-0.63.0"
+    assert profile.revision == 3
     assert profile.executable_key == "claude-agent-acp"
     assert profile.argv_template == (FROZEN_CLAUDE_ENTRY,)
     assert profile.model_selector_id == "model"
@@ -468,6 +484,12 @@ def test_claude_profile_snapshot_golden() -> None:
     assert contract.wrapped_runtime.adapter_entry_path == FROZEN_CLAUDE_ENTRY
     assert contract.wrapped_runtime.adapter_entry_sha256 == FROZEN_CLAUDE_ENTRY_SHA256
     assert contract.acp_agent_name == "@agentclientprotocol/claude-agent-acp"
+    # The ACP-reported adapter identity, byte-copied from the initialize
+    # exchange. It is not the downstream Claude CLI's own ``--version``, and no
+    # code path asserts the two are equal (PRD R12).
+    assert contract.acp_agent_version == "0.63.0"
+    assert contract.acp_protocol_version == "1"
+    assert contract.required_capabilities == ("loadSession",)
     assert [slot.to_dict() for slot in contract.binding_slots] == [
         {
             "name": "downstream_cli",
@@ -495,15 +517,60 @@ def test_claude_profile_snapshot_golden() -> None:
     assert "expected_runtime" not in snapshot
     assert len(profile.profile_hash()) == 64
     assert profile.adapter_contract_hash() == CLAUDE_CONTRACT_HASH_GOLDEN
-    assert profile.snapshot_ref() == "registry:claude-agent-acp-0.61.0@r2"
+    assert profile.snapshot_ref() == "registry:claude-agent-acp-0.63.0@r3"
+
+
+def test_the_registry_presents_only_the_0_63_0_claude_source_contract() -> None:
+    """No 0.61.0 alias survives: one registered Claude contract, not two.
+
+    Written against the registry rather than the module symbol so the failure
+    is the registered contract itself, not an import error.
+    """
+    assert DEFAULT_REGISTRY.ids() == (
+        "claude-agent-acp-0.63.0",
+        "codex-acp-1.1.7",
+        "opencode-native-acp",
+    )
+    with pytest.raises(UnknownProfileError):
+        DEFAULT_REGISTRY.get("claude-agent-acp-0.61.0")
+
+    profile = DEFAULT_REGISTRY.get("claude-agent-acp-0.63.0")
+    assert profile.revision == 3
+    assert profile.contract.acp_agent_version == "0.63.0"
+    assert "/claude-agent-acp/0.63.0/" in (
+        profile.contract.wrapped_runtime.adapter_entry_path
+    )
+    # A new source-contract revision is a new acceptance input, so a Binding
+    # generation accepted under the retired 0.61.0 contract fails closed.
+    assert (
+        profile.adapter_contract_hash() != CLAUDE_CONTRACT_HASH_RETIRED_0_61_0_R2
+    )
+
+
+def test_claude_adapter_entry_digest_does_not_discriminate_the_version() -> None:
+    """The frozen entry digest is unchanged by the 0.61.0 -> 0.63.0 move.
+
+    ``dist/index.js`` is a launcher that imports ``./acp-agent.js`` and reads
+    its version from ``../package.json``; those siblings changed and the
+    launcher bytes did not. So the *path* is the only artifact identity in
+    this contract that separates the two adapter versions, and the entry
+    digest alone must never be read as proof of which version will run. That
+    is the known wrapped-adapter package-closure gap (GOAL / PRD R13), which
+    this Source Contract records rather than closes.
+    """
+    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_63_0
+
+    wrapped = CLAUDE_AGENT_ACP_0_63_0.contract.wrapped_runtime
+    assert wrapped.adapter_entry_sha256 == FROZEN_CLAUDE_ENTRY_SHA256
+    assert wrapped.adapter_entry_path == FROZEN_CLAUDE_ENTRY
 
 
 def test_claude_profile_is_registered_alongside_the_existing_rows() -> None:
-    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_61_0
+    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_63_0
 
-    assert DEFAULT_REGISTRY.get("claude-agent-acp-0.61.0") is CLAUDE_AGENT_ACP_0_61_0
+    assert DEFAULT_REGISTRY.get("claude-agent-acp-0.63.0") is CLAUDE_AGENT_ACP_0_63_0
     assert DEFAULT_REGISTRY.ids() == (
-        "claude-agent-acp-0.61.0",
+        "claude-agent-acp-0.63.0",
         "codex-acp-1.1.7",
         "opencode-native-acp",
     )
@@ -512,9 +579,9 @@ def test_claude_profile_is_registered_alongside_the_existing_rows() -> None:
 def test_claude_executable_resolves_to_the_frozen_node_never_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_61_0
+    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_63_0
 
-    resolved = resolve_registered_executable(CLAUDE_AGENT_ACP_0_61_0.executable_key)
+    resolved = resolve_registered_executable(CLAUDE_AGENT_ACP_0_63_0.executable_key)
     assert str(resolved) == FROZEN_NODE_PATH
     # The adapter entry is an ESM script with a `#!/usr/bin/env node` shebang:
     # the process image must be the frozen Node, never an env-resolved one.
@@ -522,7 +589,7 @@ def test_claude_executable_resolves_to_the_frozen_node_never_path(
     monkeypatch.setenv("NODE", "/tmp/adversarial-bin/node")
     monkeypatch.setenv("CLAUDE_CODE_EXECUTABLE", "/tmp/adversarial-bin/claude")
     assert (
-        resolve_registered_executable(CLAUDE_AGENT_ACP_0_61_0.executable_key)
+        resolve_registered_executable(CLAUDE_AGENT_ACP_0_63_0.executable_key)
         == resolved
     )
     assert "node_modules/.bin" not in str(resolved)
@@ -530,20 +597,20 @@ def test_claude_executable_resolves_to_the_frozen_node_never_path(
 
 def test_claude_carries_no_opencode_permission_binding() -> None:
     from agent_run_supervisor.native_acp.profile import (
-        CLAUDE_AGENT_ACP_0_61_0,
+        CLAUDE_AGENT_ACP_0_63_0,
         resolve_registered_permission_env,
     )
 
     assert resolve_registered_permission_env(
-        CLAUDE_AGENT_ACP_0_61_0.executable_key
+        CLAUDE_AGENT_ACP_0_63_0.executable_key
     ) == ()
 
 
 def _claude_like(**overrides) -> AgentProfile:
-    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_61_0
+    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_63_0
     import dataclasses
 
-    return dataclasses.replace(CLAUDE_AGENT_ACP_0_61_0, **overrides)
+    return dataclasses.replace(CLAUDE_AGENT_ACP_0_63_0, **overrides)
 
 
 def test_claude_binding_key_may_not_be_frozen_as_a_source_constant() -> None:
@@ -573,9 +640,9 @@ def test_codex_profile_golden_after_the_binding_split() -> None:
 
 
 def test_claude_profile_freezes_the_default_permission_mode() -> None:
-    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_61_0
+    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_63_0
 
-    profile = CLAUDE_AGENT_ACP_0_61_0
+    profile = CLAUDE_AGENT_ACP_0_63_0
     assert profile.permission_mode_selector_id == "mode"
     assert profile.required_permission_mode == "default"
     assert profile.config_schema["selectors"]["permission_mode"] == {
@@ -619,9 +686,9 @@ FROZEN_CLAUDE_SESSION_META = (
 
 
 def test_claude_profile_freezes_the_exact_session_metadata() -> None:
-    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_61_0
+    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_63_0
 
-    profile = CLAUDE_AGENT_ACP_0_61_0
+    profile = CLAUDE_AGENT_ACP_0_63_0
     assert profile.session_meta == FROZEN_CLAUDE_SESSION_META
     payload = profile.session_meta_payload()
     assert payload == {
@@ -638,11 +705,11 @@ def test_claude_profile_freezes_the_exact_session_metadata() -> None:
 
 
 def test_session_metadata_payload_is_a_fresh_deep_copy_each_call() -> None:
-    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_61_0
+    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_63_0
 
-    first = CLAUDE_AGENT_ACP_0_61_0.session_meta_payload()
+    first = CLAUDE_AGENT_ACP_0_63_0.session_meta_payload()
     first["claudeCode"]["options"]["settingSources"].append("user")
-    second = CLAUDE_AGENT_ACP_0_61_0.session_meta_payload()
+    second = CLAUDE_AGENT_ACP_0_63_0.session_meta_payload()
     assert second["claudeCode"]["options"]["settingSources"] == []
     assert first is not second
 
@@ -664,19 +731,19 @@ def test_session_metadata_must_be_canonical_json_object_text() -> None:
 def test_session_metadata_hash_binding_is_immutable_and_canonical() -> None:
     import dataclasses
 
-    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_61_0
+    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_63_0
 
-    baseline = CLAUDE_AGENT_ACP_0_61_0.profile_hash()
-    assert CLAUDE_AGENT_ACP_0_61_0.profile_hash() == baseline
+    baseline = CLAUDE_AGENT_ACP_0_63_0.profile_hash()
+    assert CLAUDE_AGENT_ACP_0_63_0.profile_hash() == baseline
     # A different frozen metadata is a different profile identity.
     other = dataclasses.replace(
-        CLAUDE_AGENT_ACP_0_61_0,
+        CLAUDE_AGENT_ACP_0_63_0,
         session_meta='{"claudeCode":{"options":{"settingSources":["user"]}}}',
     )
     assert other.profile_hash() != baseline
     # The frozen dataclass cannot be mutated in place.
     with pytest.raises(dataclasses.FrozenInstanceError):
-        CLAUDE_AGENT_ACP_0_61_0.session_meta = "{}"  # type: ignore[misc]
+        CLAUDE_AGENT_ACP_0_63_0.session_meta = "{}"  # type: ignore[misc]
 
 
 def test_legacy_profiles_carry_no_session_metadata() -> None:

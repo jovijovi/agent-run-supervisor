@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from agent_run_supervisor.native_acp.profile import (
-    CLAUDE_AGENT_ACP_0_61_0,
+    CLAUDE_AGENT_ACP_0_63_0,
     CODEX_ACP_1_1_7,
     DEFAULT_REGISTRY,
     LAUNCH_KIND_DIRECT,
@@ -774,7 +774,7 @@ def test_codex_out_of_domain_model_or_effort_refused(overrides) -> None:
 # -- Claude closed-profile admission (B3) ------------------------------------
 
 FROZEN_CLAUDE_ENTRY = (
-    "/home/ecs-user/.local/share/agent-run-supervisor/adapters/claude-agent-acp/0.61.0"
+    "/home/ecs-user/.local/share/agent-run-supervisor/adapters/claude-agent-acp/0.63.0"
     "/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js"
 )
 FROZEN_CLAUDE_CLI_PATH = "/home/ecs-user/.local/bin/claude"
@@ -782,7 +782,7 @@ FROZEN_CLAUDE_CLI_PATH = "/home/ecs-user/.local/bin/claude"
 
 def _claude_request(**overrides) -> AgentRunRequest:
     kwargs = dict(
-        profile_id="claude-agent-acp-0.61.0",
+        profile_id="claude-agent-acp-0.63.0",
         requested_model="opus[1m]",
         requested_effort="max",
         credential_refs=(),
@@ -795,11 +795,11 @@ def _claude_launch(tmp_path: Path, request: AgentRunRequest | None = None):
     assembler = RunSpecAssembler(request or _claude_request())
     assembler.resolve_profile(DEFAULT_REGISTRY)
     assembler.bind_workspace(root=tmp_path)
-    return assembler.resolve_launch(runtime=_runtime(tmp_path, CLAUDE_AGENT_ACP_0_61_0))
+    return assembler.resolve_launch(runtime=_runtime(tmp_path, CLAUDE_AGENT_ACP_0_63_0))
 
 
 def test_claude_launch_argv_frozen_node_plus_entry(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path, CLAUDE_AGENT_ACP_0_61_0)
+    runtime = _runtime(tmp_path, CLAUDE_AGENT_ACP_0_63_0)
     assembler = RunSpecAssembler(_claude_request())
     assembler.resolve_profile(DEFAULT_REGISTRY)
     assembler.bind_workspace(root=tmp_path)

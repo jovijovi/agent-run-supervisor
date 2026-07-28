@@ -227,7 +227,7 @@ profile 是封闭、带版本、在代码中注册的启动定义；每个已注
 |---|---|---|---|---|
 | `opencode-native-acp` | OpenCode | direct ACP | `kimi-for-coding/k3`（默认） | `low` / `high` / `max`（默认 `max`） |
 | `codex-acp-1.1.7` | Codex，经其官方 ACP 适配器 | wrapped ACP | `gpt-5.6-sol` | `max` |
-| `claude-agent-acp-0.61.0` | Claude，经其官方 ACP 适配器 | wrapped ACP | `claude-fable-5[1m]`、`opus[1m]`（默认） | `max` |
+| `claude-agent-acp-0.63.0` | Claude，经其官方 ACP 适配器 | wrapped ACP | `claude-fable-5[1m]`、`opus[1m]`（默认） | `max` |
 
 上表中的字面量都必须逐字提交，但它们的来源是两回事。`profile_id` 是 ARS 的注册表输入：它指向代码
 中已注册的某份契约，在准入时被精确匹配。model 与 effort 字面量则是活动的 ACP 取值：由 agent 在协议
@@ -241,9 +241,11 @@ ACP 协议与必需/禁止能力、选择器 ID、由 discovery 证明过的 mod
 agent CLI。这也正是「讲通用 ACP 就不再需要 profile」不成立的原因：ACP 统一的是协议线，而不是启动
 方式、选择器名称、权限语义，也不是某个 agent 实际接受并读回的字面量。
 
-**下一个契约目标：`claude-agent-acp-0.63.0`。** 当前 `main` 只注册了 `claude-agent-acp-0.61.0`。
-`0.63.0` 是 Claude 官方适配器的下一个源码契约目标 —— 它**尚未**注册、尚未验收、也无法使用；在该
-契约更新连同其自身的 discovery 证据落到源码之前，准入会把它当作未知 profile 拒绝。现在不要配置它。
+**Claude 契约已迁移到 `claude-agent-acp-0.63.0`。** 已注册的 Claude 源码契约是
+`claude-agent-acp-0.63.0`（revision 3），依据对 0.63.0 适配器的零提示词 ACP discovery 冻结。**没有**
+`0.61.0` 兼容别名：退役的 ID 现在就是未知 profile，准入会直接拒绝。注册只是源码事实 —— 新 revision
+仍需运维方自己的验收，并在新的 `adapter_contract_hash` 上晋级一份 Binding generation，之后 Run 才
+能使用；按设计，在旧契约下被接受的 generation 会 fail closed。
 
 每个 profile 启动的都是你自己安装并钉住的 agent 运行时，但按启动形态划分方式不同。**wrapped ACP**
 profile 在源码中以绝对路径**加**哈希冻结解释器与适配器入口，下游 CLI 则由 Binding 以不可变路径、
