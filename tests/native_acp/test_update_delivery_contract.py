@@ -3,7 +3,7 @@
 ``RunTask._update_sink`` assigns each session/update its delivery ordinal by
 invocation count and compares it against the driver's prompt wire boundary.
 That is sound only under two exact properties of the locked stack
-(agent-client-protocol 0.11.0 on CPython asyncio):
+(agent-client-protocol 0.11.1 on CPython asyncio):
 
 1. ``NativeAcpClient.session_update`` runs the synchronous sink before its
    first await, so the ordinal is assigned in the notification task's first
@@ -14,12 +14,13 @@ That is sound only under two exact properties of the locked stack
 3. The driver's observed-update count (prompt wire boundary + pre-response
    delivery barrier) and the sink's delivery ordinals live in one causal
    domain: only session/update frames the SDK will actually dispatch to
-   ``Client.session_update`` may be counted. SDK 0.11.0 silently drops a
-   notification whose params fail ``SessionNotification`` validation
-   (``_run_notification`` suppresses handler exceptions) and routes a frame
-   carrying an ``id`` to the request table (method-not-found, no callback) —
-   counting such a frame creates a phantom ordinal that shifts the frozen
-   boundary past the first genuine current-turn chunk.
+   ``Client.session_update`` may be counted. The SDK drops a notification
+   whose params fail ``SessionNotification`` validation (``_run_notification``
+   swallows handler exceptions — 0.11.0 silently, 0.11.1 with a root-logger
+   record; no callback runs either way) and routes a frame carrying an ``id``
+   to the request table (method-not-found, no callback) — counting such a
+   frame creates a phantom ordinal that shifts the frozen boundary past the
+   first genuine current-turn chunk.
 
 These tests pin exactly those properties — no broader protocol ordering
 guarantee is claimed. An SDK/runtime upgrade that breaks any of them fails
@@ -176,9 +177,9 @@ _POST_MODEL_OPTIONS = [
     },
 ]
 
-# Observed on the wire, then dropped by SDK 0.11.0: SessionNotification
+# Observed on the wire, then dropped by the SDK: SessionNotification
 # validation rejects the unsupported update kind and _run_notification
-# suppresses the ValidationError — no session_update callback ever runs.
+# swallows the ValidationError — no session_update callback ever runs.
 _PHANTOM_SDK_SUPPRESSED = {
     "jsonrpc": "2.0",
     "method": "session/update",
@@ -191,7 +192,7 @@ _PHANTOM_SDK_SUPPRESSED = {
     },
 }
 
-# Schema-valid params, but the "id" makes it a *request*: SDK 0.11.0 routes
+# Schema-valid params, but the "id" makes it a *request*: the SDK routes
 # it to the request table, which has no session/update entry — the frame
 # earns a method-not-found error response and never a callback.
 _PHANTOM_REQUEST_SHAPED = {

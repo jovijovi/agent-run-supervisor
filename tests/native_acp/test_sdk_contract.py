@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 DISTRIBUTION = "agent-client-protocol"
-PINNED_VERSION = "0.11.0"
+PINNED_VERSION = "0.11.1"
 WORKTREE_ROOT = Path(__file__).resolve().parents[2]
 
 # Actual entry points on the client-side connection class (design expected

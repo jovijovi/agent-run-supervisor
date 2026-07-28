@@ -300,7 +300,7 @@ def test_load_replay_never_consumes_current_final_message_budget(
 def test_current_turn_chunk_survives_fast_agent_race_with_post_send_observer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # B1 happens-before (2026-07-24 focused review): SDK 0.11.0 notifies the
+    # B1 happens-before (2026-07-24 focused review): SDK 0.11.1 notifies the
     # outgoing stream observer only after MessageSender.send() has written and
     # drained the session/prompt frame. A fast agent can have its genuine
     # current-turn update processed by the receive loop inside that window; a

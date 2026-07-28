@@ -144,17 +144,19 @@ class NativeAcpDriver:
                 hook()
 
     def _update_frame_will_dispatch(self, message: Mapping[str, Any]) -> bool:
-        """Locked-SDK (0.11.0) dispatch predicate for one update callback.
+        """Locked-SDK (0.11.1) dispatch predicate for one update callback.
 
         ``Client.session_update`` runs for an incoming session/update frame
         iff it is notification-shaped (no ``id`` — a request-shaped frame
         hits the request table and fails method-not-found) and its params
         validate as ``schema.SessionNotification``: the router validates
-        inside the notification handler and ``_run_notification`` suppresses
-        the ValidationError, silently dropping the frame. Counting must
-        mirror that predicate exactly — assuming every raw frame becomes one
-        callback lets a suppressed pre-prompt frame become a phantom ordinal
-        inside the frozen boundary.
+        inside the notification handler and ``_run_notification`` swallows the
+        ValidationError, dropping the frame before any callback runs. 0.11.1
+        logs that failure where 0.11.0 suppressed it silently; the frame is
+        dropped either way, so this predicate is unchanged. Counting must
+        mirror it exactly — assuming every raw frame becomes one callback lets
+        a dropped pre-prompt frame become a phantom ordinal inside the frozen
+        boundary.
         """
         if "id" in message:
             return False
