@@ -15,6 +15,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Notes
 
+## [0.5.1] - 2026-07-29
+
+### Added
+
+- Operator-owned Runtime Binding source framework, including the
+  `runtime-binding validate`, `promote`, `rollback`, and `inspect-run` CLI
+  surface for validation, pointer changes, rollback, and sealed-launch
+  provenance inspection.
+
+### Changed
+
+- Binding admission now fails closed on an absent or unsafe Binding root, and
+  seals one resolved artifact identity and provenance record per Run. Artifact
+  validation covers package-tree identity and containment for wrapped adapters
+  as well as downstream CLI artifacts.
+- Updated the Claude adapter source contract to 0.63.0 as
+  `claude-agent-acp-0.63.0` revision 4.
+- The registered OpenCode profile is now `opencode-native-acp` revision 3;
+  retired `opencode-1.18.4` has no compatibility alias and is refused as
+  unknown.
+- Daemon mode and `--print-service-unit` now require `--binding-root`. A
+  v0.5.0-era service unit must be re-rendered/configured before restart, or the
+  upgraded daemon or renderer fails closed.
+- Aligned the READMEs and current product/roadmap documentation with the
+  Runtime Binding source closure and its remaining activation boundaries.
+
+### Fixed
+
+- Pinned the optional `native` extra to `agent-client-protocol==0.11.1` and
+  contained ACP SDK handler-exception logging at the root logger.
+
+### Notes
+
+- This is source/package publication only: it does not materialize a Runtime
+  Binding, promote a generation, re-accept a profile, run the Claude permission
+  canary, deploy, restart a daemon, run a provider, or integrate Sachima.
+- Runtime Binding operator activation remains open.
+- Pre-epoch Native Session records remain inspectable, listable, and closable,
+  but cannot resume through `session/load` after the compatibility-epoch
+  change.
+- Binding generations are contract-revision-bound: OpenCode is r3, Codex is
+  r3, and Claude is r4; old-contract generations fail closed.
+- acpx product/runtime removal is not part of this release-prep diff.
+
 ## [0.5.0] - 2026-07-26
 
 ### Added

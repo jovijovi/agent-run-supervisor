@@ -53,7 +53,7 @@ adapter rows stay `Done` as implementations, but their operator-held local accep
 pre-refactor revisions, and the closure moved both wrapped revisions again.
 
 **Publication boundary.** `Done` means implemented in the current `main` source line, whose package
-metadata is 0.5.0 and covers the Stage 0/1 Native ACP core, `arsd` (F-ARSD-001), the three
+metadata is 0.5.1 and covers the Stage 0/1 Native ACP core, `arsd` (F-ARSD-001), the three
 registered closed profiles, and the Runtime Binding source framework. The live GitHub Releases and PyPI listings are authoritative for which
 versions are published; neither publication nor local acceptance is a deployment, enablement, or
 Sachima-integration approval.
