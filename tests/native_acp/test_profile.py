@@ -162,18 +162,25 @@ def test_opencode_permission_mediation_env_is_registered() -> None:
 
 # -- Codex closed-profile admission (D2/D3/D9/D11) ---------------------------
 
-FROZEN_NODE_PATH = (
-    "/home/ecs-user/.local/share/agent-run-supervisor/adapters/node/v24.14.0/bin/node"
-)
+# The Phase 3 materialization location, not the discovery/measurement install:
+# every ancestor of a service-home path is service-UID-owned, which C5 can never
+# accept. Nothing here creates or installs anything under /opt.
+FROZEN_NODE_PATH = "/opt/agent-run-supervisor/artifacts/node/v24.14.0/bin/node"
 FROZEN_NODE_SHA256 = (
     "e237a2839d0cbdc9a9a2adda1a184afc0f5b20306ffbe923af5686550472d8a8"
 )
+FROZEN_ADAPTER_ROOT = "/opt/agent-run-supervisor/artifacts/adapters/codex-acp/1.1.7"
 FROZEN_ADAPTER_ENTRY = (
-    "/home/ecs-user/.local/share/agent-run-supervisor/adapters/codex-acp/1.1.7"
-    "/node_modules/@agentclientprotocol/codex-acp/dist/index.js"
+    f"{FROZEN_ADAPTER_ROOT}/node_modules/@agentclientprotocol/codex-acp/dist/index.js"
 )
 FROZEN_ADAPTER_ENTRY_SHA256 = (
     "0deb6b820dfed8804cd76b16a50210fe12202e5e339b5edaa23f6987f1742e0a"
+)
+# Measured over the operator-installed 1.1.7 tree: the install root Node walks
+# up to, not the adapter package directory, because every dependency is hoisted
+# into <install root>/node_modules.
+FROZEN_ADAPTER_TREE_SHA256 = (
+    "6e78f0ed56a4ec40939153cb7c1505c31b92283ca9035feb65a994c70445a83d"
 )
 FROZEN_CODEX_CONFIG = '{"features":{"use_legacy_landlock":true}}'
 
@@ -208,9 +215,12 @@ def test_codex_profile_snapshot_golden() -> None:
 
     profile = CODEX_ACP_1_1_7
     assert profile.profile_id == "codex-acp-1.1.7"
-    assert profile.revision == 2
+    assert profile.revision == 3
     assert profile.executable_key == "codex-acp"
-    assert profile.argv_template == (FROZEN_ADAPTER_ENTRY,)
+    assert profile.argv_template == (
+        "--no-global-search-paths",
+        FROZEN_ADAPTER_ENTRY,
+    )
     assert profile.model_selector_id == "model"
     assert profile.effort_selector_id == "reasoning_effort"
     assert profile.default_model == "gpt-5.6-sol"
@@ -404,9 +414,15 @@ def test_codex_carries_no_opencode_permission_binding() -> None:
 
 # -- Claude closed-profile admission (B3) ------------------------------------
 
+FROZEN_CLAUDE_ROOT = (
+    "/opt/agent-run-supervisor/artifacts/adapters/claude-agent-acp/0.63.0"
+)
 FROZEN_CLAUDE_ENTRY = (
-    "/home/ecs-user/.local/share/agent-run-supervisor/adapters/claude-agent-acp/0.63.0"
+    f"{FROZEN_CLAUDE_ROOT}"
     "/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js"
+)
+FROZEN_CLAUDE_TREE_SHA256 = (
+    "7c7958a24b96cc8510506e37b91e1ad37dcdef546bfcaaae025ffe9a1ba4ac2a"
 )
 # Unchanged across 0.61.0 -> 0.63.0: ``dist/index.js`` is a launcher that
 # imports its siblings, and only those siblings plus ``package.json`` moved.
@@ -414,16 +430,25 @@ FROZEN_CLAUDE_ENTRY = (
 FROZEN_CLAUDE_ENTRY_SHA256 = (
     "260aac90bf75f197b93640087c1de66441761d43c2784efa035fdcee60b5dacd"
 )
-# Goldens re-captured for the PR-B contract/Binding split (revision 2). The
-# config-schema hash is unchanged: selectors are compatibility semantics and
-# never carried a deployment fact.
+# Goldens re-captured for the F-RUNTIME-BINDING-002 package closure: the frozen
+# wrapped artifact identity gained ``adapter_package_root`` and
+# ``adapter_tree_sha256``, so both wrapped contracts are new acceptance inputs
+# and both revisions moved (Codex r2 -> r3, Claude r3 -> r4). The config-schema
+# hashes are unchanged: selectors are compatibility semantics and no closure
+# fact reaches them.
 CODEX_PROFILE_HASH_GOLDEN = (
-    "e574f54a37edf6c4adc5a91fff926c5c9da5a4724451c9f0f70ce7dbffa1e789"
+    "3e2ccb90b7baadddc18c46bdd56066e6c14760df4adac5a5addfa3a3b3ae5ba2"
 )
 CODEX_CONFIG_SCHEMA_HASH_GOLDEN = (
     "a86d084c818a7ca3be0a5298dda46800fc3977826e8007e3db74bea7f2b8829a"
 )
 CODEX_CONTRACT_HASH_GOLDEN = (
+    "73b3dda64ace8f3df4e5f52976f969cd67c0f7e423b7932e5b3513bbbe19e005"
+)
+# The retired pre-closure revision-2 Codex contract hash, kept for the same
+# reason as the Claude one below: a generation accepted against an entry-only
+# artifact identity must fail closed, not be reinterpreted by this contract.
+CODEX_CONTRACT_HASH_RETIRED_ENTRY_ONLY_R2 = (
     "36b85cd59f12ffdb431bdd7989beaaa11f5c7272a895b7ad4060cb00d1c8fa89"
 )
 # The retired 0.61.0 revision-2 contract hash. Kept only so the 0.63.0 source
@@ -433,8 +458,13 @@ CODEX_CONTRACT_HASH_GOLDEN = (
 CLAUDE_CONTRACT_HASH_RETIRED_0_61_0_R2 = (
     "0e62e4cbba144fc5954502e5b66222fc11891d1d566816e372b596ec88a1a38b"
 )
-CLAUDE_CONTRACT_HASH_GOLDEN = (
+# The retired 0.63.0 revision-3 contract hash: the same adapter version, frozen
+# by its entry file alone before the package closure landed.
+CLAUDE_CONTRACT_HASH_RETIRED_ENTRY_ONLY_R3 = (
     "0c822c665dd2df52924a0dbabfdf976e554bf1f774c1b089a60951c5548f4e18"
+)
+CLAUDE_CONTRACT_HASH_GOLDEN = (
+    "00a25e4dcfb13aeeb3b507cefac39a94cf74d967b71c434c78cd24895fba715e"
 )
 
 
@@ -457,9 +487,12 @@ def test_claude_profile_snapshot_golden() -> None:
 
     profile = CLAUDE_AGENT_ACP_0_63_0
     assert profile.profile_id == "claude-agent-acp-0.63.0"
-    assert profile.revision == 3
+    assert profile.revision == 4
     assert profile.executable_key == "claude-agent-acp"
-    assert profile.argv_template == (FROZEN_CLAUDE_ENTRY,)
+    assert profile.argv_template == (
+        "--no-global-search-paths",
+        FROZEN_CLAUDE_ENTRY,
+    )
     assert profile.model_selector_id == "model"
     assert profile.effort_selector_id == "effort"
     assert profile.registered_models == ("claude-fable-5[1m]", "opus[1m]")
@@ -517,7 +550,7 @@ def test_claude_profile_snapshot_golden() -> None:
     assert "expected_runtime" not in snapshot
     assert len(profile.profile_hash()) == 64
     assert profile.adapter_contract_hash() == CLAUDE_CONTRACT_HASH_GOLDEN
-    assert profile.snapshot_ref() == "registry:claude-agent-acp-0.63.0@r3"
+    assert profile.snapshot_ref() == "registry:claude-agent-acp-0.63.0@r4"
 
 
 def test_the_registry_presents_only_the_0_63_0_claude_source_contract() -> None:
@@ -535,7 +568,7 @@ def test_the_registry_presents_only_the_0_63_0_claude_source_contract() -> None:
         DEFAULT_REGISTRY.get("claude-agent-acp-0.61.0")
 
     profile = DEFAULT_REGISTRY.get("claude-agent-acp-0.63.0")
-    assert profile.revision == 3
+    assert profile.revision == 4
     assert profile.contract.acp_agent_version == "0.63.0"
     assert "/claude-agent-acp/0.63.0/" in (
         profile.contract.wrapped_runtime.adapter_entry_path
@@ -547,22 +580,54 @@ def test_the_registry_presents_only_the_0_63_0_claude_source_contract() -> None:
     )
 
 
-def test_claude_adapter_entry_digest_does_not_discriminate_the_version() -> None:
+def test_claude_adapter_entry_digest_still_does_not_discriminate_the_version() -> None:
     """The frozen entry digest is unchanged by the 0.61.0 -> 0.63.0 move.
 
     ``dist/index.js`` is a launcher that imports ``./acp-agent.js`` and reads
     its version from ``../package.json``; those siblings changed and the
-    launcher bytes did not. So the *path* is the only artifact identity in
-    this contract that separates the two adapter versions, and the entry
-    digest alone must never be read as proof of which version will run. That
-    is the known wrapped-adapter package-closure gap (GOAL / PRD R13), which
-    this Source Contract records rather than closes.
+    launcher bytes did not. The entry digest therefore still proves nothing
+    about which adapter version will run — which is why it is no longer the
+    artifact identity this contract relies on.
     """
     from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_63_0
 
     wrapped = CLAUDE_AGENT_ACP_0_63_0.contract.wrapped_runtime
     assert wrapped.adapter_entry_sha256 == FROZEN_CLAUDE_ENTRY_SHA256
     assert wrapped.adapter_entry_path == FROZEN_CLAUDE_ENTRY
+
+
+def test_the_package_closure_discriminates_what_the_entry_digest_cannot() -> None:
+    """F-RUNTIME-BINDING-002: the closure, not the launcher, is the identity.
+
+    The tree digest covers ``./acp-agent.js``, ``../package.json``, and every
+    hoisted dependency, so two adapter versions sharing a launcher byte for
+    byte no longer share an artifact identity — and the contract hash that
+    accepts a Binding generation moves with them.
+    """
+    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_63_0
+
+    profile = CLAUDE_AGENT_ACP_0_63_0
+    wrapped = profile.contract.wrapped_runtime
+    assert wrapped.adapter_package_root == FROZEN_CLAUDE_ROOT
+    assert wrapped.adapter_tree_sha256 == FROZEN_CLAUDE_TREE_SHA256
+    assert wrapped.adapter_tree_sha256 != wrapped.adapter_entry_sha256
+    # Closing the gap is itself a new acceptance input: a generation accepted
+    # against the entry-only revision-3 contract fails closed here.
+    assert profile.adapter_contract_hash() == CLAUDE_CONTRACT_HASH_GOLDEN
+    assert profile.adapter_contract_hash() != CLAUDE_CONTRACT_HASH_RETIRED_ENTRY_ONLY_R3
+
+
+def test_the_codex_package_closure_retires_the_entry_only_contract() -> None:
+    from agent_run_supervisor.native_acp.profile import CODEX_ACP_1_1_7
+
+    profile = CODEX_ACP_1_1_7
+    wrapped = profile.contract.wrapped_runtime
+    assert wrapped.adapter_package_root == FROZEN_ADAPTER_ROOT
+    assert wrapped.adapter_tree_sha256 == FROZEN_ADAPTER_TREE_SHA256
+    assert profile.revision == 3
+    assert profile.snapshot_ref() == "registry:codex-acp-1.1.7@r3"
+    assert profile.adapter_contract_hash() == CODEX_CONTRACT_HASH_GOLDEN
+    assert profile.adapter_contract_hash() != CODEX_CONTRACT_HASH_RETIRED_ENTRY_ONLY_R2
 
 
 def test_claude_profile_is_registered_alongside_the_existing_rows() -> None:
@@ -755,3 +820,366 @@ def test_legacy_profiles_carry_no_session_metadata() -> None:
         assert "session_meta" not in profile.snapshot()
     assert OPENCODE_NATIVE_ACP.profile_hash() == OPENCODE_PROFILE_HASH_GOLDEN
     assert CODEX_ACP_1_1_7.profile_hash() == CODEX_PROFILE_HASH_GOLDEN
+
+
+# ---------------------------------------------------------------------------
+# F-RUNTIME-BINDING-002 — the wrapped adapter's complete package closure
+# ---------------------------------------------------------------------------
+
+CLOSURE_ROOT = "/opt/ars/adapters/example-acp/1.0.0"
+CLOSURE_ENTRY = f"{CLOSURE_ROOT}/node_modules/@scope/example-acp/dist/index.js"
+
+
+def _wrapped_artifacts(**overrides):
+    from agent_run_supervisor.native_acp.profile import WrappedRuntimeArtifacts
+
+    values = {
+        "interpreter_path": "/opt/ars/adapters/node/v24.14.0/bin/node",
+        "interpreter_sha256": "a" * 64,
+        "adapter_entry_path": CLOSURE_ENTRY,
+        "adapter_entry_sha256": "b" * 64,
+        "adapter_package_root": CLOSURE_ROOT,
+        "adapter_tree_sha256": "c" * 64,
+        # Every wrapped contract must close its interpreter's out-of-closure
+        # search; the closure legs below vary one field at a time around it.
+        "interpreter_argv_prefix": ("--no-global-search-paths",),
+    }
+    values.update(overrides)
+    return WrappedRuntimeArtifacts(**values)
+
+
+def test_path_within_root_judges_components_not_string_prefixes() -> None:
+    from agent_run_supervisor.native_acp.profile import path_within_root
+
+    assert path_within_root("/pkg", "/pkg/dist/index.js") is True
+    # The prefix trap: "/pkg" is a text prefix of "/pkg-evil" and not a parent.
+    assert path_within_root("/pkg", "/pkg-evil/dist/index.js") is False
+    # A root is not its own member, and neither operand may be relative or
+    # carry a parent reference the walk could unwind.
+    assert path_within_root("/pkg", "/pkg") is False
+    assert path_within_root("/pkg", "/pkg/../pkg-evil/x") is False
+    assert path_within_root("pkg", "pkg/x") is False
+
+
+def test_wrapped_artifacts_require_a_declared_package_closure() -> None:
+    """A launcher digest alone never freezes the sibling code it loads."""
+    from agent_run_supervisor.native_acp.profile import ProfileValidationError
+
+    with pytest.raises(ProfileValidationError, match="package"):
+        _wrapped_artifacts(adapter_package_root=None)
+    with pytest.raises(ProfileValidationError, match="tree"):
+        _wrapped_artifacts(adapter_tree_sha256=None)
+
+
+def test_wrapped_artifacts_require_a_sha256_tree_digest() -> None:
+    from agent_run_supervisor.native_acp.profile import ProfileValidationError
+
+    with pytest.raises(ProfileValidationError):
+        _wrapped_artifacts(adapter_tree_sha256="not-a-digest")
+
+
+def test_wrapped_artifacts_require_an_absolute_package_root() -> None:
+    from agent_run_supervisor.native_acp.profile import ProfileValidationError
+
+    with pytest.raises(ProfileValidationError):
+        _wrapped_artifacts(adapter_package_root="relative/root")
+
+
+def test_wrapped_artifacts_refuse_an_entry_outside_the_closure_root() -> None:
+    from agent_run_supervisor.native_acp.profile import ProfileValidationError
+
+    with pytest.raises(ProfileValidationError, match="inside"):
+        _wrapped_artifacts(
+            adapter_entry_path="/opt/ars/adapters/other/dist/index.js"
+        )
+
+
+def test_wrapped_artifacts_refuse_a_prefix_sibling_closure_root() -> None:
+    """`/pkg-evil` shares a string prefix with `/pkg` and is not inside it."""
+    from agent_run_supervisor.native_acp.profile import ProfileValidationError
+
+    with pytest.raises(ProfileValidationError, match="inside"):
+        _wrapped_artifacts(
+            adapter_package_root="/opt/ars/adapters/example-acp/1.0.0",
+            adapter_entry_path="/opt/ars/adapters/example-acp/1.0.0-evil/dist/index.js",
+        )
+
+
+def test_wrapped_artifacts_refuse_the_root_as_its_own_entry() -> None:
+    from agent_run_supervisor.native_acp.profile import ProfileValidationError
+
+    with pytest.raises(ProfileValidationError, match="inside"):
+        _wrapped_artifacts(adapter_entry_path=CLOSURE_ROOT)
+
+
+def test_wrapped_artifacts_serialize_the_whole_closure() -> None:
+    payload = _wrapped_artifacts().to_dict()
+    assert payload["adapter_package_root"] == CLOSURE_ROOT
+    assert payload["adapter_tree_sha256"] == "c" * 64
+
+
+def test_adapter_contract_hash_covers_the_package_closure() -> None:
+    """A sibling change moves the tree digest, so it must move the contract
+    hash — otherwise a Binding accepted under the old closure stays valid."""
+    import dataclasses
+
+    from agent_run_supervisor.native_acp.profile import CODEX_ACP_1_1_7
+
+    baseline = CODEX_ACP_1_1_7.adapter_contract_hash()
+    drifted_tree = dataclasses.replace(
+        CODEX_ACP_1_1_7,
+        contract=dataclasses.replace(
+            CODEX_ACP_1_1_7.contract,
+            wrapped_runtime=dataclasses.replace(
+                CODEX_ACP_1_1_7.contract.wrapped_runtime,
+                adapter_tree_sha256="d" * 64,
+            ),
+        ),
+    )
+    assert drifted_tree.adapter_contract_hash() != baseline
+
+
+def test_registered_wrapped_profiles_freeze_a_complete_package_closure() -> None:
+    """Both registered wrapped adapters close over their install root, and the
+    frozen entry lives inside it."""
+    from agent_run_supervisor.native_acp.profile import (
+        CLAUDE_AGENT_ACP_0_63_0,
+        CODEX_ACP_1_1_7,
+        path_within_root,
+    )
+
+    for profile in (CODEX_ACP_1_1_7, CLAUDE_AGENT_ACP_0_63_0):
+        wrapped = profile.contract.wrapped_runtime
+        assert wrapped.adapter_package_root is not None
+        assert len(wrapped.adapter_tree_sha256) == 64
+        assert path_within_root(
+            wrapped.adapter_package_root, wrapped.adapter_entry_path
+        )
+        # The closure root is the npm *install* root, not the package directory:
+        # the adapter's dependencies are hoisted into <install root>/node_modules,
+        # which Node reaches by walking up from the entry.
+        assert wrapped.adapter_entry_path.startswith(
+            f"{wrapped.adapter_package_root}/node_modules/"
+        )
+
+
+def test_wrapped_profiles_admit_no_node_path_environment_key() -> None:
+    """NODE_PATH would add a module-resolution root outside the frozen closure.
+
+    It is closed by construction: the env allowlist is a closed set and the
+    profile-frozen environment names only code-known keys.
+    """
+    from agent_run_supervisor.native_acp.profile import (
+        CLAUDE_AGENT_ACP_0_63_0,
+        CODEX_ACP_1_1_7,
+    )
+
+    for profile in (CODEX_ACP_1_1_7, CLAUDE_AGENT_ACP_0_63_0):
+        assert "NODE_PATH" not in profile.env_allowlist
+        assert "NODE_PATH" not in {name for name, _ in profile.fixed_env}
+        assert "NODE_PATH" not in {
+            slot.env_key for slot in profile.contract.binding_slots
+        }
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 repair — the frozen interpreter argv prefix and the materialization
+# prefix for source-frozen artifact paths
+# ---------------------------------------------------------------------------
+
+
+def test_wrapped_artifacts_require_a_frozen_interpreter_argv_prefix() -> None:
+    """An interpreter that can still resolve code outside the closure has not
+    been closed; the contract must freeze the option tokens that close it."""
+    from agent_run_supervisor.native_acp.profile import ProfileValidationError
+
+    with pytest.raises(ProfileValidationError, match="interpreter_argv_prefix"):
+        _wrapped_artifacts(interpreter_argv_prefix=())
+
+
+def test_wrapped_artifacts_refuse_a_non_option_token_in_the_prefix() -> None:
+    """The prefix is closed interpreter options, never a path or passthrough."""
+    from agent_run_supervisor.native_acp.profile import ProfileValidationError
+
+    with pytest.raises(ProfileValidationError):
+        _wrapped_artifacts(interpreter_argv_prefix=("/etc/passwd",))
+    with pytest.raises(ProfileValidationError):
+        _wrapped_artifacts(interpreter_argv_prefix=("",))
+    # One token carrying two flags would render as a passing report row while
+    # the child received something the contract never froze.
+    with pytest.raises(ProfileValidationError):
+        _wrapped_artifacts(
+            interpreter_argv_prefix=("--no-global-search-paths --allow-anything",)
+        )
+
+
+def test_the_frozen_node_interpreter_must_disable_global_search_paths() -> None:
+    """Node's CommonJS global folders ($HOME/.node_modules,
+    $HOME/.node_libraries, <prefix>/lib/node) are searched outside any package
+    root, so a closure over the install root is incomplete without the flag.
+    Code-enforced, not merely asserted by a test, so it cannot drift."""
+    from agent_run_supervisor.native_acp.profile import (
+        NODE_NO_GLOBAL_SEARCH_PATHS,
+        ProfileValidationError,
+        _FROZEN_NODE,
+    )
+
+    assert NODE_NO_GLOBAL_SEARCH_PATHS == "--no-global-search-paths"
+    with pytest.raises(ProfileValidationError, match="global"):
+        _wrapped_artifacts(
+            interpreter_path=str(_FROZEN_NODE),
+            interpreter_argv_prefix=("--frozen-intrinsics",),
+        )
+
+
+def test_profile_argv_must_start_with_the_declared_interpreter_prefix() -> None:
+    """No drift: the contract declares the prefix and the profile's argv is
+    checked against it, so an argv missing the flag cannot be registered."""
+    from agent_run_supervisor.native_acp.profile import (
+        CODEX_ACP_1_1_7,
+        ProfileValidationError,
+    )
+    import dataclasses
+
+    wrapped = CODEX_ACP_1_1_7.contract.wrapped_runtime
+    with pytest.raises(ProfileValidationError, match="interpreter_argv_prefix"):
+        dataclasses.replace(
+            CODEX_ACP_1_1_7, argv_template=(wrapped.adapter_entry_path,)
+        )
+
+
+def test_profile_argv_must_carry_the_adapter_entry_after_the_prefix() -> None:
+    from agent_run_supervisor.native_acp.profile import (
+        CODEX_ACP_1_1_7,
+        NODE_NO_GLOBAL_SEARCH_PATHS,
+        ProfileValidationError,
+    )
+    import dataclasses
+
+    with pytest.raises(ProfileValidationError, match="adapter entry"):
+        dataclasses.replace(
+            CODEX_ACP_1_1_7,
+            argv_template=(NODE_NO_GLOBAL_SEARCH_PATHS, "/opt/elsewhere/index.js"),
+        )
+    # A token wedged between the prefix and the entry is the same failure.
+    with pytest.raises(ProfileValidationError, match="adapter entry"):
+        dataclasses.replace(
+            CODEX_ACP_1_1_7,
+            argv_template=(
+                NODE_NO_GLOBAL_SEARCH_PATHS,
+                "--experimental-vm-modules",
+                CODEX_ACP_1_1_7.contract.wrapped_runtime.adapter_entry_path,
+            ),
+        )
+
+
+def test_both_registered_wrapped_profiles_freeze_the_node_prefix() -> None:
+    from agent_run_supervisor.native_acp.profile import (
+        CLAUDE_AGENT_ACP_0_63_0,
+        CODEX_ACP_1_1_7,
+        NODE_NO_GLOBAL_SEARCH_PATHS,
+    )
+
+    for profile in (CODEX_ACP_1_1_7, CLAUDE_AGENT_ACP_0_63_0):
+        wrapped = profile.contract.wrapped_runtime
+        assert wrapped.interpreter_argv_prefix == (NODE_NO_GLOBAL_SEARCH_PATHS,)
+        assert profile.argv_template == (
+            NODE_NO_GLOBAL_SEARCH_PATHS,
+            wrapped.adapter_entry_path,
+        )
+        assert profile.contract.to_dict()["wrapped_runtime"][
+            "interpreter_argv_prefix"
+        ] == [NODE_NO_GLOBAL_SEARCH_PATHS]
+
+
+def test_direct_acp_carries_no_interpreter_prefix() -> None:
+    assert OPENCODE_NATIVE_ACP.contract.wrapped_runtime is None
+    assert OPENCODE_NATIVE_ACP.argv_template == ("acp",)
+    assert "interpreter_argv_prefix" not in str(OPENCODE_NATIVE_ACP.contract.to_dict())
+
+
+def test_adapter_contract_hash_covers_the_interpreter_argv_prefix() -> None:
+    import dataclasses
+
+    from agent_run_supervisor.native_acp.profile import CODEX_ACP_1_1_7
+
+    baseline = CODEX_ACP_1_1_7.adapter_contract_hash()
+    drifted = dataclasses.replace(
+        CODEX_ACP_1_1_7,
+        argv_template=(
+            "--no-global-search-paths",
+            "--frozen-intrinsics",
+            CODEX_ACP_1_1_7.contract.wrapped_runtime.adapter_entry_path,
+        ),
+        contract=dataclasses.replace(
+            CODEX_ACP_1_1_7.contract,
+            wrapped_runtime=dataclasses.replace(
+                CODEX_ACP_1_1_7.contract.wrapped_runtime,
+                interpreter_argv_prefix=(
+                    "--no-global-search-paths",
+                    "--frozen-intrinsics",
+                ),
+            ),
+        ),
+    )
+    assert drifted.adapter_contract_hash() != baseline
+
+
+def test_source_frozen_runtime_paths_use_the_materialization_prefix() -> None:
+    """Phase 3 materializes a root-owned artifact root. A path under the service
+    home can never satisfy the C5 ownership rule, because its ancestors are
+    owned by the service UID and only Phase 3 can place a root-owned tree."""
+    from agent_run_supervisor.native_acp.profile import (
+        ARTIFACT_MATERIALIZATION_PREFIX,
+        CLAUDE_AGENT_ACP_0_63_0,
+        CODEX_ACP_1_1_7,
+        path_within_root,
+    )
+
+    assert ARTIFACT_MATERIALIZATION_PREFIX == "/opt/agent-run-supervisor/artifacts"
+    for profile in (CODEX_ACP_1_1_7, CLAUDE_AGENT_ACP_0_63_0):
+        wrapped = profile.contract.wrapped_runtime
+        for path in (
+            wrapped.interpreter_path,
+            wrapped.adapter_package_root,
+            wrapped.adapter_entry_path,
+        ):
+            assert path_within_root(ARTIFACT_MATERIALIZATION_PREFIX, path), path
+
+
+def test_no_source_frozen_runtime_path_lives_under_the_service_home() -> None:
+    from agent_run_supervisor.native_acp import profile as profile_module
+    from agent_run_supervisor.native_acp.profile import (
+        CLAUDE_AGENT_ACP_0_63_0,
+        CODEX_ACP_1_1_7,
+    )
+
+    surfaces = [str(path) for path in profile_module._REGISTERED_EXECUTABLES.values()]
+    for profile in (CODEX_ACP_1_1_7, CLAUDE_AGENT_ACP_0_63_0):
+        wrapped = profile.contract.wrapped_runtime
+        surfaces += [
+            wrapped.interpreter_path,
+            wrapped.adapter_entry_path,
+            wrapped.adapter_package_root,
+            *profile.argv_template,
+        ]
+    for surface in surfaces:
+        assert "/home/" not in surface, surface
+
+
+def test_registered_node_paths_pin_the_exact_materialized_locations() -> None:
+    from agent_run_supervisor.native_acp.profile import (
+        CLAUDE_AGENT_ACP_0_63_0,
+        CODEX_ACP_1_1_7,
+        _FROZEN_NODE,
+    )
+
+    assert str(_FROZEN_NODE) == (
+        "/opt/agent-run-supervisor/artifacts/node/v24.14.0/bin/node"
+    )
+    assert CODEX_ACP_1_1_7.contract.wrapped_runtime.adapter_package_root == (
+        "/opt/agent-run-supervisor/artifacts/adapters/codex-acp/1.1.7"
+    )
+    assert CLAUDE_AGENT_ACP_0_63_0.contract.wrapped_runtime.adapter_package_root == (
+        "/opt/agent-run-supervisor/artifacts/adapters/claude-agent-acp/0.63.0"
+    )

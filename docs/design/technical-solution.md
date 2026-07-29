@@ -21,9 +21,12 @@ compatibility baseline, and never uses it as Native driver or fallback.
 The Runtime Binding layer described below is merged source on `main`: `native_acp/runtime_binding.py`
 is the only reader of a Binding root, every registered profile carries an `AdapterContract`,
 deployment-specific downstream CLI paths, versions, and digests have moved out of the profile constants,
-`session_compatibility_epoch` is persisted, and the `runtime-binding` command surface exists. One part
-of the design remains open source work: `WrappedRuntimeArtifacts` freezes the interpreter and the
-adapter entry path and digest only, not the complete wrapped adapter package tree.
+`session_compatibility_epoch` is persisted, and the `runtime-binding` command surface exists.
+`WrappedRuntimeArtifacts` freezes the adapter's complete package closure — install root plus tree
+digest, with the entry proven inside it — not the entry path and digest alone, and the
+`interpreter_argv_prefix` that closes the interpreter's path-independent module search. Its frozen
+paths name the root-owned artifact location a separate materialization step is expected to create;
+declaring that location creates nothing.
 
 Merged source is not operator activation. No immutable artifact root, promoted generation, re-acceptance
 at a current profile revision, permission canary, rollout, release, or deployment follows from it, and
@@ -56,9 +59,9 @@ share their stdout consumer or wait-before-return contract.
 | Module | Responsibility |
 |---|---|
 | `spec.py` | versioned `AgentRunRequest`; immutable `AgentRunSpec/spec_hash`; controlled `ResolvedLaunchSpec`; observation-only `EffectiveRunState` |
-| `profile.py` | typed, versioned, closed `AgentProfile` registry; the OpenCode profile plus the official Codex ACP and Claude Agent ACP adapter profiles. Each profile carries an `AdapterContract` with `adapter_contract_hash`, `launch_kind`, accepted Binding schema/slot projection, and a code-owned version-probe rule; deployment-specific CLI path/version/digest live in the Binding, not here |
+| `profile.py` | typed, versioned, closed `AgentProfile` registry; the OpenCode profile plus the official Codex ACP and Claude Agent ACP adapter profiles. Each profile carries an `AdapterContract` with `adapter_contract_hash`, `launch_kind`, accepted Binding schema/slot projection, a code-owned version-probe rule, and — for `wrapped_acp` — the adapter's complete package closure (install root, tree digest, entry inside it) plus the frozen `interpreter_argv_prefix` that closes the interpreter's path-independent module search, checked against the profile's own argv so the two cannot drift; deployment-specific CLI path/version/digest live in the Binding, not here. It also owns `path_within_root`, the one lexical containment predicate every closure surface shares |
 | `runtime_binding.py` | the only reader of a Binding root — `active.json` + `generations/<id>/manifest.json` loading, canonical-JSON/size/ownership/mode/ancestor validation through `O_NOFOLLOW`/dirfd walks, contract-acceptance matching, slot projection, generation/set/slot hashing, and the typed fail-closed refusal surface |
-| `attestation.py` | spawn-boundary proof that the frozen interpreter/adapter/CLI identity and launch env are what the profile registered. It proves the *sealed* runtime identity rather than a profile constant, extends artifact identity to package/tree closures, and adds the ownership/ancestor and TOCTOU rechecks for both launch kinds |
+| `attestation.py` | spawn-boundary proof that the frozen interpreter/adapter/CLI identity and launch env are what the profile registered. It proves the *sealed* runtime identity rather than a profile constant, extends artifact identity to package/tree closures on both the Binding-sealed CLI **and** the source-frozen adapter, refuses a module-resolution root above the adapter closure, binds the frozen interpreter argv prefix as a token sequence with the adapter entry pinned immediately after it, and adds the ownership/ancestor and TOCTOU rechecks for both launch kinds |
 | `storage.py` | only Native root-binding constructors for `native-runs/` and `native-sessions/`; structural guard against direct legacy store construction |
 | `driver.py` | ACP wire/state machine over a supplied `ManagedProcess`; never spawns or selects policy/profile |
 | `config_fidelity.py` | exact-or-zero configuration and between-Run switch/rollback state machine |
@@ -214,7 +217,9 @@ credential references, profile revision/hash, and schema hash. Credential values
 are never serialized or represented in `repr`.
 
 It additionally carries the resolved runtime provenance — `adapter_contract_hash`,
-`launch_kind`, wrapped adapter/interpreter identity, the complete external CLI artifact identity
+`launch_kind`, the wrapped interpreter identity plus its frozen `interpreter_argv_prefix` and the
+adapter's complete package closure
+(`adapter_package_root`, `adapter_tree_sha256`, entry path/digest), the complete external CLI artifact identity
 (path, version, digest, closure kind), Binding `generation_id` plus set and per-slot hashes, the
 `session_compatibility_epoch`, and the Binding's acceptance receipt reference carried for reporting
 only, never as an authorization input. `launch.json` embeds the resulting
@@ -391,7 +396,11 @@ FIFO, device, non-regular); ownership/mode/ancestor refusals including artifacts
 `arsd`/AGENT UID; contract-acceptance and stale-generation fail-closed; probe-versus-manifest version
 mismatch; digest mismatch at admission and again at the spawn-boundary recheck through the existing
 deterministic race seam; descriptor-pinned exec for `direct_acp` and package-closure enforcement for
-`wrapped_acp`; read-once instrumentation proving one `active.json` read plus one generation read per Run
+`wrapped_acp` on both the downstream CLI and the ACP adapter — including a sibling/dependency byte
+change that leaves the entry file untouched, a new file inside the closure, an unsafe or
+closure-escaping tree entry, and a `node_modules` above the closure root — each proven before spawn and
+again after the race seam; the frozen interpreter argv prefix dropped, reordered, altered, or padded
+with an extra option, each refused before spawn; read-once instrumentation proving one `active.json` read plus one generation read per Run
 and zero reads during spawn, finalization, and reconciliation; epoch reuse/rejection with no
 `session/new` fallback; the absence of any caller-facing runtime-selection field; the absence of
 `--force` and of any privilege escalation in the command path; and provenance recomputation that
@@ -412,8 +421,10 @@ production acceptance.
 - The Runtime Binding source framework has landed. That merge authorizes no promotion against a real
   Binding root, no artifact-root preparation or installation, no re-acceptance at a current profile
   revision, no service restart, no publication, and no real-provider acceptance; each remains a separate
-  operator decision. Completing the wrapped adapter's package-tree closure is open source work under its
-  own approval. The compatibility invariant is explicit and held: `AgentRunRequest`/`AgentRunSpec` field
+  operator decision. The wrapped adapter's package closure has since landed under its own approval and
+  bumped both wrapped profile revisions (Codex r3, Claude r4), which retires their prior Binding
+  generations by contract hash and leaves re-acceptance an open operator action. The compatibility
+  invariant is explicit and held: `AgentRunRequest`/`AgentRunSpec` field
   sets, the `arsd` v1 public wire, the result/event grammar, reconcile semantics, and the
   `ManagedProcess` public API stay unchanged, old Runs stay readable, and old Native Sessions stay
   status/list/close-readable while `load` fails closed.

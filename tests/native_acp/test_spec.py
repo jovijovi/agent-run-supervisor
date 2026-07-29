@@ -567,13 +567,14 @@ def test_r6_b5_run_limits_nan_inf_refused(field: str, bad: float) -> None:
 
 # -- Codex closed-profile admission (D3/D11) ---------------------------------
 
-FROZEN_NODE_PATH = (
-    "/home/ecs-user/.local/share/agent-run-supervisor/adapters/node/v24.14.0/bin/node"
-)
+# The Phase 3 materialization location the source contract declares. Nothing
+# here creates, copies, or installs anything under /opt.
+FROZEN_NODE_PATH = "/opt/agent-run-supervisor/artifacts/node/v24.14.0/bin/node"
 FROZEN_ADAPTER_ENTRY = (
-    "/home/ecs-user/.local/share/agent-run-supervisor/adapters/codex-acp/1.1.7"
+    "/opt/agent-run-supervisor/artifacts/adapters/codex-acp/1.1.7"
     "/node_modules/@agentclientprotocol/codex-acp/dist/index.js"
 )
+FROZEN_NODE_ARGV_PREFIX = ("--no-global-search-paths",)
 FROZEN_CLI_PATH = "/home/ecs-user/.local/bin/codex"
 FROZEN_CODEX_HOME = "/home/ecs-user/.config/agent-run-supervisor/codex-acp-1.1.7"
 FROZEN_CODEX_CONFIG = '{"features":{"use_legacy_landlock":true}}'
@@ -606,14 +607,18 @@ def test_codex_launch_argv_frozen_node_plus_entry(tmp_path: Path) -> None:
     # is Node and resolution never consults PATH. Both stay source-frozen; only
     # the downstream CLI and the config root come from the Binding.
     assert launch.executable == FROZEN_NODE_PATH
-    assert launch.argv == (FROZEN_NODE_PATH, FROZEN_ADAPTER_ENTRY)
+    assert launch.argv == (FROZEN_NODE_PATH, *FROZEN_NODE_ARGV_PREFIX, FROZEN_ADAPTER_ENTRY)
     assert launch.credential_refs == ("codex-home-auth",)
     assert launch.permission_env == ()
 
     downstream = runtime.resolved.slot("downstream_cli").descriptor
     codex_home = runtime.resolved.slot("codex_home").descriptor["path"]
     payload = launch.to_dict()
-    assert payload["argv"] == [FROZEN_NODE_PATH, FROZEN_ADAPTER_ENTRY]
+    assert payload["argv"] == [
+        FROZEN_NODE_PATH,
+        *FROZEN_NODE_ARGV_PREFIX,
+        FROZEN_ADAPTER_ENTRY,
+    ]
     assert payload["fixed_env"] == [
         ["CODEX_CONFIG", FROZEN_CODEX_CONFIG],
         ["INITIAL_AGENT_MODE", "read-only"],
@@ -774,7 +779,7 @@ def test_codex_out_of_domain_model_or_effort_refused(overrides) -> None:
 # -- Claude closed-profile admission (B3) ------------------------------------
 
 FROZEN_CLAUDE_ENTRY = (
-    "/home/ecs-user/.local/share/agent-run-supervisor/adapters/claude-agent-acp/0.63.0"
+    "/opt/agent-run-supervisor/artifacts/adapters/claude-agent-acp/0.63.0"
     "/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js"
 )
 FROZEN_CLAUDE_CLI_PATH = "/home/ecs-user/.local/bin/claude"
@@ -805,7 +810,7 @@ def test_claude_launch_argv_frozen_node_plus_entry(tmp_path: Path) -> None:
     assembler.bind_workspace(root=tmp_path)
     launch = assembler.resolve_launch(runtime=runtime)
     assert launch.executable == FROZEN_NODE_PATH
-    assert launch.argv == (FROZEN_NODE_PATH, FROZEN_CLAUDE_ENTRY)
+    assert launch.argv == (FROZEN_NODE_PATH, *FROZEN_NODE_ARGV_PREFIX, FROZEN_CLAUDE_ENTRY)
     assert launch.credential_refs == ()
     assert launch.permission_env == ()
 
@@ -1003,3 +1008,140 @@ def test_sealed_provenance_records_the_generation_but_never_re_reads_it(
     assert provenance.adapter_contract_hash == (
         OPENCODE_NATIVE_ACP.adapter_contract_hash()
     )
+
+
+# ---------------------------------------------------------------------------
+# F-RUNTIME-BINDING-002 — the sealed launch carries the whole adapter closure
+# ---------------------------------------------------------------------------
+
+
+def test_sealed_launch_carries_the_adapter_package_closure(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path, CODEX_ACP_1_1_7)
+    assembler = RunSpecAssembler(_codex_request())
+    assembler.resolve_profile(DEFAULT_REGISTRY)
+    assembler.bind_workspace(root=tmp_path)
+    launch = assembler.resolve_launch(runtime=runtime)
+
+    wrapped = CODEX_ACP_1_1_7.contract.wrapped_runtime
+    sealed = launch.to_dict()["expected_runtime"]
+    assert sealed["adapter_package_root"] == wrapped.adapter_package_root
+    assert sealed["adapter_tree_sha256"] == wrapped.adapter_tree_sha256
+
+
+def test_launch_spec_hash_moves_with_every_adapter_closure_field(
+    tmp_path: Path,
+) -> None:
+    """A sibling change moves the source contract; the launch seal must move
+    with it or a Run could be sealed to an identity it no longer has."""
+    import dataclasses
+
+    runtime = _runtime(tmp_path, CODEX_ACP_1_1_7)
+    assembler = RunSpecAssembler(_codex_request())
+    assembler.resolve_profile(DEFAULT_REGISTRY)
+    assembler.bind_workspace(root=tmp_path)
+    baseline = assembler.resolve_launch(runtime=runtime)
+    baseline_hash = baseline.launch_hash()
+
+    for field, value in (
+        ("adapter_tree_sha256", "e" * 64),
+        ("adapter_package_root", "/opt/other-root"),
+    ):
+        drifted = dataclasses.replace(
+            baseline,
+            expected_runtime=dataclasses.replace(
+                baseline.expected_runtime,
+                **(
+                    {field: value}
+                    if field == "adapter_tree_sha256"
+                    else {
+                        field: value,
+                        "adapter_entry_path": f"{value}/dist/index.js",
+                    }
+                ),
+            ),
+        )
+        assert drifted.launch_hash() != baseline_hash
+
+
+def test_claude_sealed_launch_carries_the_adapter_package_closure(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path, CLAUDE_AGENT_ACP_0_63_0)
+    assembler = RunSpecAssembler(_claude_request())
+    assembler.resolve_profile(DEFAULT_REGISTRY)
+    assembler.bind_workspace(root=tmp_path)
+    launch = assembler.resolve_launch(runtime=runtime)
+
+    wrapped = CLAUDE_AGENT_ACP_0_63_0.contract.wrapped_runtime
+    sealed = launch.to_dict()["expected_runtime"]
+    assert sealed["adapter_package_root"] == wrapped.adapter_package_root
+    assert sealed["adapter_tree_sha256"] == wrapped.adapter_tree_sha256
+    assert sealed["adapter_entry_path"].startswith(
+        f"{sealed['adapter_package_root']}/"
+    )
+
+
+def test_direct_acp_seals_no_adapter_closure(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path, OPENCODE_NATIVE_ACP)
+    assembler = RunSpecAssembler(_request())
+    assembler.resolve_profile(DEFAULT_REGISTRY)
+    assembler.bind_workspace(root=tmp_path)
+    sealed = assembler.resolve_launch(runtime=runtime).to_dict()["expected_runtime"]
+    assert "adapter_package_root" not in sealed
+    assert "adapter_tree_sha256" not in sealed
+
+
+def test_sealed_launch_carries_the_frozen_interpreter_argv_prefix(
+    tmp_path: Path,
+) -> None:
+    """The flag that closes Node's global folders must be argv the child really
+    receives *and* a sealed fact, not an undocumented literal."""
+    runtime = _runtime(tmp_path, CODEX_ACP_1_1_7)
+    assembler = RunSpecAssembler(_codex_request())
+    assembler.resolve_profile(DEFAULT_REGISTRY)
+    assembler.bind_workspace(root=tmp_path)
+    launch = assembler.resolve_launch(runtime=runtime)
+
+    wrapped = CODEX_ACP_1_1_7.contract.wrapped_runtime
+    assert launch.argv == (
+        FROZEN_NODE_PATH,
+        "--no-global-search-paths",
+        FROZEN_ADAPTER_ENTRY,
+    )
+    sealed = launch.to_dict()["expected_runtime"]
+    assert sealed["interpreter_argv_prefix"] == ["--no-global-search-paths"]
+    assert tuple(sealed["interpreter_argv_prefix"]) == wrapped.interpreter_argv_prefix
+
+
+def test_launch_spec_hash_moves_with_the_interpreter_argv_prefix(
+    tmp_path: Path,
+) -> None:
+    import dataclasses
+
+    runtime = _runtime(tmp_path, CODEX_ACP_1_1_7)
+    assembler = RunSpecAssembler(_codex_request())
+    assembler.resolve_profile(DEFAULT_REGISTRY)
+    assembler.bind_workspace(root=tmp_path)
+    baseline = assembler.resolve_launch(runtime=runtime)
+    # An empty prefix is not even expressible: a wrapped identity that seals no
+    # closing options is refused outright, so the drift leg uses a different
+    # *valid* prefix to prove the seal covers the tokens themselves.
+    with pytest.raises(ValueError, match="interpreter_argv_prefix"):
+        dataclasses.replace(baseline.expected_runtime, interpreter_argv_prefix=())
+    drifted = dataclasses.replace(
+        baseline,
+        expected_runtime=dataclasses.replace(
+            baseline.expected_runtime,
+            interpreter_argv_prefix=("--no-global-search-paths", "--frozen-intrinsics"),
+        ),
+    )
+    assert drifted.launch_hash() != baseline.launch_hash()
+
+
+def test_direct_acp_seals_no_interpreter_argv_prefix(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path, OPENCODE_NATIVE_ACP)
+    assembler = RunSpecAssembler(_request())
+    assembler.resolve_profile(DEFAULT_REGISTRY)
+    assembler.bind_workspace(root=tmp_path)
+    sealed = assembler.resolve_launch(runtime=runtime).to_dict()["expected_runtime"]
+    assert "interpreter_argv_prefix" not in sealed

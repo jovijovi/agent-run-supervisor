@@ -121,13 +121,22 @@ accepted slots, and seals the resulting `ResolvedLaunchSpec` plus runtime proven
 service unit; and every registered profile refuses admission fail-closed when no Binding is configured,
 validated, or promoted.
 
-Implemented source is not closure. The wrapped-adapter artifact identity still freezes only the
-interpreter and the adapter **entry**, not the complete wrapped adapter package tree; closing that
-package-closure gap is open source work, so the Runtime Binding layer is not finished. Operator gates
-are separate and open in their own right: preparing an immutable, non-service-writable artifact root,
-authoring/validating/promoting a Binding generation, and re-accepting each profile at its current
-revision are operator actions. No Binding root creation, generation promotion, profile acceptance,
-artifact installation, service restart, rollout, or deployment is approved by this document.
+The wrapped-adapter artifact identity is now a complete package closure in source: each `wrapped_acp`
+contract freezes the adapter's npm **install root** and that root's whole tree digest beside the
+interpreter and entry, so the sibling code and hoisted dependencies the entry resolves are frozen too;
+it also freezes the interpreter argv prefix that closes the runtime's out-of-closure module search,
+because a frozen tree is not a closure while the interpreter can still load code from elsewhere. Both
+wrapped profiles bumped a revision for it, and their frozen paths name the root-owned artifact location
+a later materialization step is expected to create — not the service account's home, whose ancestors no
+per-leaf ownership change could ever make non-writable by the service UID.
+
+Implemented source is still not closure of the Runtime Binding *layer*: operator gates are separate and
+open in their own right — materializing that immutable, non-service-writable artifact root, whose
+ancestor chain must also carry no further module-resolution root, authoring/validating/promoting a
+Binding generation, and re-accepting each profile at its current revision are operator actions. Nothing
+under that artifact prefix exists yet, and no Binding root creation, generation promotion, profile
+acceptance, artifact installation, service restart, rollout, or deployment is approved by this
+document.
 
 ## Non-goals
 

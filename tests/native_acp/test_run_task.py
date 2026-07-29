@@ -2749,10 +2749,20 @@ class CodexHarness:
 
         stage = tmp_path / "stage"
         stage.mkdir(exist_ok=True)
-        # Private copy of the repository fake-agent entry: tamper legs mutate
-        # only this file.
-        self.entry = stage / "codex_fake_entry.py"
+        # Private copy of the repository fake-agent entry, staged inside its own
+        # adapter package closure: the entry sits under the install root beside
+        # the hoisted dependency the runtime would resolve by walking up from
+        # it, which is the shape the source contract now freezes.
+        self.adapter_root = stage / "adapter-pkg"
+        self.entry = (
+            self.adapter_root / "node_modules" / "@scope" / "adapter" / "dist"
+            / "codex_fake_entry.py"
+        )
+        self.entry.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(FAKE_AGENT_PATH, self.entry)
+        self.adapter_sibling = self.adapter_root / "node_modules" / "dep" / "index.py"
+        self.adapter_sibling.parent.mkdir(parents=True, exist_ok=True)
+        self.adapter_sibling.write_bytes(b"# hoisted dependency\n")
         # The interpreter is executed, never modified. It must be an artifact
         # that actually satisfies C5 — the test runner's own uv-managed Python
         # sits under a group-writable chain, so attesting it would be attesting
@@ -2846,6 +2856,14 @@ class CodexHarness:
                 interpreter_sha256=_sha256_file(self.interpreter),
                 adapter_entry_path=str(self.entry),
                 adapter_entry_sha256=_sha256_file(self.entry),
+                adapter_package_root=str(self.adapter_root),
+                adapter_tree_sha256=bf.rb.package_tree_digest(self.adapter_root),
+                # This harness's interpreter is a real Python, not the frozen
+                # Node, so it declares Python's own closing option (-E ignores
+                # the PYTHON* environment) rather than Node's flag. The contract
+                # rule under test is that *some* closing prefix is frozen and
+                # that argv cannot drift from it.
+                interpreter_argv_prefix=("-E",),
             ),
             cli_slot="downstream_cli",
             credential_root_slot="codex_home",
@@ -2860,7 +2878,7 @@ class CodexHarness:
             profile_id="codex-fake-1.0",
             revision=1,
             executable_key="codex-fake",
-            argv_template=(str(self.entry),),
+            argv_template=("-E", str(self.entry)),
             env_allowlist=(
                 "PATH",
                 "HOME",
@@ -3967,3 +3985,74 @@ def test_a_pre_epoch_session_is_refused_by_a_binding_era_run(
     assert record.session_compatibility_epoch is None
     assert "sess-native-1" in {row.session_id for row in store.list_records()}
     assert store.mark_closed("sess-native-1").state == "closed"
+
+
+def test_adapter_sibling_tamper_before_run_refused_with_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F-RUNTIME-BINDING-002 at the Run boundary.
+
+    The dependency the entry would resolve changes; the entry file does not.
+    An entry-only artifact identity cannot see this, so the Run must refuse on
+    the closure row, before any spawn, with the sealed closure durable in
+    ``launch.json``.
+    """
+    harness = CodexHarness(tmp_path, monkeypatch)
+    spawned = _recording_spawn(monkeypatch)
+    task = harness.task()
+    wrapped = harness.profile().contract.wrapped_runtime
+    sealed_tree = wrapped.adapter_tree_sha256
+    sealed_entry = wrapped.adapter_entry_sha256
+
+    mode = harness.adapter_sibling.stat().st_mode
+    harness.adapter_sibling.write_bytes(b"# swapped hoisted dependency\n")
+    harness.adapter_sibling.chmod(mode)
+
+    result = _run(task)
+
+    assert result.status is AgentRunStatus.FAILED
+    assert spawned == []
+    run_dir = harness.run_dir()
+    launch = json.loads((run_dir / "launch.json").read_text(encoding="utf-8"))
+    assert launch["expected_runtime"]["adapter_package_root"] == str(
+        harness.adapter_root
+    )
+    assert launch["expected_runtime"]["adapter_tree_sha256"] == sealed_tree
+    rows = harness.rows()
+    # The entry itself still matches: only the closure row can catch this.
+    assert rows["adapter_entry_sha256"]["passed"] is True
+    assert rows["adapter_entry_sha256"]["expected"] == sealed_entry
+    assert rows["adapter_package_closure"]["passed"] is False
+    assert rows["adapter_package_closure"]["expected"] == sealed_tree
+    payload = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    assert payload["detail_code"] == "RUNTIME_IDENTITY_MISMATCH"
+
+
+def test_inwindow_adapter_sibling_swap_refused_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_run_supervisor.native_acp import attestation as attestation_module
+
+    harness = CodexHarness(tmp_path, monkeypatch)
+    spawned = _recording_spawn(monkeypatch)
+    task = harness.task()
+    sibling = harness.adapter_sibling
+
+    def tamper() -> None:
+        mode = sibling.stat().st_mode
+        sibling.write_bytes(b"# swapped inside the race seam\n")
+        sibling.chmod(mode)
+
+    monkeypatch.setattr(attestation_module, "_POST_ATTESTATION_HOOK", tamper)
+
+    result = _run(task)
+
+    assert result.status is AgentRunStatus.FAILED
+    assert spawned == []
+    rows = harness.rows()
+    assert rows["adapter_package_closure"]["passed"] is True
+    assert rows["adapter_package_closure_recheck"]["passed"] is False
+    payload = json.loads(
+        (harness.run_dir() / "result.json").read_text(encoding="utf-8")
+    )
+    assert payload["detail_code"] == "RUNTIME_IDENTITY_MISMATCH"

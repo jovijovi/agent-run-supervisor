@@ -49,6 +49,7 @@ from .profile import (
     SLOT_KIND_PACKAGE_TREE,
     AgentProfile,
     VersionProbeRule,
+    path_within_root,
 )
 
 BINDING_SCHEMA_VERSION = 1
@@ -414,11 +415,14 @@ def package_tree_digest(
 ) -> str:
     """Canonical digest over a package root's complete code closure (C5).
 
-    Deterministic ordering by POSIX-relative path, length-prefixed so a name
-    boundary can never be shifted into a neighbour, and bounded: an oversized
-    tree is refused rather than sampled. Symlinks and special files inside the
-    closure are refused — an immutable package root contains regular files and
-    directories only.
+    Deterministic traversal, length-prefixed so a name boundary can never be
+    shifted into a neighbour, and bounded: an oversized tree is refused rather
+    than sampled. Directories and regular files are absorbed by name and
+    content; a symlink is absorbed by its target *text* once every point the
+    kernel would walk to reach that target is proven to stay inside the root
+    (see :func:`_prove_target_within_root`), and a special file is refused
+    outright — an immutable package root contains nothing a runtime could read
+    from outside the closure.
 
     With ``ownership``, every entry is ownership- and mode-checked as it is
     walked. A digest alone would freeze the sibling code only until someone who
@@ -442,30 +446,187 @@ def package_tree_digest(
             child = directory / name
             relative = f"{prefix}{name}"
             info = os.lstat(child)
-            if ownership is not None:
-                check_ownership(info, ownership, "package closure entry")
-            if stat.S_ISDIR(info.st_mode):
-                stack.append((child, f"{relative}/"))
-                entries += 1
-                _absorb(digest, relative, "d", b"")
-            elif stat.S_ISREG(info.st_mode):
+            if stat.S_ISLNK(info.st_mode):
                 entries += 1
                 total_bytes += info.st_size
                 if total_bytes > max_bytes:
                     raise _refuse(
                         "PACKAGE_TREE_TOO_LARGE", "package closure exceeds the byte bound"
                     )
-                _absorb(digest, relative, "f", _file_digest(child))
+                if ownership is not None:
+                    _check_symlink_owner(ownership, info)
+                _absorb(digest, relative, "l", _contained_link_target(root, child))
             else:
-                raise _refuse(
-                    "PACKAGE_TREE_UNSAFE_ENTRY",
-                    "package closure contains a symlink or special file",
-                )
+                if ownership is not None:
+                    check_ownership(info, ownership, "package closure entry")
+                if stat.S_ISDIR(info.st_mode):
+                    stack.append((child, f"{relative}/"))
+                    entries += 1
+                    _absorb(digest, relative, "d", b"")
+                elif stat.S_ISREG(info.st_mode):
+                    entries += 1
+                    total_bytes += info.st_size
+                    if total_bytes > max_bytes:
+                        raise _refuse(
+                            "PACKAGE_TREE_TOO_LARGE",
+                            "package closure exceeds the byte bound",
+                        )
+                    _absorb(digest, relative, "f", _file_digest(child))
+                else:
+                    raise _refuse(
+                        "PACKAGE_TREE_UNSAFE_ENTRY",
+                        "package closure contains a special file",
+                    )
             if entries > max_entries:
                 raise _refuse(
                     "PACKAGE_TREE_TOO_LARGE", "package closure exceeds the entry bound"
                 )
     return digest.hexdigest()
+
+
+def _check_symlink_owner(ownership: TrustedOwnership, info: os.stat_result) -> None:
+    """Owner rules only: a symlink's permission bits carry no authority.
+
+    Linux ignores a symlink's mode, so the strict group/other-write rule has
+    nothing to judge on one. What actually stops a link being retargeted is the
+    strict rule already applied to the directory holding it, and what this adds
+    is that the service/AGENT UID may not own the link itself.
+    """
+    if info.st_uid == ownership.service_uid:
+        raise _refuse(
+            "SERVICE_UID_WRITABLE", "package closure symlink is owned by the arsd/AGENT UID"
+        )
+    if not ownership.is_trusted(info.st_uid):
+        raise _refuse(
+            "UNTRUSTED_OWNER", "package closure symlink is owned outside the trusted set"
+        )
+
+
+# A target is walked the way the kernel walks it, under two bounds: hops, at
+# the kernel's own ``MAXSYMLINKS`` order, and total components, so that one
+# expansion cannot amplify into an unbounded walk. Exceeding either is
+# undecidable, not proven safe.
+_SYMLINK_HOP_MAX = 40
+_SYMLINK_STEP_MAX = 4096
+
+
+def _contained_link_target(root: Path, link: Path) -> bytes:
+    """The link's own text, once it is proven not to leave the closure.
+
+    A real package install is full of symlinks — ``node_modules/.bin`` alone
+    guarantees them — so refusing every one would leave the closure unable to
+    model the tree it exists to freeze. Absorbing the target *text* freezes the
+    name without ever following it; what must still be refused is a link that
+    resolves outside the root, because that is code no tree digest covers.
+
+    Containment is a gate, never a digest input: the bytes absorbed are the raw
+    text, so what the proof below decides is which trees are *accepted*, and an
+    honest tree's digest is unaffected by it.
+    """
+    raw = os.readlink(link)
+    _prove_target_within_root(root, link.parent, raw)
+    return raw.encode("utf-8", "surrogateescape")
+
+
+def _symlink_escape() -> BindingRefusal:
+    """One wording for one fact: a link names code outside the closure."""
+    return _refuse(
+        "PACKAGE_TREE_SYMLINK_ESCAPE",
+        "package closure contains a symlink resolving outside the root",
+    )
+
+
+def _prove_target_within_root(root: Path, here: Path, raw: str) -> None:
+    """Walk a link's target as the kernel would, refusing any point outside.
+
+    A lexical walk cannot decide this and is not a conservative approximation
+    of the kernel's. ``normpath`` cancels ``X/..`` as text, while the kernel
+    applies ``..`` to whatever ``X`` *resolved to*, so a target composed of two
+    individually contained links can still land outside: with ``a/b/up -> ".."``
+    the target ``a/b/up/../../x`` reads as ``<root>/a/x`` as text and resolves
+    to ``<root>/../x``. For the same reason no hop is safe by induction —
+    containment of a link target is not closed under composition with ``..``.
+
+    So every point the kernel would walk is judged, one component at a time. An
+    intermediate point may *be* the root — a real ``.bin`` link reaching
+    ``../../lib/x.js`` passes through it — while the target itself must be
+    strictly inside, a root not being its own member. Each point is judged
+    before it is read, so no filesystem call is ever issued on a path outside
+    the root, and no component above the root is ever resolved.
+
+    Two outcomes are undecidable rather than escaping — a cycle, and a walk
+    past the bounds above — and both are refused rather than accepted or
+    chased. A dangling in-root name is neither: it reaches nothing, and the
+    trusted write inside the root that would later create it changes this very
+    digest, so it stays covered and is frozen by its text.
+
+    Preconditions, both held elsewhere: the traversal descends only real
+    directories, so ``here`` carries no unexpanded link; and that the root's own
+    ancestors are not links is proven at the Binding layer by
+    ``check_ancestors`` (``SYMLINKED_ANCESTOR``). Pinning the walked points
+    against a concurrent rewrite is not this layer's job either — the closure
+    proves what the tree *is*, and the attestation layer owns the recheck.
+    """
+    current, pending = _link_walk_start(root, here, raw)
+    hops = steps = 0
+    while pending:
+        steps += 1
+        if steps > _SYMLINK_STEP_MAX:
+            raise _refuse(
+                "PACKAGE_TREE_SYMLINK_UNRESOLVABLE",
+                "package closure contains a symlink exceeding the walk bound",
+            )
+        name = pending.pop(0)
+        if name in ("", "."):
+            continue
+        candidate = current.parent if name == ".." else current / name
+        # Judged before it is read, and the root itself passes only while
+        # components remain: a point walked *through* may be the root, the
+        # point walked *to* may not.
+        if not path_within_root(root, candidate) and not (pending and candidate == root):
+            raise _symlink_escape()
+        if name == "..":
+            current = candidate
+            continue
+        try:
+            text = os.readlink(candidate)
+        except OSError as error:
+            if error.errno == errno.EINVAL:  # a real component, not a link
+                current = candidate
+                continue
+            if error.errno == errno.ENOENT:  # in the root and absent: reaches nothing
+                return
+            raise _refuse(
+                "PACKAGE_TREE_SYMLINK_UNRESOLVABLE",
+                "package closure contains a symlink that could not be resolved",
+            ) from None
+        hops += 1
+        if hops > _SYMLINK_HOP_MAX:
+            raise _refuse(
+                "PACKAGE_TREE_SYMLINK_UNRESOLVABLE",
+                "package closure contains a symlink cycle or an over-deep chain",
+            )
+        current, expanded = _link_walk_start(root, candidate.parent, text)
+        pending = expanded + pending
+    if not path_within_root(root, current):
+        raise _symlink_escape()
+
+
+def _link_walk_start(root: Path, here: Path, text: str) -> tuple[Path, list[str]]:
+    """Where a target's walk starts, and the components left to walk.
+
+    An absolute target restarts the walk at the root, so its leading components
+    must be the root's own — compared as text, with no ``..`` elided, because
+    eliding is the very confusion this walk exists to avoid. What follows the
+    root is then walked like any other component, which is what keeps an
+    in-root absolute target legible while still refusing one that jumps out.
+    """
+    if not text.startswith("/"):
+        return here, text.split("/")
+    parts, root_parts = Path(text).parts, root.parts
+    if parts[: len(root_parts)] != root_parts:
+        raise _symlink_escape()
+    return root, list(parts[len(root_parts) :])
 
 
 def _absorb(digest: "hashlib._Hash", relative: str, kind: str, payload: bytes) -> None:
