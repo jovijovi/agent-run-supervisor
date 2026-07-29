@@ -168,7 +168,24 @@ promotes it. Every registered profile refuses admission fail-closed until an ope
 immutable artifact root the daemon's own UID cannot rewrite and promoted a generation for that
 profile — so a freshly started daemon with no promoted Binding runs nothing.
 
-The operator surface is a separate CLI:
+One daemon takes one `--binding-root`, and that root carries **one independently promotable selection
+per registered profile**:
+
+```text
+<binding-root>/
+└── profiles/<profile-id>/
+    ├── active.json                        # regular file, atomically replaced — never a symlink
+    └── generations/<generation-id>/
+        └── manifest.json                  # immutable once written
+```
+
+The operator authors these directories; ARS creates nothing here and writes only `active.json`.
+Promoting or rolling back one profile replaces one file inside that profile's own subtree, so it
+cannot disable, overwrite, or race another profile's selection. Generation ids are scoped per profile,
+so two profiles may both use `gen-0001`. The pointer names the profile it activates, so one moved
+between subtrees is refused rather than believed.
+
+The operator surface is a separate CLI, and each generation command acts on exactly one profile:
 
 ```bash
 agent-run-supervisor runtime-binding validate    --binding-root <root> --profile <id> --generation <gen>
@@ -184,6 +201,13 @@ There is no `--force`: a generation that does not validate is never promoted. No
 an artifact, edits a unit file, escalates privilege, or restarts the daemon. Promotion needs no
 restart and takes effect on the *next* run, because admission re-reads the active pointer per run and
 never re-points a run that is already sealed.
+
+**Upgrading from a 0.5.1 Binding root.** 0.5.1 put a single `active.json` at the root, which could
+activate only one profile at a time. That layout is refused, not read: a root still carrying it fails
+closed with `LEGACY_BINDING_LAYOUT`, and a root with no subtree for the resolving profile with
+`PROFILE_BINDING_ABSENT`. ARS does not migrate operator storage. Move each generation to
+`profiles/<profile-id>/generations/<generation-id>/`, delete the root-level `active.json`, and run
+`runtime-binding promote` once per profile.
 
 ## Call it from Python
 

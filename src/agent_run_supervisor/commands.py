@@ -441,8 +441,12 @@ def _resolve_binding_profile(profile_id: str):
         return None
 
 
+def _unknown_profile_report(profile_id: str) -> dict[str, Any]:
+    return {"valid": False, "rule": "UNKNOWN_PROFILE", "profile_id": profile_id}
+
+
 def _validated_generation(
-    args: argparse.Namespace,
+    args: argparse.Namespace, profile: Any
 ) -> tuple[int, dict[str, Any], Any]:
     """Shared validate/promote/rollback core: full validation plus the probe.
 
@@ -451,13 +455,6 @@ def _validated_generation(
     """
     from agent_run_supervisor.native_acp import runtime_binding as rb
 
-    profile = _resolve_binding_profile(args.profile)
-    if profile is None:
-        return 1, {
-            "valid": False,
-            "rule": "UNKNOWN_PROFILE",
-            "profile_id": args.profile,
-        }, None
     try:
         resolved = rb.validate_generation(
             Path(args.binding_root),
@@ -516,13 +513,24 @@ def cmd_runtime_binding(args: argparse.Namespace) -> int:
 def _cmd_binding_generation(args: argparse.Namespace, command: str) -> int:
     from agent_run_supervisor.native_acp import runtime_binding as rb
 
+    # Every Binding path this command touches is scoped to one registered
+    # profile, so the profile is resolved from the closed registry before any
+    # root is opened. A promotion for one profile never reads or replaces
+    # another's active selection.
+    profile = _resolve_binding_profile(args.profile)
+    if profile is None:
+        _print_json(_unknown_profile_report(args.profile))
+        return 1
+
     if command == "rollback":
         # A rollback targets a generation other than the active one: rolling
         # back to what is already promoted would be a silent no-op that reads
         # like a successful recovery.
         try:
             active = rb.read_active_pointer(
-                Path(args.binding_root), ownership=_binding_ownership(args)
+                Path(args.binding_root),
+                profile=profile,
+                ownership=_binding_ownership(args),
             )
         except rb.BindingRefusal as refusal:
             _print_json({"valid": False, "rule": refusal.rule})
@@ -537,7 +545,7 @@ def _cmd_binding_generation(args: argparse.Namespace, command: str) -> int:
             )
             return 1
 
-    code, report, resolved = _validated_generation(args)
+    code, report, resolved = _validated_generation(args, profile)
     if code != 0 or command == "validate":
         _print_json(report)
         return code
@@ -548,7 +556,10 @@ def _cmd_binding_generation(args: argparse.Namespace, command: str) -> int:
     # generation's bytes did not change while it was being probed.
     try:
         rb.write_active_pointer(
-            Path(args.binding_root), resolved, ownership=_binding_ownership(args)
+            Path(args.binding_root),
+            resolved,
+            profile=profile,
+            ownership=_binding_ownership(args),
         )
     except rb.BindingRefusal as refusal:
         _print_json({"valid": True, "promoted": False, "rule": refusal.rule})

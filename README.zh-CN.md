@@ -154,7 +154,23 @@ ARS **只读打开 Binding root，且每次运行恰好读一次**，从不创�
 已注册 profile 都会失败关闭地拒绝准入 —— 因此一个刚启动、没有已提升 Binding 的守护进程跑不了
 任何东西。
 
-运维侧是一套独立的 CLI：
+一个守护进程只接受一个 `--binding-root`，而这个 root 为**每个已注册 profile 各自持有一份可独立提升
+的选择**：
+
+```text
+<binding-root>/
+└── profiles/<profile-id>/
+    ├── active.json                        # 普通文件，原子替换 —— 绝不是符号链接
+    └── generations/<generation-id>/
+        └── manifest.json                  # 一旦写入即不可变
+```
+
+这些目录由运维方创建；ARS 在这里不创建任何东西，只写 `active.json`。提升或回滚某个 profile 只替换
+它自己子树里的那一个文件，因此不可能禁用、覆盖或抢占另一个 profile 的选择。generation id 按 profile
+划分作用域，两个 profile 都用 `gen-0001` 也互不相干。指针自身声明它激活的是哪个 profile，所以被挪到
+别的子树里的指针会被拒绝，而不是被采信。
+
+运维侧是一套独立的 CLI，每条 generation 命令只作用于一个 profile：
 
 ```bash
 agent-run-supervisor runtime-binding validate    --binding-root <root> --profile <id> --generation <gen>
@@ -168,6 +184,12 @@ agent-run-supervisor runtime-binding inspect-run --run-dir <native-run-dir>
 这里没有 `--force`：校验不通过的 generation 永远不会被提升。其中没有任何命令会安装工件、修改 unit
 文件、提升权限或重启守护进程。提升无需重启，并在**下一次**运行时生效 —— 因为准入按 Run 重新读取
 active 指针，且绝不改写一个已经封存的 Run。
+
+**从 0.5.1 的 Binding root 升级。** 0.5.1 把唯一一个 `active.json` 放在 root 下，同一时刻只能激活一个
+profile。该布局会被拒绝，而不是被读取：仍带着它的 root 以 `LEGACY_BINDING_LAYOUT` 失败关闭，没有对应
+profile 子树的 root 则是 `PROFILE_BINDING_ABSENT`。ARS 不迁移运维方的存储。请把每个 generation 移动到
+`profiles/<profile-id>/generations/<generation-id>/`，删除 root 下的 `active.json`，再为每个 profile
+各执行一次 `runtime-binding promote`。
 
 ## 用 Python 调用
 

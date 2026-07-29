@@ -59,6 +59,7 @@ def canonical(payload: Any) -> str:
 
 
 from .binding_fixtures import (  # noqa: E402
+    build_binding_root,
     declared_interpreter,
     harden,
     harden_tree,
@@ -156,7 +157,8 @@ def build_root(
     write_pointer: bool = True,
 ) -> Path:
     root = tmp_path / "binding-root"
-    (root / rb.GENERATIONS_DIRNAME / generation_id).mkdir(parents=True, exist_ok=True)
+    manifest_path = rb.generation_manifest_path(root, profile.profile_id, generation_id)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
     if slots is None:
         binary = make_native_binary(root)
         slots = {"agent_cli": {"kind": SLOT_KIND_NATIVE_BINARY, **native_binary_descriptor(binary)}}
@@ -181,21 +183,39 @@ def build_root(
     }
     if manifest_overrides:
         manifest.update(manifest_overrides)
-    manifest_path = root / rb.GENERATIONS_DIRNAME / generation_id / rb.MANIFEST_FILENAME
     write_canonical(manifest_path, manifest)
     if write_pointer:
         pointer = {
             "schema_version": rb.BINDING_SCHEMA_VERSION,
+            "profile_id": profile.profile_id,
             "generation_id": generation_id,
             "manifest_sha256": sha256_file(manifest_path),
         }
         if pointer_overrides:
             pointer.update(pointer_overrides)
-        write_canonical(root / rb.ACTIVE_FILENAME, pointer)
-    for directory in (root, root / rb.GENERATIONS_DIRNAME, manifest_path.parent):
+        write_canonical(rb.active_pointer_path(root, profile.profile_id), pointer)
+    profile_dir = rb.profile_binding_dir(root, profile.profile_id)
+    for directory in (
+        root,
+        root / rb.PROFILES_DIRNAME,
+        profile_dir,
+        profile_dir / rb.GENERATIONS_DIRNAME,
+        manifest_path.parent,
+    ):
         directory.chmod(0o755)
     harden(manifest_path.parent)
     return root
+
+
+def opencode_pointer(root: Path) -> Path:
+    """The default fixture profile's own active pointer."""
+    return rb.active_pointer_path(root, OPENCODE_NATIVE_ACP.profile_id)
+
+
+def opencode_manifest(root: Path, generation_id: str = "gen-0007") -> Path:
+    return rb.generation_manifest_path(
+        root, OPENCODE_NATIVE_ACP.profile_id, generation_id
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -459,13 +479,14 @@ def test_launcher_only_package_tree_is_refused(tmp_path: Path) -> None:
 
 def test_non_canonical_json_is_refused(tmp_path: Path) -> None:
     root = build_root(tmp_path)
-    manifest_path = root / rb.GENERATIONS_DIRNAME / "gen-0007" / rb.MANIFEST_FILENAME
+    manifest_path = opencode_manifest(root)
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     write_canonical(
-        root / rb.ACTIVE_FILENAME,
+        opencode_pointer(root),
         {
             "schema_version": rb.BINDING_SCHEMA_VERSION,
+            "profile_id": OPENCODE_NATIVE_ACP.profile_id,
             "generation_id": "gen-0007",
             "manifest_sha256": sha256_file(manifest_path),
         },
@@ -477,7 +498,7 @@ def test_non_canonical_json_is_refused(tmp_path: Path) -> None:
 
 def test_oversize_file_is_refused(tmp_path: Path) -> None:
     root = build_root(tmp_path)
-    manifest_path = root / rb.GENERATIONS_DIRNAME / "gen-0007" / rb.MANIFEST_FILENAME
+    manifest_path = opencode_manifest(root)
     manifest_path.write_text("x" * (rb.MAX_BINDING_FILE_BYTES + 1), encoding="utf-8")
     with pytest.raises(rb.BindingRefusal) as excinfo:
         _resolve(root)
@@ -497,9 +518,10 @@ def test_pointer_generation_id_traversal_is_refused(
 ) -> None:
     root = build_root(tmp_path)
     write_canonical(
-        root / rb.ACTIVE_FILENAME,
+        opencode_pointer(root),
         {
             "schema_version": rb.BINDING_SCHEMA_VERSION,
+            "profile_id": OPENCODE_NATIVE_ACP.profile_id,
             "generation_id": generation_id,
             "manifest_sha256": "c" * 64,
         },
@@ -511,7 +533,7 @@ def test_pointer_generation_id_traversal_is_refused(
 
 def test_symlinked_active_pointer_is_refused(tmp_path: Path) -> None:
     root = build_root(tmp_path)
-    pointer = root / rb.ACTIVE_FILENAME
+    pointer = opencode_pointer(root)
     real = root / "real-active.json"
     pointer.rename(real)
     pointer.symlink_to(real)
@@ -522,7 +544,7 @@ def test_symlinked_active_pointer_is_refused(tmp_path: Path) -> None:
 
 def test_symlinked_manifest_is_refused(tmp_path: Path) -> None:
     root = build_root(tmp_path)
-    manifest_path = root / rb.GENERATIONS_DIRNAME / "gen-0007" / rb.MANIFEST_FILENAME
+    manifest_path = opencode_manifest(root)
     real = manifest_path.parent / "real-manifest.json"
     manifest_path.rename(real)
     manifest_path.symlink_to(real)
@@ -533,7 +555,7 @@ def test_symlinked_manifest_is_refused(tmp_path: Path) -> None:
 
 def test_symlinked_generation_directory_is_refused(tmp_path: Path) -> None:
     root = build_root(tmp_path)
-    generations = root / rb.GENERATIONS_DIRNAME
+    generations = opencode_manifest(root).parent.parent
     real = generations / "real-gen"
     (generations / "gen-0007").rename(real)
     (generations / "gen-0007").symlink_to(real)
@@ -544,7 +566,7 @@ def test_symlinked_generation_directory_is_refused(tmp_path: Path) -> None:
 
 def test_fifo_where_a_regular_file_is_required_is_refused(tmp_path: Path) -> None:
     root = build_root(tmp_path)
-    pointer = root / rb.ACTIVE_FILENAME
+    pointer = opencode_pointer(root)
     pointer.unlink()
     os.mkfifo(pointer, 0o644)
     with pytest.raises(rb.BindingRefusal) as excinfo:
@@ -554,7 +576,7 @@ def test_fifo_where_a_regular_file_is_required_is_refused(tmp_path: Path) -> Non
 
 def test_directory_where_a_regular_file_is_required_is_refused(tmp_path: Path) -> None:
     root = build_root(tmp_path)
-    pointer = root / rb.ACTIVE_FILENAME
+    pointer = opencode_pointer(root)
     pointer.unlink()
     pointer.mkdir()
     with pytest.raises(rb.BindingRefusal) as excinfo:
@@ -608,7 +630,7 @@ def test_group_or_other_writable_artifact_is_refused(tmp_path: Path) -> None:
     root = build_root(tmp_path)
     binary = Path(
         json.loads(
-            (root / rb.GENERATIONS_DIRNAME / "gen-0007" / rb.MANIFEST_FILENAME).read_text()
+            (opencode_manifest(root)).read_text()
         )["slots"]["agent_cli"]["path"]
     )
     binary.chmod(0o777)
@@ -621,7 +643,7 @@ def test_group_or_other_writable_ancestor_is_refused(tmp_path: Path) -> None:
     root = build_root(tmp_path)
     binary = Path(
         json.loads(
-            (root / rb.GENERATIONS_DIRNAME / "gen-0007" / rb.MANIFEST_FILENAME).read_text()
+            (opencode_manifest(root)).read_text()
         )["slots"]["agent_cli"]["path"]
     )
     binary.parent.chmod(0o777)
@@ -632,7 +654,7 @@ def test_group_or_other_writable_ancestor_is_refused(tmp_path: Path) -> None:
 
 def test_artifact_digest_mismatch_is_refused(tmp_path: Path) -> None:
     root = build_root(tmp_path)
-    manifest_path = root / rb.GENERATIONS_DIRNAME / "gen-0007" / rb.MANIFEST_FILENAME
+    manifest_path = opencode_manifest(root)
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     binary = Path(payload["slots"]["agent_cli"]["path"])
     binary.write_text("#!/bin/sh\n# swapped\n", encoding="utf-8")
@@ -643,7 +665,7 @@ def test_artifact_digest_mismatch_is_refused(tmp_path: Path) -> None:
 
 def test_symlinked_artifact_is_refused(tmp_path: Path) -> None:
     root = build_root(tmp_path)
-    manifest_path = root / rb.GENERATIONS_DIRNAME / "gen-0007" / rb.MANIFEST_FILENAME
+    manifest_path = opencode_manifest(root)
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     binary = Path(payload["slots"]["agent_cli"]["path"])
     real = binary.with_name("real-opencode")
@@ -759,7 +781,7 @@ def test_sticky_world_writable_binding_root_is_refused(tmp_path: Path) -> None:
 def test_sticky_world_writable_generation_directory_is_refused(tmp_path: Path) -> None:
     """A generation directory holds manifest bytes, so it is protected too."""
     root = build_root(tmp_path)
-    (root / rb.GENERATIONS_DIRNAME / "gen-0007").chmod(0o1777)
+    opencode_manifest(root).parent.chmod(0o1777)
     with pytest.raises(rb.BindingRefusal) as excinfo:
         _resolve(root)
     assert excinfo.value.rule == "GROUP_OR_OTHER_WRITABLE"
@@ -1235,7 +1257,7 @@ def test_validate_generation_refuses_a_probe_versus_manifest_mismatch(
     tmp_path: Path,
 ) -> None:
     root = build_root(tmp_path)
-    manifest_path = root / rb.GENERATIONS_DIRNAME / "gen-0007" / rb.MANIFEST_FILENAME
+    manifest_path = opencode_manifest(root)
     binary = Path(json.loads(manifest_path.read_text())["slots"]["agent_cli"]["path"])
     binary.write_text(
         "#!" + str(stage_interpreter(root)) + "\nprintf '%s' '9.9.9'\n",
@@ -1300,13 +1322,16 @@ def test_write_active_pointer_replaces_atomically_and_never_creates_a_symlink(
     resolved = rb.validate_generation(
         root, "gen-0008", profile=OPENCODE_NATIVE_ACP, ownership=ownership(), probe=False
     )
-    written = rb.write_active_pointer(root, resolved, ownership=ownership())
-    assert written == root / rb.ACTIVE_FILENAME
+    written = rb.write_active_pointer(
+        root, resolved, profile=OPENCODE_NATIVE_ACP, ownership=ownership()
+    )
+    assert written == opencode_pointer(root)
     assert not written.is_symlink()
     assert stat.S_ISREG(os.lstat(written).st_mode)
     payload = json.loads(written.read_text(encoding="utf-8"))
     assert payload == {
         "schema_version": rb.BINDING_SCHEMA_VERSION,
+        "profile_id": OPENCODE_NATIVE_ACP.profile_id,
         "generation_id": "gen-0008",
         "manifest_sha256": resolved.manifest_sha256,
     }
@@ -3478,3 +3503,209 @@ def test_well_formed_provenance_still_never_authorizes_a_mismatched_contract(
     with pytest.raises(rb.BindingRefusal) as excinfo:
         _resolve(root)
     assert excinfo.value.rule == "CONTRACT_IDENTITY_MISMATCH"
+
+
+# ---------------------------------------------------------------------------
+# C15 — one root, one independent active selection per profile
+#
+# ``arsd`` takes exactly one ``--binding-root``, the registry is closed at three
+# profiles, and every registered profile refuses admission until a generation is
+# promoted *for that profile*. Those three facts are only simultaneously
+# satisfiable if the active-selection namespace is profile-scoped.
+# ---------------------------------------------------------------------------
+
+_SHARED_ROOT = "shared-binding-root"
+
+
+def _multi_profile_root(tmp_path: Path, *, generation_id: str | None = None) -> Path:
+    """One operator-configured root carrying a generation for every profile."""
+    root = tmp_path / _SHARED_ROOT
+    for index, profile_id in enumerate(DEFAULT_REGISTRY.ids()):
+        root = build_binding_root(
+            tmp_path,
+            DEFAULT_REGISTRY.get(profile_id),
+            generation_id=generation_id or f"gen-000{index}",
+            epoch=index + 1,
+            dirname=_SHARED_ROOT,
+        )
+    return root
+
+
+def test_one_root_serves_every_registered_profile_concurrently(tmp_path: Path) -> None:
+    """The class-wide requirement: three promoted profiles, one configured root."""
+    root = _multi_profile_root(tmp_path)
+    for index, profile_id in enumerate(DEFAULT_REGISTRY.ids()):
+        profile = DEFAULT_REGISTRY.get(profile_id)
+        resolved = rb.BindingReader(root, ownership=ownership()).resolve_active(profile)
+        assert resolved.contract_identity["profile_id"] == profile_id
+        assert resolved.generation_id == f"gen-000{index}"
+        assert resolved.session_compatibility_epoch == index + 1
+
+
+def test_two_profiles_may_use_the_same_generation_id_independently(
+    tmp_path: Path,
+) -> None:
+    """The generation namespace is per profile, so ``gen-0001`` is not one name."""
+    root = _multi_profile_root(tmp_path, generation_id="gen-0001")
+    for profile_id in DEFAULT_REGISTRY.ids():
+        profile = DEFAULT_REGISTRY.get(profile_id)
+        resolved = rb.BindingReader(root, ownership=ownership()).resolve_active(profile)
+        assert resolved.generation_id == "gen-0001"
+        assert resolved.contract_identity["profile_id"] == profile_id
+
+
+def test_a_shared_root_still_reads_one_pointer_and_one_generation_per_run(
+    tmp_path: Path,
+) -> None:
+    """C8 is unchanged by the profile scope: still exactly one pair of reads."""
+    root = _multi_profile_root(tmp_path)
+    for profile_id in DEFAULT_REGISTRY.ids():
+        rb.reset_read_counters()
+        rb.BindingReader(root, ownership=ownership()).resolve_active(
+            DEFAULT_REGISTRY.get(profile_id)
+        )
+        assert rb.read_counters() == {"active": 1, "generation": 1}
+
+
+def test_promoting_one_profile_leaves_every_other_selection_byte_identical(
+    tmp_path: Path,
+) -> None:
+    """C15: promotion is profile-scoped, sequentially as well as concurrently."""
+    root = _multi_profile_root(tmp_path)
+    others = {
+        profile_id: rb.active_pointer_path(root, profile_id).read_bytes()
+        for profile_id in DEFAULT_REGISTRY.ids()
+        if profile_id != OPENCODE_NATIVE_ACP.profile_id
+    }
+    build_binding_root(
+        tmp_path,
+        OPENCODE_NATIVE_ACP,
+        generation_id="gen-0009",
+        dirname=_SHARED_ROOT,
+        write_pointer=False,
+    )
+    resolved = rb.validate_generation(
+        root,
+        "gen-0009",
+        profile=OPENCODE_NATIVE_ACP,
+        ownership=ownership(),
+        probe=False,
+    )
+    rb.write_active_pointer(
+        root, resolved, profile=OPENCODE_NATIVE_ACP, ownership=ownership()
+    )
+    assert _resolve(root).generation_id == "gen-0009"
+    for profile_id, before in others.items():
+        assert rb.active_pointer_path(root, profile_id).read_bytes() == before
+        assert (
+            rb.BindingReader(root, ownership=ownership())
+            .resolve_active(DEFAULT_REGISTRY.get(profile_id))
+            .contract_identity["profile_id"]
+            == profile_id
+        )
+
+
+def test_a_pointer_moved_between_profile_subtrees_is_refused(tmp_path: Path) -> None:
+    """The pointer proves its own profile; the filename never speaks for it."""
+    root = _multi_profile_root(tmp_path)
+    victim = DEFAULT_REGISTRY.get(
+        [i for i in DEFAULT_REGISTRY.ids() if i != OPENCODE_NATIVE_ACP.profile_id][0]
+    )
+    stolen = rb.active_pointer_path(root, OPENCODE_NATIVE_ACP.profile_id).read_bytes()
+    target = rb.active_pointer_path(root, victim.profile_id)
+    target.write_bytes(stolen)
+    with pytest.raises(rb.BindingRefusal) as excinfo:
+        rb.BindingReader(root, ownership=ownership()).resolve_active(victim)
+    assert excinfo.value.rule == "POINTER_PROFILE_MISMATCH"
+
+
+def test_a_pointer_without_a_profile_id_is_refused(tmp_path: Path) -> None:
+    """A pre-0.5.2 pointer body cannot say what it activates, so it never does."""
+    root = build_root(tmp_path)
+    payload = json.loads(opencode_pointer(root).read_text(encoding="utf-8"))
+    payload.pop("profile_id")
+    write_canonical(opencode_pointer(root), payload)
+    with pytest.raises(rb.BindingRefusal) as excinfo:
+        _resolve(root)
+    assert excinfo.value.rule == "POINTER_PROFILE_MISMATCH"
+
+
+def test_another_profiles_generation_is_refused_by_name(tmp_path: Path) -> None:
+    """Path separation is not the only gate: identity is still a machine field."""
+    root = _multi_profile_root(tmp_path, generation_id="gen-0001")
+    other = DEFAULT_REGISTRY.get(
+        [i for i in DEFAULT_REGISTRY.ids() if i != OPENCODE_NATIVE_ACP.profile_id][0]
+    )
+    foreign = rb.generation_manifest_path(root, other.profile_id, "gen-0001").read_bytes()
+    smuggled = rb.generation_manifest_path(
+        root, OPENCODE_NATIVE_ACP.profile_id, "gen-smuggled"
+    )
+    smuggled.parent.mkdir(parents=True, exist_ok=True)
+    smuggled.write_bytes(foreign)
+    smuggled.chmod(0o644)
+    smuggled.parent.chmod(0o755)
+    with pytest.raises(rb.BindingRefusal) as excinfo:
+        rb.BindingReader(root, ownership=ownership()).read_generation(
+            "gen-smuggled", profile=OPENCODE_NATIVE_ACP
+        )
+    assert excinfo.value.rule in (
+        "GENERATION_ID_MISMATCH",
+        "CONTRACT_IDENTITY_MISMATCH",
+    )
+
+
+def test_a_root_with_no_subtree_for_this_profile_fails_closed(tmp_path: Path) -> None:
+    root = build_root(tmp_path)
+    other = DEFAULT_REGISTRY.get(
+        [i for i in DEFAULT_REGISTRY.ids() if i != OPENCODE_NATIVE_ACP.profile_id][0]
+    )
+    with pytest.raises(rb.BindingRefusal) as excinfo:
+        rb.BindingReader(root, ownership=ownership()).resolve_active(other)
+    assert excinfo.value.rule == "PROFILE_BINDING_ABSENT"
+    # And it is a state, not a fault: nothing is promoted for that profile.
+    assert (
+        rb.read_active_pointer(root, profile=other, ownership=ownership()) is None
+    )
+
+
+def test_a_pre_0_5_2_root_level_pointer_is_refused_with_a_stable_rule(
+    tmp_path: Path,
+) -> None:
+    """The old single-pointer layout is rejected, named, and never read."""
+    root = build_root(tmp_path)
+    legacy = root / rb.ACTIVE_FILENAME
+    legacy.write_bytes(opencode_pointer(root).read_bytes())
+    legacy.chmod(0o644)
+    # Remove the new-layout subtree so the old pointer is the only candidate.
+    import shutil
+
+    shutil.rmtree(root / rb.PROFILES_DIRNAME)
+    with pytest.raises(rb.BindingRefusal) as excinfo:
+        _resolve(root)
+    assert excinfo.value.rule == "LEGACY_BINDING_LAYOUT"
+    assert "re-promote every profile" in excinfo.value.message
+    # A legacy root is never silently reported as "nothing promoted".
+    with pytest.raises(rb.BindingRefusal):
+        rb.read_active_pointer(
+            root, profile=OPENCODE_NATIVE_ACP, ownership=ownership()
+        )
+
+
+@pytest.mark.parametrize(
+    "profile_id", ["", ".", "..", "../escape", "a/b", "-leading", "x" * 200, 7]
+)
+def test_an_unsafe_profile_id_can_never_name_a_binding_directory(
+    profile_id: Any,
+) -> None:
+    """Registry ids are code constants; the component is proven safe regardless."""
+    with pytest.raises(rb.BindingRefusal) as excinfo:
+        rb.profile_component(profile_id)
+    assert excinfo.value.rule == "PROFILE_ID_UNSAFE"
+
+
+def test_every_registered_profile_id_is_a_safe_binding_component() -> None:
+    for profile_id in DEFAULT_REGISTRY.ids():
+        assert rb.profile_component(profile_id) == profile_id
+        assert rb.active_pointer_path("/opt/binding", profile_id).parent.name == (
+            profile_id
+        )

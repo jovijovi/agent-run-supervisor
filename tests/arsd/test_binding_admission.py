@@ -51,6 +51,43 @@ def test_admission_reads_the_pointer_once_and_one_generation_once(
     assert admitted.resolved.generation_id == "gen-0001"
 
 
+def test_one_configured_root_admits_every_registered_profile(tmp_path: Path) -> None:
+    """C15: one ``--binding-root`` serves the whole closed registry at once."""
+    from agent_run_supervisor.native_acp.profile import DEFAULT_REGISTRY
+
+    root = tmp_path / "shared-binding-root"
+    for profile_id in DEFAULT_REGISTRY.ids():
+        root = bf.build_binding_root(
+            tmp_path, DEFAULT_REGISTRY.get(profile_id), dirname="shared-binding-root"
+        )
+    for profile_id in DEFAULT_REGISTRY.ids():
+        rb.reset_read_counters()
+        admitted = admission.resolve_runtime_binding(
+            DEFAULT_REGISTRY.get(profile_id),
+            binding_root=root,
+            ownership=bf.ownership(),
+        )
+        assert admitted is not None
+        assert admitted.resolved.contract_identity["profile_id"] == profile_id
+        # Still one pointer and one generation, per Run, per profile.
+        assert rb.read_counters() == {"active": 1, "generation": 1}
+
+
+def test_admission_reads_only_the_resolved_profiles_own_subtree(
+    tmp_path: Path,
+) -> None:
+    """R1/C15: the subtree comes from the resolved closed profile, nothing else."""
+    profile = _binding_profile(tmp_path)
+    root = codex_binding_root(tmp_path, profile)
+    subtree = rb.profile_binding_dir(root, profile.profile_id)
+    subtree.rename(subtree.with_name("some-other-profile"))
+    with pytest.raises(rb.BindingRefusal) as err:
+        admission.resolve_runtime_binding(
+            profile, binding_root=root, ownership=bf.ownership()
+        )
+    assert err.value.rule == "PROFILE_BINDING_ABSENT"
+
+
 def test_only_the_binding_module_opens_a_binding_root() -> None:
     """C8 is structural, not advisory: the import graph is the proof."""
     allowed = {
@@ -137,7 +174,7 @@ def test_admission_revalidates_the_artifact_digest_against_the_trusted_path(
     profile = _binding_profile(tmp_path)
     root = codex_binding_root(tmp_path, profile)
     manifest = json.loads(
-        (root / rb.GENERATIONS_DIRNAME / "gen-0001" / rb.MANIFEST_FILENAME).read_text()
+        rb.generation_manifest_path(root, profile.profile_id, "gen-0001").read_text()
     )
     launcher = Path(manifest["slots"]["downstream_cli"]["launcher_path"])
     mode = launcher.stat().st_mode

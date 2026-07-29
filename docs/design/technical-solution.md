@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext Technical Solution"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-28
+last_validated_at: 2026-07-29
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/technical-solution.md"
 ---
 # agent-run-supervisor vNext Technical Solution
@@ -21,7 +21,9 @@ compatibility baseline, and never uses it as Native driver or fallback.
 The Runtime Binding layer described below is merged source on `main`: `native_acp/runtime_binding.py`
 is the only reader of a Binding root, every registered profile carries an `AdapterContract`,
 deployment-specific downstream CLI paths, versions, and digests have moved out of the profile constants,
-`session_compatibility_epoch` is persisted, and the `runtime-binding` command surface exists.
+`session_compatibility_epoch` is persisted, and the `runtime-binding` command surface exists. The root's
+active-selection namespace is scoped per profile, so the one root a daemon is configured with carries an
+independent active generation for each registered profile.
 `WrappedRuntimeArtifacts` freezes the adapter's complete package closure — install root plus tree
 digest, with the entry proven inside it — not the entry path and digest alone, and the
 `interpreter_argv_prefix` that closes the interpreter's path-independent module search. Its frozen
@@ -60,7 +62,7 @@ share their stdout consumer or wait-before-return contract.
 |---|---|
 | `spec.py` | versioned `AgentRunRequest`; immutable `AgentRunSpec/spec_hash`; controlled `ResolvedLaunchSpec`; observation-only `EffectiveRunState` |
 | `profile.py` | typed, versioned, closed `AgentProfile` registry; the OpenCode profile plus the official Codex ACP and Claude Agent ACP adapter profiles. Each profile carries an `AdapterContract` with `adapter_contract_hash`, `launch_kind`, accepted Binding schema/slot projection, a code-owned version-probe rule, and — for `wrapped_acp` — the adapter's complete package closure (install root, tree digest, entry inside it) plus the frozen `interpreter_argv_prefix` that closes the interpreter's path-independent module search, checked against the profile's own argv so the two cannot drift; deployment-specific CLI path/version/digest live in the Binding, not here. It also owns `path_within_root`, the one lexical containment predicate every closure surface shares |
-| `runtime_binding.py` | the only reader of a Binding root — `active.json` + `generations/<id>/manifest.json` loading, canonical-JSON/size/ownership/mode/ancestor validation through `O_NOFOLLOW`/dirfd walks, contract-acceptance matching, slot projection, generation/set/slot hashing, and the typed fail-closed refusal surface |
+| `runtime_binding.py` | the only reader of a Binding root — per-profile `profiles/<profile_id>/active.json` + `.../generations/<id>/manifest.json` loading, the safe profile-component rule and the lexical path helpers built on it, canonical-JSON/size/ownership/mode/ancestor validation through `O_NOFOLLOW`/dirfd walks, contract-acceptance matching, slot projection, generation/set/slot hashing, and the typed fail-closed refusal surface |
 | `attestation.py` | spawn-boundary proof that the frozen interpreter/adapter/CLI identity and launch env are what the profile registered. It proves the *sealed* runtime identity rather than a profile constant, extends artifact identity to package/tree closures on both the Binding-sealed CLI **and** the source-frozen adapter, refuses a module-resolution root above the adapter closure, binds the frozen interpreter argv prefix as a token sequence with the adapter entry pinned immediately after it, and adds the ownership/ancestor and TOCTOU rechecks for both launch kinds |
 | `storage.py` | only Native root-binding constructors for `native-runs/` and `native-sessions/`; structural guard against direct legacy store construction |
 | `driver.py` | ACP wire/state machine over a supplied `ManagedProcess`; never spawns or selects policy/profile |
@@ -78,7 +80,7 @@ share their stdout consumer or wait-before-return contract.
 | `server.py` | asyncio UDS accept loop, `SO_PEERCRED`, finite backlog, per-connection isolation |
 | `protocol.py` | bounded JSON frames, mandatory `api_version`, unknown-version rejection |
 | `handlers.py` | submit/status/events/cancel and Session status/list/close with owner checks; Session creation is part of `submit` |
-| `admission.py` | durable submission/idempotency records, keyed admission locks, typed terminal-result inspection; also the single per-Run Binding read — one `active.json` read plus one generation read, revalidation of contract match and artifact digest, then sealing; no other module reads the Binding root |
+| `admission.py` | durable submission/idempotency records, keyed admission locks, typed terminal-result inspection; also the single per-Run Binding read — one `active.json` read plus one generation read, both inside the resolved profile's own subtree, revalidation of contract match and artifact digest, then sealing; no other module reads the Binding root |
 | `reconcile.py` | startup-only reconciliation; no prompt replay/resume |
 | `client.py` | typed local caller for Hermes/CLI; explicit connect/close, no silent reconnect or replay |
 | `service_unit.py` | pure data→text renderer for the user-scope service unit; never installs, enables, or starts anything |
@@ -91,11 +93,14 @@ No TCP, root mode, runtime plugin loader, arbitrary command adapter, or per-Run 
 `cli.py`/`commands.py` carry exactly one subcommand group, wired to `runtime_binding.py` and to the
 per-Run provenance reader:
 
+Every generation command names one registered profile, and every path it touches lives under that
+profile's own `profiles/<profile_id>/` subtree.
+
 | Command | Reads | Writes | Side effects |
 |---|---|---|---|
-| `runtime-binding validate <generation>` | generation manifest, artifacts, live contract | nothing | runs the code-owned version probe |
-| `runtime-binding promote <generation>` | the same, revalidated | `active.json` (atomic replace) | none beyond that file; no daemon restart |
-| `runtime-binding rollback <generation>` | a previously validated generation | `active.json` (atomic replace) | none beyond that file |
+| `runtime-binding validate <generation>` | that profile's generation manifest, artifacts, live contract | nothing | runs the code-owned version probe |
+| `runtime-binding promote <generation>` | the same, revalidated | that profile's `active.json` (atomic replace) | none beyond that file; no daemon restart |
+| `runtime-binding rollback <generation>` | a previously validated generation of that profile | that profile's `active.json` (atomic replace) | none beyond that file |
 | `runtime-binding inspect-run <run_id>` | `spec.json`, `launch.json` | nothing | none |
 
 No `--force` flag is defined, no command shells out to `sudo` or otherwise escalates, and no command
@@ -197,15 +202,28 @@ or canonical manifest digest, launcher path and digest, and the required interpr
 `config_root` slot the profile declared. A `package_tree` slot that declares only a launcher digest is
 refused by schema validation: a launcher hash alone does not freeze the sibling code it loads.
 
-The active pointer is a regular file, replaced atomically:
+The root's layout is profile-scoped, one independently promotable selection per registered profile:
+
+```text
+<binding_root>/profiles/<profile_id>/active.json
+<binding_root>/profiles/<profile_id>/generations/<generation_id>/manifest.json
+```
+
+The active pointer is a regular file, replaced atomically, and declares the profile it activates:
 
 ```json
-{"schema_version": 1, "generation_id": "gen-0007", "manifest_sha256": "[REDACTED-SHA256]"}
+{"schema_version":1,"profile_id":"opencode-native-acp","generation_id":"gen-0007","manifest_sha256":"[REDACTED-SHA256]"}
 ```
+
+The subtree component comes from the resolved closed profile object — never from request text — and is
+itself validated as a safe path component, so a future registration cannot introduce traversal by being
+registered. Generation ids are scoped by that subtree, so two profiles may use `gen-0001` independently.
 
 Refusal rules, all fail-closed: non-canonical JSON, byte size over the bound, unknown field, unknown
 slot, slot missing a required descriptor field, absent `contract_identity`, `contract_identity` mismatch
-against the live contract on profile ID, revision, or `adapter_contract_hash`, non-positive epoch, path
+against the live contract on profile ID, revision, or `adapter_contract_hash`, a pointer whose
+`profile_id` is absent or names another profile, an unsafe profile component, an absent per-profile
+subtree, a pre-0.5.2 root-level `active.json`, non-positive epoch, path
 traversal, symlink, FIFO, device, non-regular artifact, artifact or ancestor owned outside the trusted
 operator/root set, artifact or ancestor writable by the `arsd`/AGENT UID, and digest or probe-version
 mismatch. Every refusal names the failing rule.
@@ -359,11 +377,13 @@ owns each event stream. Credential values, raw env, cookies, authorization heade
 payloads never persist.
 
 The Binding root is operator storage that ARS opens read-only and never creates,
-writes, repairs, or migrates. `runtime_binding.py` is the only module that opens it, `arsd/admission.py`
-is its only Run-path caller, and the read happens exactly once per Run. `run_task.py`,
+writes, repairs, or migrates — including the per-profile subtrees, which are operator-authored and whose
+absence is a refusal rather than a directory ARS makes. `runtime_binding.py` is the only module that
+opens it, `arsd/admission.py` is its only Run-path caller, and the read happens exactly once per Run
+inside the resolving profile's own subtree. `run_task.py`,
 `reconcile.py`, and finalization have no Binding read path, so a promotion can never re-point work that
-is already sealed. `promote`/`rollback` write only `active.json`, atomically, and only from the operator
-command surface.
+is already sealed. `promote`/`rollback` write only one profile's `active.json`, atomically, and only
+from the operator command surface — which is also why one profile's promotion cannot disturb another's.
 
 ## 9. Service containment and bounded operation
 
@@ -401,7 +421,11 @@ change that leaves the entry file untouched, a new file inside the closure, an u
 closure-escaping tree entry, and a `node_modules` above the closure root — each proven before spawn and
 again after the race seam; the frozen interpreter argv prefix dropped, reordered, altered, or padded
 with an extra option, each refused before spawn; read-once instrumentation proving one `active.json` read plus one generation read per Run
-and zero reads during spawn, finalization, and reconciliation; epoch reuse/rejection with no
+and zero reads during spawn, finalization, and reconciliation; one root concurrently serving every
+registered profile, the same generation id used independently by two profiles, a promotion or rollback
+leaving every other profile's pointer byte-identical, a pointer moved between subtrees or missing its
+`profile_id` refused, an unsafe profile component refused, an absent subtree and a pre-0.5.2 root-level
+pointer each refused by their own stable rule; epoch reuse/rejection with no
 `session/new` fallback; the absence of any caller-facing runtime-selection field; the absence of
 `--force` and of any privilege escalation in the command path; and provenance recomputation that
 excludes exactly one top-level field.
