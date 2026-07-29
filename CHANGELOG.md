@@ -15,6 +15,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Notes
 
+## [0.5.2] - 2026-07-29
+
+### Fixed
+
+- A Runtime Binding root can now hold a concurrent, independently promotable
+  active generation for every registered profile. The active-selection
+  namespace is scoped per profile
+  (`profiles/<profile_id>/active.json` plus
+  `profiles/<profile_id>/generations/<generation_id>/manifest.json`), so one
+  `arsd --binding-root <root>` serves OpenCode, Codex, and Claude at once.
+  Previously a single root-level `active.json` meant promoting one profile made
+  every other registered profile refuse admission with
+  `CONTRACT_IDENTITY_MISMATCH`.
+
+### Changed
+
+- `active.json` carries a `profile_id` machine field, and a pointer or
+  generation belonging to one profile can never satisfy another — by path
+  separation and by explicit identity, not by filename. New fail-closed rules:
+  `POINTER_PROFILE_MISMATCH`, `PROFILE_BINDING_ABSENT`, `PROFILE_ID_UNSAFE`,
+  and `LEGACY_BINDING_LAYOUT`.
+- `runtime-binding promote` and `rollback` replace only the named profile's
+  pointer, so an operator action on one profile cannot disable or overwrite
+  another's selection, concurrently or in sequence. The command surface is
+  unchanged: `validate`, `promote`, `rollback`, `inspect-run`, still with no
+  `--force`, no privilege escalation, and no daemon write.
+- ARS still creates nothing inside a Binding root: `profiles/<profile_id>/` is
+  operator-authored, and promoting into a subtree that does not exist is
+  refused rather than materialized.
+
+### Notes
+
+- **Breaking for any 0.5.1-shaped Binding root.** The single root-level
+  `active.json` layout is rejected, not read: it can hold only one activation,
+  and its pointer body cannot say which profile it activates. A root still
+  carrying it fails closed with the stable rule `LEGACY_BINDING_LAYOUT`. ARS
+  does not migrate operator storage — move each generation under
+  `profiles/<profile-id>/generations/<generation-id>/`, remove the root-level
+  `active.json`, and run `runtime-binding promote` once per profile. No Binding
+  root had been promoted anywhere, so this migrates nothing that exists.
+- Source and packaging only. It does not materialize a Runtime Binding, promote
+  a generation, re-accept a profile, run the Claude permission canary, deploy,
+  restart a daemon, run a provider, or integrate Sachima.
+- Public compatibility surfaces are unchanged: `AgentRunRequest`/`AgentRunSpec`
+  field sets, the `arsd` v1 wire, the result/event grammar, reconcile
+  semantics, the `ManagedProcess` API, `launch.json`'s shape, and old-Run
+  readability. Admission still reads exactly one pointer and one generation per
+  Run, and spawn, finalization, and reconciliation still read none.
+- Runtime Binding operator activation remains open, and no request or caller
+  field selects a root, generation, version, digest, or path.
+
 ## [0.5.1] - 2026-07-29
 
 ### Added

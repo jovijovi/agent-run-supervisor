@@ -946,7 +946,10 @@ class PrivateNegativeFixtures:
     def write_binding_root(self, profile: AgentProfile) -> Path:
         """A private Binding root for the negative legs — never a real one."""
         root = self.base / "binding-root"
-        generation = root / rb.GENERATIONS_DIRNAME / "gen-neg"
+        manifest_path = rb.generation_manifest_path(
+            root, profile.profile_id, "gen-neg"
+        )
+        generation = manifest_path.parent
         generation.mkdir(parents=True, exist_ok=True)
         manifest = {
             "schema_version": rb.BINDING_SCHEMA_VERSION,
@@ -965,17 +968,24 @@ class PrivateNegativeFixtures:
                 "acceptance_receipt": {"ref": "receipt:private", "sha256": "0" * 64},
             },
         }
-        manifest_path = generation / rb.MANIFEST_FILENAME
         _write_canonical(manifest_path, manifest)
         _write_canonical(
-            root / rb.ACTIVE_FILENAME,
+            rb.active_pointer_path(root, profile.profile_id),
             {
                 "schema_version": rb.BINDING_SCHEMA_VERSION,
+                "profile_id": profile.profile_id,
                 "generation_id": "gen-neg",
                 "manifest_sha256": _sha256_file(manifest_path),
             },
         )
-        for directory in (root, root / rb.GENERATIONS_DIRNAME, generation):
+        profile_dir = rb.profile_binding_dir(root, profile.profile_id)
+        for directory in (
+            root,
+            root / rb.PROFILES_DIRNAME,
+            profile_dir,
+            profile_dir / rb.GENERATIONS_DIRNAME,
+            generation,
+        ):
             os.chmod(directory, 0o755)
         return root
 

@@ -15,11 +15,15 @@ import pytest
 
 from agent_run_supervisor.cli import _build_parser, main
 from agent_run_supervisor.native_acp import runtime_binding as rb
-from agent_run_supervisor.native_acp.profile import OPENCODE_NATIVE_ACP
+from agent_run_supervisor.native_acp.profile import (
+    CLAUDE_AGENT_ACP_0_63_0,
+    OPENCODE_NATIVE_ACP,
+)
 
 from tests.native_acp import binding_fixtures as bf
 
 _PROFILE_ID = OPENCODE_NATIVE_ACP.profile_id
+_OTHER_PROFILE_ID = CLAUDE_AGENT_ACP_0_63_0.profile_id
 
 
 def _binding_root(tmp_path: Path, *, version: str = "1.18.5", **kwargs) -> Path:
@@ -218,7 +222,7 @@ def test_promote_atomically_replaces_only_the_active_pointer(
     tmp_path: Path, capsys
 ) -> None:
     root = _binding_root(tmp_path, generation_id="gen-0002", write_pointer=False)
-    assert not (root / rb.ACTIVE_FILENAME).exists()
+    assert not rb.active_pointer_path(root, _PROFILE_ID).exists()
     code, payload = _run(
         capsys,
         "runtime-binding",
@@ -233,14 +237,14 @@ def test_promote_atomically_replaces_only_the_active_pointer(
     )
     assert code == 0
     assert payload["promoted"] is True
-    pointer = root / rb.ACTIVE_FILENAME
+    pointer = rb.active_pointer_path(root, _PROFILE_ID)
     assert pointer.is_file() and not pointer.is_symlink()
     assert json.loads(pointer.read_text())["generation_id"] == "gen-0002"
-    # Only that one file appeared.
-    assert sorted(path.name for path in root.iterdir()) == [
-        rb.ACTIVE_FILENAME,
-        rb.GENERATIONS_DIRNAME,
-    ]
+    # Only that one file appeared, and only inside this profile's own subtree.
+    assert sorted(path.name for path in root.iterdir()) == [rb.PROFILES_DIRNAME]
+    assert sorted(
+        path.name for path in rb.profile_binding_dir(root, _PROFILE_ID).iterdir()
+    ) == [rb.ACTIVE_FILENAME, rb.GENERATIONS_DIRNAME]
 
 
 def test_promote_refuses_a_generation_that_cannot_be_validated(
@@ -261,7 +265,7 @@ def test_promote_refuses_a_generation_that_cannot_be_validated(
     )
     assert code == 1
     assert payload["rule"] == "EPOCH_NOT_POSITIVE"
-    assert not (root / rb.ACTIVE_FILENAME).exists()
+    assert not rb.active_pointer_path(root, _PROFILE_ID).exists()
 
 
 def test_rollback_refuses_a_generation_that_never_validates(
@@ -269,7 +273,7 @@ def test_rollback_refuses_a_generation_that_never_validates(
 ) -> None:
     """``rollback`` re-proves the target with the same validation + probe."""
     root = _binding_root(tmp_path, generation_id="gen-0001")
-    bad = root / rb.GENERATIONS_DIRNAME / "gen-bad"
+    bad = rb.generation_manifest_path(root, _PROFILE_ID, "gen-bad").parent
     bad.mkdir(parents=True)
     bf.write_canonical(bad / rb.MANIFEST_FILENAME, {"schema_version": 1})
     bad.chmod(0o755)
@@ -288,9 +292,8 @@ def test_rollback_refuses_a_generation_that_never_validates(
     assert code == 1
     assert payload["valid"] is False
     # The active pointer is untouched.
-    assert json.loads((root / rb.ACTIVE_FILENAME).read_text())["generation_id"] == (
-        "gen-0001"
-    )
+    pointer = rb.active_pointer_path(root, _PROFILE_ID)
+    assert json.loads(pointer.read_text())["generation_id"] == "gen-0001"
 
 
 def test_rollback_refuses_the_already_active_generation(tmp_path: Path, capsys) -> None:
@@ -315,9 +318,9 @@ def test_rollback_repromotes_a_validated_generation(tmp_path: Path, capsys) -> N
     root = _binding_root(tmp_path, generation_id="gen-0001")
     # A second, independently valid generation over the same artifacts.
     manifest = json.loads(
-        (root / rb.GENERATIONS_DIRNAME / "gen-0001" / rb.MANIFEST_FILENAME).read_text()
+        rb.generation_manifest_path(root, _PROFILE_ID, "gen-0001").read_text()
     )
-    older = root / rb.GENERATIONS_DIRNAME / "gen-0000"
+    older = rb.generation_manifest_path(root, _PROFILE_ID, "gen-0000").parent
     older.mkdir(parents=True)
     manifest["generation_id"] = "gen-0000"
     bf.write_canonical(older / rb.MANIFEST_FILENAME, manifest)
@@ -337,9 +340,90 @@ def test_rollback_repromotes_a_validated_generation(tmp_path: Path, capsys) -> N
     )
     assert code == 0
     assert payload["rolled_back_to"] == "gen-0000"
-    assert json.loads((root / rb.ACTIVE_FILENAME).read_text())["generation_id"] == (
-        "gen-0000"
+    pointer = rb.active_pointer_path(root, _PROFILE_ID)
+    assert json.loads(pointer.read_text())["generation_id"] == "gen-0000"
+
+
+# -- one root, several independently promoted profiles (C15) ------------------
+
+
+def _shared_root_with_two_profiles(tmp_path: Path) -> Path:
+    """One operator root: OpenCode already promoted, the other profile authored."""
+    shared = "shared-binding-root"
+    root = _binding_root(tmp_path, generation_id="gen-0001", dirname=shared)
+    bf.build_binding_root(
+        tmp_path,
+        CLAUDE_AGENT_ACP_0_63_0,
+        generation_id="gen-0001",
+        dirname=shared,
+        version="0.63.0",
+        reports_version=True,
+        write_pointer=False,
     )
+    return root
+
+
+def test_promoting_one_profile_never_disturbs_another_in_the_same_root(
+    tmp_path: Path, capsys
+) -> None:
+    """Sequential operator promotions leave one active selection per profile."""
+    root = _shared_root_with_two_profiles(tmp_path)
+    promoted = rb.active_pointer_path(root, _PROFILE_ID)
+    before = promoted.read_bytes()
+
+    code, payload = _run(
+        capsys,
+        "runtime-binding",
+        "promote",
+        "--binding-root",
+        str(root),
+        "--profile",
+        _OTHER_PROFILE_ID,
+        "--generation",
+        "gen-0001",
+        *_trusted(tmp_path),
+    )
+    assert code == 0
+    assert payload["promoted"] is True
+    other_pointer = rb.active_pointer_path(root, _OTHER_PROFILE_ID)
+    assert json.loads(other_pointer.read_text())["generation_id"] == "gen-0001"
+    # The profile nobody promoted is byte-identical and still resolvable.
+    assert promoted.read_bytes() == before
+    resolved = rb.BindingReader(root, ownership=bf.ownership()).resolve_active(
+        OPENCODE_NATIVE_ACP
+    )
+    assert resolved.contract_identity["profile_id"] == _PROFILE_ID
+
+
+def test_rollback_is_scoped_to_the_profile_it_names(tmp_path: Path, capsys) -> None:
+    root = _shared_root_with_two_profiles(tmp_path)
+    # A second, independently valid generation for the *other* profile only.
+    manifest_path = rb.generation_manifest_path(root, _OTHER_PROFILE_ID, "gen-0001")
+    manifest = json.loads(manifest_path.read_text())
+    manifest["generation_id"] = "gen-0000"
+    older = rb.generation_manifest_path(root, _OTHER_PROFILE_ID, "gen-0000")
+    older.parent.mkdir(parents=True, exist_ok=True)
+    bf.write_canonical(older, manifest)
+    older.parent.chmod(0o755)
+
+    untouched = rb.active_pointer_path(root, _PROFILE_ID).read_bytes()
+    for generation in ("gen-0001", "gen-0000"):
+        code, payload = _run(
+            capsys,
+            "runtime-binding",
+            "promote" if generation == "gen-0001" else "rollback",
+            "--binding-root",
+            str(root),
+            "--profile",
+            _OTHER_PROFILE_ID,
+            "--generation",
+            generation,
+            *_trusted(tmp_path),
+        )
+        assert code == 0, payload
+    other_pointer = rb.active_pointer_path(root, _OTHER_PROFILE_ID)
+    assert json.loads(other_pointer.read_text())["generation_id"] == "gen-0000"
+    assert rb.active_pointer_path(root, _PROFILE_ID).read_bytes() == untouched
 
 
 # -- inspect-run (C13) --------------------------------------------------------
@@ -499,7 +583,7 @@ def test_promote_refuses_a_root_reached_through_a_symlinked_ancestor(
     )
     assert code == 1
     assert report["rule"] == "SYMLINKED_ANCESTOR"
-    assert not (root / rb.ACTIVE_FILENAME).exists()
+    assert not rb.active_pointer_path(root, _PROFILE_ID).exists()
 
 
 # -- C6: promotion activates exactly the generation the probe proved ---------
@@ -533,7 +617,7 @@ def _second_manifest(tmp_path: Path, root: Path, *, version: str) -> bytes:
         body="#!" + str(shell) + "\nprintf '%s' '" + version + "'\n",
     )
     manifest = json.loads(
-        (root / rb.GENERATIONS_DIRNAME / "gen-0001" / rb.MANIFEST_FILENAME).read_text()
+        rb.generation_manifest_path(root, _PROFILE_ID, "gen-0001").read_text()
     )
     manifest["slots"] = {"agent_cli": bf.native_binary_slot(binary, version=version)}
     return bf.canonical(manifest).encode("utf-8")
@@ -543,7 +627,7 @@ def test_promote_never_activates_a_generation_the_probe_did_not_see(
     tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = _binding_root(tmp_path, write_pointer=False)
-    manifest = root / rb.GENERATIONS_DIRNAME / "gen-0001" / rb.MANIFEST_FILENAME
+    manifest = rb.generation_manifest_path(root, _PROFILE_ID, "gen-0001")
     _retarget_seam(
         monkeypatch, manifest, _second_manifest(tmp_path, root, version="9.9.9")
     )
@@ -562,7 +646,7 @@ def test_promote_never_activates_a_generation_the_probe_did_not_see(
     )
     assert code == 1
     assert report["rule"] == "GENERATION_CHANGED"
-    assert not (root / rb.ACTIVE_FILENAME).exists()
+    assert not rb.active_pointer_path(root, _PROFILE_ID).exists()
 
 
 def test_rollback_never_activates_a_generation_the_probe_did_not_see(
@@ -573,21 +657,24 @@ def test_rollback_never_activates_a_generation_the_probe_did_not_see(
         tmp_path / "other", generation_id="gen-0002", write_pointer=False
     )
     # Make gen-0002 the active pointer so gen-0001 is a genuine rollback target.
-    (root / rb.GENERATIONS_DIRNAME / "gen-0002").mkdir(parents=True, exist_ok=True)
-    source = other / rb.GENERATIONS_DIRNAME / "gen-0002" / rb.MANIFEST_FILENAME
-    target = root / rb.GENERATIONS_DIRNAME / "gen-0002" / rb.MANIFEST_FILENAME
+    rb.generation_manifest_path(root, _PROFILE_ID, "gen-0002").parent.mkdir(
+        parents=True, exist_ok=True
+    )
+    source = rb.generation_manifest_path(other, _PROFILE_ID, "gen-0002")
+    target = rb.generation_manifest_path(root, _PROFILE_ID, "gen-0002")
     target.write_bytes(source.read_bytes())
     bf.write_canonical(
-        root / rb.ACTIVE_FILENAME,
+        rb.active_pointer_path(root, _PROFILE_ID),
         {
             "schema_version": rb.BINDING_SCHEMA_VERSION,
+            "profile_id": _PROFILE_ID,
             "generation_id": "gen-0002",
             "manifest_sha256": bf.sha256_file(target),
         },
     )
-    before = (root / rb.ACTIVE_FILENAME).read_bytes()
+    before = rb.active_pointer_path(root, _PROFILE_ID).read_bytes()
 
-    manifest = root / rb.GENERATIONS_DIRNAME / "gen-0001" / rb.MANIFEST_FILENAME
+    manifest = rb.generation_manifest_path(root, _PROFILE_ID, "gen-0001")
     _retarget_seam(
         monkeypatch, manifest, _second_manifest(tmp_path, root, version="9.9.9")
     )
@@ -605,7 +692,7 @@ def test_rollback_never_activates_a_generation_the_probe_did_not_see(
     )
     assert code == 1
     assert report["rule"] == "GENERATION_CHANGED"
-    assert (root / rb.ACTIVE_FILENAME).read_bytes() == before
+    assert rb.active_pointer_path(root, _PROFILE_ID).read_bytes() == before
 
 
 # -- C13: a legacy launch record is readable, not exempt from verification ---

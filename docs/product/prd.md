@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext PRD"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-28
+last_validated_at: 2026-07-29
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/prd.md"
 ---
 # agent-run-supervisor vNext PRD
@@ -253,14 +253,24 @@ identity field. A generation with a valid receipt but the wrong declared contrac
 - The artifact and every path ancestor are operator- or root-owned and non-writable by the `arsd`/AGENT
   UID.
 
-**Layout and validation.** A Binding root holds a regular, atomically replaced `active.json` plus
-`generations/<id>/manifest.json`; there is no active symlink. Validation requires strict canonical JSON
-within a finite size bound, `O_NOFOLLOW`/dirfd walks, verified ownership, modes, and ancestors, and
-refusal of traversal, symlink, FIFO, device, unknown fields, and unknown slots.
+**Layout and validation.** One daemon takes one Binding root and the registry is closed at several
+profiles, so the root's active-selection namespace is **profile-scoped**: it holds one independently
+promotable active selection per registered profile, under
+`profiles/<profile_id>/active.json` plus `profiles/<profile_id>/generations/<id>/manifest.json`. The
+pointer is a regular, atomically replaced file and there is no active symlink. The pointer declares its
+own `profile_id` as a machine field, so a pointer or generation belonging to one profile can never
+satisfy another — by path separation and by explicit identity, not by filename. The subtree component
+is derived from the already-resolved closed profile; no request field reaches it, and an id that is not
+a safe path component is refused. Validation requires strict canonical JSON within a finite size bound,
+`O_NOFOLLOW`/dirfd walks, verified ownership, modes, and ancestors, and refusal of traversal, symlink,
+FIFO, device, unknown fields, and unknown slots. ARS creates no directory in a Binding root: a
+promotion into a subtree the operator has not authored is refused, never materialized.
 
 **Promotion and admission.** `validate` and `promote` obtain the real external CLI version through the
 Profile's code-owned version probe and compare it with the Binding; a manifest's version string alone is
-not proof. Admission reads `active.json` and the selected generation exactly once per Run, revalidates
+not proof. Promotion and rollback replace exactly one profile's pointer, so updating one profile can
+never disable or overwrite another's selection, concurrently or in sequence. Admission reads that
+profile's `active.json` and the selected generation exactly once per Run, revalidates
 contract match and artifact digest against the trusted immutable paths, resolves the complete
 launch/runtime identity, writes write-once `launch.json`, and seals `launch_spec_hash`. Spawn,
 finalization, and reconciliation never reread the active Binding, and admission never accepts caller
@@ -277,6 +287,14 @@ the complete CLI artifact identity/version/digest, and the epoch.
 result/event grammar, reconcile semantics, and the `ManagedProcess` public API are unchanged. Old Runs
 stay readable. Old Native Sessions stay status/list/close-readable, but `session/load` on a record
 without a matching epoch fails closed.
+
+The pre-0.5.2 single-pointer root layout — one `active.json` at the root — is **rejected, not read**.
+It could hold only one activation, so honouring it would silently fail every other registered profile
+on a contract mismatch, and its pointer body cannot say which profile it activates. A root still
+carrying it is refused with the stable rule `LEGACY_BINDING_LAYOUT`, and a root with no subtree for the
+resolving profile with `PROFILE_BINDING_ABSENT`. ARS neither migrates nor repairs operator storage: the
+operator moves each generation under `profiles/<profile_id>/generations/` and re-promotes per profile,
+which is a separate operator decision.
 
 ## 4. Acceptance and staged delivery
 
@@ -341,7 +359,8 @@ section records only the coarse position.
   `session_compatibility_epoch` reuse gate, the `runtime-binding` operator commands, and an `arsd` that
   requires an explicit `--binding-root`. Deployment-specific downstream CLI paths, versions, and digests
   are no longer profile constants, and the stable ID `opencode-native-acp` is registered on its
-  discovery evidence.
+  discovery evidence. Its active-selection namespace is profile-scoped, so the one configured root
+  holds a concurrent, independently promotable selection for each of the three registered profiles.
 - The wrapped artifact identity is a complete package closure in source: each `wrapped_acp` contract
   freezes the adapter install root and its whole tree digest, the frozen entry is proven to lie inside
   that root, the frozen interpreter argv prefix closes the runtime's path-independent search roots, and

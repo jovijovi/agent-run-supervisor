@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext System Architecture"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-28
+last_validated_at: 2026-07-29
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/architecture.md"
 ---
 # agent-run-supervisor vNext System Architecture
@@ -150,22 +150,43 @@ nothing else. The provenance block is recorded and reported for audit; it never 
 never substitutes for a missing or mismatched machine field, and never becomes part of profile identity.
 A generation with a valid acceptance receipt but the wrong declared contract identity is refused.
 
-Read-once is structural, not advisory: `arsd` admission opens the Binding root once per Run, and spawn,
+Read-once is structural, not advisory: `arsd` admission opens the Binding root once per Run — one
+pointer read and one generation read, both inside the resolved profile's own subtree — and spawn,
 finalization, and reconciliation have no Binding read path at all. Two Runs admitted on either side of a
-promotion are each sealed to what they read; an in-flight Run is never re-pointed.
+promotion are each sealed to what they read; an in-flight Run is never re-pointed, and a promotion for
+one profile is invisible to every other.
 
 ### 3.2 Binding layout, validation, and operator surface 🟦
 
 ```text
-<binding_root>/                     # operator/root-owned; outside the repository
-├── active.json                     # regular file, atomically replaced — never a symlink
-└── generations/<generation_id>/
-    └── manifest.json               # immutable once written
+<binding_root>/                            # operator/root-owned; outside the repository
+└── profiles/<profile_id>/                 # one independent selection per registered profile
+    ├── active.json                        # regular file, atomically replaced — never a symlink
+    └── generations/<generation_id>/
+        └── manifest.json                  # immutable once written
 ```
+
+The active-selection namespace is profile-scoped because the shape of the deployment demands it: one
+`arsd` takes one `--binding-root`, the registry is closed at three profiles, and each refuses admission
+until a generation is promoted **for that profile**. A single root-level pointer could satisfy exactly
+one of those three at a time. Each subtree is therefore independent — promoting or rolling back one
+profile replaces one file inside that profile's own directory and cannot disable, overwrite, or race
+another's, concurrently or in sequence — and the generation namespace is per profile too, so two
+profiles may carry the same generation id without either meaning the other.
+
+Separation is proven twice over. The subtree component is derived from the already-resolved closed
+profile, never from request text, and is refused unless it is a safe path component; and the pointer
+declares its own `profile_id` as a machine field, so a pointer moved or copied between subtrees is
+refused (`POINTER_PROFILE_MISMATCH`) rather than inheriting authority from its filename. A generation
+still has to declare the matching contract identity on top of that.
 
 Validation is fail-closed on every read: strict canonical JSON, finite size bound, `O_NOFOLLOW`/dirfd
 walks, verified ownership, modes, and full ancestor chain, and refusal of traversal, symlink, FIFO,
-device, unknown fields, and unknown slots. There is no active symlink to retarget.
+device, unknown fields, and unknown slots. There is no active symlink to retarget. ARS creates nothing
+in a Binding root: `profiles/<profile_id>/generations/` is operator-authored, an absent subtree is
+`PROFILE_BINDING_ABSENT`, and a root still carrying a pre-0.5.2 root-level `active.json` is
+`LEGACY_BINDING_LAYOUT` — refused and never read, because that layout can hold only one activation and
+its pointer cannot say whose it is.
 
 The operator command surface is exactly these, and no command beyond them is defined:
 
@@ -177,7 +198,8 @@ agent-run-supervisor runtime-binding inspect-run  # per-Run provenance recomputa
 ```
 
 No `--force` is defined and no command escalates privilege internally; preparing an immutable artifact root
-is an operator action outside ARS. `validate`/`promote` obtain the real external CLI version through the
+is an operator action outside ARS. Each command names one registered profile and touches only that
+profile's subtree. `validate`/`promote` obtain the real external CLI version through the
 Profile's code-owned probe and compare it with the Binding — a manifest's version string alone is not
 proof. A pure Binding promotion does not restart `arsd`, because admission re-reads the active pointer
 per Run; changing the Binding root, the service unit, or the runtime does require a restart and stays
@@ -422,9 +444,9 @@ Rollback disables Native/`arsd` ingress and stops new submissions. It never conv
 fallback and never rewrites terminal Run facts.
 
 🟦 Binding rollback is a distinct, narrower mechanism: `runtime-binding rollback` re-promotes a
-previously validated generation and affects only Runs admitted afterwards. It never rewrites a sealed
-`launch.json`, never changes a terminal Run fact, and never substitutes for a source revert or for
-disabling ingress.
+previously validated generation for one named profile and affects only that profile's Runs admitted
+afterwards. It never rewrites a sealed `launch.json`, never changes a terminal Run fact, never touches
+another profile's selection, and never substitutes for a source revert or for disabling ingress.
 
 🟦 A *source* rollback that removes the Binding layer is fail-closed for Binding-era Sessions, not a
 return to pre-epoch reuse. The reverted runtime cannot enforce epoch or contract identity, so it must stop

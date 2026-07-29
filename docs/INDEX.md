@@ -2,10 +2,11 @@
 
 # Documentation Index
 
-Total: 68 documents tracked across 2 statuses.
+Total: 69 documents tracked across 2 statuses.
 
-## Active (15)
+## Active (16)
 
+- [Profile-scoped Runtime Binding activation](plans/active/2026-07-29-multi-profile-runtime-binding.md) — created 2026-07-29
 - [agent-run-supervisor vNext System Architecture](design/architecture.md) — created 2026-07-21
 - [agent-run-supervisor vNext Technical Solution](design/technical-solution.md) — created 2026-07-21
 - [agent-run-supervisor vNext PRD](product/prd.md) — created 2026-07-21

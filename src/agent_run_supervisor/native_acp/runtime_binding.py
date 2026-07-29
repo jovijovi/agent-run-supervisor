@@ -8,10 +8,19 @@ exception is the operator command surface, which atomically replaces
 
 ```text
 <binding_root>/
-├── active.json                     # regular file, atomically replaced
-└── generations/<generation_id>/
-    └── manifest.json               # immutable once written
+└── profiles/<profile_id>/
+    ├── active.json                 # regular file, atomically replaced
+    └── generations/<generation_id>/
+        └── manifest.json           # immutable once written
 ```
+
+The active-selection namespace is profile-scoped, because one daemon takes one
+``--binding-root`` and the registry is closed at several profiles: a root holds
+one independently promotable active selection per profile, and no read or write
+inside one profile's subtree can observe or alter another's. The component is
+derived from the already-resolved closed ``AgentProfile``, never from request
+text, and both the pointer and the manifest must declare that same profile as
+explicit machine fields.
 
 Everything here is fail-closed and every refusal names its failing rule.
 Acceptance rests on the manifest's explicit machine identity fields plus
@@ -55,6 +64,7 @@ from .profile import (
 BINDING_SCHEMA_VERSION = 1
 
 ACTIVE_FILENAME = "active.json"
+PROFILES_DIRNAME = "profiles"
 GENERATIONS_DIRNAME = "generations"
 MANIFEST_FILENAME = "manifest.json"
 
@@ -73,7 +83,9 @@ _MANIFEST_FIELDS = frozenset(
         "provenance",
     }
 )
-_POINTER_FIELDS = frozenset({"schema_version", "generation_id", "manifest_sha256"})
+_POINTER_FIELDS = frozenset(
+    {"schema_version", "profile_id", "generation_id", "manifest_sha256"}
+)
 _CONTRACT_IDENTITY_FIELDS = frozenset(
     {"profile_id", "profile_revision", "adapter_contract_hash"}
 )
@@ -252,6 +264,7 @@ def _open_dir(
     dir_fd: int | None = None,
     surface: str,
     symlink_rule: str = "NOT_A_DIRECTORY",
+    missing_rule: str | None = None,
 ) -> int:
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     try:
@@ -266,6 +279,10 @@ def _open_dir(
     except OSError as exc:
         if exc.errno in (errno.ELOOP, 62):  # ELOOP variants on O_NOFOLLOW
             raise _refuse(symlink_rule, f"{surface} is a symlink") from None
+        # "absent" and "unopenable" are different operator facts, and only the
+        # caller knows whether absence deserves its own rule here.
+        if missing_rule is not None and exc.errno == errno.ENOENT:
+            raise _refuse(missing_rule, f"{surface} does not exist") from None
         raise _refuse("OPEN_FAILED", f"{surface} could not be opened") from None
 
 
@@ -321,6 +338,81 @@ def open_trusted_dir(path: Path | str, *, ownership: TrustedOwnership, surface: 
         os.close(fd)
         raise
     return fd
+
+
+def _open_profile_dir(
+    root_fd: int, profile: AgentProfile, *, ownership: TrustedOwnership
+) -> int:
+    """Descend a verified root to ``profiles/<profile_id>/``.
+
+    The component comes from the resolved closed profile object — the registry's
+    own constant — and never from request text, so no caller-supplied value
+    reaches a path here. Each step is dirfd-relative and ``O_NOFOLLOW``, so the
+    subtree that was proven is the subtree the returned descriptor belongs to.
+
+    Both directories are protected objects rather than ambient traversal
+    ancestors: what they contain *is* one profile's activation state, so they
+    take the strict ownership rule. The caller owns closing the descriptor.
+    """
+    component = profile_component(profile.profile_id)
+    fd = root_fd
+    opened: int | None = None
+    try:
+        for name, surface in (
+            (PROFILES_DIRNAME, f"{PROFILES_DIRNAME}/"),
+            (component, f"{PROFILES_DIRNAME}/{component}/"),
+        ):
+            try:
+                child = _open_dir(
+                    name,
+                    dir_fd=fd,
+                    surface=surface,
+                    missing_rule="PROFILE_BINDING_ABSENT",
+                )
+            except BindingRefusal as refusal:
+                if refusal.rule != "PROFILE_BINDING_ABSENT":
+                    raise
+                raise _absent_or_legacy(root_fd, surface) from None
+            if opened is not None:
+                os.close(opened)
+            opened = fd = child
+            check_ownership(os.fstat(fd), ownership, surface)
+        assert opened is not None  # the loop opens at least one descriptor
+        return opened
+    except BaseException:
+        if opened is not None:
+            os.close(opened)
+        raise
+
+
+def _absent_or_legacy(root_fd: int, surface: str) -> BindingRefusal:
+    """Name a pre-0.5.2 root instead of reporting a bare missing directory.
+
+    The old layout put one ``active.json`` at the root, so one configured root
+    could activate exactly one profile — every other registered profile failed
+    its contract-identity check against whichever generation happened to be
+    promoted. It is refused rather than read: its pointer carries no profile
+    identity, so it cannot even say which profile it activates, and honouring it
+    would reinstate that defect silently for two profiles out of three.
+
+    ARS never writes, repairs, or migrates operator storage, so the refusal
+    names the operator action instead of performing one.
+    """
+    try:
+        legacy = os.lstat(ACTIVE_FILENAME, dir_fd=root_fd)
+    except OSError:
+        legacy = None
+    if legacy is not None and stat.S_ISREG(legacy.st_mode):
+        return _refuse(
+            "LEGACY_BINDING_LAYOUT",
+            "binding root carries a pre-0.5.2 root-level active.json; move each "
+            f"generation under {PROFILES_DIRNAME}/<profile_id>/{GENERATIONS_DIRNAME}/ "
+            "and re-promote every profile",
+        )
+    return _refuse(
+        "PROFILE_BINDING_ABSENT",
+        f"binding root has no {surface} for this profile",
+    )
 
 
 def _read_regular_file(dir_fd: int, name: str, *, surface: str) -> bytes:
@@ -388,6 +480,55 @@ def _require_fields(
     unknown = sorted(set(payload) - set(allowed))
     if unknown:
         raise _refuse(rule, f"{surface} carries unknown field(s): {unknown}")
+
+
+# A profile id names a directory under ``profiles/``. Registry ids are code
+# constants rather than caller input, so this is defence in depth rather than
+# input filtering — but a future registration must not be able to introduce
+# traversal by being registered, so the component is proven safe on every use.
+# Dots are admissible because registered ids carry versions (``codex-acp-1.1.7``);
+# ``.``, ``..``, and any ``..`` run are not.
+_PROFILE_COMPONENT_MAX = 128
+
+
+def profile_component(profile_id: Any) -> str:
+    """The one directory component a profile's Binding material may live under."""
+    if (
+        not isinstance(profile_id, str)
+        or not profile_id
+        or len(profile_id) > _PROFILE_COMPONENT_MAX
+    ):
+        raise _refuse("PROFILE_ID_UNSAFE", "profile id is missing or oversized")
+    if not profile_id[0].isalnum():
+        raise _refuse("PROFILE_ID_UNSAFE", "profile id must start alphanumeric")
+    if ".." in profile_id:
+        raise _refuse("PROFILE_ID_UNSAFE", "profile id carries a traversal run")
+    for char in profile_id[1:]:
+        if not (char.isalnum() or char in "_-."):
+            raise _refuse("PROFILE_ID_UNSAFE", "profile id has an unsafe character")
+    return profile_id
+
+
+def profile_binding_dir(root: Path | str, profile_id: str) -> Path:
+    """``<root>/profiles/<profile_id>`` — lexical only, and never created here."""
+    return Path(root) / PROFILES_DIRNAME / profile_component(profile_id)
+
+
+def active_pointer_path(root: Path | str, profile_id: str) -> Path:
+    """The one file a promotion for ``profile_id`` replaces."""
+    return profile_binding_dir(root, profile_id) / ACTIVE_FILENAME
+
+
+def generation_manifest_path(
+    root: Path | str, profile_id: str, generation_id: str
+) -> Path:
+    """Where one profile's generation manifest lives; operator-authored."""
+    return (
+        profile_binding_dir(root, profile_id)
+        / GENERATIONS_DIRNAME
+        / _safe_generation_id(generation_id)
+        / MANIFEST_FILENAME
+    )
 
 
 def _safe_generation_id(value: Any) -> str:
@@ -888,27 +1029,44 @@ class BindingReader:
         return self._root
 
     def resolve_active(self, profile: AgentProfile) -> ResolvedBinding:
-        """One ``active.json`` read plus one generation read. Nothing else."""
-        generation_id, manifest_sha256 = self.read_active()
+        """One ``active.json`` read plus one generation read. Nothing else.
+
+        Both reads are anchored at the profile's own subtree, so a root serves
+        every registered profile at once and a Run can only ever see the
+        selection promoted for the profile that is resolving.
+        """
+        generation_id, manifest_sha256 = self.read_active(profile)
         return self.read_generation(
             generation_id, profile=profile, expected_manifest_sha256=manifest_sha256
         )
 
-    def read_active(self) -> tuple[str, str]:
+    def read_active(self, profile: AgentProfile) -> tuple[str, str]:
         root_fd = self._open_root()
         try:
             self._verify_dir(root_fd, "binding root")
-            raw = _read_regular_file(root_fd, ACTIVE_FILENAME, surface="active.json")
-            _READ_COUNTERS["active"] += 1
-            self._verify_entry(root_fd, ACTIVE_FILENAME, "active.json")
+            profile_fd = _open_profile_dir(root_fd, profile, ownership=self._ownership)
         finally:
             os.close(root_fd)
+        try:
+            raw = _read_regular_file(profile_fd, ACTIVE_FILENAME, surface="active.json")
+            _READ_COUNTERS["active"] += 1
+            self._verify_entry(profile_fd, ACTIVE_FILENAME, "active.json")
+        finally:
+            os.close(profile_fd)
         payload = _decode_canonical(raw, surface="active.json")
         _require_fields(
             payload, _POINTER_FIELDS, rule="UNKNOWN_POINTER_FIELD", surface="active.json"
         )
         if payload.get("schema_version") != BINDING_SCHEMA_VERSION:
             raise _refuse("SCHEMA_VERSION", "active.json schema_version is unsupported")
+        # The directory already separates the profiles; this makes the pointer
+        # say so itself, so one moved or copied between subtrees is refused on
+        # an explicit machine field rather than inherited from its filename.
+        if payload.get("profile_id") != profile.profile_id:
+            raise _refuse(
+                "POINTER_PROFILE_MISMATCH",
+                "active.json activates a different profile than the one resolving it",
+            )
         generation_id = _safe_generation_id(payload.get("generation_id"))
         manifest_sha256 = payload.get("manifest_sha256")
         if not _is_sha256(manifest_sha256):
@@ -928,11 +1086,15 @@ class BindingReader:
         root_fd = self._open_root()
         try:
             self._verify_dir(root_fd, "binding root")
-            generations_fd = _open_dir(
-                GENERATIONS_DIRNAME, dir_fd=root_fd, surface="generations/"
-            )
+            profile_fd = _open_profile_dir(root_fd, profile, ownership=self._ownership)
         finally:
             os.close(root_fd)
+        try:
+            generations_fd = _open_dir(
+                GENERATIONS_DIRNAME, dir_fd=profile_fd, surface="generations/"
+            )
+        finally:
+            os.close(profile_fd)
         try:
             self._verify_dir(generations_fd, "generations/")
             generation_fd = _open_dir(
@@ -1965,50 +2127,83 @@ def validate_generation(
 
 
 def read_active_pointer(
-    root: Path | str, *, ownership: TrustedOwnership
+    root: Path | str, *, profile: AgentProfile, ownership: TrustedOwnership
 ) -> tuple[str, str] | None:
-    """The currently promoted generation, or ``None`` when none is promoted."""
+    """One profile's promoted generation, or ``None`` when it has none.
+
+    ``None`` is "nothing is promoted for this profile", which is an ordinary
+    state in a root that serves several profiles. A pre-0.5.2 root is not that
+    state and is not absorbed into it: it raises.
+    """
     try:
-        return BindingReader(root, ownership=ownership).read_active()
+        return BindingReader(root, ownership=ownership).read_active(profile)
     except BindingRefusal as refusal:
-        if refusal.rule in ("OPEN_FAILED", "NOT_A_REGULAR_FILE"):
+        if refusal.rule in (
+            "OPEN_FAILED",
+            "NOT_A_REGULAR_FILE",
+            "PROFILE_BINDING_ABSENT",
+        ):
             return None
         raise
 
 
 def write_active_pointer(
-    root: Path | str, resolved: ResolvedBinding, *, ownership: TrustedOwnership
+    root: Path | str,
+    resolved: ResolvedBinding,
+    *,
+    profile: AgentProfile,
+    ownership: TrustedOwnership,
 ) -> Path:
-    """Atomically replace ``active.json`` — the only file ARS ever writes here.
+    """Atomically replace one profile's ``active.json`` — the only file ARS writes.
 
     The write obeys the same ancestor policy as the reader: the root is opened
-    through the verified dirfd walk and every step — create, fsync, chmod,
-    replace — is dirfd-relative, so a redirected or rewritable ancestor can
-    never become a promotion target and no pathname is re-resolved between the
-    proof and the write.
+    through the verified dirfd walk, the descent to ``profiles/<profile_id>/``
+    is the reader's own, and every step — create, fsync, chmod, replace — is
+    dirfd-relative, so a redirected or rewritable ancestor can never become a
+    promotion target and no pathname is re-resolved between the proof and the
+    write.
 
-    The root directory itself is fsynced after ``os.replace`` so the rename is
-    durable, not merely atomic, across a crash.
+    The target directory is fsynced after ``os.replace`` so the rename is
+    durable, not merely atomic, across a crash. Because the replaced file lives
+    inside the profile's own subtree, promoting one profile cannot disable,
+    overwrite, or race another's selection — concurrently or in sequence.
+
+    ARS creates no directory here: ``profiles/<profile_id>/generations/`` is
+    operator-authored storage, and a promotion into a subtree that does not
+    exist is refused rather than materialized.
 
     No symlink is created, no other file is touched, and no daemon is
     restarted: admission re-reads the pointer per Run, so a promotion takes
     effect on the next Run and never re-points a sealed one.
     """
     root = Path(root)
+    if resolved.contract_identity.get("profile_id") != profile.profile_id:
+        # Unreachable through projection, which already matched the live
+        # contract — stated here so the write side carries the invariant rather
+        # than inheriting it.
+        raise _refuse(
+            "POINTER_PROFILE_MISMATCH",
+            "refusing to promote a generation accepted for a different profile",
+        )
     payload = {
         "schema_version": BINDING_SCHEMA_VERSION,
+        "profile_id": profile.profile_id,
         "generation_id": resolved.generation_id,
         "manifest_sha256": resolved.manifest_sha256,
     }
     data = _canonical_json(payload).encode("utf-8")
     root_fd = open_trusted_dir(root, ownership=ownership, surface="binding root")
     try:
+        profile_fd = _open_profile_dir(root_fd, profile, ownership=ownership)
+    finally:
+        os.close(root_fd)
+    try:
         temp_name = f".active-{os.getpid()}-{os.urandom(8).hex()}.tmp"
         fd = os.open(
             temp_name,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
             0o644,
-            dir_fd=root_fd,
+            dir_fd=profile_fd,
         )
         try:
             try:
@@ -2018,15 +2213,15 @@ def write_active_pointer(
             finally:
                 os.close(fd)
             os.replace(
-                temp_name, ACTIVE_FILENAME, src_dir_fd=root_fd, dst_dir_fd=root_fd
+                temp_name, ACTIVE_FILENAME, src_dir_fd=profile_fd, dst_dir_fd=profile_fd
             )
         except BaseException:
             try:
-                os.unlink(temp_name, dir_fd=root_fd)
+                os.unlink(temp_name, dir_fd=profile_fd)
             except OSError:
                 pass
             raise
-        os.fsync(root_fd)
+        os.fsync(profile_fd)
     finally:
-        os.close(root_fd)
-    return root / ACTIVE_FILENAME
+        os.close(profile_fd)
+    return active_pointer_path(root, profile.profile_id)

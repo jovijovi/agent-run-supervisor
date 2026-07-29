@@ -175,8 +175,20 @@ def native_binary_slot(
     }
 
 
-def make_package_tree(root: Path, *, version: str = "1.0.0") -> dict[str, Any]:
-    package_root = Path(root) / "artifacts" / "downstream" / version
+def make_package_tree(
+    root: Path,
+    *,
+    version: str = "1.0.0",
+    subdir: str = "downstream",
+    reports_version: bool = False,
+) -> dict[str, Any]:
+    """A fake wrapped-CLI package closure under ``artifacts/<subdir>/<version>``.
+
+    ``subdir`` keeps two profiles staged in the same fixture root from sharing
+    one package tree. ``reports_version`` makes the launcher print ``version``,
+    which is what the code-owned probe has to read back for a promotion.
+    """
+    package_root = Path(root) / "artifacts" / subdir / version
     lib = package_root / "lib"
     lib.mkdir(parents=True, exist_ok=True)
     (lib / "cli.js").write_text("// sibling code\n", encoding="utf-8")
@@ -189,7 +201,8 @@ def make_package_tree(root: Path, *, version: str = "1.0.0") -> dict[str, Any]:
     launcher.parent.mkdir(parents=True, exist_ok=True)
     # The launcher runs the interpreter the descriptor freezes; a shebang
     # naming anything else would leave the real runtime unfrozen (C5).
-    launcher.write_text("#!" + str(interpreter) + "\nexit 0\n", encoding="utf-8")
+    body = f"printf '%s' '{version}'\n" if reports_version else "exit 0\n"
+    launcher.write_text("#!" + str(interpreter) + "\n" + body, encoding="utf-8")
     launcher.chmod(0o755)
     harden_tree(package_root)
     harden_tree(interpreter.parent)
@@ -213,16 +226,38 @@ def make_config_root(root: Path, *, name: str = "config-root") -> dict[str, Any]
     return {"kind": "config_root", "path": str(path)}
 
 
-def default_slots(profile: AgentProfile, root: Path) -> dict[str, Any]:
-    """A minimal admissible slot set for whatever the contract declares."""
+def default_slots(
+    profile: AgentProfile,
+    root: Path,
+    *,
+    version: str = "1.0.0",
+    reports_version: bool = False,
+) -> dict[str, Any]:
+    """A minimal admissible slot set for whatever the contract declares.
+
+    Artifacts are namespaced by profile so several profiles can be staged into
+    one fixture root without sharing an artifact tree.
+    """
     slots: dict[str, Any] = {}
     for slot in profile.contract.binding_slots:
+        staged = f"{profile.profile_id}-{slot.name}"
         if slot.kind == SLOT_KIND_NATIVE_BINARY:
-            slots[slot.name] = native_binary_slot(make_native_binary(root, name=slot.name))
+            binary = make_native_binary(
+                root,
+                name=staged,
+                body=(
+                    "#!" + str(stage_interpreter(root)) + f"\nprintf '%s' '{version}'\n"
+                    if reports_version
+                    else None
+                ),
+            )
+            slots[slot.name] = native_binary_slot(binary, version=version)
         elif slot.kind == SLOT_KIND_PACKAGE_TREE:
-            slots[slot.name] = make_package_tree(root)
+            slots[slot.name] = make_package_tree(
+                root, version=version, subdir=staged, reports_version=reports_version
+            )
         else:
-            slots[slot.name] = make_config_root(root, name=slot.name)
+            slots[slot.name] = make_config_root(root, name=staged)
     return slots
 
 
@@ -238,11 +273,22 @@ def build_binding_root(
     pointer_overrides: dict[str, Any] | None = None,
     write_pointer: bool = True,
     dirname: str = "binding-root",
+    version: str = "1.0.0",
+    reports_version: bool = False,
 ) -> Path:
+    """One operator-shaped Binding root carrying one generation for ``profile``.
+
+    Called repeatedly with the same ``dirname``, it stages several profiles into
+    the same root — which is what a real deployment has, since one daemon takes
+    one ``--binding-root`` and the registry is closed at three profiles.
+    """
     root = Path(tmp_path) / dirname
-    (root / rb.GENERATIONS_DIRNAME / generation_id).mkdir(parents=True, exist_ok=True)
+    manifest_path = rb.generation_manifest_path(root, profile.profile_id, generation_id)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
     if slots is None:
-        slots = default_slots(profile, root)
+        slots = default_slots(
+            profile, root, version=version, reports_version=reports_version
+        )
     manifest: dict[str, Any] = {
         "schema_version": rb.BINDING_SCHEMA_VERSION,
         "generation_id": generation_id,
@@ -264,18 +310,25 @@ def build_binding_root(
     }
     if manifest_overrides:
         manifest.update(manifest_overrides)
-    manifest_path = root / rb.GENERATIONS_DIRNAME / generation_id / rb.MANIFEST_FILENAME
     write_canonical(manifest_path, manifest)
     if write_pointer:
         pointer = {
             "schema_version": rb.BINDING_SCHEMA_VERSION,
+            "profile_id": profile.profile_id,
             "generation_id": generation_id,
             "manifest_sha256": sha256_file(manifest_path),
         }
         if pointer_overrides:
             pointer.update(pointer_overrides)
-        write_canonical(root / rb.ACTIVE_FILENAME, pointer)
-    for directory in (root, root / rb.GENERATIONS_DIRNAME, manifest_path.parent):
+        write_canonical(rb.active_pointer_path(root, profile.profile_id), pointer)
+    profile_dir = rb.profile_binding_dir(root, profile.profile_id)
+    for directory in (
+        root,
+        root / rb.PROFILES_DIRNAME,
+        profile_dir,
+        profile_dir / rb.GENERATIONS_DIRNAME,
+        manifest_path.parent,
+    ):
         directory.chmod(0o755)
     harden(manifest_path.parent)
     return root
