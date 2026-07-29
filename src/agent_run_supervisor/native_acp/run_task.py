@@ -272,6 +272,9 @@ class _RunContext:
     bridge: PermissionBridge | None = None
     client: NativeAcpClient | None = None
     profile: Any = None
+    # The profile/registration pair this Run resolved. Every consumer below
+    # asks the pair for a fact and never asks which agent it is holding.
+    instance: Any = None
     driver: NativeAcpDriver | None = None
     machine: ConfigFidelityMachine | None = None
     effective: EffectiveRunState = field(default_factory=EffectiveRunState)
@@ -443,10 +446,10 @@ class RunTask:
     # -- drive -------------------------------------------------------------
 
     async def _drive(self, ctx: _RunContext) -> None:
-        spec, launch, binding, profile = self._admit(ctx)
+        spec, launch, binding, instance = self._admit(ctx)
         limits = spec.limits
 
-        self._bind_session(ctx, spec, binding, profile, launch)
+        self._bind_session(ctx, spec, binding, instance, launch)
 
         # Identity-pinned profiles attest the spawn boundary here: after the
         # session is bound and immediately before the child is created, so the
@@ -520,14 +523,18 @@ class RunTask:
             fs_read_handler=self._fs_read_handler(ctx),
         )
         ctx.client = client
-        ctx.profile = profile
+        ctx.profile = instance.profile
+        ctx.instance = instance
+        # Selector ids come from the instance, so a source-frozen profile and an
+        # operator-registered agent take the identical code path with different
+        # data — there is no agent-aware branch anywhere below this line.
         ctx.machine = ConfigFidelityMachine(
-            model_selector_id=profile.model_selector_id,
-            effort_selector_id=profile.effort_selector_id,
+            model_selector_id=instance.model_selector_id,
+            effort_selector_id=instance.effort_selector_id,
             requested_model=spec.runtime.model_id,
             requested_effort=spec.runtime.effort,
-            permission_mode_selector_id=profile.permission_mode_selector_id,
-            required_permission_mode=profile.required_permission_mode,
+            permission_mode_selector_id=instance.profile.permission_mode_selector_id,
+            required_permission_mode=instance.profile.required_permission_mode,
         )
         ctx.driver = NativeAcpDriver(client=client, machine=ctx.machine)
 
@@ -558,6 +565,8 @@ class RunTask:
             )
         except NativeSpecError as exc:
             raise _PreDispatchFailure(f"admission failed: {exc}", "ADMISSION") from exc
+        instance = assembler.instance
+        assert instance is not None  # resolve_launch always produces one
         spec_payload = spec.to_dict()
         spec_payload["spec_hash"] = spec_hash(spec)
         storage.write_once_json(ctx.handle.run_dir / "spec.json", spec_payload)
@@ -565,9 +574,9 @@ class RunTask:
         launch_payload["launch_spec_hash"] = launch.launch_hash()
         storage.write_once_json(ctx.handle.run_dir / "launch.json", launch_payload)
         self._spec = spec
-        return spec, launch, binding, profile
+        return spec, launch, binding, instance
 
-    def _bind_session(self, ctx: _RunContext, spec, binding, profile, launch) -> None:
+    def _bind_session(self, ctx: _RunContext, spec, binding, instance, launch) -> None:
         # The Binding era this Run was sealed under (C11). Both are ``None``
         # for a profile whose contract accepts no Binding, so such a Session
         # keeps its exact pre-epoch shape and its exact reuse semantics.
@@ -598,17 +607,21 @@ class RunTask:
                 matched_root=spec.workspace.canonical_root,
                 adapter_contract_hash=contract_hash,
                 session_compatibility_epoch=epoch,
+                agent_id=spec.agent.agent_id,
+                agent_registration_hash=spec.agent.agent_registration_hash,
             )
         else:
             # Before the lease is acquired and long before session/load.
             validate_native_binding(
                 record,
-                profile=profile,
+                profile=instance.profile,
                 workspace_result=binding,
                 owner=spec.identity.owner,
                 namespace=spec.identity.namespace,
                 expected_contract_hash=contract_hash,
                 expected_epoch=epoch,
+                expected_agent_id=spec.agent.agent_id,
+                expected_agent_registration_hash=spec.agent.agent_registration_hash,
             )
             if record.agent_session_id is not None:
                 # Later Runs on a bound session use real session/load with
@@ -646,7 +659,7 @@ class RunTask:
             ctx.effective.capabilities = summary.capabilities
             ctx.effective.load_session_advertised = summary.load_session_advertised
 
-            self._attest_initialize(ctx, ctx.profile.contract, summary)
+            self._attest_initialize(ctx, ctx.instance, summary)
 
             if ctx.reuse_load:
                 if not summary.load_session_advertised:
@@ -714,7 +727,7 @@ class RunTask:
         ctx.effective_written = True
         self._write_progress(ctx, "running")
 
-    def _attest_initialize(self, ctx: _RunContext, contract, summary) -> None:
+    def _attest_initialize(self, ctx: _RunContext, instance, summary) -> None:
         """Post-initialize identity gate (D10c), before any session call.
 
         Runs on first *and* reused Runs. The write-once artifact is persisted
@@ -727,7 +740,13 @@ class RunTask:
         a wrapped adapter, whose entry digest the spawn boundary already
         proves. For ``direct_acp`` it reports the *deployed* executable, so it
         is recorded as an observation and never compared with a CLI
-        ``--version``: the two are independent facts.
+        ``--version``: the two are independent facts. A registration never
+        supplies a version for the same reason: it freezes no artifact.
+
+        The expected values come from the instance, so the ACP name and the
+        forbidden-capability set are the agent's where an agent exists and the
+        profile's where one does not. The protocol version is contract-owned in
+        both cases — a registration cannot move the ACP major.
         """
         agent_info = summary.agent_info or {}
         observed_name = str(agent_info.get("name", ""))
@@ -738,24 +757,24 @@ class RunTask:
         checks: list[dict[str, Any]] = [
             {
                 "name": "agent_name",
-                "expected": contract.acp_agent_name,
+                "expected": instance.acp_agent_name,
                 "observed": observed_name,
-                "passed": observed_name == contract.acp_agent_name,
+                "passed": observed_name == instance.acp_agent_name,
             },
             {
                 "name": "agent_version",
-                "expected": contract.acp_agent_version or _OBSERVED_ONLY,
+                "expected": instance.acp_agent_version or _OBSERVED_ONLY,
                 "observed": observed_version,
                 "passed": (
-                    contract.acp_agent_version is None
-                    or observed_version == contract.acp_agent_version
+                    instance.acp_agent_version is None
+                    or observed_version == instance.acp_agent_version
                 ),
             },
             {
                 "name": "protocol_version",
-                "expected": contract.acp_protocol_version,
+                "expected": instance.acp_protocol_version,
                 "observed": observed_protocol,
-                "passed": observed_protocol == contract.acp_protocol_version,
+                "passed": observed_protocol == instance.acp_protocol_version,
             },
             {
                 "name": "load_session_advertised",
@@ -764,7 +783,7 @@ class RunTask:
                 "passed": observed_load,
             },
         ]
-        for capability in contract.forbidden_capabilities:
+        for capability in instance.forbidden_capabilities:
             present = bool(advertised.get(capability))
             checks.append(
                 {
@@ -779,11 +798,11 @@ class RunTask:
             {
                 "schema_version": 1,
                 "expected": {
-                    "agent_info_name": contract.acp_agent_name,
-                    "agent_info_version": contract.acp_agent_version,
-                    "protocol_version": contract.acp_protocol_version,
+                    "agent_info_name": instance.acp_agent_name,
+                    "agent_info_version": instance.acp_agent_version,
+                    "protocol_version": instance.acp_protocol_version,
                     "load_session_advertised": True,
-                    "forbidden_capabilities": list(contract.forbidden_capabilities),
+                    "forbidden_capabilities": list(instance.forbidden_capabilities),
                 },
                 "observed": {
                     "agent_info_name": observed_name,
@@ -825,8 +844,8 @@ class RunTask:
         latest_options = snapshots[-1][1] if snapshots else None
         try:
             rollback_machine = ConfigFidelityMachine(
-                model_selector_id=ctx.profile.model_selector_id,
-                effort_selector_id=ctx.profile.effort_selector_id,
+                model_selector_id=ctx.instance.model_selector_id,
+                effort_selector_id=ctx.instance.effort_selector_id,
                 requested_model=previous_model,
                 requested_effort=previous_effort,
                 # The rollback re-runs the full exact sequence, so a frozen

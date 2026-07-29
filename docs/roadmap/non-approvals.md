@@ -52,6 +52,28 @@ This document specifically does not approve:
 - treating the PR-A authority update or the active plan as approval to land PR-B source, to publish, to
   deploy, or to run a real provider — each remains a separate, narrow operator decision.
 
+The standard Native ACP (v1) contract and the Agent Registration layer (PRD R14, GOAL contract 11) add
+no approval either. This document specifically does not approve:
+
+- registering any **real** agent against `standard-native-acp-v1`, or any step of that sequence:
+  installing an agent artifact under a root-owned prefix, running ACP `initialize` discovery, running
+  the code-owned CLI probe, running the mandatory denied-action mediation canary, authoring a
+  `registration.json` or a generation manifest, or `validate --agent`/`promote --agent` against any
+  real Binding root;
+- freezing any real agent identity, capability, selector, or value domain in source or documentation —
+  the only registrations that exist are two fabricated test fixtures, and no OpenCode or Cursor
+  registration fact is frozen anywhere;
+- claiming real OpenCode or Cursor end-to-end evidence for the standard-native path; no
+  standard-native agent is runnable at merge, and real acceptance is a future operator stage;
+- cutting any caller over to `standard-native-acp-v1` or to any agent id;
+- **retiring, deprecating, disabling, deleting, aliasing, or redirecting `opencode-native-acp` or any
+  other registered profile, or introducing any mechanism capable of doing so.** No such mechanism
+  exists in source, and adding one is a separate design and a separate approval from using it — two
+  decisions, neither taken;
+- treating a registration's provenance block — its acceptance, discovery, or permission-canary receipt
+  — as self-authorization for anything;
+- adding a `standard-native-acp-v2` profile, registration, Binding, or Session domain.
+
 The released v0.1.7 acpx path may receive separately approved compatibility/security maintenance. Such
 maintenance does not reopen its archived requirements as the vNext product direction.
 

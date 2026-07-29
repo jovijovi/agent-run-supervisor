@@ -27,7 +27,8 @@ Status legend: **Done** · **In review** · **Planned** · **Parked** · **Non-g
 | F-NATIVE-ADAPTER-CLAUDE-001 | Claude official ACP adapter closed profile: frozen runtime identity, enforced `default` permission mode, frozen session metadata on new+load | Required | Done | PRD R1/R3/R7/R12; [plan](../plans/archive/2026-07-25-claude-official-adapter-b3-b5-closure.md); 0.63.0 ACP discovery | registered contract is now `claude-agent-acp-0.63.0` r4 (no 0.61.0 alias) with the complete adapter package closure; the R12 permission canary and re-acceptance at r4 are open operator actions; publication/deployment/enablement remain separately approved |
 | F-RUNTIME-BINDING-001 | operator-owned Runtime Binding, sealed per-Run runtime provenance, session compatibility epoch | Required | Done | PRD R13; [plan](../plans/archive/2026-07-26-runtime-binding-refactor.md); WP2–WP5 hermetic suites | source framework merged, including the daemon's required `--binding-root`; a prepared artifact root, a promoted generation, re-acceptance at the bumped revisions, rollout, and real-provider evidence stay separate operator decisions |
 | F-RUNTIME-BINDING-002 | complete wrapped-adapter package closure in the frozen artifact identity | Required | Done | PRD R13 artifact closure; GOAL contract 9; profile/spec/attestation closure suites | source only: both wrapped contracts freeze the adapter install root plus tree digest **and** the `--no-global-search-paths` interpreter prefix, and name the future root-owned `/opt/agent-run-supervisor/artifacts/` location rather than the service home; both bumped a revision (Codex r3, Claude r4), so their prior Binding generations fail closed. Materialization, re-acceptance, and the Claude canary stay open operator actions |
-| F-RUNTIME-BINDING-003 | profile-scoped active selection: one Binding root, one independent generation per registered profile | Required | In review | PRD R13 layout/promotion; [plan](../plans/active/2026-07-29-multi-profile-runtime-binding.md) | source/tests/docs on branch; the pre-0.5.2 root-level pointer layout is refused and needs per-profile re-promotion, which is an operator decision |
+| F-RUNTIME-BINDING-003 | profile-scoped active selection: one Binding root, one independent generation per registered profile | Required | Done | PRD R13 layout/promotion; [plan](../plans/archive/2026-07-29-multi-profile-runtime-binding.md) | released on the v0.5.2 line; one generation per profile is promoted under the live root |
+| F-STANDARD-NATIVE-ACP-001 | versioned `standard-native-acp-v1` conformance profile + typed operator-owned Agent Registration + agent-anchored Binding | Required | In review | PRD R12/R14; GOAL contract 11; [plan](../plans/active/2026-07-29-standard-native-acp-v1.md) | source/tests/docs on branch, additive and merge-safe: the three live profiles keep byte-identical hashes, layout, and digests. Registering any real agent — artifact install, ACP discovery, probe, mediation canary, registration authoring, validate/promote — stays a separate operator sequence, and no agent is runnable at merge |
 | F-SACHIMA-ARSD-001 | Sachima socket backend | Later integration | Parked | GOAL/PRD stage boundary | ARS production acceptance closed; integration still requires its own separate approval |
 | F-NONGOAL-001 | public/root/TCP/multi-tenant/business-orchestration surfaces | Non-goal | Non-goal | GOAL; PRD §6; non-approvals | separate product decision only |
 
@@ -39,7 +40,7 @@ Status legend: **Done** · **In review** · **Planned** · **Parked** · **Non-g
 | vNext Stage 0/1 | 7 | 0 | 0 | 0 | 0 |
 | vNext Stage 2 | 1 | 0 | 0 | 0 | 0 |
 | Registered official adapters | 2 | 0 | 0 | 0 | 0 |
-| Runtime Binding | 2 | 1 | 0 | 0 | 0 |
+| Runtime Binding | 3 | 1 | 0 | 0 | 0 |
 | Later integration | 0 | 0 | 0 | 1 | 0 |
 | Explicit exclusions | 0 | 0 | 0 | 0 | 1 |
 
@@ -48,12 +49,18 @@ read-once sealed admission path, the epoch gate, the artifact/owner/TOCTOU refus
 command surface, and the daemon's required `--binding-root` are merged in `main` source and pass the
 local verification gates — nothing more. `Done` on F-RUNTIME-BINDING-002 means the same kind of claim
 for the wrapped adapter's artifact identity: the closure is source-frozen, validated, sealed into
-`launch.json`, and enforced at the spawn boundary on both sides of the race seam. `In review` on
-F-RUNTIME-BINDING-003 means the profile-scoped active-selection namespace exists on a branch with its
-hermetic suites green — not merged, and not a promotion. No row claims a Binding root, promoted
-generation, re-acceptance, enablement, deployment, or publication. The three
-adapter rows stay `Done` as implementations, but their operator-held local acceptance was taken at the
-pre-refactor revisions, and the closure moved both wrapped revisions again.
+`launch.json`, and enforced at the spawn boundary on both sides of the race seam. `Done` on
+F-RUNTIME-BINDING-003 means the profile-scoped active-selection namespace is released on the v0.5.2
+line and the operator has promoted one generation per profile under the live root.
+
+`In review` on F-STANDARD-NATIVE-ACP-001 means the conformance profile, the Agent Registration
+contract and reader, the `AgentInstance` seam, and the agent-anchored Binding subtree exist on a branch
+with their hermetic suites green — not merged, not promoted, and not a registration. The row claims
+**no** real agent: no OpenCode or Cursor identity, capability, or selector constant is frozen anywhere
+in it, the only registrations that exist are two fabricated fixtures that ship in tests and never in
+the installed package, and no standard-native agent is runnable at merge. The three
+adapter rows stay `Done` as implementations, and no row anywhere claims a retirement, deprecation, or
+disablement of a registered profile — no such mechanism exists in source.
 
 **Publication boundary.** `Done` means implemented in the source line this release prepares, whose
 package metadata is 0.5.2 and covers the Stage 0/1 Native ACP core, `arsd` (F-ARSD-001), the three

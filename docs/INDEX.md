@@ -2,11 +2,11 @@
 
 # Documentation Index
 
-Total: 69 documents tracked across 2 statuses.
+Total: 70 documents tracked across 2 statuses.
 
 ## Active (16)
 
-- [Profile-scoped Runtime Binding activation](plans/active/2026-07-29-multi-profile-runtime-binding.md) — created 2026-07-29
+- [Standard Native ACP (v1) — one conformance contract, many registered agents](plans/active/2026-07-29-standard-native-acp-v1.md) — created 2026-07-29
 - [agent-run-supervisor vNext System Architecture](design/architecture.md) — created 2026-07-21
 - [agent-run-supervisor vNext Technical Solution](design/technical-solution.md) — created 2026-07-21
 - [agent-run-supervisor vNext PRD](product/prd.md) — created 2026-07-21
@@ -23,8 +23,9 @@ Total: 69 documents tracked across 2 statuses.
 - [Engineering practices](practices/README.md) — created 2026-05-28
 - [Verification gates for implementation PRs](roadmap/verification.md) — created 2026-05-28
 
-## Archived (53)
+## Archived (54)
 
+- [Profile-scoped Runtime Binding activation](plans/archive/2026-07-29-multi-profile-runtime-binding.md) — created 2026-07-29
 - [Runtime Binding Source and Wrapped-Adapter Package-Closure](roadmap/archive/phases/vnext-runtime-binding-source-closure.md) — created 2026-07-29
 - [Runtime Binding refactor — contract/Binding split and sealed runtime provenance](plans/archive/2026-07-26-runtime-binding-refactor.md) — created 2026-07-26
 - [Claude official ACP adapter — B3/B4/B5 closure](plans/archive/2026-07-25-claude-official-adapter-b3-b5-closure.md) — created 2026-07-25

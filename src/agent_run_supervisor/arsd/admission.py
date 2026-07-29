@@ -42,6 +42,16 @@ FORBIDDEN_RUNTIME_SELECTION_FIELDS = (
     "session_compatibility_epoch",
 )
 
+# The closed set of request fields that leave the digest material when they are
+# ``None`` — deliberately one named field, never a blanket null-strip.
+#
+# Production is live at the pre-change digest, so a legacy frame must hash
+# byte-identically or every in-flight retry becomes an idempotency conflict for
+# no information gain. A blanket strip would go the other way and collapse the
+# meaningful existing nulls (``ars_session_id``, ``expected_binding_hash``,
+# ``cwd``, ``retry_of_run_id``), changing every digest instead.
+_DIGEST_OMIT_WHEN_NONE = ("agent_id",)
+
 _RUN_ID_PREFIX = "run-"
 _DERIVATION_TAG = b"arsd-run-id-v1\x00"
 _REQUEST_ID_RE = re.compile(rf"[A-Za-z0-9._-]{{1,{protocol.MAX_REQUEST_ID_CHARS}}}")
@@ -111,12 +121,21 @@ def compute_request_digest(command: protocol.SubmitCommand) -> RequestDigest:
 
     Excludes transport-only material (``api_version``, ``op``, ``request_id``).
     Prompt is bound as SHA-256 + UTF-8 byte count, never as plaintext.
+
+    ``DIGEST_SCHEMA_VERSION`` does **not** move when a request field is added:
+    the omit-when-None discipline (``_DIGEST_OMIT_WHEN_NONE``) keeps a
+    pre-upgrade frame's digest byte-identical, while a request that names an
+    agent digests differently because it behaves differently.
     """
     prompt = command.prompt_text.encode("utf-8")
     prompt_sha256 = hashlib.sha256(prompt).hexdigest()
+    request_material = dataclasses.asdict(command.request)
+    for name in _DIGEST_OMIT_WHEN_NONE:
+        if request_material.get(name) is None:
+            request_material.pop(name, None)
     material = {
         "digest_schema_version": DIGEST_SCHEMA_VERSION,
-        "request": dataclasses.asdict(command.request),
+        "request": request_material,
         "workspace_root": command.workspace_root,
         "cwd": command.cwd,
         "retry_of_run_id": command.retry_of_run_id,
@@ -142,6 +161,7 @@ def resolve_runtime_binding(
     *,
     binding_root: Path | None,
     ownership: runtime_binding.TrustedOwnership | None = None,
+    agent_id: str | None = None,
 ) -> runtime_binding.AdmittedRuntimeBinding | None:
     """The single per-Run Binding read (C8) — one pointer, one generation.
 
@@ -151,11 +171,21 @@ def resolve_runtime_binding(
     downstream re-opens the Binding root, so a promotion between two Runs can
     never re-point work already admitted.
 
-    A caller cannot reach this: the profile comes from the closed registry and
-    the root from operator-supplied daemon configuration. A profile whose
-    contract declares no slot needs no Binding and gets ``None``; a profile
-    that declares slots refuses fail-closed when no root is configured, rather
-    than falling back to a source constant that no longer exists.
+    An agent-scoped profile reads one ``registration.json`` first — three reads
+    total, still exactly once each — and the whole read set is anchored inside
+    that agent's subtree.
+
+    The profile comes from the closed registry and the root from operator
+    supplied daemon configuration. ``agent_id`` *is* caller text, and it selects
+    among operator-authored, source-bounded registrations exactly as
+    ``profile_id`` selects among source-registered profiles: it names no path,
+    executable, argv, env key, digest, or version, and the component grammar
+    that runs before any filesystem query makes it unable to.
+
+    A profile whose contract declares no slot needs no Binding and gets
+    ``None``; a profile that declares slots refuses fail-closed when no root is
+    configured, rather than falling back to a source constant that no longer
+    exists.
     """
     if not profile.contract.requires_binding:
         return None
@@ -170,8 +200,13 @@ def resolve_runtime_binding(
         )
     policy = ownership or runtime_binding.default_ownership()
     reader = runtime_binding.BindingReader(binding_root, ownership=policy)
+    registration = (
+        None if agent_id is None else reader.read_registration(profile, agent_id)
+    )
     return runtime_binding.AdmittedRuntimeBinding(
-        resolved=reader.resolve_active(profile), ownership=policy
+        resolved=reader.resolve_active(profile, agent_id=agent_id),
+        ownership=policy,
+        registration=registration,
     )
 
 

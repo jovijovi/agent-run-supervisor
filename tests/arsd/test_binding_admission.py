@@ -46,7 +46,7 @@ def test_admission_reads_the_pointer_once_and_one_generation_once(
     admitted = admission.resolve_runtime_binding(
         profile, binding_root=root, ownership=bf.ownership()
     )
-    assert rb.read_counters() == {"active": 1, "generation": 1}
+    assert rb.read_counters() == {"registration": 0, "active": 1, "generation": 1}
     assert admitted is not None
     assert admitted.resolved.generation_id == "gen-0001"
 
@@ -56,11 +56,16 @@ def test_one_configured_root_admits_every_registered_profile(tmp_path: Path) -> 
     from agent_run_supervisor.native_acp.profile import DEFAULT_REGISTRY
 
     root = tmp_path / "shared-binding-root"
-    for profile_id in DEFAULT_REGISTRY.ids():
+    profile_scoped = [
+        pid
+        for pid in DEFAULT_REGISTRY.ids()
+        if not DEFAULT_REGISTRY.get(pid).contract.requires_agent_registration
+    ]
+    for profile_id in profile_scoped:
         root = bf.build_binding_root(
             tmp_path, DEFAULT_REGISTRY.get(profile_id), dirname="shared-binding-root"
         )
-    for profile_id in DEFAULT_REGISTRY.ids():
+    for profile_id in profile_scoped:
         rb.reset_read_counters()
         admitted = admission.resolve_runtime_binding(
             DEFAULT_REGISTRY.get(profile_id),
@@ -70,7 +75,7 @@ def test_one_configured_root_admits_every_registered_profile(tmp_path: Path) -> 
         assert admitted is not None
         assert admitted.resolved.contract_identity["profile_id"] == profile_id
         # Still one pointer and one generation, per Run, per profile.
-        assert rb.read_counters() == {"active": 1, "generation": 1}
+        assert rb.read_counters() == {"registration": 0, "active": 1, "generation": 1}
 
 
 def test_admission_reads_only_the_resolved_profiles_own_subtree(
@@ -165,7 +170,7 @@ def test_no_binding_read_happens_after_admission_during_a_run(
     # zero reads, whatever it succeeds or fails on.
     rb.reset_read_counters()
     asyncio.run(task.run())
-    assert rb.read_counters() == {"active": 0, "generation": 0}
+    assert rb.read_counters() == {"registration": 0, "active": 0, "generation": 0}
 
 
 def test_admission_revalidates_the_artifact_digest_against_the_trusted_path(
@@ -231,7 +236,7 @@ def test_a_bindingless_profile_needs_no_root_and_reads_nothing() -> None:
     )
     rb.reset_read_counters()
     assert admission.resolve_runtime_binding(profile, binding_root=None) is None
-    assert rb.read_counters() == {"active": 0, "generation": 0}
+    assert rb.read_counters() == {"registration": 0, "active": 0, "generation": 0}
 
 
 def test_a_pre_pr_b_run_directory_stays_readable(tmp_path: Path) -> None:
@@ -305,3 +310,122 @@ def test_no_caller_facing_runtime_selection_field_exists(tmp_path: Path) -> None
         with pytest.raises(protocol.ProtocolError) as err:
             protocol.parse_submit(payload)
         assert err.value.code == protocol.INVALID_REQUEST
+
+
+# -- the agent gate and the agent-anchored read ------------------------------
+
+
+def _standard():
+    from agent_run_supervisor.native_acp.profile import STANDARD_NATIVE_ACP_V1
+
+    return STANDARD_NATIVE_ACP_V1
+
+
+def test_an_agent_scoped_run_reads_one_registration_one_pointer_one_generation(
+    tmp_path: Path,
+) -> None:
+    profile = _standard()
+    root = bf.build_agent_binding_root(tmp_path, profile, bf.FAKE_ALPHA_ID)
+    rb.reset_read_counters()
+    admitted = admission.resolve_runtime_binding(
+        profile,
+        binding_root=root,
+        ownership=bf.ownership(),
+        agent_id=bf.FAKE_ALPHA_ID,
+    )
+    assert rb.read_counters() == {"registration": 1, "active": 1, "generation": 1}
+    assert admitted is not None
+    assert admitted.registration is not None
+    assert admitted.registration.agent_id == bf.FAKE_ALPHA_ID
+
+
+def test_a_legacy_run_reads_no_registration(tmp_path: Path) -> None:
+    profile = _binding_profile(tmp_path)
+    root = codex_binding_root(tmp_path, profile)
+    rb.reset_read_counters()
+    admission.resolve_runtime_binding(
+        profile, binding_root=root, ownership=bf.ownership()
+    )
+    assert rb.read_counters() == {"registration": 0, "active": 1, "generation": 1}
+
+
+def test_the_agent_gate_refuses_a_missing_agent_before_reading(tmp_path: Path) -> None:
+    profile = _standard()
+    root = bf.build_agent_binding_root(tmp_path, profile, bf.FAKE_ALPHA_ID)
+    rb.reset_read_counters()
+    with pytest.raises(rb.BindingRefusal) as excinfo:
+        admission.resolve_runtime_binding(
+            profile, binding_root=root, ownership=bf.ownership()
+        )
+    assert excinfo.value.rule == "AGENT_SCOPE_REQUIRED"
+    assert rb.read_counters() == {"registration": 0, "active": 0, "generation": 0}
+
+
+def test_the_agent_gate_refuses_an_agent_on_a_legacy_profile(tmp_path: Path) -> None:
+    profile = _binding_profile(tmp_path)
+    root = codex_binding_root(tmp_path, profile)
+    rb.reset_read_counters()
+    with pytest.raises(rb.BindingRefusal) as excinfo:
+        admission.resolve_runtime_binding(
+            profile,
+            binding_root=root,
+            ownership=bf.ownership(),
+            agent_id=bf.FAKE_ALPHA_ID,
+        )
+    assert excinfo.value.rule == "AGENT_SCOPE_FORBIDDEN"
+    assert rb.read_counters() == {"registration": 0, "active": 0, "generation": 0}
+
+
+def test_g1_2_an_unmodified_pre_merge_root_still_resolves_every_live_profile(
+    tmp_path: Path,
+) -> None:
+    """The three live subtrees are byte-identical to today's layout."""
+    from agent_run_supervisor.native_acp.profile import DEFAULT_REGISTRY
+
+    root = tmp_path / "pre-merge-root"
+    live = [
+        DEFAULT_REGISTRY.get(pid)
+        for pid in DEFAULT_REGISTRY.ids()
+        if not DEFAULT_REGISTRY.get(pid).contract.requires_agent_registration
+    ]
+    for profile in live:
+        root = bf.build_binding_root(tmp_path, profile, dirname="pre-merge-root")
+    for profile in live:
+        resolved = admission.resolve_runtime_binding(
+            profile, binding_root=root, ownership=bf.ownership()
+        )
+        assert resolved is not None
+        assert set(resolved.resolved.contract_identity) == {
+            "profile_id",
+            "profile_revision",
+            "adapter_contract_hash",
+        }
+        pointer = json.loads(
+            rb.active_pointer_path(root, profile.profile_id).read_text(encoding="utf-8")
+        )
+        assert set(pointer) == {
+            "schema_version",
+            "profile_id",
+            "generation_id",
+            "manifest_sha256",
+        }
+
+
+def test_g1_2_field_sets_widen_only_for_an_agent_scoped_contract(
+    tmp_path: Path,
+) -> None:
+    profile = _standard()
+    root = bf.build_agent_binding_root(tmp_path, profile, bf.FAKE_ALPHA_ID)
+    admitted = admission.resolve_runtime_binding(
+        profile,
+        binding_root=root,
+        ownership=bf.ownership(),
+        agent_id=bf.FAKE_ALPHA_ID,
+    )
+    assert set(admitted.resolved.contract_identity) == {
+        "profile_id",
+        "profile_revision",
+        "adapter_contract_hash",
+        "agent_id",
+        "agent_registration_hash",
+    }

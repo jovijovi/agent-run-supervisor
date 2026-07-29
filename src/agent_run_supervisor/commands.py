@@ -455,12 +455,14 @@ def _validated_generation(
     """
     from agent_run_supervisor.native_acp import runtime_binding as rb
 
+    agent_id = getattr(args, "agent", None)
     try:
         resolved = rb.validate_generation(
             Path(args.binding_root),
             args.generation,
             profile=profile,
             ownership=_binding_ownership(args),
+            agent_id=agent_id,
             probe=True,
         )
     except rb.BindingRefusal as refusal:
@@ -468,11 +470,13 @@ def _validated_generation(
             "valid": False,
             "rule": refusal.rule,
             "profile_id": profile.profile_id,
+            "agent_id": agent_id,
             "generation_id": args.generation,
         }, None
     report: dict[str, Any] = {
         "valid": True,
         "profile_id": profile.profile_id,
+        "agent_id": agent_id,
         "profile_revision": profile.revision,
         "adapter_contract_hash": profile.adapter_contract_hash(),
         "generation_id": resolved.generation_id,
@@ -484,6 +488,10 @@ def _validated_generation(
         "declared_version": None,
         "probe_version": None,
     }
+    if agent_id is not None:
+        report["agent_registration_hash"] = resolved.contract_identity.get(
+            "agent_registration_hash"
+        )
     if profile.contract.cli_slot is not None:
         report["declared_version"] = rb.declared_cli_version(resolved, profile)
         # ``validate_generation`` already probed and matched this exact object;
@@ -525,12 +533,14 @@ def _cmd_binding_generation(args: argparse.Namespace, command: str) -> int:
     if command == "rollback":
         # A rollback targets a generation other than the active one: rolling
         # back to what is already promoted would be a silent no-op that reads
-        # like a successful recovery.
+        # like a successful recovery. The comparison is scoped to the same
+        # agent, so one agent's active selection never grades another's.
         try:
             active = rb.read_active_pointer(
                 Path(args.binding_root),
                 profile=profile,
                 ownership=_binding_ownership(args),
+                agent_id=getattr(args, "agent", None),
             )
         except rb.BindingRefusal as refusal:
             _print_json({"valid": False, "rule": refusal.rule})
@@ -560,6 +570,7 @@ def _cmd_binding_generation(args: argparse.Namespace, command: str) -> int:
             resolved,
             profile=profile,
             ownership=_binding_ownership(args),
+            agent_id=getattr(args, "agent", None),
         )
     except rb.BindingRefusal as refusal:
         _print_json({"valid": True, "promoted": False, "rule": refusal.rule})

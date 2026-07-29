@@ -187,15 +187,24 @@ caller-authorized Run linked by `retry_of_run_id`; it never rewrites the origina
   required plus forbidden capabilities, permission/config/model/effort/session semantics, and — for
   wrapped adapters — the interpreter and adapter artifact identity. It does **not** freeze the
   deployment-specific external CLI path, version, or digest; those are Binding facts (R13).
-- Three profiles are registered, and R13 gives each one a `launch_kind`. The OpenCode profile is
+- Four profiles are registered, and R13 gives each one a `launch_kind`. The OpenCode profile is
   `direct_acp`: one OpenCode executable is both the AGENT CLI and the ACP implementation, so the profile
   freezes direct launch/protocol/capability semantics while the Binding freezes that single executable's
   identity. Its required stable ID is `opencode-native-acp`, which §5 records as registered on `main`.
   The official Codex ACP and Claude Agent ACP profiles are `wrapped_acp`: source freezes the
   interpreter plus the ACP adapter's complete package closure, and the Binding freezes the downstream
   CLI artifact and the config-root values.
+- `standard-native-acp-v1` is a fourth registered profile of a different shape: a versioned
+  `direct_acp` contract that freezes ACP-v1 **conformance only** — protocol major, `loadSession` as a
+  required capability, real `session/load`, the accepted Binding slot schema, the code-known env key
+  set, and the code-owned probe rule — and freezes no agent-specific identity, selector, or domain.
+  It is instantiated per agent by an operator-owned Agent Registration (R14). Its `-v1` suffix is
+  load-bearing: profile construction refuses a contract whose frozen protocol major disagrees with
+  the id, so a future `standard-native-acp-v2` is a separate profile rather than a revision.
 - New profiles are typed, versioned, closed registrations. An Agent-specific adapter is allowed only
-  after conformance evidence proves a standard ACP gap; v1 has no runtime plugin system.
+  after conformance evidence proves a standard ACP gap; v1 has no runtime plugin system, and an
+  Agent Registration is not one: it selects and narrows inside source-declared bounds and can supply
+  no code, path, or capability of its own.
 - Adding a profile, or revising a registered one, requires a fresh install/discovery/permission-canary
   cycle, a revision bump, and independent review. Discovery evidence must come from a real non-prompt
   ACP `initialize` exchange; the ACP `agentInfo.version` and the external CLI `--version` are separate
@@ -295,6 +304,85 @@ carrying it is refused with the stable rule `LEGACY_BINDING_LAYOUT`, and a root 
 resolving profile with `PROFILE_BINDING_ABSENT`. ARS neither migrates nor repairs operator storage: the
 operator moves each generation under `profiles/<profile_id>/generations/` and re-promotes per profile,
 which is a separate operator decision.
+
+### R14 — Agent Registration: one standard contract, many registered agents
+
+A profile whose contract sets `requires_agent_registration` is not frozen agent by agent in source. It
+is instantiated by a typed, bounded, operator-owned **Agent Registration** — a fourth authority that
+sits strictly *inside* layer 2, never beside layer 1.
+
+**Anchor.** An agent-scoped profile descends one level deeper than the profile-scoped layout above:
+
+```text
+<binding_root>/profiles/<profile_id>/
+├── active.json                            # non-agent-scoped only — unchanged
+├── generations/<gen>/manifest.json        # non-agent-scoped only — unchanged
+└── agents/<agent_id>/                     # agent-scoped only
+    ├── registration.json
+    ├── active.json
+    └── generations/<gen>/manifest.json
+```
+
+Field-set widening is contract-dependent, never global: a non-agent-scoped profile's pointer and
+`contract_identity` field sets are byte-identical to R13's, so its promoted generations keep resolving
+unchanged. An agent-scoped pointer additionally declares `agent_id`, and its `contract_identity`
+additionally declares `agent_id` and `agent_registration_hash` — so a pointer or generation moved
+between two agent subtrees is refused on an explicit machine field (`POINTER_AGENT_MISMATCH`,
+`REGISTRATION_CONTRACT_MISMATCH`) rather than by path separation alone. The registration is deliberately
+*not* folded into the generation manifest, despite costing a third read: folding would put agent
+identity inside `generation_hash`, so an artifact-only bump would force re-authoring agent facts and a
+rollback would silently change the agent's ACP name.
+
+**What a registration may say.** Only values that select within, or narrow, a bound source already
+declared: the ACP `agent_name`; 1..4 bounded ASCII `argv_tokens` structurally incapable of being a path
+or a shell fragment; a `version_probe_argv_suffix` validated by the contract's own probe rule, which
+keeps parser, timeout, and output bound code-owned; selector ids and their 1..32-entry value domains
+with each default inside its own domain; a `forbidden_capabilities` set that is a **superset** of the
+source floor and disjoint from the required capabilities; one `permission_binding_id` from a
+source-closed mediation registry, or `null`; credential slot names with `required_refs` a subset of
+them; and a shape-validated provenance block that is recorded and never consulted. It supplies no
+executable, path, digest, version, env key, launch kind, protocol version, or capability requirement —
+those are not fields, so the refusal is structural rather than filtered.
+
+**Identity and staleness.** `agent_registration_hash` is computed over the whole payload except
+provenance, so re-recording a receipt does not retire an agent's Sessions while any
+compatibility-bearing edit does. The generation **freezes** it: the digest a generation declares is
+compared with the digest of the Registration that is live at admission, so an in-place Registration edit
+under a promoted generation fails closed rather than being launched. That comparison is a single
+invariant carried by the runtime pair that holds both halves, and operator validation applies the same
+one, so a drifted Registration can be neither admitted nor promoted. It is also sealed into
+`AgentRunSpec.agent`, into `launch.json`, and into Session identity, and equality there is symmetric: a Session created under one agent is refused for
+another, and an agent-bearing record is refused by a runtime carrying none. A registration must also
+re-declare `(profile_id, profile_revision, adapter_contract_hash)`, so a contract revision retires every
+registration accepted under the old hash, closed.
+
+**Caller surface.** `AgentRunRequest` gains one optional field, `agent_id`. Admission refuses
+`requires_agent_registration XOR agent_id` in both directions before sealing, which makes the absence of
+agent identity in a sealed spec a total function of the `profile_id` in the same record. Neither
+`SPEC_SCHEMA_VERSION` nor `DIGEST_SCHEMA_VERSION` moves: the digest material drops exactly one named
+field when it is `None`, so a pre-upgrade frame digests byte-identically while a request naming an agent
+digests differently. `agent_id` is **not** a forbidden runtime-selection field — it selects among
+operator-authored, source-bounded registrations exactly as `profile_id` selects among source-registered
+profiles, and names no path, executable, argv, env key, digest, or version.
+
+**The one new exposure.** `agent_id` is the first caller-supplied value in this system to become a path
+component. It is fail-closed because the value passes the component grammar **before any filesystem
+query**; the type is judged by exact identity rather than `isinstance` and frozen once, because a `str`
+subclass with a lying `__str__`/`__eq__` is the class of bug this system has already paid for; the
+descent is dirfd-relative and `O_NOFOLLOW` under an ownership-verified directory; ARS creates nothing,
+so a caller can only name a directory an operator authored under a trusted root; and the registration
+re-declares the same `agent_id` as an explicit machine field.
+
+**Operator surface.** `validate`, `promote`, and `rollback` take `--agent`. It is required for an
+agent-scoped profile and refused for any other, both by a stable rule. No new command, no `--force`, no
+new daemon flag, and no `arsd` restart: admission re-reads the pointer per Run.
+
+**Registering a real agent is an operator sequence, not a source change.** Install the artifact under a
+root-owned immutable prefix; run zero-prompt ACP `initialize` discovery for name, protocol,
+`loadSession`, selector ids, and the model-dependent effort domain read *after* the exact model is set;
+record the code-owned CLI `--version` probe as a separate fact; run the mandatory denied-action
+mediation canary; author `registration.json` and the manifest; then `validate --agent` and
+`promote --agent`. Each step is a separate decision, and none is implied by a merged source change.
 
 ## 4. Acceptance and staged delivery
 

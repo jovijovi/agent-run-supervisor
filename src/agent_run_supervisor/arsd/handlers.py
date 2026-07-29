@@ -148,7 +148,10 @@ def default_run_task_factory(
     def factory(*, command, run_id, prepared_handle, submitted_at):
         profile = registry.get(command.request.profile_id)
         admitted = admission.resolve_runtime_binding(
-            profile, binding_root=binding_root, ownership=binding_ownership
+            profile,
+            binding_root=binding_root,
+            ownership=binding_ownership,
+            agent_id=command.request.agent_id,
         )
         return RunTask(
             request=command.request,

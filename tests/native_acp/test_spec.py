@@ -1145,3 +1145,190 @@ def test_direct_acp_seals_no_interpreter_argv_prefix(tmp_path: Path) -> None:
     assembler.bind_workspace(root=tmp_path)
     sealed = assembler.resolve_launch(runtime=runtime).to_dict()["expected_runtime"]
     assert "interpreter_argv_prefix" not in sealed
+
+
+# -- G2: immutable requested agent identity ----------------------------------
+#
+# Option A from the closure: agent identity is a *requested* fact, so it lives
+# in ``SpecAgent`` beside ``profile_id``. Everything below defends that choice
+# rather than merely recording it.
+
+from agent_run_supervisor.native_acp.profile import STANDARD_NATIVE_ACP_V1  # noqa: E402
+
+# Pinned on the first GREEN run: the agent-scoped spec shape is a golden of its
+# own, so it cannot drift free while the legacy golden holds still.
+GOLDEN_AGENT_SPEC_HASH = (
+    "6191ef3dbac2a6444d6807125517d1b67db9742ec28b14d9694b8b84d189966d"
+)
+
+
+# What each fake registration declares — the domains differ per agent, which is
+# the whole point of the pair.
+_AGENT_CONFIG = {
+    "fake-alpha": ("alpha/one", "high", ("alpha-auth",)),
+    "fake-beta": ("beta/two", "max", ()),
+}
+
+
+def _agent_request(agent_id: str = "fake-alpha", **overrides) -> AgentRunRequest:
+    model, effort, credential_refs = _AGENT_CONFIG[agent_id]
+    kwargs = dict(
+        profile_id="standard-native-acp-v1",
+        agent_id=agent_id,
+        requested_model=model,
+        requested_effort=effort,
+        credential_refs=credential_refs,
+    )
+    kwargs.update(overrides)
+    return _request(**kwargs)
+
+
+def _agent_runtime(tmp_path: Path, agent_id: str = "fake-alpha"):
+    return bf.admitted_agent(tmp_path, STANDARD_NATIVE_ACP_V1, agent_id)
+
+
+def _sealed_agent_spec(tmp_path: Path, agent_id: str = "fake-alpha"):
+    assembler = RunSpecAssembler(_agent_request(agent_id))
+    assembler.resolve_profile(DEFAULT_REGISTRY)
+    assembler.bind_workspace(root=tmp_path)
+    launch = assembler.resolve_launch(runtime=_agent_runtime(tmp_path, agent_id))
+    return assembler.seal(run_id="run-agent", submitted_at="2026-07-29T00:00:00+00:00"), launch
+
+
+def test_g2_1_agent_identity_is_present_iff_the_profile_requires_registration(
+    tmp_path: Path,
+) -> None:
+    """The biconditional that makes a versionless spec unambiguous."""
+    for profile_id in DEFAULT_REGISTRY.ids():
+        profile = DEFAULT_REGISTRY.get(profile_id)
+        if profile.contract.requires_agent_registration:
+            spec, _ = _sealed_agent_spec(tmp_path)
+            assert spec.agent.agent_id is not None
+            assert spec.agent.agent_registration_hash is not None
+        else:
+            assembler = RunSpecAssembler(_request())
+            assembler.resolve_profile(DEFAULT_REGISTRY)
+            assembler.bind_workspace(root=tmp_path)
+            assembler.resolve_launch(runtime=_runtime(tmp_path, OPENCODE_NATIVE_ACP))
+            spec = assembler.seal(
+                run_id="run-legacy", submitted_at="2026-07-29T00:00:00+00:00"
+            )
+            assert spec.agent.agent_id is None
+            assert spec.agent.agent_registration_hash is None
+            break
+
+
+def test_g2_1_a_registration_scoped_profile_refuses_a_run_with_no_agent() -> None:
+    request = dataclasses.replace(_agent_request("fake-alpha"), agent_id=None)
+    assembler = RunSpecAssembler(request)
+    with pytest.raises(SpecValidationError, match="AGENT_ID_REQUIRED"):
+        assembler.resolve_profile(DEFAULT_REGISTRY)
+
+
+def test_g2_1_a_legacy_profile_refuses_a_run_that_names_an_agent() -> None:
+    assembler = RunSpecAssembler(_request(agent_id="fake-alpha"))
+    with pytest.raises(SpecValidationError, match="AGENT_ID_FORBIDDEN"):
+        assembler.resolve_profile(DEFAULT_REGISTRY)
+
+
+def test_g2_2_the_legacy_golden_spec_hash_is_byte_identical() -> None:
+    assert spec_hash(AgentRunSpec.for_golden_fixture()) == GOLDEN_SPEC_HASH
+
+
+def test_g2_2_an_agent_scoped_golden_is_pinned_in_its_own_right() -> None:
+    golden = AgentRunSpec.for_agent_golden_fixture()
+    assert golden.agent.agent_id is not None
+    assert spec_hash(golden) == GOLDEN_AGENT_SPEC_HASH
+    assert spec_hash(golden) != GOLDEN_SPEC_HASH
+
+
+def test_g2_3_every_spec_field_appears_in_the_projection_except_the_omit_set() -> None:
+    """``to_dict`` stopped being ``asdict``; this replaces what ``asdict`` guaranteed."""
+    from agent_run_supervisor.native_acp.spec import SPEC_OMIT_WHEN_NONE
+
+    def walk(instance, projected, path: str) -> None:
+        for field in dataclasses.fields(instance):
+            value = getattr(instance, field.name)
+            qualified = f"{path}.{field.name}" if path else field.name
+            if qualified in SPEC_OMIT_WHEN_NONE and value is None:
+                assert field.name not in projected, qualified
+                continue
+            assert field.name in projected, f"{qualified} escaped the projection"
+            if dataclasses.is_dataclass(value) and not isinstance(value, type):
+                walk(value, projected[field.name], qualified)
+
+    walk(AgentRunSpec.for_golden_fixture(), AgentRunSpec.for_golden_fixture().to_dict(), "")
+    agent_golden = AgentRunSpec.for_agent_golden_fixture()
+    walk(agent_golden, agent_golden.to_dict(), "")
+
+
+def test_g2_3_the_omit_set_is_exactly_the_two_agent_fields() -> None:
+    from agent_run_supervisor.native_acp.spec import SPEC_OMIT_WHEN_NONE
+
+    assert set(SPEC_OMIT_WHEN_NONE) == {
+        "agent.agent_id",
+        "agent.agent_registration_hash",
+    }
+
+
+def test_g2_4_two_runs_differing_only_by_agent_differ_in_every_seal(
+    tmp_path: Path,
+) -> None:
+    alpha_spec, alpha_launch = _sealed_agent_spec(tmp_path, "fake-alpha")
+    beta_spec, beta_launch = _sealed_agent_spec(tmp_path, "fake-beta")
+    assert spec_hash(alpha_spec) != spec_hash(beta_spec)
+    assert alpha_launch.launch_hash() != beta_launch.launch_hash()
+    assert alpha_spec.launch_spec_hash != beta_spec.launch_spec_hash
+
+
+def test_the_launch_spec_carries_agent_identity_omit_when_none(tmp_path: Path) -> None:
+    _, launch = _sealed_agent_spec(tmp_path)
+    payload = launch.to_dict()
+    assert payload["agent_id"] == "fake-alpha"
+    assert len(payload["agent_registration_hash"]) == 64
+
+    assembler = RunSpecAssembler(_request())
+    assembler.resolve_profile(DEFAULT_REGISTRY)
+    assembler.bind_workspace(root=tmp_path)
+    legacy = assembler.resolve_launch(runtime=_runtime(tmp_path, OPENCODE_NATIVE_ACP))
+    assert "agent_id" not in legacy.to_dict()
+    assert "agent_registration_hash" not in legacy.to_dict()
+
+
+def test_the_agent_launch_is_built_entirely_from_the_registration(
+    tmp_path: Path,
+) -> None:
+    _, launch = _sealed_agent_spec(tmp_path, "fake-beta")
+    # exe from the slot; argv tokens from the registration; no source argv.
+    assert launch.argv[0] == launch.executable
+    assert launch.argv[1:] == ("serve", "--acp")
+    assert launch.permission_env == ()
+    assert launch.credential_refs == ()
+
+    _, alpha = _sealed_agent_spec(tmp_path, "fake-alpha")
+    assert alpha.argv[1:] == ("acp",)
+    assert alpha.permission_env == (
+        ("OPENCODE_PERMISSION", '{"bash":"ask","edit":"ask","webfetch":"ask"}'),
+    )
+    assert alpha.credential_refs == ("alpha-auth",)
+
+
+def test_a_model_outside_the_registration_domain_is_refused(tmp_path: Path) -> None:
+    """The domain lives in the registration, so it is checked once it is read.
+
+    The gate cannot move earlier without inventing a source-side domain for an
+    agent the source deliberately knows nothing about.
+    """
+    assembler = RunSpecAssembler(_agent_request(requested_model="beta/two"))
+    assembler.resolve_profile(DEFAULT_REGISTRY)
+    assembler.bind_workspace(root=tmp_path)
+    with pytest.raises(SpecValidationError, match="registered"):
+        assembler.resolve_launch(runtime=_agent_runtime(tmp_path))
+
+
+def test_credential_refs_must_exactly_match_the_registration(tmp_path: Path) -> None:
+    assembler = RunSpecAssembler(_agent_request(credential_refs=()))
+    assembler.resolve_profile(DEFAULT_REGISTRY)
+    assembler.bind_workspace(root=tmp_path)
+    with pytest.raises(SpecValidationError, match="credential_refs"):
+        assembler.resolve_launch(runtime=_agent_runtime(tmp_path))

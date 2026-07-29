@@ -299,6 +299,7 @@ def test_codex_profile_snapshot_golden() -> None:
         "claude-agent-acp-0.63.0",
         "codex-acp-1.1.7",
         "opencode-native-acp",
+        "standard-native-acp-v1",
     )
 
 
@@ -563,6 +564,7 @@ def test_the_registry_presents_only_the_0_63_0_claude_source_contract() -> None:
         "claude-agent-acp-0.63.0",
         "codex-acp-1.1.7",
         "opencode-native-acp",
+        "standard-native-acp-v1",
     )
     with pytest.raises(UnknownProfileError):
         DEFAULT_REGISTRY.get("claude-agent-acp-0.61.0")
@@ -638,6 +640,7 @@ def test_claude_profile_is_registered_alongside_the_existing_rows() -> None:
         "claude-agent-acp-0.63.0",
         "codex-acp-1.1.7",
         "opencode-native-acp",
+        "standard-native-acp-v1",
     )
 
 
@@ -1183,3 +1186,73 @@ def test_registered_node_paths_pin_the_exact_materialized_locations() -> None:
     assert CLAUDE_AGENT_ACP_0_63_0.contract.wrapped_runtime.adapter_package_root == (
         "/opt/agent-run-supervisor/artifacts/adapters/claude-agent-acp/0.63.0"
     )
+
+
+# -- G0/G1.1: non-retirement and zero hash movement --------------------------
+#
+# Blocker 1 is a test, not a promise. These pin both halves: the mechanism
+# capable of retiring a live profile does not exist, and the three live
+# profiles' identity hashes did not move when the fourth was registered.
+
+FROZEN_LIVE_IDENTITY_HASHES = {
+    "opencode-native-acp": (
+        "ac42ed6b8e67c919cd5fc56304e3b08d9bf745dcd8967441c97fb5947d95d844",
+        "55b4c5255959fc209a64be155841a16bf836e7fea9b6864753c22a6ed3080807",
+    ),
+    "codex-acp-1.1.7": (
+        "3e2ccb90b7baadddc18c46bdd56066e6c14760df4adac5a5addfa3a3b3ae5ba2",
+        "73b3dda64ace8f3df4e5f52976f969cd67c0f7e423b7932e5b3513bbbe19e005",
+    ),
+    "claude-agent-acp-0.63.0": (
+        "ca720d9b9c40757e4a269e961812679420fa20998422cbd96667d2ef03f06a3d",
+        "00a25e4dcfb13aeeb3b507cefac39a94cf74d967b71c434c78cd24895fba715e",
+    ),
+}
+
+
+def test_the_three_live_profiles_keep_their_exact_identity_hashes() -> None:
+    """G1.1: any drift here fails every promoted generation on the next Run."""
+    for profile_id, (profile_hash, contract_hash) in FROZEN_LIVE_IDENTITY_HASHES.items():
+        profile = DEFAULT_REGISTRY.get(profile_id)
+        assert profile.profile_hash() == profile_hash, profile_id
+        assert profile.adapter_contract_hash() == contract_hash, profile_id
+
+
+def test_opencode_stays_registered_resolvable_and_admissible() -> None:
+    profile = DEFAULT_REGISTRY.get("opencode-native-acp")
+    assert profile is OPENCODE_NATIVE_ACP
+    assert profile.revision == 3
+    assert profile.contract.requires_agent_registration is False
+
+
+def test_no_profile_field_can_express_retirement() -> None:
+    """G0: not a field defaulting to False, not a marker, not a dormant flag."""
+    import dataclasses
+
+    from agent_run_supervisor.native_acp.profile import AdapterContract
+
+    banned = {"retired", "deprecated", "disabled", "sunset", "withdrawn"}
+    for cls in (AgentProfile, AdapterContract):
+        names = {field.name for field in dataclasses.fields(cls)}
+        assert not (names & banned), f"{cls.__name__} carries {sorted(names & banned)}"
+
+
+def test_no_source_rule_constant_can_refuse_a_registered_profile_by_identity() -> None:
+    """G0: ``PROFILE_RETIRED`` and its cousins exist nowhere in shipped source."""
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[2] / "src" / "agent_run_supervisor"
+    banned = ("PROFILE_RETIRED", "PROFILE_DEPRECATED", "PROFILE_DISABLED")
+    offenders = [
+        f"{path.relative_to(src)}:{token}"
+        for path in sorted(src.rglob("*.py"))
+        for token in banned
+        if token in path.read_text(encoding="utf-8")
+    ]
+    assert not offenders, offenders
+
+
+def test_every_registered_profile_admits_on_identity_alone() -> None:
+    """A registered id is always resolvable; nothing refuses it for being itself."""
+    for profile_id in DEFAULT_REGISTRY.ids():
+        assert DEFAULT_REGISTRY.get(profile_id).profile_id == profile_id

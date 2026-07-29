@@ -101,7 +101,9 @@ _REQUIRED_REQUEST_FIELDS = tuple(
     if field.default is dataclasses.MISSING
     and field.default_factory is dataclasses.MISSING
 )
-_NULLABLE_REQUEST_FIELDS = frozenset({"ars_session_id", "expected_binding_hash"})
+_NULLABLE_REQUEST_FIELDS = frozenset(
+    {"ars_session_id", "expected_binding_hash", "agent_id"}
+)
 _STRING_TUPLE_REQUEST_FIELDS = frozenset(
     {"grant_capabilities", "mcp_snapshot_hashes", "credential_refs"}
 )

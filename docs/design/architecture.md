@@ -136,9 +136,27 @@ LAYER 2 — operator-owned Runtime Binding generation           owner: the opera
         │
         │ read exactly once per Run, at admission
         ▼
+LAYER 2b — operator-owned Agent Registration (agent-scoped profiles only)
+  registration.json under profiles/<profile_id>/agents/<agent_id>/
+  ACP agent_name · bounded argv tokens · probe argv suffix
+  selector ids + value domains · forbidden-capability superset
+  one source-registered mediation binding id, or null
+  credential slot names · provenance   ← recorded and reported, never consulted
+  agent_registration_hash (excludes provenance) → frozen by the generation,
+    and sealed into spec, launch, and Session identity
+        │
+        ▼
 LAYER 3 — per-Run sealed ResolvedLaunchSpec + provenance      owner: the Run
   write-once launch.json · launch_spec_hash · never re-read after sealing
 ```
+
+Layer 2b exists so one source contract can serve many standards-conforming agents without a plugin
+platform. It is strictly *inside* layer 2, never beside layer 1: every value it supplies selects within
+or narrows a bound layer 1 already declared, and it supplies no executable, path, digest, version, env
+key, launch kind, protocol version, or capability requirement. `adapter_contract_hash` deliberately does
+**not** become agent-derived — synthesizing a per-agent contract from a registration would make the
+contract hash a function of operator data, so the operator's registration would satisfy the operator's
+own manifest. The registration carries its own `agent_registration_hash` instead.
 
 A Binding never declares a command, argv, env key, adapter, launch kind, capability, permission, or
 selector. Every slot binds to the exact profile ID, revision, and `adapter_contract_hash` that accepted
@@ -161,15 +179,48 @@ one profile is invisible to every other.
 ```text
 <binding_root>/                            # operator/root-owned; outside the repository
 └── profiles/<profile_id>/                 # one independent selection per registered profile
-    ├── active.json                        # regular file, atomically replaced — never a symlink
-    └── generations/<generation_id>/
-        └── manifest.json                  # immutable once written
+    ├── active.json                        # non-agent-scoped only — regular file, never a symlink
+    ├── generations/<generation_id>/
+    │   └── manifest.json                  # immutable once written
+    └── agents/<agent_id>/                 # agent-scoped profiles only
+        ├── registration.json              # operator-owned Agent Registration
+        ├── active.json
+        └── generations/<generation_id>/manifest.json
 ```
 
+The agent anchor is a **new subtree that only an agent-scoped profile descends into**, never a rewrite
+of the existing one: a non-agent-scoped profile's descent, pointer field set, and `contract_identity`
+field set are byte-identical to what they were, so its already-promoted generations keep resolving
+without migration, re-promotion, or restart. An agent-scoped pointer adds `agent_id`, and its
+`contract_identity` adds `agent_id` and `agent_registration_hash`, so separation is proven one level
+deeper than `POINTER_PROFILE_MISMATCH`: a pointer or generation moved between agent subtrees is refused
+on `POINTER_AGENT_MISMATCH` or `REGISTRATION_CONTRACT_MISMATCH`.
+
+That frozen digest is **compared against the Registration that is actually live**, not merely recorded.
+The comparison is one invariant in one place — the runtime pair that holds both halves — and operator
+validation applies it through that same object rather than restating it, so a generation whose
+Registration has drifted can be neither admitted nor promoted. Reading a generation is deliberately a
+separate, weaker act: it returns what the generation says and never claims to have admitted a
+Registration, because the object that reads one manifest is not the object that can compare two facts.
+Without that split the manifest would satisfy itself, and every other check — pointer bytes, manifest
+bytes, manifest digest, epoch, contract identity — would still pass on an in-place Registration swap,
+since none of them is about the Registration's contents.
+
+`agent_id` is the one place caller text becomes a path component. It is judged by the component grammar
+**before any filesystem query**, by exact type identity rather than `isinstance` and frozen once (a
+`str` subclass with a lying `__str__`/`__eq__` is the failure this codebase has already paid for once),
+and the descent below it is dirfd-relative and `O_NOFOLLOW` under an ownership-verified directory. ARS
+creates nothing, so a caller can only name a directory an operator authored under a trusted root, and
+the registration inside re-declares the same `agent_id` as a machine field.
+
+Reads stay exactly-once and are instrumented: three per agent-scoped Run — one `registration.json`, one
+`active.json`, one `manifest.json` — two for a non-agent-scoped Run, and **zero** during spawn,
+finalization, and reconciliation.
+
 The active-selection namespace is profile-scoped because the shape of the deployment demands it: one
-`arsd` takes one `--binding-root`, the registry is closed at three profiles, and each refuses admission
+`arsd` takes one `--binding-root`, the registry is closed at several profiles, and each refuses admission
 until a generation is promoted **for that profile**. A single root-level pointer could satisfy exactly
-one of those three at a time. Each subtree is therefore independent — promoting or rolling back one
+one of them at a time. Each subtree is therefore independent — promoting or rolling back one
 profile replaces one file inside that profile's own directory and cannot disable, overwrite, or race
 another's, concurrently or in sequence — and the generation namespace is per profile too, so two
 profiles may carry the same generation id without either meaning the other.
@@ -198,8 +249,10 @@ agent-run-supervisor runtime-binding inspect-run  # per-Run provenance recomputa
 ```
 
 No `--force` is defined and no command escalates privilege internally; preparing an immutable artifact root
-is an operator action outside ARS. Each command names one registered profile and touches only that
-profile's subtree. `validate`/`promote` obtain the real external CLI version through the
+is an operator action outside ARS. Each command names one registered profile — and, for an agent-scoped
+profile, one registered agent through `--agent`, which is required there and refused anywhere else — and
+touches only that subtree. Without `--agent` an operator would have no way to promote an agent-scoped
+generation at all, which would leave such a profile permanently unusable. `validate`/`promote` obtain the real external CLI version through the
 Profile's code-owned probe and compare it with the Binding — a manifest's version string alone is not
 proof. A pure Binding promotion does not restart `arsd`, because admission re-reads the active pointer
 per Run; changing the Binding root, the service unit, or the runtime does require a restart and stays
@@ -215,9 +268,20 @@ generation/set/slot hashes, the complete CLI artifact identity/version/digest, a
 |---|---|---|
 | `wrapped_acp` (Codex ACP, Claude Agent ACP) | interpreter/Node identity, the ACP adapter's complete package closure (install root + tree digest + entry), argv construction, env keys, protocol/capability contract | downstream CLI artifact identity/version/digest, config-root slot values |
 | `direct_acp` (OpenCode) | direct launch, protocol, and capability semantics | that one executable's identity/version/digest |
+| `direct_acp`, agent-scoped (`standard-native-acp-v1`) | ACP-v1 conformance only: protocol major, required `loadSession`, real `session/load`, the accepted slot schema, the code-known env key set, the probe rule, and the forbidden-capability **floor** | that one executable's identity/version/digest, plus — through the Agent Registration (§3.1 layer 2b) — the ACP name, argv tokens, selector ids and domains, capability narrowing, and mediation selection |
 
 OpenCode is one artifact, not two: the same executable is the AGENT CLI and the ACP implementation, and
 the documentation must not pretend otherwise.
+
+The agent-scoped row freezes no agent-specific constant at all, and that is deliberate rather than
+incomplete: across standards-conforming native ACP agents the facts that actually vary are a small typed
+bounded set, while launch kind, slot schema, env allowlist, session-load requirement, required
+capabilities, protocol version, permission/config/session semantics, and the probe parser and bounds are
+shared ACP-v1 conformance that belongs in one source contract. Its `executable_key` appears in neither
+the registered-executable map nor the profile-keyed mediation map, so its executable can only arrive
+through the slot and its mediation can only arrive through a registration's selection from the
+source-closed mediation registry — the two mediation registries are disjoint by profile-construction
+invariant rather than by convention.
 
 Artifact identity must cover the complete executable code closure:
 
@@ -301,6 +365,14 @@ equal epoch. A missing or different epoch is rejected before any lease mutation 
 the continuity failure R4 forbids. An epoch may be retained across a Binding change only after an
 approved continuity canary proves the external AGENT still loads its own prior Sessions; otherwise the
 operator bumps it, and every older Session becomes non-reusable by construction.
+
+🟦 For an agent-scoped profile the record also persists `agent_id` and `agent_registration_hash`, and
+reuse requires both to be equal on the same terms. Equality is symmetric on purpose: a Session created
+under one agent is refused for another, and an agent-bearing record is refused by a runtime carrying
+none, so a runtime that cannot enforce agent identity never silently loads an agent's Session. Because
+the registration hash excludes provenance, re-recording an acceptance, discovery, or canary receipt does
+not retire an agent's Sessions, while any compatibility-bearing edit does. A record created before
+agents existed keeps its exact serialized shape — the two fields are omitted, never written as null.
 
 Between completed Runs on the same Session, model/effort may change:
 

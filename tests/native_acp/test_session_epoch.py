@@ -197,3 +197,122 @@ def test_a_bindingless_run_and_a_bindingless_record_still_reuse(
     store = _store(tmp_path)
     record = _create(store, "sess-reuse-plain")
     _validate(record, expected_epoch=None, expected_contract_hash=None)
+
+
+# -- G6: agent identity is part of Session identity ---------------------------
+#
+# A Session belongs to one agent under one registration. Everything below fails
+# closed *before* the lease and long before ``session/load``, and never degrades
+# into ``session/new``.
+
+
+class _AgentProfile(_Profile):
+    profile_id = "standard-native-acp-v1"
+    revision = 1
+
+
+def _create_agent(store: SessionStore, session_id: str, **overrides):
+    kwargs = dict(
+        agent_id="fake-alpha",
+        agent_registration_hash="r" * 64,
+        adapter_contract_hash="c" * 64,
+        session_compatibility_epoch=1,
+        profile_id="standard-native-acp-v1",
+        profile_revision=1,
+    )
+    kwargs.update(overrides)
+    return _create(store, session_id, **kwargs)
+
+
+def _validate_agent(record, **overrides):
+    kwargs = dict(
+        profile=_AgentProfile(),
+        workspace_result=_Workspace(),
+        owner="hermes",
+        namespace="hermes/ns",
+        expected_contract_hash="c" * 64,
+        expected_epoch=1,
+        expected_agent_id="fake-alpha",
+        expected_agent_registration_hash="r" * 64,
+    )
+    kwargs.update(overrides)
+    return validate_native_binding(record, **kwargs)
+
+
+def test_agent_identity_persists_and_reuses_when_it_matches(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    record = _create_agent(store, "agent-sess-1")
+    assert record.native_agent_id == "fake-alpha"
+    assert record.native_agent_registration_hash == "r" * 64
+    persisted = _record_json(tmp_path, "agent-sess-1")
+    assert persisted["native_agent_id"] == "fake-alpha"
+    _validate_agent(store.open_session("agent-sess-1"))
+
+
+def test_a_session_created_under_one_agent_is_refused_for_another(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    _create_agent(store, "agent-sess-2")
+    with pytest.raises(SessionBindingError, match="agent_id"):
+        _validate_agent(store.open_session("agent-sess-2"), expected_agent_id="fake-beta")
+
+
+def test_agent_identity_rejection_is_symmetric_in_both_directions(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    _create_agent(store, "agent-sess-3")
+    # An agent-bearing record refused by a runtime that carries none...
+    with pytest.raises(SessionBindingError, match="agent_id"):
+        _validate_agent(
+            store.open_session("agent-sess-3"),
+            expected_agent_id=None,
+            expected_agent_registration_hash=None,
+        )
+    # ...and a record with none refused by a runtime that carries one.
+    _create(store, "agent-sess-4", adapter_contract_hash="c" * 64,
+            session_compatibility_epoch=1)
+    with pytest.raises(SessionBindingError, match="agent_id"):
+        _validate_agent(store.open_session("agent-sess-4"))
+
+
+def test_a_compatibility_bearing_registration_edit_retires_the_session(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    _create_agent(store, "agent-sess-5")
+    with pytest.raises(SessionBindingError, match="agent_registration_hash"):
+        _validate_agent(
+            store.open_session("agent-sess-5"),
+            expected_agent_registration_hash="d" * 64,
+        )
+
+
+def test_a_provenance_only_edit_does_not_retire_the_session(tmp_path: Path) -> None:
+    """The hash excludes provenance, so re-recording a receipt is not an edit."""
+    from agent_run_supervisor.native_acp import agent_registration as ar
+    from agent_run_supervisor.native_acp.profile import STANDARD_NATIVE_ACP_V1
+    from tests.native_acp import binding_fixtures as fx
+
+    before = fx.fake_registration_payload(fx.FAKE_ALPHA_ID, STANDARD_NATIVE_ACP_V1)
+    after = fx.fake_registration_payload(fx.FAKE_ALPHA_ID, STANDARD_NATIVE_ACP_V1)
+    after["provenance"] = dict(after["provenance"])
+    after["provenance"]["accepted_at"] = "2026-09-09T09:00:00+08:00"
+    assert ar.registration_hash(before) == ar.registration_hash(after)
+
+    store = _store(tmp_path)
+    _create_agent(store, "agent-sess-6", agent_registration_hash=ar.registration_hash(before))
+    _validate_agent(
+        store.open_session("agent-sess-6"),
+        expected_agent_registration_hash=ar.registration_hash(after),
+    )
+
+
+def test_legacy_session_json_bytes_stay_byte_identical(tmp_path: Path) -> None:
+    """G6: a non-agent record must not gain a key, not even a null one."""
+    store = _store(tmp_path)
+    _create(store, "legacy-sess-1")
+    persisted = _record_json(tmp_path, "legacy-sess-1")
+    assert "native_agent_id" not in persisted
+    assert "native_agent_registration_hash" not in persisted

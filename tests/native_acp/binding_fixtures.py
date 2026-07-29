@@ -344,3 +344,244 @@ def admitted(
         resolved=rb.BindingReader(root, ownership=policy).resolve_active(profile),
         ownership=policy,
     )
+
+
+# -- fake Agent Registrations ------------------------------------------------
+#
+# Two fabricated agents, never a real one. They differ in every fact a
+# registration may supply — ACP name, argv tokens, selector ids, model/effort
+# domains, forbidden capabilities, credentials, and mediation (one selects the
+# source-registered binding, one selects none) — because the pair is what proves
+# the admission→Binding→launch→Session path is generic rather than name-aware.
+# Nothing here freezes a real OpenCode or Cursor fact, and none of it ships in
+# the installed package.
+
+FAKE_ALPHA_ID = "fake-alpha"
+FAKE_BETA_ID = "fake-beta"
+
+
+def _provenance() -> dict[str, Any]:
+    return {
+        "created_at": "2026-07-29T09:00:00+08:00",
+        "accepted_by": "operator",
+        "accepted_at": "2026-07-29T09:00:00+08:00",
+        "acceptance_receipt": {"ref": "receipt:accept", "sha256": "a" * 64},
+        "discovery_receipt": {"ref": "receipt:discovery", "sha256": "b" * 64},
+        "permission_canary_receipt": {"ref": "receipt:canary", "sha256": "c" * 64},
+    }
+
+
+def fake_registration_payload(
+    agent_id: str, profile: AgentProfile, **overrides: Any
+) -> dict[str, Any]:
+    """One fabricated registration body for ``agent_id`` under ``profile``."""
+    from agent_run_supervisor.native_acp import agent_registration as ar
+
+    if agent_id == FAKE_BETA_ID:
+        acp = {"agent_name": "FakeBeta", "forbidden_capabilities": ["terminal"]}
+        launch = {
+            "argv_tokens": ["serve", "--acp"],
+            "version_probe_argv_suffix": ["--version"],
+            "permission_binding_id": None,
+        }
+        config = {
+            "model_selector_id": "modelId",
+            "effort_selector_id": "reasoning",
+            "registered_models": ["beta/two"],
+            "allowed_efforts": ["max"],
+            "default_model": "beta/two",
+            "default_effort": "max",
+        }
+        credentials: dict[str, Any] = {"slots": [], "required_refs": []}
+    else:
+        acp = {"agent_name": "FakeAlpha", "forbidden_capabilities": ["terminal"]}
+        launch = {
+            "argv_tokens": ["acp"],
+            "version_probe_argv_suffix": ["--version"],
+            "permission_binding_id": "ask-privileged-tool-families-v1",
+        }
+        config = {
+            "model_selector_id": "model",
+            "effort_selector_id": "effort",
+            "registered_models": ["alpha/one"],
+            "allowed_efforts": ["low", "high"],
+            "default_model": "alpha/one",
+            "default_effort": "high",
+        }
+        credentials = {"slots": ["alpha-auth"], "required_refs": ["alpha-auth"]}
+    body: dict[str, Any] = {
+        "schema_version": ar.REGISTRATION_SCHEMA_VERSION,
+        "agent_id": agent_id,
+        "contract_identity": {
+            "profile_id": profile.profile_id,
+            "profile_revision": profile.revision,
+            "adapter_contract_hash": profile.adapter_contract_hash(),
+        },
+        "acp": acp,
+        "launch": launch,
+        "config": config,
+        "credentials": credentials,
+        "provenance": _provenance(),
+    }
+    body.update(overrides)
+    return body
+
+
+def build_agent_binding_root(
+    tmp_path: Path,
+    profile: AgentProfile,
+    agent_id: str,
+    *,
+    slots: dict[str, Any] | None = None,
+    generation_id: str = "gen-0001",
+    epoch: int = 1,
+    contract_identity: dict[str, Any] | None = None,
+    registration: dict[str, Any] | None = None,
+    manifest_overrides: dict[str, Any] | None = None,
+    pointer_overrides: dict[str, Any] | None = None,
+    write_pointer: bool = True,
+    write_registration: bool = True,
+    dirname: str = "binding-root",
+    version: str = "1.0.0",
+    reports_version: bool = False,
+) -> Path:
+    """One operator-shaped root carrying one agent-anchored generation.
+
+    Called repeatedly with the same ``dirname``, it stages several agents under
+    one profile *and* several non-agent-scoped profiles into the same root —
+    which is the shape a real deployment has.
+    """
+    root = Path(tmp_path) / dirname
+    agent_dir = rb.agent_binding_dir(root, profile.profile_id, agent_id)
+    manifest_path = rb.generation_manifest_path(
+        root, profile.profile_id, generation_id, agent_id=agent_id
+    )
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    if slots is None:
+        slots = default_slots(
+            profile,
+            root,
+            version=version,
+            reports_version=reports_version,
+        )
+        slots = {
+            name: _restage_for_agent(root, profile, agent_id, name, body, version, reports_version)
+            for name, body in slots.items()
+        }
+    identity = (
+        contract_identity
+        if contract_identity is not None
+        else {
+            "profile_id": profile.profile_id,
+            "profile_revision": profile.revision,
+            "adapter_contract_hash": profile.adapter_contract_hash(),
+            "agent_id": agent_id,
+            "agent_registration_hash": _registration_hash(
+                registration
+                if registration is not None
+                else fake_registration_payload(agent_id, profile)
+            ),
+        }
+    )
+    manifest: dict[str, Any] = {
+        "schema_version": rb.BINDING_SCHEMA_VERSION,
+        "generation_id": generation_id,
+        "contract_identity": identity,
+        "slots": slots,
+        "session_compatibility_epoch": epoch,
+        "provenance": {
+            "created_at": "2026-07-29T09:00:00+08:00",
+            "accepted_by": "operator",
+            "accepted_at": "2026-07-29T09:00:00+08:00",
+            "acceptance_receipt": {"ref": "receipt:local", "sha256": "a" * 64},
+        },
+    }
+    if manifest_overrides:
+        manifest.update(manifest_overrides)
+    write_canonical(manifest_path, manifest)
+    if write_registration:
+        write_canonical(
+            agent_dir / rb.REGISTRATION_FILENAME,
+            registration
+            if registration is not None
+            else fake_registration_payload(agent_id, profile),
+        )
+    if write_pointer:
+        pointer = {
+            "schema_version": rb.BINDING_SCHEMA_VERSION,
+            "profile_id": profile.profile_id,
+            "agent_id": agent_id,
+            "generation_id": generation_id,
+            "manifest_sha256": sha256_file(manifest_path),
+        }
+        if pointer_overrides:
+            pointer.update(pointer_overrides)
+        write_canonical(
+            rb.active_pointer_path(root, profile.profile_id, agent_id=agent_id), pointer
+        )
+    profile_dir = rb.profile_binding_dir(root, profile.profile_id)
+    for directory in (
+        root,
+        root / rb.PROFILES_DIRNAME,
+        profile_dir,
+        profile_dir / rb.AGENTS_DIRNAME,
+        agent_dir,
+        agent_dir / rb.GENERATIONS_DIRNAME,
+        manifest_path.parent,
+    ):
+        directory.chmod(0o755)
+    harden(manifest_path.parent)
+    return root
+
+
+def _registration_hash(body: dict[str, Any]) -> str:
+    from agent_run_supervisor.native_acp import agent_registration as ar
+
+    return ar.registration_hash(body)
+
+
+def _restage_for_agent(
+    root: Path,
+    profile: AgentProfile,
+    agent_id: str,
+    slot_name: str,
+    body: dict[str, Any],
+    version: str,
+    reports_version: bool,
+) -> dict[str, Any]:
+    """Give each agent its own artifact, so two agents never share one file."""
+    if body.get("kind") != SLOT_KIND_NATIVE_BINARY:
+        return body
+    binary = make_native_binary(
+        root,
+        name=f"{profile.profile_id}-{agent_id}-{slot_name}",
+        body=(
+            "#!" + str(stage_interpreter(root)) + f"\nprintf '%s' '{version}'\n"
+            if reports_version
+            else None
+        ),
+    )
+    return native_binary_slot(binary, version=version)
+
+
+def admitted_agent(
+    tmp_path: Path, profile: AgentProfile, agent_id: str, **kwargs: Any
+) -> rb.AdmittedRuntimeBinding:
+    """The value ``arsd.admission`` would hand a RunTask for an agent-scoped Run."""
+    root = build_agent_binding_root(tmp_path, profile, agent_id, **kwargs)
+    return admit_from_root(root, profile, agent_id)
+
+
+def admit_from_root(
+    root: Path, profile: AgentProfile, agent_id: str | None = None
+) -> rb.AdmittedRuntimeBinding:
+    policy = ownership()
+    reader = rb.BindingReader(root, ownership=policy)
+    registration = (
+        None if agent_id is None else reader.read_registration(profile, agent_id)
+    )
+    return rb.AdmittedRuntimeBinding(
+        resolved=reader.resolve_active(profile, agent_id=agent_id),
+        ownership=policy,
+        registration=registration,
+    )

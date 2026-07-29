@@ -9,11 +9,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `standard-native-acp-v1`: a fourth registered profile of a different shape. It
+  is a versioned `direct_acp` contract that freezes ACP v1 **conformance only** —
+  protocol major, `loadSession` as a required capability, real `session/load`,
+  the accepted Binding slot schema, the code-known env key set, and the
+  code-owned version-probe rule — and freezes no agent-specific identity,
+  selector, or value domain. The `-v1` suffix is load-bearing: profile
+  construction refuses a contract whose frozen protocol major disagrees with the
+  id, so a future `standard-native-acp-v2` is a separate profile, registration,
+  Binding, and Session domain rather than a revision of this one.
+- Typed, bounded, operator-owned **Agent Registration**. An agent-scoped profile
+  descends one level deeper in its Binding root, to
+  `profiles/<profile_id>/agents/<agent_id>/{registration,active}.json` plus that
+  agent's own `generations/`. A registration may only select within, or narrow,
+  a bound the source contract already declared: ACP name, 1..4 bounded ASCII
+  argv tokens structurally incapable of being a path or a shell fragment, a
+  probe argv suffix validated by the contract's own rule, selector ids and their
+  value domains with each default inside its own domain, a
+  `forbidden_capabilities` **superset** of the source floor, one
+  source-registered permission-mediation binding or none, and credential slot
+  names. It supplies no executable, path, digest, version, env key, launch kind,
+  protocol version, or capability requirement — those are not fields, so the
+  refusal is structural rather than filtered. Its provenance block is shape
+  validated, recorded, and never consulted.
+- A Binding generation **freezes** the Agent Registration it was accepted
+  against. The `agent_registration_hash` a generation declares is compared with
+  the digest of the Registration that is actually live, so editing
+  `registration.json` in place under a promoted generation fails closed with
+  `REGISTRATION_HASH_MISMATCH` instead of launching. The comparison is one
+  constant-time invariant in one place — the runtime pair that holds both halves
+  — and operator validation applies that same object, so a drifted Registration
+  can be neither admitted nor promoted. Reading a generation stays a separate,
+  weaker act that admits no Registration. A provenance-only edit remains
+  compatible, because the hash excludes provenance.
+- `AgentInstance`, the `(profile, registration)` seam every generic consumer
+  asks for a fact. For the three existing profiles the registration is absent
+  and every accessor returns the existing value unchanged, so no runtime path
+  branches on an agent name.
+- Optional `agent_id` on `AgentRunRequest`, and `agent_id` plus
+  `agent_registration_hash` on the sealed `AgentRunSpec.agent`, on
+  `launch.json`, and on the Native Session record — all omit-when-`None`.
+  Admission refuses `requires_agent_registration XOR agent_id` in both
+  directions before sealing, which makes the absence of agent identity in a
+  sealed spec a total function of the `profile_id` in the same record.
+- `--agent` on `runtime-binding validate`, `promote`, and `rollback`. It is
+  required for a registration-scoped profile and refused for any other, each by
+  its own stable rule. No new subcommand, no `--force`, no new daemon flag.
+
 ### Changed
+
+- `AgentRunSpec.to_dict()` is an explicit projection rather than raw `asdict`,
+  dropping exactly the two agent fields when they are `None`. `asdict` was
+  silently guaranteeing "every field is in the hash"; a structural test that
+  walks every spec dataclass field now guarantees it instead.
+- Binding pointer and `contract_identity` field sets are contract-dependent
+  rather than global. A profile that is not agent-scoped keeps byte-identical
+  field sets and descent, so already-promoted generations keep resolving with no
+  migration, re-promotion, or restart. An agent-scoped pointer adds `agent_id`
+  and its `contract_identity` adds `agent_id` and `agent_registration_hash`, so
+  a pointer or generation moved between agent subtrees is refused on an explicit
+  machine field (`POINTER_AGENT_MISMATCH`, `REGISTRATION_CONTRACT_MISMATCH`).
+- Binding reads stay exactly-once and are instrumented: three per agent-scoped
+  Run, two for a non-agent-scoped Run, and zero during spawn, finalization, and
+  reconciliation.
 
 ### Fixed
 
 ### Notes
+
+- Additive and merge-safe with production live. The three registered profiles
+  keep byte-identical `profile_hash` and `adapter_contract_hash` values, their
+  Binding layout and field sets are unchanged, and no schema or API version
+  moves. The request digest is unchanged for any frame that names no agent: the
+  digest material drops exactly one named field when it is `None`, never a
+  blanket null-strip, which would have collapsed the meaningful existing nulls
+  and changed every digest in the other direction.
+- No retirement, deprecation, disablement, alias, or redirect mechanism is
+  introduced — not a field defaulting to `False`, not an unused rule constant,
+  not a marker. `opencode-native-acp` stays registered at r3, resolvable,
+  admissible, launchable, and hash-identical, and remains the authoritative
+  OpenCode path.
+- No real agent is registered. The only registrations that exist are two
+  fabricated fixtures that ship in tests and never in the installed package, and
+  no real agent identity, capability, or selector constant is frozen anywhere.
+  `standard-native-acp-v1` is inert in a root with no agent subtree, refusing
+  with `PROFILE_BINDING_ABSENT` before reading anything. Registering a real
+  agent — artifact install, zero-prompt ACP discovery, code-owned CLI probe,
+  mandatory denied-action mediation canary, registration authoring, then
+  `validate --agent` and `promote --agent` — is a separate operator sequence,
+  and no standard-native agent is runnable at merge.
+- `agent_id` is the first caller-supplied value in this codebase to become a
+  path component. It is judged by its component grammar before any filesystem
+  query, by exact type identity rather than `isinstance` and frozen once, and
+  the descent below it is dirfd-relative and `O_NOFOLLOW` under an
+  ownership-verified directory. ARS creates nothing, so a caller can only name a
+  directory an operator authored under a trusted root, and the registration
+  inside re-declares the same `agent_id` as an explicit machine field.
 
 ## [0.5.2] - 2026-07-29
 

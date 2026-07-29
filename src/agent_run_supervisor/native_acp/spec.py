@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import dataclasses
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -23,10 +24,10 @@ from .profile import (
     LAUNCH_KIND_DIRECT,
     LAUNCH_KIND_WRAPPED,
     SLOT_KIND_NATIVE_BINARY,
+    AgentInstance,
     AgentProfile,
     ProfileRegistry,
     resolve_registered_executable,
-    resolve_registered_permission_env,
 )
 from .runtime_binding import AdmittedRuntimeBinding
 
@@ -196,6 +197,15 @@ class AgentRunRequest:
     evidence_policy_hash: str
     recovery_policy_hash: str
     schema_version: int = SPEC_SCHEMA_VERSION
+    # Which registered agent of a registration-scoped profile this Run targets.
+    # ``None`` for the three legacy profiles, whose contracts are frozen agent
+    # by agent in source and therefore have no agent to name.
+    #
+    # Only the *type* is judged here. The value grammar belongs to exactly one
+    # place — ``runtime_binding.agent_component`` — because that is the function
+    # standing between this text and a path component, and a second copy of the
+    # rules would be a second thing to keep in agreement.
+    agent_id: str | None = None
 
     def __post_init__(self) -> None:
         _require(
@@ -231,6 +241,10 @@ class AgentRunRequest:
         _require_text(self.evidence_policy_hash, "evidence_policy_hash")
         _require_text(self.recovery_policy_hash, "recovery_policy_hash")
         _require(isinstance(self.limits, RunLimits), "limits must be RunLimits")
+        _require(
+            self.agent_id is None or type(self.agent_id) is str,
+            "agent_id must be a string or null",
+        )
 
 
 @dataclass(frozen=True)
@@ -333,6 +347,11 @@ class ResolvedLaunchSpec:
     # so the exact ``_meta`` this Run will send is durable evidence before any
     # session call. Never caller input.
     session_meta: str | None = None
+    # The agent this launch was materialized for, omit-when-None. argv and
+    # ``permission_env`` are already visible above as themselves, so nothing
+    # else about the registration is projected here.
+    agent_id: str | None = None
+    agent_registration_hash: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -357,6 +376,9 @@ class ResolvedLaunchSpec:
             payload["runtime_provenance"] = self.runtime_provenance.to_dict()
         if self.session_meta is not None:
             payload["session_meta"] = json.loads(self.session_meta)
+        if self.agent_id is not None:
+            payload["agent_id"] = self.agent_id
+            payload["agent_registration_hash"] = self.agent_registration_hash
         return payload
 
     def launch_hash(self) -> str:
@@ -383,6 +405,18 @@ class SpecAgent:
     profile_snapshot_ref: str
     profile_hash: str
     config_schema_hash: str
+    # Requested and resolved agent identity, side by side with the requested
+    # ``profile_id`` and the resolved ``profile_hash`` that already live here.
+    #
+    # This is the *requested* record, so it is where a reader that has only
+    # ``spec.json`` — crash reconciliation, run authorization, an audit asking
+    # which Runs targeted which agent — can still answer who the agent was.
+    # Both are omit-when-None, and their absence is a total function of
+    # ``profile_id`` in the same record: identity is present here if and only if
+    # that profile requires a registration, so "written before the field
+    # existed" and "written after, agent unknown" can never be confused.
+    agent_id: str | None = None
+    agent_registration_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -435,7 +469,22 @@ class AgentRunSpec:
     retry_of_run_id: str | None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        """Every field, minus exactly the declared omit-when-None set.
+
+        This was ``asdict`` until agent identity arrived, and ``asdict`` was
+        silently guaranteeing "every field is in the hash". A hand-written
+        projection could quietly drop a field later, so the guarantee is
+        restored as a structural test instead: it walks ``dataclasses.fields``
+        over this class and every nested spec dataclass and asserts each field
+        appears here except ``SPEC_OMIT_WHEN_NONE``.
+        """
+        payload = asdict(self)
+        for qualified in SPEC_OMIT_WHEN_NONE:
+            section, field_name = qualified.split(".")
+            block = payload.get(section)
+            if isinstance(block, dict) and block.get(field_name) is None:
+                del block[field_name]
+        return payload
 
     @staticmethod
     def for_golden_fixture() -> "AgentRunSpec":
@@ -476,6 +525,31 @@ class AgentRunSpec:
             retry_of_run_id=None,
         )
 
+    @staticmethod
+    def for_agent_golden_fixture() -> "AgentRunSpec":
+        """The agent-scoped spec shape, pinned in its own right.
+
+        The legacy golden proves the old shape did not move; this one keeps the
+        new shape from floating free, so a later canonicalization change has to
+        break a test rather than silently re-hash every agent-scoped Run.
+        """
+        legacy = AgentRunSpec.for_golden_fixture()
+        return dataclasses.replace(
+            legacy,
+            agent=dataclasses.replace(
+                legacy.agent,
+                profile_id="golden-standard-native-acp-v1",
+                profile_snapshot_ref="registry:golden-standard-native-acp-v1@r1",
+                agent_id="golden-agent",
+                agent_registration_hash="9" * 64,
+            ),
+        )
+
+
+# The complete, closed set of spec fields that leave the projection when they
+# are ``None`` — qualified by section so the rule names one field of one block
+# rather than a bare name that could match somewhere else later.
+SPEC_OMIT_WHEN_NONE = ("agent.agent_id", "agent.agent_registration_hash")
 
 # Generated Run identity/lineage fields excluded from the requested-fact hash:
 # authenticated owner/namespace stay inside it (changing either changes it).
@@ -610,37 +684,79 @@ class RunSpecAssembler:
         self._profile: AgentProfile | None = None
         self._binding: WorkspaceBinding | None = None
         self._launch: ResolvedLaunchSpec | None = None
+        self._instance: AgentInstance | None = None
         self._sealed = False
 
     @property
     def request(self) -> AgentRunRequest:
         return self._request
 
+    @property
+    def instance(self) -> AgentInstance | None:
+        """The profile/registration pair this admission resolved, once launched."""
+        return self._instance
+
     def resolve_profile(self, registry: ProfileRegistry) -> AgentProfile:
         profile = registry.get(self._request.profile_id)
-        _require(
-            self._request.requested_model in profile.registered_models,
-            f"model {self._request.requested_model!r} is outside the registered "
-            f"closed set {profile.registered_models} for {profile.profile_id}",
-        )
-        _require(
-            self._request.requested_effort in profile.allowed_efforts,
-            f"effort {self._request.requested_effort!r} is outside the registered "
-            f"domain {profile.allowed_efforts} for {profile.profile_id}",
-        )
-        required_refs = profile.required_credential_refs
-        if required_refs is not None:
-            # Exact match: missing, wrong, extra, or duplicated references are
-            # refused here — before workspace bind, before any credential-root
-            # access, and before spawn.
-            _require(
-                tuple(self._request.credential_refs) == tuple(required_refs),
-                f"credential_refs {tuple(self._request.credential_refs)!r} do not "
-                f"exactly match the required credential_refs "
-                f"{tuple(required_refs)!r} for {profile.profile_id}",
-            )
+        self._require_agent_scope(profile)
+        if not profile.contract.requires_agent_registration:
+            # A source-frozen profile owns its own domains, so they are checked
+            # at exactly the moment they always were. A registration-scoped
+            # profile has no domains here to check against — its are read from
+            # the operator's registration, so the same three checks run in
+            # ``resolve_launch`` the instant that data exists (§5.5).
+            self._validate_config_domains(AgentInstance(profile, None))
         self._profile = profile
         return profile
+
+    def _require_agent_scope(self, profile: AgentProfile) -> None:
+        """The requested-side half of the agent biconditional, before sealing.
+
+        The Binding reader has its own symmetric gate for the same fact; this
+        one exists so the invariant holds on *every* admission path, including
+        the direct ars-core test/dev path that never opens a Binding root.
+        """
+        agent_id = self._request.agent_id
+        if profile.contract.requires_agent_registration and agent_id is None:
+            raise SpecValidationError(
+                f"AGENT_ID_REQUIRED: profile {profile.profile_id} runs only as a "
+                "registered agent; the request names none"
+            )
+        if not profile.contract.requires_agent_registration and agent_id is not None:
+            raise SpecValidationError(
+                f"AGENT_ID_FORBIDDEN: profile {profile.profile_id} is frozen in "
+                "source and admits no agent selection"
+            )
+
+    def _validate_config_domains(self, instance: AgentInstance) -> None:
+        """Model, effort, and credential refs against whatever owns them.
+
+        The instance answers, so this reads identically for a source-frozen
+        profile and for an operator-registered agent — the domains differ, the
+        rule does not.
+        """
+        request = self._request
+        profile_id = instance.profile.profile_id
+        _require(
+            request.requested_model in instance.registered_models,
+            f"model {request.requested_model!r} is outside the registered "
+            f"closed set {instance.registered_models} for {profile_id}",
+        )
+        _require(
+            request.requested_effort in instance.allowed_efforts,
+            f"effort {request.requested_effort!r} is outside the registered "
+            f"domain {instance.allowed_efforts} for {profile_id}",
+        )
+        required_refs = instance.required_credential_refs
+        if required_refs is not None:
+            # Exact match: missing, wrong, extra, or duplicated references are
+            # refused here — before any credential-root access and before spawn.
+            _require(
+                tuple(request.credential_refs) == tuple(required_refs),
+                f"credential_refs {tuple(request.credential_refs)!r} do not "
+                f"exactly match the required credential_refs "
+                f"{tuple(required_refs)!r} for {profile_id}",
+            )
 
     def bind_workspace(self, *, root: Path, cwd: str | None = None) -> WorkspaceBinding:
         self._binding = resolve_workspace_binding(root=root, cwd=cwd)
@@ -671,6 +787,22 @@ class RunSpecAssembler:
                 f"profile {profile.profile_id} accepts no Runtime Binding slot"
             )
 
+        registration = None if runtime is None else runtime.registration
+        if contract.requires_agent_registration and registration is None:
+            raise SpecValidationError(
+                f"profile {profile.profile_id} requires an admitted Agent Registration"
+            )
+        instance = AgentInstance(profile, registration)
+        if contract.requires_agent_registration:
+            # The registration's domains exist now, so the checks a source-frozen
+            # profile ran at ``resolve_profile`` run here — still before the
+            # launch is materialized and long before spawn.
+            self._validate_config_domains(instance)
+            if registration.agent_id != self._request.agent_id:
+                raise SpecValidationError(
+                    "admitted registration names a different agent than the request"
+                )
+
         fixed_env = list(profile.fixed_env)
         executable_slot = contract.executable_slot()
         if executable_slot is not None and runtime is not None:
@@ -686,7 +818,7 @@ class RunSpecAssembler:
                 fixed_env.append((slot.env_key, str(value)))
 
         argv: list[str] = [executable]
-        for token in profile.argv_template:
+        for token in instance.argv_tokens:
             if token == _CWD_TOKEN:
                 argv.append(self._binding.effective_cwd)
             elif "<" in token or ">" in token:
@@ -699,17 +831,20 @@ class RunSpecAssembler:
             executable=executable,
             argv=tuple(argv),
             env_allowlist=profile.env_allowlist,
-            credential_refs=profile.credential_slots,
+            credential_refs=instance.credential_slots,
             profile_id=profile.profile_id,
             profile_revision=profile.revision,
             profile_hash=profile.profile_hash(),
             config_schema_hash=profile.config_schema_hash(),
-            permission_env=resolve_registered_permission_env(profile.executable_key),
+            permission_env=instance.permission_env,
             fixed_env=tuple(fixed_env),
             expected_runtime=seal_runtime_identity(profile, runtime),
             runtime_provenance=seal_runtime_provenance(profile, runtime),
             session_meta=profile.session_meta,
+            agent_id=instance.agent_id,
+            agent_registration_hash=instance.agent_registration_hash,
         )
+        self._instance = instance
         return self._launch
 
     def seal(
@@ -742,6 +877,8 @@ class RunSpecAssembler:
                 profile_snapshot_ref=self._profile.snapshot_ref(),
                 profile_hash=self._profile.profile_hash(),
                 config_schema_hash=self._profile.config_schema_hash(),
+                agent_id=self._launch.agent_id,
+                agent_registration_hash=self._launch.agent_registration_hash,
             ),
             execution_grant=SpecGrant(
                 grant_ref=request.grant_ref,

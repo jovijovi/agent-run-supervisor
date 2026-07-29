@@ -94,6 +94,15 @@ def _add_runtime_binding_parser(subparsers: argparse._SubParsersAction) -> None:
             required=True,
             help="Registered profile id whose live contract must accept the generation.",
         )
+        sub.add_argument(
+            "--agent",
+            default=None,
+            help=(
+                "Registered agent id, for a profile whose contract is "
+                "instantiated per operator-owned Agent Registration. Required "
+                "for such a profile and refused for any other."
+            ),
+        )
         sub.add_argument("--generation", required=True, help="Generation id to act on.")
         sub.add_argument(
             "--trusted-uid",
