@@ -265,7 +265,7 @@ not the launch, the selector names, the permission semantics, or the literals a 
 actually accept and read back.
 
 **The Claude contract moved to `claude-agent-acp-0.63.0`.** The registered Claude source contract is
-`claude-agent-acp-0.63.0` (revision 3), frozen against zero-prompt ACP discovery of the 0.63.0
+`claude-agent-acp-0.63.0` (revision 4), frozen against zero-prompt ACP discovery of the 0.63.0
 adapter. There is **no** `0.61.0` compatibility alias: the retired ID is now an unknown profile and
 admission refuses it. Registration is a source fact only — the new revision still needs its own
 operator acceptance and a Binding generation promoted at the new `adapter_contract_hash` before any

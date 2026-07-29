@@ -242,7 +242,7 @@ agent CLI。这也正是「讲通用 ACP 就不再需要 profile」不成立的�
 方式、选择器名称、权限语义，也不是某个 agent 实际接受并读回的字面量。
 
 **Claude 契约已迁移到 `claude-agent-acp-0.63.0`。** 已注册的 Claude 源码契约是
-`claude-agent-acp-0.63.0`（revision 3），依据对 0.63.0 适配器的零提示词 ACP discovery 冻结。**没有**
+`claude-agent-acp-0.63.0`（revision 4），依据对 0.63.0 适配器的零提示词 ACP discovery 冻结。**没有**
 `0.61.0` 兼容别名：退役的 ID 现在就是未知 profile，准入会直接拒绝。注册只是源码事实 —— 新 revision
 仍需运维方自己的验收，并在新的 `adapter_contract_hash` 上晋级一份 Binding generation，之后 Run 才
 能使用；按设计，在旧契约下被接受的 generation 会 fail closed。
