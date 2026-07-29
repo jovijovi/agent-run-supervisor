@@ -2,7 +2,7 @@
 
 # Documentation Index
 
-Total: 67 documents tracked across 2 statuses.
+Total: 68 documents tracked across 2 statuses.
 
 ## Active (15)
 
@@ -22,8 +22,9 @@ Total: 67 documents tracked across 2 statuses.
 - [Engineering practices](practices/README.md) — created 2026-05-28
 - [Verification gates for implementation PRs](roadmap/verification.md) — created 2026-05-28
 
-## Archived (52)
+## Archived (53)
 
+- [Runtime Binding Source and Wrapped-Adapter Package-Closure](roadmap/archive/phases/vnext-runtime-binding-source-closure.md) — created 2026-07-29
 - [Runtime Binding refactor — contract/Binding split and sealed runtime provenance](plans/archive/2026-07-26-runtime-binding-refactor.md) — created 2026-07-26
 - [Claude official ACP adapter — B3/B4/B5 closure](plans/archive/2026-07-25-claude-official-adapter-b3-b5-closure.md) — created 2026-07-25
 - [Codex official ACP adapter — closed-profile admission](plans/archive/2026-07-25-codex-official-adapter-admission.md) — created 2026-07-25

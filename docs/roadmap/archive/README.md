@@ -2,7 +2,7 @@
 title: "Roadmap phase archive"
 status: active
 created_at: 2026-07-07
-last_validated_at: 2026-07-21
+last_validated_at: 2026-07-29
 ---
 
 # Roadmap phase archive
@@ -13,6 +13,7 @@ context — read the living board [`current-status.md`](../current-status.md) fi
 | Archive | Execution plans |
 |---|---|
 | [`phases/`](phases/) phase Goal/Checklist/Acceptance | [`docs/plans/archive/`](../../plans/archive/) checklists |
+| [Runtime Binding source/package closure](phases/vnext-runtime-binding-source-closure.md) | [Runtime Binding refactor](../../plans/archive/2026-07-26-runtime-binding-refactor.md) |
 | [`../../archive/pre-vnext-reset-2026-07-21/`](../../archive/pre-vnext-reset-2026-07-21/README.md) former authority | Audit/compatibility only; never new-development context |
 
 ## When to write here
