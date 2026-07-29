@@ -565,6 +565,11 @@ def seal_runtime_identity(
         node_sha256=wrapped.interpreter_sha256 if wrapped else None,
         adapter_entry_path=wrapped.adapter_entry_path if wrapped else None,
         adapter_entry_sha256=wrapped.adapter_entry_sha256 if wrapped else None,
+        adapter_package_root=wrapped.adapter_package_root if wrapped else None,
+        adapter_tree_sha256=wrapped.adapter_tree_sha256 if wrapped else None,
+        interpreter_argv_prefix=(
+            wrapped.interpreter_argv_prefix if wrapped else ()
+        ),
         credential_root_env=(
             contract.slot(contract.credential_root_slot).env_key
             if contract.credential_root_slot is not None

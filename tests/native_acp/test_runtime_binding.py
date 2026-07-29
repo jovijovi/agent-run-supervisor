@@ -30,6 +30,7 @@ from agent_run_supervisor.native_acp.profile import (
     SLOT_KIND_CONFIG_ROOT,
     SLOT_KIND_NATIVE_BINARY,
     SLOT_KIND_PACKAGE_TREE,
+    path_within_root,
 )
 
 # ---------------------------------------------------------------------------
@@ -819,6 +820,274 @@ def test_package_tree_digest_refuses_rather_than_samples(tmp_path: Path) -> None
     with pytest.raises(rb.BindingRefusal) as excinfo:
         rb.package_tree_digest(root, max_entries=2)
     assert excinfo.value.rule == "PACKAGE_TREE_TOO_LARGE"
+
+
+# ---------------------------------------------------------------------------
+# F-RUNTIME-BINDING-002 — the closure primitive a real package install needs
+# ---------------------------------------------------------------------------
+
+
+def _npm_shaped_tree(root: Path) -> Path:
+    """A package root shaped like a real npm install: `.bin` links included."""
+    (root / "node_modules" / ".bin").mkdir(parents=True)
+    (root / "node_modules" / "pkg").mkdir(parents=True)
+    (root / "node_modules" / "pkg" / "index.js").write_text("// dep\n", encoding="utf-8")
+    (root / "node_modules" / ".bin" / "pkg").symlink_to("../pkg/index.js")
+    harden_tree(root)
+    return root
+
+
+# The digest of the symlink-free tree `_fixed_tree` builds, measured against the
+# wire format that shipped with F-RUNTIME-BINDING-001. It contains no absolute
+# path, so it is a machine-independent constant: adding a symlink kind to the
+# closure must leave every regular tree's digest — and therefore every existing
+# downstream CLI `package_tree` Binding — byte-identical.
+REGULAR_TREE_DIGEST_GOLDEN = (
+    "7d99eb94c659d75d212df77dfed807c9fbb5be0dec9ddc60337a813e4b034bba"
+)
+
+
+def _fixed_tree(root: Path) -> Path:
+    (root / "lib").mkdir(parents=True)
+    (root / "bin").mkdir(parents=True)
+    (root / "package.json").write_text('{"name":"fixed"}\n', encoding="utf-8")
+    (root / "lib" / "a.js").write_text("// a\n", encoding="utf-8")
+    (root / "lib" / "b.js").write_text("// b\n", encoding="utf-8")
+    (root / "bin" / "run.js").write_text("// run\n", encoding="utf-8")
+    return root
+
+
+def test_package_tree_digest_freezes_a_contained_symlink_by_its_target(
+    tmp_path: Path,
+) -> None:
+    """A real npm install carries `node_modules/.bin` links; refusing them would
+    make the closure unable to model the tree it must freeze, and ignoring them
+    would leave a resolvable name unfrozen."""
+    root = _npm_shaped_tree(tmp_path / "pkg")
+    before = rb.package_tree_digest(root, ownership=ownership())
+    link = root / "node_modules" / ".bin" / "pkg"
+    link.unlink()
+    link.symlink_to("../pkg/other.js")
+    after = rb.package_tree_digest(root, ownership=ownership())
+    assert before != after
+
+
+def test_package_tree_digest_refuses_a_symlink_leaving_the_closure_root(
+    tmp_path: Path,
+) -> None:
+    root = _npm_shaped_tree(tmp_path / "pkg")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "evil.js").write_text("// unfrozen\n", encoding="utf-8")
+    (root / "node_modules" / "escape").symlink_to(outside)
+    with pytest.raises(rb.BindingRefusal) as excinfo:
+        rb.package_tree_digest(root, ownership=ownership())
+    assert excinfo.value.rule == "PACKAGE_TREE_SYMLINK_ESCAPE"
+
+
+def test_package_tree_digest_refuses_a_symlink_escaping_by_parent_traversal(
+    tmp_path: Path,
+) -> None:
+    root = _npm_shaped_tree(tmp_path / "pkg")
+    (root / "node_modules" / "up").symlink_to("../../../outside/evil.js")
+    with pytest.raises(rb.BindingRefusal) as excinfo:
+        rb.package_tree_digest(root, ownership=ownership())
+    assert excinfo.value.rule == "PACKAGE_TREE_SYMLINK_ESCAPE"
+
+
+def test_package_tree_digest_refuses_a_sibling_prefix_symlink_target(
+    tmp_path: Path,
+) -> None:
+    """`/pkg-evil` is not inside `/pkg`; only a component-wise containment test
+    sees that, and a string-prefix test does not."""
+    root = _npm_shaped_tree(tmp_path / "pkg")
+    sibling = tmp_path / "pkg-evil"
+    sibling.mkdir()
+    (sibling / "evil.js").write_text("// unfrozen\n", encoding="utf-8")
+    (root / "node_modules" / "sibling").symlink_to(sibling / "evil.js")
+    with pytest.raises(rb.BindingRefusal) as excinfo:
+        rb.package_tree_digest(root, ownership=ownership())
+    assert excinfo.value.rule == "PACKAGE_TREE_SYMLINK_ESCAPE"
+
+
+def test_package_tree_digest_still_refuses_a_special_file(tmp_path: Path) -> None:
+    root = tmp_path / "pkg"
+    root.mkdir()
+    os.mkfifo(root / "pipe")
+    harden_tree(root)
+    with pytest.raises(rb.BindingRefusal) as excinfo:
+        rb.package_tree_digest(root, ownership=ownership())
+    assert excinfo.value.rule == "PACKAGE_TREE_UNSAFE_ENTRY"
+
+
+def test_package_tree_digest_of_a_symlink_free_tree_keeps_its_wire_format(
+    tmp_path: Path,
+) -> None:
+    """The downstream CLI Binding's `package_tree` meaning is unchanged: a tree
+    without symlinks digests to exactly the value the shipped format gives."""
+    root = _fixed_tree(tmp_path / "pkg")
+    assert rb.package_tree_digest(root) == REGULAR_TREE_DIGEST_GOLDEN
+
+
+# ---------------------------------------------------------------------------
+# Containment is the kernel's resolution, not a lexical one
+#
+# `normpath` cancels `X/..` as text; the kernel applies `..` to what `X`
+# *resolved to*. So a lexical rule is not a conservative over-approximation of
+# the kernel's — it can call an escaping target contained. What must hold is
+# that every point the kernel would walk stays in the root.
+# ---------------------------------------------------------------------------
+
+
+def _linked_tree(root: Path) -> Path:
+    """The contained link shapes a real install produces, in one tree.
+
+    A directory link (`vendor`), a link reaching its target *through* one
+    (`entry`), a link whose walk passes through the root itself (`.bin/cli`), a
+    `..` link landing strictly inside (`.bin/up`), and a dangling in-root name
+    (`absent`). Every target text is relative, so this tree's digest carries no
+    absolute path and is a machine-independent constant.
+    """
+    (root / "lib").mkdir(parents=True)
+    (root / "node_modules" / ".bin").mkdir(parents=True)
+    (root / "lib" / "index.js").write_text("// index\n", encoding="utf-8")
+    (root / "vendor").symlink_to("lib")
+    (root / "entry").symlink_to("vendor/index.js")
+    (root / "node_modules" / ".bin" / "cli").symlink_to("../../lib/index.js")
+    (root / "node_modules" / ".bin" / "up").symlink_to("..")
+    (root / "node_modules" / "absent").symlink_to("missing.js")
+    harden_tree(root)
+    return root
+
+
+# The digests of the two link-bearing trees above, measured against the wire
+# format in force before the containment rule was tightened. Until now no test
+# pinned the bytes a *symlink* contributes — only that changing a target text
+# changes the digest — which left the frozen `adapter_tree_sha256` constants in
+# `profile.py` without a guard. Tightening containment shrinks the accepted set
+# and must not touch the encoding: a tree that was honest before digests to the
+# same value after, byte for byte.
+NPM_SHAPED_TREE_DIGEST_GOLDEN = (
+    "30c4632376e58d79b3081c9251d671484c56ff8bc0c8d9865ff3ff2754e3a746"
+)
+LINKED_TREE_DIGEST_GOLDEN = (
+    "30f740982e7657c2afdf1bc3acd61e8f343434ecd0f7b95f5d228539c7a9f030"
+)
+
+
+def test_package_tree_digest_of_an_npm_shaped_tree_keeps_its_wire_format(
+    tmp_path: Path,
+) -> None:
+    root = _npm_shaped_tree(tmp_path / "pkg")
+    assert rb.package_tree_digest(root, ownership=ownership()) == (
+        NPM_SHAPED_TREE_DIGEST_GOLDEN
+    )
+
+
+def test_package_tree_digest_accepts_every_contained_link_shape_unchanged(
+    tmp_path: Path,
+) -> None:
+    """Link identity stays the target *text*: the resolved path is a gate the
+    digest consults, never a byte it absorbs."""
+    root = _linked_tree(tmp_path / "pkg")
+    assert rb.package_tree_digest(root, ownership=ownership()) == (
+        LINKED_TREE_DIGEST_GOLDEN
+    )
+
+
+def test_package_tree_digest_freezes_a_dangling_in_root_symlink_by_its_text(
+    tmp_path: Path,
+) -> None:
+    """A name that does not exist reaches nothing outside the closure, and
+    creating it later means writing inside the root — which changes this very
+    digest. So it is frozen by its text rather than refused."""
+    root = tmp_path / "pkg"
+    root.mkdir()
+    link = root / "absent"
+    link.symlink_to("missing.js")
+    harden_tree(root)
+    before = rb.package_tree_digest(root, ownership=ownership())
+    link.unlink()
+    link.symlink_to("other-missing.js")
+    assert rb.package_tree_digest(root, ownership=ownership()) != before
+
+
+def test_package_tree_digest_refuses_a_composed_multi_hop_symlink_escape(
+    tmp_path: Path,
+) -> None:
+    """Two links, each contained on its own, composing into an escape."""
+    root = tmp_path / "pkg"
+    (root / "a" / "b").mkdir(parents=True)
+    (root / "a" / "b" / "up").symlink_to("..")
+    harden_tree(root)
+    # `up` resolves to `<root>/a`: a `..` link is a real npm shape and stays
+    # accepted, so the refusal below is about the composition, not about `..`.
+    assert _is_sha256_text(rb.package_tree_digest(root, ownership=ownership()))
+    (root / "esc").symlink_to("a/b/up/../../x")
+    # Pinned by the kernel's own answer, not by an implementation detail: `esc`
+    # names code no tree digest covers.
+    assert not path_within_root(root, Path(os.path.realpath(root / "esc")))
+    with pytest.raises(rb.BindingRefusal) as excinfo:
+        rb.package_tree_digest(root, ownership=ownership())
+    assert excinfo.value.rule == "PACKAGE_TREE_SYMLINK_ESCAPE"
+
+
+def test_package_tree_digest_never_queries_a_path_outside_the_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every point is judged before it is read. That ordering is what lets the
+    closure prove containment without ever touching an untrusted directory —
+    the reason the proof is a bounded walk and not a `realpath` call."""
+    root = tmp_path / "pkg"
+    (root / "a" / "b").mkdir(parents=True)
+    (root / "a" / "b" / "up").symlink_to("..")
+    (root / "esc").symlink_to("a/b/up/../../x")
+    harden_tree(root)
+    queried: list[Path] = []
+    real_readlink = os.readlink
+
+    def recording_readlink(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        queried.append(Path(path))
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "readlink", recording_readlink)
+    with pytest.raises(rb.BindingRefusal):
+        rb.package_tree_digest(root, ownership=ownership())
+    assert queried, "the walk did not run, so the assertion below proves nothing"
+    assert [p for p in queried if p != root and not path_within_root(root, p)] == []
+
+
+def test_package_tree_digest_refuses_an_escape_composed_through_an_absolute_link(
+    tmp_path: Path,
+) -> None:
+    """An in-root absolute target is a *jump*, and the `..` that follows applies
+    to where it landed — shallower than where the link sits."""
+    root = tmp_path / "pkg"
+    (root / "deep" / "deeper").mkdir(parents=True)
+    (root / "a").mkdir()
+    (root / "deep" / "deeper" / "mid").symlink_to(root / "a")
+    (root / "esc").symlink_to("deep/deeper/mid/../../x")
+    harden_tree(root)
+    assert not path_within_root(root, Path(os.path.realpath(root / "esc")))
+    with pytest.raises(rb.BindingRefusal) as excinfo:
+        rb.package_tree_digest(root, ownership=ownership())
+    assert excinfo.value.rule == "PACKAGE_TREE_SYMLINK_ESCAPE"
+
+
+def test_package_tree_digest_refuses_an_unresolvable_symlink_cycle(
+    tmp_path: Path,
+) -> None:
+    """A cycle is undecidable, so the closure fails closed on it — it neither
+    accepts the pair nor walks it forever — and says so with its own rule
+    rather than claiming a proven escape."""
+    root = tmp_path / "pkg"
+    root.mkdir()
+    (root / "x").symlink_to("y")
+    (root / "y").symlink_to("x")
+    harden_tree(root)
+    with pytest.raises(rb.BindingRefusal) as excinfo:
+        rb.package_tree_digest(root, ownership=ownership())
+    assert excinfo.value.rule == "PACKAGE_TREE_SYMLINK_UNRESOLVABLE"
 
 
 # ---------------------------------------------------------------------------

@@ -49,6 +49,32 @@ def _is_sha256_hex(value: Any) -> bool:
     )
 
 
+def path_within_root(root: str | Path, candidate: str | Path) -> bool:
+    """Is ``candidate`` strictly inside the closure ``root``? (C5)
+
+    The one containment authority every closure surface shares — contract
+    construction, the sealed runtime identity, and the tree digest's symlink
+    rule — so the three cannot disagree about what "inside" means.
+
+    Judged on **path components**, never on string prefixes: ``/pkg-evil`` has
+    ``/pkg`` as a text prefix and is not inside it. Lexical by construction: it
+    asks no question of the filesystem, so it is safe to call while validating a
+    frozen constant and cannot be raced. Both operands must be absolute and free
+    of ``..``, and a path equal to the root is *not* inside it — a closure root
+    is not its own member.
+    """
+    root_path, candidate_path = Path(root), Path(candidate)
+    if not root_path.is_absolute() or not candidate_path.is_absolute():
+        return False
+    root_parts, candidate_parts = root_path.parts, candidate_path.parts
+    if ".." in root_parts or ".." in candidate_parts:
+        return False
+    return (
+        len(candidate_parts) > len(root_parts)
+        and candidate_parts[: len(root_parts)] == root_parts
+    )
+
+
 # Operator-managed registered installation mapping. Resolution never consults
 # caller input, PATH, or any environment variable.
 #
@@ -62,9 +88,27 @@ def _is_sha256_hex(value: Any) -> bool:
 # A ``direct_acp`` profile has no entry here at all: its one executable is both
 # the AGENT CLI and the ACP implementation, so it is a deployment fact the
 # operator-owned Binding supplies through the contract's executable slot.
-_FROZEN_NODE = Path(
-    "/home/ecs-user/.local/share/agent-run-supervisor/adapters/node/v24.14.0/bin/node"
-)
+#
+# Every source-frozen runtime path names the root-owned artifact location a
+# separate materialization step is expected to create. It is deliberately not a
+# path under the service account's home: C5 requires the artifact *and every
+# ancestor* to be non-writable by the `arsd`/AGENT UID, and no per-leaf
+# ownership change can make a service-owned home directory satisfy that. These
+# constants declare the expected source paths only — this module creates,
+# copies, installs, and chowns nothing, and a path that has not been
+# materialized simply fails admission closed.
+ARTIFACT_MATERIALIZATION_PREFIX = "/opt/agent-run-supervisor/artifacts"
+
+# Node searches its CommonJS "global folders" — ``$HOME/.node_modules``,
+# ``$HOME/.node_libraries`` and ``<node prefix>/lib/node`` — outside every
+# package root, so an adapter package closure is *not* complete while they are
+# live: measured on the frozen v24.14.0, a `createRequire` inside a bundled
+# adapter loads code from ``$HOME/.node_modules``, and both wrapped profiles
+# forward ``HOME``. This is the exact frozen flag that closes them, and the
+# contract below refuses a frozen-Node interpreter that does not carry it.
+NODE_NO_GLOBAL_SEARCH_PATHS = "--no-global-search-paths"
+
+_FROZEN_NODE = Path(f"{ARTIFACT_MATERIALIZATION_PREFIX}/node/v24.14.0/bin/node")
 _REGISTERED_EXECUTABLES: dict[str, Path] = {
     "codex-acp": _FROZEN_NODE,
     "claude-agent-acp": _FROZEN_NODE,
@@ -263,31 +307,110 @@ class BindingSlot:
 class WrappedRuntimeArtifacts:
     """Source-frozen interpreter and ACP adapter identity for ``wrapped_acp``.
 
-    These stay in code (C9): the interpreter and the adapter entry are ARS-
+    These stay in code (C9): the interpreter and the adapter package are ARS-
     controlled artifacts, not deployment facts an operator re-points.
+
+    The adapter is frozen as a **complete package closure**, not as one entry
+    file (F-RUNTIME-BINDING-002; PRD R13 artifact closure, GOAL contract 9).
+    ``adapter_package_root`` is the npm *install* root and
+    ``adapter_tree_sha256`` is the digest of everything under it, because that
+    is the smallest root Node's module resolution cannot escape downward from:
+    starting at the entry, ``NODE_MODULES_PATHS`` walks the parent chain and
+    finds the adapter's hoisted dependencies in ``<install root>/node_modules``.
+    A package directory alone would leave every hoisted dependency unfrozen,
+    and the entry digest alone freezes neither the siblings the entry imports
+    nor the ``package.json`` it reads its own version from — which is exactly
+    how one launcher's bytes stayed identical across two adapter versions.
+
+    ``adapter_entry_path`` is required to lie strictly inside the closure root,
+    judged on path components so a sibling like ``…/1.0.0-evil`` can never pass
+    as a member of ``…/1.0.0``.
+
+    A frozen tree is still not a closure while the interpreter can resolve code
+    from somewhere else entirely, so ``interpreter_argv_prefix`` freezes the
+    fixed option tokens that close its out-of-closure search. It is required and
+    non-empty: an interpreter with no way to close that search cannot honestly
+    carry a wrapped contract, and this field is where that question has to be
+    answered rather than assumed. The tokens are options only — never a path,
+    never caller or environment input — they ride in ``adapter_contract_hash``,
+    and :class:`AgentProfile` refuses any argv that does not begin with exactly
+    them.
     """
 
     interpreter_path: str
     interpreter_sha256: str
     adapter_entry_path: str
     adapter_entry_sha256: str
+    # Declared with defaults so an omission is a typed, fail-closed contract
+    # refusal rather than a constructor TypeError; all three are required.
+    adapter_package_root: str | None = None
+    adapter_tree_sha256: str | None = None
+    interpreter_argv_prefix: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        for name in ("interpreter_path", "adapter_entry_path"):
+        self._validate_interpreter_argv_prefix()
+        for name in ("interpreter_path", "adapter_entry_path", "adapter_package_root"):
             value = getattr(self, name)
+            if value is None:
+                raise ProfileValidationError(
+                    f"{name} is required: a wrapped adapter freezes its complete "
+                    "package closure, never its entry file alone"
+                )
             if not isinstance(value, str) or not Path(value).is_absolute():
                 raise ProfileValidationError(f"{name} must be an absolute path")
-        for name in ("interpreter_sha256", "adapter_entry_sha256"):
+        for name in ("interpreter_sha256", "adapter_entry_sha256", "adapter_tree_sha256"):
             value = getattr(self, name)
+            if value is None:
+                raise ProfileValidationError(
+                    f"{name} is required: a wrapped adapter freezes its complete "
+                    "package closure tree digest, never its entry digest alone"
+                )
             if not _is_sha256_hex(value):
                 raise ProfileValidationError(f"{name} must be a sha256 hex digest")
+        if not path_within_root(self.adapter_package_root, self.adapter_entry_path):
+            raise ProfileValidationError(
+                "adapter_entry_path must be inside adapter_package_root"
+            )
+
+    def _validate_interpreter_argv_prefix(self) -> None:
+        prefix = self.interpreter_argv_prefix
+        if not isinstance(prefix, tuple) or not prefix:
+            raise ProfileValidationError(
+                "interpreter_argv_prefix is required: a wrapped contract must "
+                "freeze the option tokens that close its interpreter's "
+                "out-of-closure module search"
+            )
+        for token in prefix:
+            if not isinstance(token, str) or not token or not token.startswith("-"):
+                raise ProfileValidationError(
+                    "interpreter_argv_prefix accepts option tokens only"
+                )
+            if any(ch.isspace() for ch in token) or not token.isprintable():
+                # One argv token is one option. A token carrying whitespace
+                # would read as several in a report and as one on the wire.
+                raise ProfileValidationError(
+                    "interpreter_argv_prefix tokens carry no whitespace"
+                )
+        if len(set(prefix)) != len(prefix):
+            raise ProfileValidationError("duplicate interpreter_argv_prefix token")
+        if (
+            self.interpreter_path == str(_FROZEN_NODE)
+            and NODE_NO_GLOBAL_SEARCH_PATHS not in prefix
+        ):
+            raise ProfileValidationError(
+                f"the frozen Node interpreter requires {NODE_NO_GLOBAL_SEARCH_PATHS!r}: "
+                "its CommonJS global folders resolve outside every package root"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "interpreter_path": self.interpreter_path,
             "interpreter_sha256": self.interpreter_sha256,
+            "interpreter_argv_prefix": list(self.interpreter_argv_prefix),
             "adapter_entry_path": self.adapter_entry_path,
             "adapter_entry_sha256": self.adapter_entry_sha256,
+            "adapter_package_root": self.adapter_package_root,
+            "adapter_tree_sha256": self.adapter_tree_sha256,
         }
 
 
@@ -594,6 +717,7 @@ class AgentProfile:
                     f"fixed_env {slot.env_key!r} collides with binding slot "
                     f"{slot.name!r}"
                 )
+        self._validate_wrapped_argv()
         if (
             self.contract.launch_kind == LAUNCH_KIND_DIRECT
             and self.contract.requires_binding
@@ -601,6 +725,37 @@ class AgentProfile:
         ):
             raise ProfileValidationError(
                 "a direct_acp profile must bind its executable through a slot"
+            )
+
+    def _validate_wrapped_argv(self) -> None:
+        """The declared interpreter prefix and the real argv cannot drift.
+
+        ``resolve_launch`` builds ``[interpreter, *argv_template]``, so the
+        contract's frozen option tokens are only actually passed to the
+        interpreter if they are literally the head of this profile's argv. Two
+        places could otherwise disagree — the contract could declare the flag
+        while the argv omitted it, and the attestation would then be proving a
+        prefix the child never received. The adapter entry is pinned to the
+        first position after the prefix for the same reason: a token wedged
+        between them would be an interpreter option this contract never froze.
+        """
+        wrapped = self.contract.wrapped_runtime
+        if wrapped is None:
+            return
+        prefix = wrapped.interpreter_argv_prefix
+        if tuple(self.argv_template[: len(prefix)]) != prefix:
+            raise ProfileValidationError(
+                "argv_template must begin with the contract's "
+                f"interpreter_argv_prefix {list(prefix)!r}"
+            )
+        entry_index = len(prefix)
+        if (
+            len(self.argv_template) <= entry_index
+            or self.argv_template[entry_index] != wrapped.adapter_entry_path
+        ):
+            raise ProfileValidationError(
+                "argv_template must carry the frozen adapter entry immediately "
+                "after the interpreter_argv_prefix"
             )
 
     def snapshot(self) -> dict[str, Any]:
@@ -781,16 +936,27 @@ OPENCODE_NATIVE_ACP = AgentProfile(
 # frozen Node interpreter and the ACP adapter entry — plus the frozen
 # ``CODEX_CONFIG``/mode/browser environment, which are compatibility semantics
 # rather than deployment facts.
+#
+# Revision 3 (F-RUNTIME-BINDING-002): the frozen adapter identity became the
+# complete package closure. ``CODEX_ADAPTER_ROOT`` is the npm install root that
+# ``CODEX_ADAPTER_ENTRY`` lives inside, and its tree digest covers every file
+# the entry can reach — including the hoisted ``node_modules`` this adapter's
+# own package directory does not contain. The digest is a byte-copy measurement
+# of the operator-installed 1.1.7 tree; it is source-frozen artifact identity,
+# not a deployment fact, exactly like the entry digest beside it.
+CODEX_ADAPTER_ROOT = f"{ARTIFACT_MATERIALIZATION_PREFIX}/adapters/codex-acp/1.1.7"
 CODEX_ADAPTER_ENTRY = (
-    "/home/ecs-user/.local/share/agent-run-supervisor/adapters/codex-acp/1.1.7"
-    "/node_modules/@agentclientprotocol/codex-acp/dist/index.js"
+    f"{CODEX_ADAPTER_ROOT}/node_modules/@agentclientprotocol/codex-acp/dist/index.js"
 )
 
 CODEX_ACP_1_1_7 = AgentProfile(
     profile_id="codex-acp-1.1.7",
-    revision=2,
+    revision=3,
     executable_key="codex-acp",
-    argv_template=(CODEX_ADAPTER_ENTRY,),
+    # [node, --no-global-search-paths, entry]: the frozen option tokens are the
+    # head of argv, so the child actually receives them, and profile
+    # construction refuses any argv that drifts from the contract's prefix.
+    argv_template=(NODE_NO_GLOBAL_SEARCH_PATHS, CODEX_ADAPTER_ENTRY),
     env_allowlist=(
         "HOME",
         "PATH",
@@ -862,6 +1028,11 @@ CODEX_ACP_1_1_7 = AgentProfile(
             adapter_entry_sha256=(
                 "0deb6b820dfed8804cd76b16a50210fe12202e5e339b5edaa23f6987f1742e0a"
             ),
+            adapter_package_root=CODEX_ADAPTER_ROOT,
+            adapter_tree_sha256=(
+                "6e78f0ed56a4ec40939153cb7c1505c31b92283ca9035feb65a994c70445a83d"
+            ),
+            interpreter_argv_prefix=(NODE_NO_GLOBAL_SEARCH_PATHS,),
         ),
         cli_slot="downstream_cli",
         credential_root_slot="codex_home",
@@ -885,8 +1056,11 @@ CODEX_ACP_1_1_7 = AgentProfile(
 # credential root: the Claude CLI owns its own credential storage, which ARS
 # neither manages, stages, nor inspects — so admission requires exactly zero
 # caller credential references.
+CLAUDE_ADAPTER_ROOT = (
+    f"{ARTIFACT_MATERIALIZATION_PREFIX}/adapters/claude-agent-acp/0.63.0"
+)
 CLAUDE_ADAPTER_ENTRY = (
-    "/home/ecs-user/.local/share/agent-run-supervisor/adapters/claude-agent-acp/0.63.0"
+    f"{CLAUDE_ADAPTER_ROOT}"
     "/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js"
 )
 
@@ -909,14 +1083,20 @@ CLAUDE_ADAPTER_ENTRY = (
 # ``adapter_entry_sha256`` deliberately does NOT change: ``dist/index.js`` is a
 # launcher whose bytes are identical in 0.61.0 and 0.63.0, while the siblings it
 # imports and the ``package.json`` it reads its version from are what moved. The
-# entry path is therefore the only artifact identity here that separates the two
-# adapter versions. That is the known wrapped-adapter package-closure gap
-# (GOAL / PRD R13); this contract records it and does not close it.
+# entry path was therefore the only artifact identity here that separated the
+# two adapter versions.
+#
+# Revision 4 (F-RUNTIME-BINDING-002) closes that gap rather than recording it:
+# ``adapter_tree_sha256`` is the digest of the whole install root, so the
+# 350 KB ``./acp-agent.js`` the 3 KB entry imports, the ``../package.json`` it
+# reads its version from, and the hoisted ``@anthropic-ai/claude-agent-sdk`` it
+# resolves by walking up to ``<install root>/node_modules`` are all frozen. Two
+# adapter versions can no longer share an artifact identity.
 CLAUDE_AGENT_ACP_0_63_0 = AgentProfile(
     profile_id="claude-agent-acp-0.63.0",
-    revision=3,
+    revision=4,
     executable_key="claude-agent-acp",
-    argv_template=(CLAUDE_ADAPTER_ENTRY,),
+    argv_template=(NODE_NO_GLOBAL_SEARCH_PATHS, CLAUDE_ADAPTER_ENTRY),
     env_allowlist=(
         "HOME",
         "PATH",
@@ -1002,6 +1182,11 @@ CLAUDE_AGENT_ACP_0_63_0 = AgentProfile(
             adapter_entry_sha256=(
                 "260aac90bf75f197b93640087c1de66441761d43c2784efa035fdcee60b5dacd"
             ),
+            adapter_package_root=CLAUDE_ADAPTER_ROOT,
+            adapter_tree_sha256=(
+                "7c7958a24b96cc8510506e37b91e1ad37dcdef546bfcaaae025ffe9a1ba4ac2a"
+            ),
+            interpreter_argv_prefix=(NODE_NO_GLOBAL_SEARCH_PATHS,),
         ),
         cli_slot="downstream_cli",
         # The Claude CLI owns its own credential storage, which ARS neither

@@ -1288,7 +1288,10 @@ def codex_admission_contract(tmp_path: Path, **overrides):
     stage.mkdir(exist_ok=True)
     node = stage / "node"
     node.write_bytes(b"# private node placeholder\n")
-    entry = stage / "index.js"
+    # The adapter is a package closure: the entry lives inside its install root.
+    adapter_root = stage / "adapter-pkg"
+    entry = adapter_root / "node_modules" / "@scope" / "adapter" / "dist" / "index.js"
+    entry.parent.mkdir(parents=True, exist_ok=True)
     entry.write_bytes(b"// private adapter entry placeholder\n")
     kwargs = dict(
         launch_kind=LAUNCH_KIND_WRAPPED,
@@ -1311,6 +1314,9 @@ def codex_admission_contract(tmp_path: Path, **overrides):
             interpreter_sha256="0" * 64,
             adapter_entry_path=str(entry),
             adapter_entry_sha256="1" * 64,
+            adapter_package_root=str(adapter_root),
+            adapter_tree_sha256="2" * 64,
+            interpreter_argv_prefix=("--no-global-search-paths",),
         ),
         cli_slot="downstream_cli",
         credential_root_slot="codex_home",
@@ -1330,7 +1336,7 @@ def codex_admission_profile(tmp_path: Path, **overrides):
         profile_id="codex-acp-admission-1.0",
         revision=1,
         executable_key="codex-acp-admission",
-        argv_template=(str(entry),),
+        argv_template=("--no-global-search-paths", str(entry)),
         env_allowlist=("HOME", "PATH"),
         fixed_env=(
             ("CODEX_CONFIG", CODEX_CANONICAL_CONFIG),
@@ -1629,14 +1635,17 @@ def claude_admission_profile(tmp_path: Path, **overrides):
     stage.mkdir(exist_ok=True)
     node = stage / "node"
     node.write_bytes(b"# private node placeholder\n")
-    entry = stage / "index.js"
+    # The adapter is a package closure: the entry lives inside its install root.
+    adapter_root = stage / "adapter-pkg"
+    entry = adapter_root / "node_modules" / "@scope" / "adapter" / "dist" / "index.js"
+    entry.parent.mkdir(parents=True, exist_ok=True)
     entry.write_bytes(b"// private adapter entry placeholder\n")
 
     kwargs = dict(
         profile_id="claude-agent-acp-admission-0.61.0",
         revision=1,
         executable_key="claude-agent-acp-admission",
-        argv_template=(str(entry),),
+        argv_template=("--no-global-search-paths", str(entry)),
         env_allowlist=("HOME", "PATH"),
         fixed_env=(("NO_BROWSER", "1"),),
         credential_slots=(),
@@ -1688,6 +1697,9 @@ def claude_admission_profile(tmp_path: Path, **overrides):
                 interpreter_sha256="0" * 64,
                 adapter_entry_path=str(entry),
                 adapter_entry_sha256="1" * 64,
+                adapter_package_root=str(adapter_root),
+                adapter_tree_sha256="2" * 64,
+                interpreter_argv_prefix=("--no-global-search-paths",),
             ),
             cli_slot="downstream_cli",
         ),

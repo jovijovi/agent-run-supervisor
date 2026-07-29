@@ -819,8 +819,18 @@ class PrivateNegativeFixtures:
         self.node = stage / "node"
         shutil.copy2(real_node, self.node)
         os.chmod(self.node, 0o555)
-        self.entry = stage / "codex-fake-agent.mjs"
+        # The adapter is a package closure: the entry lives inside its install
+        # root, beside the hoisted dependency Node reaches by walking up.
+        self.adapter_root = stage / "adapter-pkg"
+        self.entry = (
+            self.adapter_root / "node_modules" / "@scope" / "adapter" / "dist"
+            / "codex-fake-agent.mjs"
+        )
+        self.entry.parent.mkdir(parents=True)
         self.entry.write_text(CODEX_FAKE_AGENT_MJS, encoding="utf-8")
+        self.adapter_sibling = self.adapter_root / "node_modules" / "dep" / "index.js"
+        self.adapter_sibling.parent.mkdir(parents=True)
+        self.adapter_sibling.write_bytes(b"// private hoisted dependency\n")
         # The downstream CLI is a package closure, and a Binding names an
         # immutable regular file: no symlink stands in for the launcher.
         self.package_root = stage / "codex-pkg"
@@ -871,6 +881,9 @@ class PrivateNegativeFixtures:
             node_sha256=_sha256_file(self.node),
             adapter_entry_path=str(self.entry),
             adapter_entry_sha256=_sha256_file(self.entry),
+            adapter_package_root=str(self.adapter_root),
+            adapter_tree_sha256=rb.package_tree_digest(self.adapter_root),
+            interpreter_argv_prefix=("--no-global-search-paths",),
             credential_root_env="CODEX_HOME",
             credential_root_path=str(self.cred_root),
             project_config_relpath=".codex/config.toml",
@@ -900,6 +913,9 @@ class PrivateNegativeFixtures:
                 interpreter_sha256=_sha256_file(self.node),
                 adapter_entry_path=str(self.entry),
                 adapter_entry_sha256=_sha256_file(self.entry),
+                adapter_package_root=str(self.adapter_root),
+                adapter_tree_sha256=rb.package_tree_digest(self.adapter_root),
+                interpreter_argv_prefix=("--no-global-search-paths",),
             ),
             cli_slot="downstream_cli",
             credential_root_slot="codex_home",

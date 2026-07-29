@@ -17,9 +17,8 @@ Status markers:
 
 - ✅ released compatibility baseline reused unchanged;
 - 🟦 vNext supervision plane, implemented on `main` (Stage 0/1 closed, Stage 2 closed, and the Runtime
-  Binding layer of §3.1–§3.3 merged as source);
-- 🟨 accepted design whose source work is still open — the complete wrapped-adapter package-tree
-  closure noted in §3.3;
+  Binding layer of §3.1–§3.3 merged as source, including the complete wrapped-adapter package closure
+  of §3.3);
 - ⏸ separately approved later integration.
 
 Marker 🟦 records the settled design and the merged source that implements it, not an approval:
@@ -27,8 +26,7 @@ per-stage implementation status, gates, and enablement decisions live in
 [`docs/roadmap/current-status.md`](../roadmap/current-status.md). Merged source is never operator
 activation — preparing an immutable artifact root, promoting a Binding generation, re-accepting a
 profile at its current revision, the permission canary owed at the current Claude revision, rollout,
-release, and deployment each remain separate operator decisions. Marker 🟨 is weaker still: accepted
-architecture whose source is not written, and it approves nothing at all.
+release, and deployment each remain separate operator decisions.
 
 ## 1. System context
 
@@ -193,7 +191,7 @@ generation/set/slot hashes, the complete CLI artifact identity/version/digest, a
 
 | Launch kind | Source freezes | Binding freezes |
 |---|---|---|
-| `wrapped_acp` (Codex ACP, Claude Agent ACP) | interpreter/Node identity, ACP adapter artifact identity, argv construction, env keys, protocol/capability contract | downstream CLI artifact identity/version/digest, config-root slot values |
+| `wrapped_acp` (Codex ACP, Claude Agent ACP) | interpreter/Node identity, the ACP adapter's complete package closure (install root + tree digest + entry), argv construction, env keys, protocol/capability contract | downstream CLI artifact identity/version/digest, config-root slot values |
 | `direct_acp` (OpenCode) | direct launch, protocol, and capability semantics | that one executable's identity/version/digest |
 
 OpenCode is one artifact, not two: the same executable is the AGENT CLI and the ACP implementation, and
@@ -214,11 +212,50 @@ on both sides of the spawn window. A wrapped downstream CLI is reopened later by
 cannot fd-pin on the adapter's behalf; the guarantee there is that the path and package closure remain
 under an immutable operator-owned root that the `arsd`/AGENT UID cannot rewrite.
 
-🟨 Source does not yet satisfy that closure rule on the wrapped **adapter** side. The Binding-side
-downstream CLI is closed as a package tree, but `WrappedRuntimeArtifacts` still freezes the interpreter
-and the adapter *entry* path and digest only, not the complete wrapped adapter package tree — so an
-entry file's digest does not freeze the sibling code it loads. Closing that gap is open source work,
-tracked as its own capability on the roadmap; nothing here approves or schedules it.
+🟦 The same rule now holds on the wrapped **adapter** side. `WrappedRuntimeArtifacts` freezes an
+`adapter_package_root` plus its `adapter_tree_sha256` beside the interpreter and entry, and the closure
+root is chosen so the runtime's own resolution cannot leave it:
+
+- the root is the adapter's npm **install root**, not its package directory, because a Node entry at
+  `<root>/node_modules/<scope>/<pkg>/dist/index.js` resolves bare specifiers by walking its parent
+  chain — hoisted dependencies live in `<root>/node_modules`, which the package directory does not
+  contain;
+- the frozen entry is required to lie inside the root, judged on path components, so a sibling like
+  `…/1.0.0-evil` can never pass as a member of `…/1.0.0`;
+- everything at or below the root is covered by the tree digest, and the spawn boundary refuses any
+  `node_modules` on the ancestor chain **above** the root, which is the only place that parent walk can
+  still reach. Preparing an artifact root with no such directory above it is therefore part of
+  preparing an immutable root, and is an operator action.
+
+A parent walk is not Node's only way out. Its CommonJS resolution also searches path-independent
+*global folders* — `$HOME/.node_modules`, `$HOME/.node_libraries`, `<node prefix>/lib/node` — which no
+closure root can contain, and both wrapped profiles forward `HOME`. The contract therefore also freezes
+an `interpreter_argv_prefix`, which for the frozen Node is exactly `--no-global-search-paths`:
+
+- it is required and non-empty for every `wrapped_acp` contract — an interpreter with no way to close
+  that search cannot honestly carry one;
+- it is the literal head of the profile's argv, and profile construction refuses any argv that does not
+  begin with exactly the declared tokens, so the declared prefix and the real launch cannot drift;
+- it rides in `adapter_contract_hash`, is sealed into `launch.json`, and the spawn boundary compares it
+  against the real argv as a token *sequence*, with the adapter entry bound to the position immediately
+  after it — so a dropped, reordered, altered, or padded prefix refuses the Run before spawn.
+
+`NODE_PATH` and any other resolution root that would come from the environment are closed by the
+profile's own closed env allowlist rather than by these checks.
+
+The consequence the earlier gap made concrete: one adapter's `dist/index.js` stayed byte-identical
+across two adapter versions while the siblings it imports moved, so an entry digest could not tell the
+two apart. A tree digest does.
+
+🟦 Every source-frozen runtime path names the root-owned artifact location a separate materialization
+step is expected to create, under `/opt/agent-run-supervisor/artifacts/`. That is a declaration, not an
+installation: nothing under it exists, ARS never creates, copies, or re-owns it, and admission simply
+fails closed until an operator materializes it. A path under the service account's home was not an
+option — C5 requires the artifact *and every ancestor* to be non-writable by the `arsd`/AGENT UID, and
+no per-leaf ownership change can make a service-owned home satisfy that, so freezing such a path would
+only have deferred the contradiction to deployment. The currently installed adapter trees remain
+discovery and measurement sources — the frozen digests are byte identity, which ownership, mode, and
+path do not enter — and are not activation targets.
 
 ## 4. Process-per-Run Session model
 

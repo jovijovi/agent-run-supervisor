@@ -59,6 +59,8 @@ class Fixture:
 
     node: Path
     entry: Path
+    adapter_root: Path
+    adapter_sibling: Path
     cli: Path
     cli_target: Path
     package_root: Path
@@ -101,8 +103,16 @@ def _arrange(tmp_path: Path, *, cwd: Path | None = None) -> Fixture:
     stage.mkdir(parents=True)
     node = stage / "node"
     node.write_bytes(b"#!/bin/false\n# private node copy\n")
-    entry = stage / "index.js"
+    # The adapter is a package closure, not one entry file: the entry sits
+    # inside its npm install root beside the hoisted dependency Node reaches by
+    # walking up from it (F-RUNTIME-BINDING-002).
+    adapter_root = stage / "adapter-pkg"
+    entry = adapter_root / "node_modules" / "@scope" / "adapter" / "dist" / "index.js"
+    entry.parent.mkdir(parents=True)
     entry.write_bytes(b"// private adapter entry copy\n")
+    adapter_sibling = adapter_root / "node_modules" / "dep" / "index.js"
+    adapter_sibling.parent.mkdir(parents=True)
+    adapter_sibling.write_bytes(b"// hoisted dependency\n")
     # The downstream CLI is a package closure: a launcher plus the sibling code
     # it loads plus its required interpreter. A launcher hash alone would not
     # freeze the siblings (C5).
@@ -139,6 +149,11 @@ def _arrange(tmp_path: Path, *, cwd: Path | None = None) -> Fixture:
         node_sha256=_sha256(node),
         adapter_entry_path=str(entry),
         adapter_entry_sha256=_sha256(entry),
+        adapter_package_root=str(adapter_root),
+        adapter_tree_sha256=package_tree_digest(adapter_root),
+        # The frozen option tokens that close the interpreter's out-of-closure
+        # module search; argv below carries exactly them, in order.
+        interpreter_argv_prefix=("--no-global-search-paths",),
         credential_root_env="CODEX_HOME",
         credential_root_path=str(cred_root),
         project_config_relpath=".codex/config.toml",
@@ -152,7 +167,7 @@ def _arrange(tmp_path: Path, *, cwd: Path | None = None) -> Fixture:
     }
     launch = ResolvedLaunchSpec(
         executable=str(node),
-        argv=(str(node), str(entry)),
+        argv=(str(node), "--no-global-search-paths", str(entry)),
         env_allowlist=("HOME", "PATH"),
         credential_refs=("codex-home-auth",),
         profile_id="private-profile-1.0",
@@ -163,6 +178,8 @@ def _arrange(tmp_path: Path, *, cwd: Path | None = None) -> Fixture:
     return Fixture(
         node=node,
         entry=entry,
+        adapter_root=adapter_root,
+        adapter_sibling=adapter_sibling,
         cli=cli,
         cli_target=cli_target,
         package_root=package_root,
@@ -684,7 +701,11 @@ def test_argv_env_binding_mismatch_refused(
                                   "profile_id", "profile_revision", "profile_hash",
                                   "config_schema_hash")
                 },
-                "argv": ("/somewhere/else/node", str(fixture.entry)),
+                "argv": (
+                    "/somewhere/else/node",
+                    "--no-global-search-paths",
+                    str(fixture.entry),
+                ),
             }
         )
     elif mutation == "argv1":
@@ -696,7 +717,11 @@ def test_argv_env_binding_mismatch_refused(
                                   "profile_id", "profile_revision", "profile_hash",
                                   "config_schema_hash")
                 },
-                "argv": (str(fixture.node), "/somewhere/else/index.js"),
+                "argv": (
+                    str(fixture.node),
+                    "--no-global-search-paths",
+                    "/somewhere/else/index.js",
+                ),
             }
         )
     else:
@@ -1425,16 +1450,27 @@ def test_writable_adapter_entry_is_refused(tmp_path: Path) -> None:
 
 
 def test_writable_adapter_entry_ancestor_is_refused(tmp_path: Path) -> None:
-    """The adapter's own ancestor chain is walked, not just the CLI's."""
+    """The adapter's own ancestor chain is walked, not just the CLI's.
+
+    The whole closure moves, not the entry alone: an entry outside its declared
+    package root is not an admissible sealed identity at all, so this leg has to
+    relocate the root with it to exercise the ancestor rule rather than the
+    containment rule.
+    """
+    import shutil
+
     fixture = _arrange(tmp_path)
-    private = tmp_path / "stage" / "adapter"
+    private = tmp_path / "private-adapter-parent"
     private.mkdir()
-    relocated = private / "index.js"
-    relocated.write_bytes(fixture.entry.read_bytes())
-    bf.harden_tree(private)
+    relocated_root = private / "adapter-pkg"
+    shutil.copytree(fixture.adapter_root, relocated_root)
+    relocated = relocated_root / fixture.entry.relative_to(fixture.adapter_root)
+    bf.harden_tree(relocated_root)
     expected = fixture.reseal(
         adapter_entry_path=str(relocated),
         adapter_entry_sha256=_sha256(relocated),
+        adapter_package_root=str(relocated_root),
+        adapter_tree_sha256=package_tree_digest(relocated_root),
     )
     launch = dataclasses.replace(
         fixture.launch, argv=(str(fixture.node), str(relocated))
@@ -1495,3 +1531,299 @@ def test_inwindow_adapter_entry_permission_grant_refused(
         fixture.rows()["adapter_entry_trust_recheck"]["observed"]
         == "GROUP_OR_OTHER_WRITABLE"
     )
+
+
+# ---------------------------------------------------------------------------
+# F-RUNTIME-BINDING-002 — the wrapped adapter's package closure at the boundary
+# ---------------------------------------------------------------------------
+
+
+def _reclose_adapter(fixture: Fixture) -> SealedRuntimeIdentity:
+    """Re-seal the adapter closure after a test mutated the adapter tree."""
+    return fixture.reseal(adapter_tree_sha256=package_tree_digest(fixture.adapter_root))
+
+
+def test_a_wrapped_identity_must_seal_its_adapter_package_closure(
+    tmp_path: Path,
+) -> None:
+    fixture = _arrange(tmp_path)
+    with pytest.raises(ValueError, match="adapter_package_root"):
+        fixture.reseal(adapter_package_root=None)
+    with pytest.raises(ValueError, match="adapter_tree_sha256"):
+        fixture.reseal(adapter_tree_sha256=None)
+
+
+def test_a_wrapped_identity_refuses_an_entry_outside_its_closure_root(
+    tmp_path: Path,
+) -> None:
+    fixture = _arrange(tmp_path)
+    with pytest.raises(ValueError, match="inside"):
+        fixture.reseal(adapter_entry_path=str(tmp_path / "elsewhere" / "index.js"))
+
+
+def test_a_wrapped_identity_refuses_a_prefix_sibling_closure_root(
+    tmp_path: Path,
+) -> None:
+    """`…/adapter-pkg-evil` is a text prefix match and not a member."""
+    fixture = _arrange(tmp_path)
+    evil = Path(f"{fixture.adapter_root}-evil") / "dist" / "index.js"
+    with pytest.raises(ValueError, match="inside"):
+        fixture.reseal(adapter_entry_path=str(evil))
+
+
+def test_a_direct_identity_seals_no_adapter_closure(tmp_path: Path) -> None:
+    fixture = _arrange(tmp_path)
+    with pytest.raises(ValueError, match="adapter"):
+        SealedRuntimeIdentity(
+            launch_kind="direct_acp",
+            agent_info_name="OpenCode",
+            protocol_version="1",
+            cli=fixture.expected.cli,
+            adapter_package_root=str(fixture.adapter_root),
+            adapter_tree_sha256=package_tree_digest(fixture.adapter_root),
+        )
+
+
+def test_adapter_package_closure_is_an_explicit_named_row(tmp_path: Path) -> None:
+    fixture = _arrange(tmp_path)
+    attestation = _attest(fixture)
+    os.close(attestation.exec_fd)
+    rows = fixture.rows()
+    assert rows["adapter_package_closure"]["passed"] is True
+    assert rows["adapter_package_closure"]["expected"] == (
+        fixture.expected.adapter_tree_sha256
+    )
+    assert rows["adapter_package_closure_recheck"]["passed"] is True
+    assert rows["adapter_resolution_escape"]["passed"] is True
+
+
+def test_a_sibling_mutation_that_leaves_the_entry_untouched_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exact shape the entry digest cannot see: sibling bytes change, the
+    launcher does not. Refusal happens before any spawn."""
+    fixture = _arrange(tmp_path)
+    spawns = _spawn_guard(monkeypatch)
+    entry_digest_before = _sha256(fixture.entry)
+    mode = fixture.adapter_sibling.stat().st_mode
+    fixture.adapter_sibling.write_bytes(b"// swapped dependency\n")
+    fixture.adapter_sibling.chmod(mode)
+
+    with pytest.raises(AttestationRefusal) as excinfo:
+        _attest(fixture)
+
+    assert excinfo.value.failing_check == "adapter_package_closure"
+    assert excinfo.value.code == RUNTIME_IDENTITY_MISMATCH
+    assert _sha256(fixture.entry) == entry_digest_before
+    assert fixture.rows()["adapter_entry_sha256"]["passed"] is True
+    assert fixture.rows()["adapter_package_closure"]["passed"] is False
+    assert spawns == []
+
+
+def test_a_new_sibling_file_inside_the_closure_is_refused(tmp_path: Path) -> None:
+    """Sibling code no digest froze is exactly what a closure must catch."""
+    fixture = _arrange(tmp_path)
+    added = fixture.adapter_root / "node_modules" / "dep" / "extra.js"
+    added.write_bytes(b"// unfrozen sibling\n")
+    bf.harden_tree(fixture.adapter_root)
+    with pytest.raises(AttestationRefusal) as excinfo:
+        _attest(fixture)
+    assert excinfo.value.failing_check == "adapter_package_closure"
+
+
+def test_an_adapter_tree_mutation_inside_the_race_seam_is_caught(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _arrange(tmp_path)
+    sibling = fixture.adapter_sibling
+
+    def tamper() -> None:
+        mode = sibling.stat().st_mode
+        sibling.write_bytes(b"// swapped in the window\n")
+        sibling.chmod(mode)
+
+    monkeypatch.setattr(attestation_module, "_POST_ATTESTATION_HOOK", tamper)
+    with pytest.raises(AttestationRefusal) as excinfo:
+        _attest(fixture)
+    assert excinfo.value.failing_check == "adapter_package_closure_recheck"
+    assert fixture.rows()["adapter_package_closure"]["passed"] is True
+    assert fixture.rows()["adapter_package_closure_recheck"]["passed"] is False
+
+
+def test_an_unsafe_entry_in_the_adapter_tree_fails_closed(tmp_path: Path) -> None:
+    fixture = _arrange(tmp_path)
+    os.mkfifo(fixture.adapter_root / "node_modules" / "pipe")
+    bf.harden_tree(fixture.adapter_root)
+    with pytest.raises(AttestationRefusal) as excinfo:
+        _attest(fixture)
+    assert excinfo.value.failing_check == "adapter_package_closure"
+    assert fixture.rows()["adapter_package_closure"]["observed"] == (
+        "PACKAGE_TREE_UNSAFE_ENTRY"
+    )
+
+
+def test_a_symlink_escaping_the_adapter_tree_fails_closed(tmp_path: Path) -> None:
+    fixture = _arrange(tmp_path)
+    outside = tmp_path / "unfrozen"
+    outside.mkdir()
+    (outside / "evil.js").write_bytes(b"// unfrozen\n")
+    (fixture.adapter_root / "node_modules" / "escape").symlink_to(outside / "evil.js")
+    with pytest.raises(AttestationRefusal) as excinfo:
+        _attest(fixture)
+    assert excinfo.value.failing_check == "adapter_package_closure"
+    assert fixture.rows()["adapter_package_closure"]["observed"] == (
+        "PACKAGE_TREE_SYMLINK_ESCAPE"
+    )
+
+
+def test_a_service_uid_owned_adapter_tree_fails_closed(tmp_path: Path) -> None:
+    """C5 ownership applies to the adapter closure exactly as to the CLI one."""
+    fixture = _arrange(tmp_path)
+    hostile = attestation_module.TrustedOwnership(
+        trusted_uids=frozenset({0}), service_uid=os.getuid()
+    )
+    with pytest.raises(AttestationRefusal) as excinfo:
+        attest_spawn_boundary(
+            expected=fixture.expected,
+            launch=fixture.launch,
+            fixed_env=fixture.fixed_env,
+            effective_cwd=str(fixture.workspace),
+            run_dir=fixture.run_dir,
+            ownership=hostile,
+        )
+    assert excinfo.value.code == RUNTIME_IDENTITY_MISMATCH
+
+
+def test_a_node_modules_above_the_closure_root_is_refused(tmp_path: Path) -> None:
+    """Node's NODE_MODULES_PATHS keeps walking above the closure root, so a
+    `node_modules` on that chain is resolvable code no tree digest froze."""
+    fixture = _arrange(tmp_path)
+    escape = fixture.adapter_root.parent / "node_modules"
+    escape.mkdir()
+    (escape / "shadow.js").write_bytes(b"// resolvable, unfrozen\n")
+    with pytest.raises(AttestationRefusal) as excinfo:
+        _attest(fixture)
+    assert excinfo.value.failing_check == "adapter_resolution_escape"
+    assert excinfo.value.code == RUNTIME_IDENTITY_MISMATCH
+    assert fixture.rows()["adapter_resolution_escape"]["observed"] == str(escape)
+
+
+def test_the_closure_roots_own_node_modules_is_not_an_escape(tmp_path: Path) -> None:
+    """`<root>/node_modules` is the hoisted install; it is inside the digest."""
+    fixture = _arrange(tmp_path)
+    attestation = _attest(fixture)
+    os.close(attestation.exec_fd)
+    assert (fixture.adapter_root / "node_modules").is_dir()
+    assert fixture.rows()["adapter_resolution_escape"]["passed"] is True
+
+
+def test_a_node_modules_appearing_inside_the_race_seam_is_caught(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _arrange(tmp_path)
+    escape = fixture.adapter_root.parent / "node_modules"
+
+    monkeypatch.setattr(attestation_module, "_POST_ATTESTATION_HOOK", escape.mkdir)
+    with pytest.raises(AttestationRefusal) as excinfo:
+        _attest(fixture)
+    assert excinfo.value.failing_check == "adapter_resolution_escape_recheck"
+
+
+def test_interpreter_argv_prefix_is_an_explicit_named_row(tmp_path: Path) -> None:
+    fixture = _arrange(tmp_path)
+    attestation = _attest(fixture)
+    os.close(attestation.exec_fd)
+    row = fixture.rows()["argv_interpreter_prefix_binding"]
+    assert row["passed"] is True
+    assert row["expected"] == "--no-global-search-paths"
+
+
+def test_a_launch_that_drops_the_interpreter_prefix_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without the flag the child can still resolve code outside the closure,
+    so the sealed identity is not the one about to run."""
+    fixture = _arrange(tmp_path)
+    spawns = _spawn_guard(monkeypatch)
+    launch = dataclasses.replace(
+        fixture.launch, argv=(str(fixture.node), str(fixture.entry))
+    )
+    with pytest.raises(AttestationRefusal) as excinfo:
+        _attest(fixture, launch=launch)
+    assert excinfo.value.failing_check == "argv_interpreter_prefix_binding"
+    assert excinfo.value.code == RUNTIME_IDENTITY_MISMATCH
+    assert spawns == []
+
+
+def test_a_launch_that_reorders_the_interpreter_prefix_is_refused(
+    tmp_path: Path,
+) -> None:
+    fixture = _arrange(tmp_path)
+    expected = fixture.reseal(
+        interpreter_argv_prefix=("--no-global-search-paths", "--frozen-intrinsics")
+    )
+    launch = dataclasses.replace(
+        fixture.launch,
+        argv=(
+            str(fixture.node),
+            "--frozen-intrinsics",
+            "--no-global-search-paths",
+            str(fixture.entry),
+        ),
+    )
+    with pytest.raises(AttestationRefusal) as excinfo:
+        _attest(fixture, launch=launch, expected=expected)
+    assert excinfo.value.failing_check == "argv_interpreter_prefix_binding"
+
+
+def test_a_launch_that_alters_the_interpreter_prefix_is_refused(
+    tmp_path: Path,
+) -> None:
+    fixture = _arrange(tmp_path)
+    launch = dataclasses.replace(
+        fixture.launch,
+        argv=(str(fixture.node), "--no-global-search-path", str(fixture.entry)),
+    )
+    with pytest.raises(AttestationRefusal) as excinfo:
+        _attest(fixture, launch=launch)
+    assert excinfo.value.failing_check == "argv_interpreter_prefix_binding"
+
+
+def test_a_token_wedged_after_the_prefix_breaks_the_entry_binding(
+    tmp_path: Path,
+) -> None:
+    """The entry is bound at the position immediately after the prefix, so an
+    extra interpreter option cannot be smuggled in behind it."""
+    fixture = _arrange(tmp_path)
+    launch = dataclasses.replace(
+        fixture.launch,
+        argv=(
+            str(fixture.node),
+            "--no-global-search-paths",
+            "--experimental-vm-modules",
+            str(fixture.entry),
+        ),
+    )
+    with pytest.raises(AttestationRefusal) as excinfo:
+        _attest(fixture, launch=launch)
+    assert excinfo.value.failing_check == "argv_adapter_entry_binding"
+
+
+def test_a_wrapped_identity_must_seal_an_interpreter_argv_prefix(
+    tmp_path: Path,
+) -> None:
+    fixture = _arrange(tmp_path)
+    with pytest.raises(ValueError, match="interpreter_argv_prefix"):
+        fixture.reseal(interpreter_argv_prefix=())
+
+
+def test_a_direct_identity_seals_no_interpreter_argv_prefix(tmp_path: Path) -> None:
+    fixture = _arrange(tmp_path)
+    with pytest.raises(ValueError, match="interpreter_argv_prefix"):
+        SealedRuntimeIdentity(
+            launch_kind="direct_acp",
+            agent_info_name="OpenCode",
+            protocol_version="1",
+            cli=fixture.expected.cli,
+            interpreter_argv_prefix=("--no-global-search-paths",),
+        )

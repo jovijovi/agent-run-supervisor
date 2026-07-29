@@ -192,8 +192,8 @@ caller-authorized Run linked by `retry_of_run_id`; it never rewrites the origina
   freezes direct launch/protocol/capability semantics while the Binding freezes that single executable's
   identity. Its required stable ID is `opencode-native-acp`, which §5 records as registered on `main`.
   The official Codex ACP and Claude Agent ACP profiles are `wrapped_acp`: source freezes the
-  interpreter plus the ACP adapter, and the Binding freezes the downstream CLI artifact and the
-  config-root values.
+  interpreter plus the ACP adapter's complete package closure, and the Binding freezes the downstream
+  CLI artifact and the config-root values.
 - New profiles are typed, versioned, closed registrations. An Agent-specific adapter is allowed only
   after conformance evidence proves a standard ACP gap; v1 has no runtime plugin system.
 - Adding a profile, or revising a registered one, requires a fresh install/discovery/permission-canary
@@ -237,6 +237,19 @@ identity field. A generation with a valid receipt but the wrong declared contrac
 - Package or launcher CLI: an immutable package root/tree or canonical manifest digest, the launcher
   identity, and the required interpreter/runtime identity. A launcher-file hash alone never freezes the
   sibling code that launcher loads, and ARS must not claim that it does.
+- Wrapped ACP adapter: the same rule applied to the source-frozen side. The closure root is the
+  smallest root the runtime's own module resolution cannot escape downward from — for a Node adapter,
+  the npm install root the entry's parent walk reaches, because dependencies hoist above the package
+  directory. The frozen entry must lie inside that root, judged on path components so a sibling
+  directory sharing a name prefix is never mistaken for a member, and no further module-resolution
+  root may exist on the ancestor chain above it. A tree digest is necessary and not sufficient: the
+  contract must also freeze the interpreter argv prefix that disables the runtime's *path-independent*
+  search roots, and that prefix is contract identity — hashed, sealed, and re-proven against the real
+  argv at the spawn boundary — never an incidental launch literal.
+- Every source-frozen runtime path names the root-owned artifact location a separate materialization
+  step is expected to create. A path under the service account's home can never satisfy the ownership
+  rule, because its ancestors are service-owned and no per-leaf change fixes that; declaring such a
+  path would push the contradiction into deployment. Declaring the expected path is not creating it.
 - The artifact and every path ancestor are operator- or root-owned and non-writable by the `arsd`/AGENT
   UID.
 
@@ -329,12 +342,16 @@ section records only the coarse position.
   requires an explicit `--binding-root`. Deployment-specific downstream CLI paths, versions, and digests
   are no longer profile constants, and the stable ID `opencode-native-acp` is registered on its
   discovery evidence.
-- Merged source is not closure. The wrapped artifact identity still freezes the interpreter and the
-  adapter entry only, not the complete adapter package tree, so package-tree closure stays open source
-  work. No immutable operator-owned artifact root, promoted current generation, re-acceptance at the
-  current profile revisions, permission canary owed by the current Claude revision, rollout, release, or
-  deployment follows from that merge; each remains a separate operator decision, and nothing in R13 is
-  deployed.
+- The wrapped artifact identity is a complete package closure in source: each `wrapped_acp` contract
+  freezes the adapter install root and its whole tree digest, the frozen entry is proven to lie inside
+  that root, the frozen interpreter argv prefix closes the runtime's path-independent search roots, and
+  the spawn boundary re-proves the tree, its ownership, and that exact argv prefix on both sides of the
+  race seam. Both wrapped profiles bumped a revision for it (Codex r3, Claude r4) and now name the
+  root-owned artifact location rather than the service home. Merged source is still not deployment: no
+  materialized artifact root, promoted current generation, re-acceptance at the current profile
+  revisions, permission canary owed by the current Claude revision, rollout, release, or deployment
+  follows from it; each remains a separate operator decision, nothing under the declared artifact
+  prefix exists, and nothing in R13 is deployed.
 
 ## 6. Non-goals
 

@@ -21,11 +21,13 @@ than to pathnames. On PASS the pin of the image that will actually be exec'd
 survives as ``exec_fd`` and the spawn exec's that descriptor directly, leaving
 zero residual swap window:
 
-- ``wrapped_acp`` pins the source-frozen interpreter, the source-frozen ACP
-  adapter entry, and the Binding-sealed downstream CLI closure. ARS cannot
-  fd-pin the CLI the adapter reopens later, so the honest guarantee there is
-  path-and-closure immutability under an operator-owned root, not descriptor
-  identity.
+- ``wrapped_acp`` pins the source-frozen interpreter and the source-frozen ACP
+  adapter entry, and proves two package closures: the source-frozen adapter
+  tree the entry is a member of, and the Binding-sealed downstream CLI. ARS can
+  fd-pin neither the siblings Node resolves around argv[1] nor the CLI the
+  adapter reopens later, so the honest guarantee for both is path-and-closure
+  immutability under an operator-owned root, not descriptor identity — plus, for
+  the adapter, the refusal of any module-resolution root above that closure.
 - ``direct_acp`` pins the single Binding-sealed executable that is both the
   AGENT CLI and the ACP implementation, and exec's that descriptor.
 
@@ -50,6 +52,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from . import storage
+from .profile import path_within_root
 from .runtime_binding import BindingRefusal, TrustedOwnership  # noqa: F401 - re-exported
 from .runtime_binding import check_ancestors as _check_ancestors
 from .runtime_binding import check_ownership as _check_ownership
@@ -78,8 +81,11 @@ _CHECK_CLASSES: dict[str, str] = {
     "cli_sha256": RUNTIME_IDENTITY_MISMATCH,
     "cli_artifact_trust": RUNTIME_IDENTITY_MISMATCH,
     "cli_package_closure": RUNTIME_IDENTITY_MISMATCH,
+    "adapter_package_closure": RUNTIME_IDENTITY_MISMATCH,
+    "adapter_resolution_escape": RUNTIME_IDENTITY_MISMATCH,
     "cli_interpreter_sha256": RUNTIME_IDENTITY_MISMATCH,
     "argv_node_binding": RUNTIME_IDENTITY_MISMATCH,
+    "argv_interpreter_prefix_binding": RUNTIME_IDENTITY_MISMATCH,
     "argv_adapter_entry_binding": RUNTIME_IDENTITY_MISMATCH,
     "argv_cli_binding": RUNTIME_IDENTITY_MISMATCH,
     "env_cli_path_binding": RUNTIME_IDENTITY_MISMATCH,
@@ -87,6 +93,8 @@ _CHECK_CLASSES: dict[str, str] = {
     "adapter_entry_binding_lost": RUNTIME_IDENTITY_MISMATCH,
     "cli_binding_lost": RUNTIME_IDENTITY_MISMATCH,
     "cli_package_closure_recheck": RUNTIME_IDENTITY_MISMATCH,
+    "adapter_package_closure_recheck": RUNTIME_IDENTITY_MISMATCH,
+    "adapter_resolution_escape_recheck": RUNTIME_IDENTITY_MISMATCH,
     "credential_root_not_declared": CREDENTIAL_ROOT_VIOLATION,
     "project_config_not_declared": PROJECT_CONFIG_LAYER_PRESENT,
     "credential_root_structure": CREDENTIAL_ROOT_VIOLATION,
@@ -104,6 +112,8 @@ CREDENTIAL_ROOT_MODE = 0o700
 AUTH_FILE_MODE = 0o600
 PROJECT_CONFIG_DIRNAME = ".codex"
 PROJECT_CONFIG_FILENAME = "config.toml"
+# The one directory name Node's module resolution searches on a parent walk.
+NODE_MODULES_DIRNAME = "node_modules"
 _HASH_BLOCK_BYTES = 1 << 20
 _CREDENTIAL_ALIAS_EXPECTED = "distinct from credential file"
 _NOT_DECLARED = "not declared"
@@ -244,6 +254,9 @@ class SealedRuntimeIdentity:
     node_sha256: str | None = None
     adapter_entry_path: str | None = None
     adapter_entry_sha256: str | None = None
+    adapter_package_root: str | None = None
+    adapter_tree_sha256: str | None = None
+    interpreter_argv_prefix: tuple[str, ...] = ()
     credential_root_env: str | None = None
     credential_root_path: str | None = None
     project_config_relpath: str | None = None
@@ -266,10 +279,31 @@ class SealedRuntimeIdentity:
             _require_digest(self.node_sha256, "sealed node_sha256")
             _require_absolute(self.adapter_entry_path, "sealed adapter_entry_path")
             _require_digest(self.adapter_entry_sha256, "sealed adapter_entry_sha256")
+            _require_absolute(self.adapter_package_root, "sealed adapter_package_root")
+            _require_digest(self.adapter_tree_sha256, "sealed adapter_tree_sha256")
+            if not path_within_root(self.adapter_package_root, self.adapter_entry_path):
+                raise ValueError(
+                    "sealed adapter_entry_path must be inside adapter_package_root"
+                )
+            if not self.interpreter_argv_prefix:
+                raise ValueError(
+                    "a wrapped runtime must seal its interpreter_argv_prefix: the "
+                    "options that close the interpreter's out-of-closure search "
+                    "are part of the identity, not an incidental argv literal"
+                )
             if not self.cli_path_env:
                 raise ValueError("a wrapped runtime must bind its CLI path env key")
-        elif self.node_path is not None or self.adapter_entry_path is not None:
-            raise ValueError("a direct runtime seals no interpreter or adapter entry")
+        elif (
+            self.node_path is not None
+            or self.adapter_entry_path is not None
+            or self.adapter_package_root is not None
+            or self.adapter_tree_sha256 is not None
+            or self.interpreter_argv_prefix
+        ):
+            raise ValueError(
+                "a direct runtime seals no interpreter, adapter entry, adapter "
+                "closure, or interpreter_argv_prefix"
+            )
         for field_name in ("cli_path_env", "credential_root_env"):
             value = getattr(self, field_name)
             if value is None:
@@ -307,6 +341,8 @@ class SealedRuntimeIdentity:
             "node_sha256",
             "adapter_entry_path",
             "adapter_entry_sha256",
+            "adapter_package_root",
+            "adapter_tree_sha256",
             "credential_root_env",
             "credential_root_path",
             "project_config_relpath",
@@ -314,6 +350,9 @@ class SealedRuntimeIdentity:
             value = getattr(self, name)
             if value is not None:
                 payload[name] = value
+        # Omit-when-empty, so a direct_acp launch record stays byte-identical.
+        if self.interpreter_argv_prefix:
+            payload["interpreter_argv_prefix"] = list(self.interpreter_argv_prefix)
         return payload
 
 
@@ -390,8 +429,13 @@ def project_config_closure(
     configuration surface ARS did not freeze. ``relpath`` defaults to the
     Codex surface, so existing callers keep their exact behavior.
 
-    One pure predicate, two call sites per attestation — the pre-hook pass and
-    the post-hook recheck cannot diverge.
+    This is the shared "first hit walking up" predicate. Its second use is
+    :func:`adapter_resolution_escape`, which asks the same question of Node's
+    module-resolution chain — both are surfaces a runtime reaches by walking
+    parents, and both must give the same answer pre-hook and post-hook.
+
+    One pure predicate, two call sites per check — the pre-hook pass and the
+    post-hook recheck cannot diverge.
     """
     directory = Path(effective_cwd)
     while True:
@@ -567,6 +611,19 @@ class _AttestationState:
             raise _CheckFailed(name, expected, observed)
         self.record(name, expected, observed)
 
+    def sequence_equality(
+        self, name: str, expected: tuple[str, ...], observed: tuple[str, ...]
+    ) -> None:
+        """Exact token sequence, rendered for the report only after comparing.
+
+        Order and arity are both part of the claim, so the comparison is on the
+        tuples; the joined text exists solely so the row stays a readable
+        expected/observed pair like every other one.
+        """
+        if tuple(observed) != tuple(expected):
+            raise _CheckFailed(name, " ".join(expected), " ".join(observed))
+        self.record(name, " ".join(expected), " ".join(observed))
+
     def pin_credential_root(
         self, name: str, root: str | None, *, env_key: str
     ) -> None:
@@ -728,15 +785,22 @@ def _require_artifact_trust(
 
 
 def _require_package_closure(
-    state: _AttestationState, name: str, closure: ArtifactClosure, ownership: TrustedOwnership
+    state: _AttestationState,
+    name: str,
+    root: str | None,
+    expected: str | None,
+    ownership: TrustedOwnership,
 ) -> None:
-    """The wrapped downstream CLI's sibling code, not just its launcher.
+    """A package root's sibling code, not just the file that launches it.
 
-    ARS cannot fd-pin the CLI the adapter reopens later, so the guarantee is
-    path-and-closure immutability under an operator-owned root: the package
-    tree digest plus the ownership/mode of the root and every ancestor.
+    Used for both closures a wrapped Run depends on: the Binding-sealed
+    downstream CLI, and the source-frozen ACP adapter. Neither can be fd-pinned
+    on the runtime's behalf — Node reopens the adapter tree by path after this
+    gate closes its descriptors, and the adapter reopens the CLI later still —
+    so the guarantee is path-and-closure immutability under an operator-owned
+    root: the whole tree digest plus the ownership/mode of the root and every
+    ancestor.
     """
-    root = closure.package_root
     if root is None:
         state.record(name, _NOT_DECLARED, _NOT_DECLARED)
         return
@@ -745,12 +809,42 @@ def _require_package_closure(
         _check_ancestors(Path(root), ownership, "package root")
         observed = package_tree_digest(Path(root), ownership=ownership)
     except BindingRefusal as refusal:
-        raise _CheckFailed(name, closure.tree_sha256, refusal.rule) from None
+        raise _CheckFailed(name, expected, refusal.rule) from None
     except OSError as exc:
-        raise _CheckFailed(name, closure.tree_sha256, _errno_name(exc)) from None
-    if observed != closure.tree_sha256:
-        raise _CheckFailed(name, closure.tree_sha256, observed)
-    state.record(name, closure.tree_sha256, observed)
+        raise _CheckFailed(name, expected, _errno_name(exc)) from None
+    if observed != expected:
+        raise _CheckFailed(name, expected, observed)
+    state.record(name, expected, observed)
+
+
+def adapter_resolution_escape(package_root: str) -> str | None:
+    """The first module-resolution root Node would search *outside* the closure.
+
+    ``NODE_MODULES_PATHS`` walks the entry's parent chain and searches
+    ``<dir>/node_modules`` at every level, skipping the ``node_modules``
+    components themselves. Everything that walk reaches at or below the closure
+    root is inside the frozen tree digest; everything above it is not. So a
+    ``node_modules`` on the chain strictly above the root is code the adapter
+    can load and no digest froze — the closure would be complete only by
+    accident of that directory not existing.
+
+    Returns the offending path, or ``None`` when the closure is the last word.
+    """
+    return project_config_closure(
+        str(Path(package_root).parent), NODE_MODULES_DIRNAME
+    )
+
+
+def _require_no_resolution_escape(
+    state: _AttestationState, name: str, package_root: str | None
+) -> None:
+    if package_root is None:
+        state.record(name, _NOT_DECLARED, _NOT_DECLARED)
+        return
+    offender = adapter_resolution_escape(package_root)
+    if offender is not None:
+        raise _CheckFailed(name, "absent", offender)
+    state.record(name, "absent", "absent")
 
 
 def _perform(
@@ -822,7 +916,28 @@ def _perform(
             expected.adapter_entry_path,
             ownership,
         )
-    _require_package_closure(state, "cli_package_closure", expected.cli, ownership)
+    _require_package_closure(
+        state,
+        "cli_package_closure",
+        expected.cli.package_root,
+        expected.cli.tree_sha256,
+        ownership,
+    )
+    if wrapped:
+        # The adapter is frozen as a closure, not as one entry file: Node
+        # resolves the entry's siblings and the hoisted dependencies above it
+        # by walking up from argv[1], and none of that is covered by the entry
+        # digest two rows above.
+        _require_package_closure(
+            state,
+            "adapter_package_closure",
+            expected.adapter_package_root,
+            expected.adapter_tree_sha256,
+            ownership,
+        )
+        _require_no_resolution_escape(
+            state, "adapter_resolution_escape", expected.adapter_package_root
+        )
     if expected.cli.interpreter_path is not None:
         # The interpreter is an artifact of the launch like any other: a frozen
         # digest without a trust boundary is a statement about bytes anyone able
@@ -840,10 +955,19 @@ def _perform(
         state.equality(
             "argv_node_binding", expected.node_path, argv[0] if len(argv) > 0 else None
         )
+        # The frozen interpreter options are identity, not decoration: dropped,
+        # reordered, or misspelled, the child regains a module-resolution root
+        # this closure never froze. Compared as a sequence rather than as joined
+        # text so no token boundary can be shifted into a neighbour.
+        prefix = expected.interpreter_argv_prefix
+        entry_index = 1 + len(prefix)
+        state.sequence_equality(
+            "argv_interpreter_prefix_binding", prefix, argv[1:entry_index]
+        )
         state.equality(
             "argv_adapter_entry_binding",
             expected.adapter_entry_path,
-            argv[1] if len(argv) > 1 else None,
+            argv[entry_index] if len(argv) > entry_index else None,
         )
         state.equality(
             "env_cli_path_binding",
@@ -914,6 +1038,19 @@ def _perform(
             expected.adapter_entry_sha256,
             credential=credential,
         )
+        # The entry's own pin says nothing about the siblings Node will resolve
+        # around it, so the closure and its escape are both re-proven on the
+        # far side of the window.
+        _require_package_closure(
+            state,
+            "adapter_package_closure_recheck",
+            expected.adapter_package_root,
+            expected.adapter_tree_sha256,
+            ownership,
+        )
+        _require_no_resolution_escape(
+            state, "adapter_resolution_escape_recheck", expected.adapter_package_root
+        )
     state.recheck_artifact("cli", "cli_binding_lost", expected.cli.path)
     _require_artifact_trust(state, "cli_trust_recheck", expected.cli.path, ownership)
     if expected.cli.interpreter_path is not None:
@@ -924,7 +1061,11 @@ def _perform(
             ownership,
         )
     _require_package_closure(
-        state, "cli_package_closure_recheck", expected.cli, ownership
+        state,
+        "cli_package_closure_recheck",
+        expected.cli.package_root,
+        expected.cli.tree_sha256,
+        ownership,
     )
     if credential_env_key is not None:
         state.recheck_credential_root("credential_root_binding_lost", str(root))
