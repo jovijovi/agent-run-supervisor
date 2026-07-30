@@ -49,12 +49,39 @@ _TO_PERSISTED_STATE = {
 _MAX_TERMINAL_READ_BYTES = MAX_NATIVE_RESULT_SERIALIZED_BYTES
 
 
+# Read cap for the classifying reconciliation reader. Spec, launch, and
+# submission documents are bounded records; anything larger is not one of them.
+MAX_RECONCILE_JSON_BYTES = 1_048_576
+
+
 class NativeTerminalKind(enum.Enum):
     """Typed outcomes for the single trusted Native terminal reader."""
 
     ABSENT = "absent"
     TRUSTED = "trusted"
     INVALID = "invalid"
+
+
+class JsonDocumentKind(enum.Enum):
+    """Three-way classification of a durable Native JSON artifact.
+
+    ``ABSENT`` is reachable **only** from a clean no-such-path result. Every
+    other present-or-indeterminate state is ``CORRUPT`` — never a second chance
+    to become absent — because absent and corrupt select different
+    reconciliation rows and only one of them is safe.
+    """
+
+    ABSENT = "absent"
+    VALID = "valid"
+    CORRUPT = "corrupt"
+
+
+@dataclass(frozen=True)
+class JsonDocumentState:
+    """The classification and, only when VALID, the decoded object."""
+
+    kind: JsonDocumentKind
+    payload: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -117,38 +144,87 @@ def write_once_json(path: Path, payload: Mapping[str, Any]) -> Path:
     return exclusive_create_bytes(Path(path), data)
 
 
-def read_native_terminal_result(path: Path, *, run_id: str) -> NativeTerminalState:
-    """Single trusted Native terminal reader for live paths and reconciliation.
+_ABSENT = object()
 
-    Opens with ``O_RDONLY|O_NOFOLLOW``, requires a regular file, reads through
-    that fd with a finite cap, and delegates schema trust to
-    :func:`validate_native_terminal_result`. Returns ABSENT, TRUSTED(payload),
-    or INVALID (corrupt/oversize/symlink/wrong-schema/compat-only/uncertain IO)
-    without raw errors or data.
+
+def _lstat_or_absent(path: Path) -> Any:
+    """The observed path object, ``_ABSENT`` for a clean ``ENOENT``, else ``None``.
+
+    A clean no-such-path is the **only** route to absent. Any other error is an
+    indeterminate observation and must never become a second chance to be
+    absent.
     """
-    path = Path(path)
+    try:
+        return os.lstat(path)
+    except FileNotFoundError:
+        return _ABSENT
+    except OSError:
+        return None
+
+
+def _read_observed_regular_file(
+    path: Path, observed: Any, *, max_bytes: int
+) -> bytes | None:
+    """Read exactly the object ``lstat`` observed, or fail closed with ``None``.
+
+    The controls, in order, and why each exists:
+
+    * open ``O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK`` — the open can neither
+      follow a symlink nor block on a writerless FIFO, so a poisoned path
+      cannot hang startup;
+    * ``fstat`` the **descriptor** and require it to be the same object
+      ``lstat`` observed (device + inode) — a regular file swapped for another
+      regular file between observation and open is a different object, not a
+      shorter version of this one;
+    * require a regular file within the byte bound;
+    * read from that descriptor and require the byte count to equal the size
+      observed **for that descriptor** — a successful short read is a race,
+      not a valid smaller document;
+    * ``fstat`` once more and require identity, size, and both timestamps to be
+      unchanged — a mutation detectable during the read fails closed;
+    * an indeterminate close discards the bytes.
+
+    There is no retry: a failed observation is final for this pass.
+    """
+    if observed is None:
+        return None
     flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
+    for name in ("O_CLOEXEC", "O_NOFOLLOW", "O_NONBLOCK"):
+        flags |= getattr(os, name, 0)
     try:
         fd = os.open(path, flags)
-    except FileNotFoundError:
-        return NativeTerminalState(NativeTerminalKind.ABSENT)
     except OSError:
-        return NativeTerminalState(NativeTerminalKind.INVALID)
+        # Includes the unlink-after-lstat race: observed presence is final.
+        return None
 
     raw: bytes | None = None
     try:
         try:
             st = os.fstat(fd)
-            if not stat.S_ISREG(st.st_mode):
+            if (st.st_dev, st.st_ino) != (observed.st_dev, observed.st_ino):
                 raw = None
-            elif st.st_size > _MAX_TERMINAL_READ_BYTES:
+            elif not stat.S_ISREG(st.st_mode) or st.st_size > max_bytes:
                 raw = None
             else:
-                raw = _read_fd_capped(fd, _MAX_TERMINAL_READ_BYTES + 1)
-                if len(raw) > _MAX_TERMINAL_READ_BYTES:
+                raw = _read_fd_capped(fd, max_bytes + 1)
+                if len(raw) != st.st_size:
                     raw = None
+                else:
+                    after = os.fstat(fd)
+                    if (
+                        after.st_dev,
+                        after.st_ino,
+                        after.st_size,
+                        after.st_mtime_ns,
+                        after.st_ctime_ns,
+                    ) != (
+                        st.st_dev,
+                        st.st_ino,
+                        st.st_size,
+                        st.st_mtime_ns,
+                        st.st_ctime_ns,
+                    ):
+                        raw = None
         except OSError:
             raw = None
     finally:
@@ -156,6 +232,53 @@ def read_native_terminal_result(path: Path, *, run_id: str) -> NativeTerminalSta
             os.close(fd)
         except OSError:
             raw = None
+    return raw
+
+
+def classify_json_document(
+    path: Path, *, max_bytes: int = MAX_RECONCILE_JSON_BYTES
+) -> JsonDocumentState:
+    """Classify one durable JSON artifact as VALID / ABSENT / CORRUPT.
+
+    ``lstat`` distinguishes a clean absence *first*; every other outcome is
+    ``CORRUPT``. See :func:`_read_observed_regular_file` for the descriptor
+    identity and exact-length controls that make a successful short read, a
+    regular-file replacement, and a mutation during the read all fail closed.
+    """
+    path = Path(path)
+    observed = _lstat_or_absent(path)
+    if observed is _ABSENT:
+        return JsonDocumentState(JsonDocumentKind.ABSENT)
+    raw = _read_observed_regular_file(path, observed, max_bytes=max_bytes)
+
+    if raw is None:
+        return JsonDocumentState(JsonDocumentKind.CORRUPT)
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
+        return JsonDocumentState(JsonDocumentKind.CORRUPT)
+    if not isinstance(payload, dict):
+        return JsonDocumentState(JsonDocumentKind.CORRUPT)
+    return JsonDocumentState(JsonDocumentKind.VALID, payload=payload)
+
+
+def read_native_terminal_result(path: Path, *, run_id: str) -> NativeTerminalState:
+    """Single trusted Native terminal reader for live paths and reconciliation.
+
+    Reads through the same bounded, identity-bound descriptor control as every
+    other classified artifact (:func:`_read_observed_regular_file`), then
+    delegates schema trust to :func:`validate_native_terminal_result`. Returns
+    ABSENT only for a clean no-such-path, TRUSTED(payload), or INVALID
+    (corrupt/oversize/symlink/short read/replaced/wrong-schema/compat-only/
+    uncertain IO) without raw errors or data.
+    """
+    path = Path(path)
+    observed = _lstat_or_absent(path)
+    if observed is _ABSENT:
+        return NativeTerminalState(NativeTerminalKind.ABSENT)
+    raw = _read_observed_regular_file(
+        path, observed, max_bytes=_MAX_TERMINAL_READ_BYTES
+    )
 
     if raw is None:
         return NativeTerminalState(NativeTerminalKind.INVALID)

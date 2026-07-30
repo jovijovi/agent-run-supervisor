@@ -109,6 +109,11 @@ async def _drive_failing_handlers() -> None:
         on_update=lambda session_id, update: delivered.set(),
         fs_read_handler=fs_read,
     )
+    # Bound before any frame is written (B1): these frames carry the expected
+    # external id, so the identity gate admits them and the failures under test
+    # are the SDK's own validation error and the injected handler's exception —
+    # not an identity refusal.
+    client.expected_session_id = _SESSION_ID
     ClientSideConnection(lambda _conn: client, client_writer, client_reader)
     try:
         for payload in (

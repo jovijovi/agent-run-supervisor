@@ -38,8 +38,13 @@ from agent_run_supervisor.native_acp.run_task import (
     NativeRunTaskError,
     RunTask,
 )
-from agent_run_supervisor.native_acp.spec import AgentRunRequest, InputRef, RunLimits
-from agent_run_supervisor.session import SessionStore
+from agent_run_supervisor.native_acp.spec import (
+    AgentRunRequest,
+    InputRef,
+    RunLimits,
+    RunSpecAssembler,
+)
+from agent_run_supervisor.session import SessionNotFoundError, SessionStore
 
 from . import binding_fixtures as bf
 
@@ -136,6 +141,71 @@ def _request(**overrides) -> AgentRunRequest:
     return AgentRunRequest(**kwargs)
 
 
+DEFAULT_EXTERNAL_ID = "fake-external-session-1"
+
+
+def _seed_bound_session(kwargs: dict, external_id: str) -> None:
+    """Arrange the precondition a reuse Run requires (B1 / PRD R4).
+
+    A reuse request now opens its Session **existing-only** and needs a stored
+    external id, so no Run can conjure the record it reuses. The harness
+    therefore creates exactly the record an earlier Run would have left behind,
+    with the identical identity field set this Run will compute — a mismatch
+    here is a real refusal, not a fixture convenience. A record the test seeded
+    itself is left untouched.
+    """
+    request = kwargs["request"]
+    if request.session_reuse != "reuse":
+        return
+    session_id = request.ars_session_id
+    root = kwargs.get("supervisor_root")
+    store = kwargs.get("session_store") if root is None else (
+        storage.native_session_store(root)
+    )
+    if not isinstance(store, SessionStore):
+        # No usable store handed to this construction — the RunTask constructor
+        # is the thing under test and will refuse on its own terms.
+        return
+    try:
+        store.open_session(session_id)
+        return
+    except SessionNotFoundError:
+        pass
+    assembler = RunSpecAssembler(request)
+    assembler.resolve_profile(kwargs["registry"])
+    assembler.bind_workspace(
+        root=kwargs["workspace_root"], cwd=kwargs.get("cwd")
+    )
+    launch = assembler.resolve_launch(runtime=kwargs.get("runtime_binding"))
+    spec = assembler.seal(
+        run_id="run-seed-0",
+        submitted_at="2026-07-21T00:00:00+00:00",
+        retry_of_run_id=None,
+    )
+    provenance = launch.runtime_provenance
+    storage.create_native_session(
+        store,
+        session_id=session_id,
+        profile_id=spec.agent.profile_id,
+        profile_revision=spec.agent.profile_revision,
+        profile_hash=spec.agent.profile_hash,
+        owner=spec.identity.owner,
+        namespace=spec.identity.namespace,
+        workspace_hash=spec.workspace.workspace_hash,
+        effective_cwd=spec.workspace.cwd,
+        matched_root=spec.workspace.canonical_root,
+        adapter_contract_hash=(
+            provenance.adapter_contract_hash if provenance else None
+        ),
+        session_compatibility_epoch=(
+            provenance.session_compatibility_epoch if provenance else None
+        ),
+        agent_id=spec.agent.agent_id,
+        agent_registration_hash=spec.agent.agent_registration_hash,
+    )
+    storage.bind_agent_session(store, session_id, agent_session_id=external_id)
+
+
 class Harness:
     def __init__(
         self,
@@ -155,6 +225,7 @@ class Harness:
         monkeypatch.setenv("FAKE_AGENT_SCRIPT", json.dumps(script))
         monkeypatch.setenv("FAKE_AGENT_TRACE", str(self.trace))
         self.registry = ProfileRegistry((_test_profile(),))
+        self.external_id = script.get("session_id", DEFAULT_EXTERNAL_ID)
 
     def task(self, *, run_id: str = "run-0001", request=None, **overrides) -> RunTask:
         kwargs = dict(
@@ -167,6 +238,7 @@ class Harness:
             submitted_at="2026-07-21T00:00:00+00:00",
         )
         kwargs.update(overrides)
+        _seed_bound_session(kwargs, self.external_id)
         return RunTask(**kwargs)
 
     def run_dir(self, run_id: str = "run-0001") -> Path:
@@ -336,9 +408,13 @@ def test_spawn_failure_is_pre_dispatch_failed_session_active(
 def test_fidelity_failure_is_zero_turn_failed_session_active(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A discovery-time fidelity failure: the model selector is missing from the
+    # advertised set, so no set_config_option is ever dispatched. Nothing can
+    # have partially switched, so the reused Session stays active — a *post*-set
+    # failure on a reused Session is the separate rollback/quarantine row.
     script = dict(HAPPY_SCRIPT)
-    script["post_model_options"] = [
-        option for option in HAPPY_SCRIPT["initial_options"] if option["id"] != "effort"
+    script["initial_options"] = [
+        option for option in HAPPY_SCRIPT["initial_options"] if option["id"] != "model"
     ]
     harness = Harness(tmp_path, monkeypatch, script)
     result = _run(harness.task())
@@ -2805,6 +2881,9 @@ class CodexHarness:
         monkeypatch.setenv("FAKE_AGENT_TRACE", str(self.trace))
         self.registry = ProfileRegistry((self.profile(),))
         self.runtime = self.binding()
+        self.external_id = (script if script is not None else CODEX_SCRIPT).get(
+            "session_id", DEFAULT_EXTERNAL_ID
+        )
 
     def cli_slot(self) -> dict:
         return {
@@ -2939,6 +3018,7 @@ class CodexHarness:
             runtime_binding=self.runtime,
         )
         kwargs.update(overrides)
+        _seed_bound_session(kwargs, self.external_id)
         return RunTask(**kwargs)
 
     def run_dir(self, run_id: str = "run-codex-1") -> Path:
@@ -3247,7 +3327,13 @@ def test_codex_first_run_initialize_attestation_pass_precedes_new_session(
         monkeypatch, method="new_session", run_dir=harness.run_dir()
     )
 
-    result = _run(harness.task())
+    # A first Run is a non-reuse Run: it is the only intent that may create a
+    # Session, and therefore the only one that reaches ``session/new``.
+    result = _run(
+        harness.task(
+            request=harness.request(session_reuse="none", ars_session_id=None)
+        )
+    )
 
     assert result.status is AgentRunStatus.COMPLETED
     assert probes == [True]
@@ -3458,10 +3544,10 @@ def test_codex_seeded_session_profile_hash_drift_refused_before_attestation(
     """N9 (profile-hash drift on a seeded Session), pinned hermetically.
 
     A registry revision bump alone breaks the bound profile hash, so
-    `validate_native_binding` refuses reuse inside `_bind_session` — before the
-    spawn-boundary attestation is ever called. The surfaced `detail_code` is
-    the RunTask top-level guard's `RUN_EXCEPTION`, not `ADMISSION`: the
-    acceptance matrix declares exactly this row.
+    `validate_native_binding` refuses reuse inside the reuse plan builder —
+    before the lease and before the spawn-boundary attestation is ever called.
+    The surfaced `detail_code` is the categorical pre-dispatch
+    `SESSION_BINDING_MISMATCH`, distinct from the other three reuse refusals.
     """
     harness = CodexHarness(tmp_path, monkeypatch)
     first = _run(harness.task(run_id="run-codex-1"))
@@ -3475,7 +3561,7 @@ def test_codex_seeded_session_profile_hash_drift_refused_before_attestation(
     assert spawned == []
     run_dir = harness.run_dir("run-codex-2")
     payload = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
-    assert payload["detail_code"] == "RUN_EXCEPTION"
+    assert payload["detail_code"] == "SESSION_BINDING_MISMATCH"
     assert payload["retryable"] is False
     # Refused before the attestation stage: no observed-identity artifact.
     assert not (run_dir / "attestation.json").exists()
@@ -3804,7 +3890,12 @@ def test_claude_shaped_run_sends_the_frozen_metadata_on_session_new(
     script = _claude_shaped_script(capture_meta_path=str(capture))
     profile = _claude_shaped_profile(session_meta=FROZEN_CLAUDE_SESSION_META_TEXT)
     harness = _claude_harness(tmp_path, monkeypatch, script, profile=profile)
-    result = _run(harness.task(request=_claude_request()))
+    # Non-reuse intent is the only path that reaches ``session/new``.
+    result = _run(
+        harness.task(
+            request=_claude_request(session_reuse="none", ars_session_id=None)
+        )
+    )
 
     assert result.status is AgentRunStatus.COMPLETED
     captured = _captured_meta(capture)
@@ -3826,7 +3917,14 @@ def test_claude_shaped_reused_session_sends_the_same_metadata_on_load(
         session_meta=FROZEN_CLAUDE_SESSION_META_TEXT,
     )
     harness = _claude_harness(tmp_path, monkeypatch, script, profile=profile)
-    first = _run(harness.task(run_id="run-0001", request=_claude_request()))
+    # First Run: non-reuse, so it creates its Session and calls session/new.
+    # Second Run: reuse against an already-bound record, so it loads.
+    first = _run(
+        harness.task(
+            run_id="run-0001",
+            request=_claude_request(session_reuse="none", ars_session_id=None),
+        )
+    )
     assert first.status is AgentRunStatus.COMPLETED
     second = _run(harness.task(run_id="run-0002", request=_claude_request()))
     assert second.status is AgentRunStatus.COMPLETED
@@ -3945,7 +4043,7 @@ def test_epoch_bump_refuses_reuse_before_the_lease_and_before_session_load(
     assert spawned == []
     run_dir = harness.run_dir("run-codex-2")
     payload = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
-    assert payload["detail_code"] == "RUN_EXCEPTION"
+    assert payload["detail_code"] == "SESSION_BINDING_MISMATCH"
     assert payload["retryable"] is False
     assert not (run_dir / "attestation.json").exists()
     assert not (run_dir / DISPATCH_STARTED_MARKER).exists()
@@ -4207,6 +4305,9 @@ class AgentHarness:
             runtime_binding=self.runtime,
         )
         kwargs.update(overrides)
+        _seed_bound_session(
+            kwargs, _AGENT_SCRIPTS[self.agent_id].get("session_id", DEFAULT_EXTERNAL_ID)
+        )
         return RunTask(**kwargs)
 
     def run_dir(self, run_id: str | None = None) -> Path:

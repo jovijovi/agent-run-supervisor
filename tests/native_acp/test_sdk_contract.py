@@ -94,6 +94,40 @@ def test_client_callback_protocol_surface() -> None:
         assert callable(getattr(client, name)), name
 
 
+def test_elicitation_mode_is_a_four_leaf_union_with_session_scoped_ids() -> None:
+    """Pins the accessor the callback boundary depends on (B1, reviewer note 1).
+
+    ``ElicitationMode`` is a plain ``Union`` of four leaf types and the client
+    router passes a leaf instance directly, so the Session id is read from the
+    leaf's own ``session_id`` field. There is no ``root`` wrapper attribute on
+    the leaves, so ``mode.root.session_id`` is not merely discouraged here — it
+    does not exist.
+    """
+    _sdk_module()
+    schema = importlib.import_module("acp.schema")
+    leaves = typing.get_args(schema.ElicitationMode)
+    assert set(leaves) == {
+        schema.ElicitationFormSessionMode,
+        schema.ElicitationFormRequestMode,
+        schema.ElicitationUrlSessionMode,
+        schema.ElicitationUrlRequestMode,
+    }
+    assert len(leaves) == 4
+
+    for leaf in (schema.ElicitationFormSessionMode, schema.ElicitationUrlSessionMode):
+        assert issubclass(leaf, schema.ElicitationSessionScope)
+        assert "session_id" in _field_names(leaf)
+        assert "root" not in _field_names(leaf)
+    for leaf in (schema.ElicitationFormRequestMode, schema.ElicitationUrlRequestMode):
+        assert issubclass(leaf, schema.ElicitationRequestScope)
+        assert "session_id" not in _field_names(leaf)
+
+    assert "session_id" in _field_names(schema.ElicitationSessionScope)
+    # The load response carries no identity field at all, so the load arm has
+    # nothing to read back even if it wanted to.
+    assert "session_id" not in _field_names(schema.LoadSessionResponse)
+
+
 def test_config_option_carriers() -> None:
     _sdk_module()
     schema = importlib.import_module("acp.schema")

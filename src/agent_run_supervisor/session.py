@@ -91,6 +91,17 @@ class SessionBindingError(SessionError):
     """
 
 
+class SessionRecordInvalidError(SessionError):
+    """Raised when a Native session record is not strictly structurally valid.
+
+    Distinct from :class:`SessionBindingError`: that one means "a readable
+    record does not match this Run", while this one means "the record itself is
+    not usable evidence at all". Reuse and reconciliation both need the two
+    kept apart — a mismatch is a Run-scoped refusal, an invalid record is never
+    actionable for anyone.
+    """
+
+
 class SessionLockError(SessionError):
     """Raised when a lease lock is held, missing, or released with a wrong token."""
 
@@ -435,6 +446,24 @@ class SessionStore:
             )
             self._clear_quarantine_pending_unlocked(session_dir)
             return quarantined
+
+    def has_quarantine_pending(self, session_id: str) -> bool:
+        """Read-only: is the durable quarantine-pending fence present?
+
+        Pure inspection — it takes no guard, mutates nothing, and answers
+        ``False`` for an absent session, an invalid id, or any unreadable path,
+        so a caller can decide whether a fence still needs converging without
+        writing one to find out.
+        """
+        try:
+            path = self._session_dir(session_id) / QUARANTINE_PENDING_JSON
+        except InvalidSessionIdError:
+            return False
+        try:
+            os.lstat(path)
+        except OSError:
+            return False
+        return True
 
     def _clear_quarantine_pending_unlocked(self, session_dir: Path) -> None:
         """Clear the fence; caller must already hold the per-session guard.
@@ -1000,6 +1029,85 @@ def _record_from_dict(data: dict[str, Any]) -> SessionRecord:
 def _profile_hash_of(profile: Any) -> Any:
     value = getattr(profile, "profile_hash", None)
     return value() if callable(value) else value
+
+
+NATIVE_RECORD_STATES = (STATE_OPEN, STATE_CLOSED, STATE_QUARANTINED)
+
+
+def _nonempty_str(value: Any) -> bool:
+    return isinstance(value, str) and value != ""
+
+
+def validate_native_session_record(
+    record: SessionRecord, *, expected_session_id: str
+) -> None:
+    """Strict structural validation of an already-read Native session record.
+
+    Structure and *self-identity* — whether the record matches a particular
+    Run's profile, workspace, and era stays :func:`validate_native_binding`'s
+    job. One definition of "strictly readable record" serves both the load-only
+    reuse gate and reconciliation's actionability predicate, so the two can
+    never disagree about which records exist as usable evidence.
+
+    ``expected_session_id`` is required and must equal the record's own
+    ``session_id``: a record is located by directory name, so a document whose
+    internal identity names a *different* Session is a conflict, not a
+    relabelled record. Neither reuse nor reconciliation may take the directory
+    name as sufficient. The failure names field categories, never values.
+    """
+    problems: list[str] = []
+    if record.schema_version != SCHEMA_VERSION:
+        problems.append("schema_version")
+    if not _nonempty_str(record.session_id):
+        problems.append("session_id")
+    elif record.session_id != expected_session_id:
+        problems.append("session_id_conflict")
+    if record.session_kind != SESSION_KIND_NATIVE:
+        problems.append("session_kind")
+    if record.state not in NATIVE_RECORD_STATES:
+        problems.append("state")
+    for name in ("owner", "namespace", "workspace_hash"):
+        if not _nonempty_str(getattr(record, name)):
+            problems.append(name)
+    if not _nonempty_str(record.native_profile_id):
+        problems.append("native_profile_id")
+    if not _nonempty_str(record.native_profile_hash):
+        problems.append("native_profile_hash")
+    if not isinstance(record.native_profile_revision, int) or isinstance(
+        record.native_profile_revision, bool
+    ):
+        problems.append("native_profile_revision")
+    if record.agent_session_id is not None and not _nonempty_str(
+        record.agent_session_id
+    ):
+        problems.append("agent_session_id")
+    if problems:
+        raise SessionRecordInvalidError(
+            f"native session record is invalid: {', '.join(problems)}",
+        )
+
+
+def read_native_session_record(
+    store: SessionStore, session_id: str
+) -> SessionRecord | None:
+    """An already-existing, strictly readable Native record, else ``None``.
+
+    Never raises and never creates, repairs, or reopens anything: an absent,
+    unreadable, malformed, non-native, or internally conflicting record is
+    simply not a record for the caller's purposes. Reconciliation's
+    actionability predicate is built on exactly this, and it is the same gate
+    the load-only reuse path applies.
+    """
+    try:
+        record = store.open_session(session_id)
+    except Exception:
+        # Absent, unreadable, or not a safe id — all "no usable record".
+        return None
+    try:
+        validate_native_session_record(record, expected_session_id=session_id)
+    except SessionRecordInvalidError:
+        return None
+    return record
 
 
 def validate_native_binding(

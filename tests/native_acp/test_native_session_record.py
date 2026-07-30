@@ -13,6 +13,7 @@ import pytest
 from agent_run_supervisor import session_inspect
 from agent_run_supervisor.process_liveness import ProcessIdentity
 from agent_run_supervisor.session import (
+    SESSION_JSON,
     STATE_CLOSED,
     STATE_OPEN,
     STATE_QUARANTINED,
@@ -21,10 +22,13 @@ from agent_run_supervisor.session import (
     SessionLockError,
     SessionQuarantinedError,
     SessionRecord,
+    SessionRecordInvalidError,
     SessionStore,
     _json_bytes,
     _record_to_dict,
+    read_native_session_record,
     validate_native_binding,
+    validate_native_session_record,
 )
 
 T0 = dt.datetime(2026, 7, 21, 0, 0, 0, tzinfo=dt.timezone.utc)
@@ -680,3 +684,40 @@ def test_r6_b2_fence_clear_unlink_parent_fsync_failure_propagates(
         store.mark_quarantined("native-1", reason="done", run_id="run-x", now=T0)
     # Session may already be quarantined on disk; fence clear durability failed.
     assert store.open_session("native-1").state == "quarantined"
+
+
+# ---------------------------------------------------------------------------
+# The directory name is not identity (B1 / B4 shared record gate)
+# ---------------------------------------------------------------------------
+
+
+def test_a_record_validates_against_the_id_it_was_requested_under(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    record = _native(store, "native-1")
+    validate_native_session_record(record, expected_session_id="native-1")
+    assert read_native_session_record(store, "native-1") is not None
+
+
+def test_a_conflicting_internal_session_id_is_not_a_readable_record(
+    tmp_path: Path,
+) -> None:
+    """A structurally valid record inside the requested directory is refused
+    when its own ``session_id`` names a different Session."""
+    store = _store(tmp_path)
+    _native(store, "native-1")
+    path = Path(store.base_dir) / "native-1" / SESSION_JSON
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["session_id"] = "native-elsewhere"
+    path.write_bytes(json.dumps(payload, sort_keys=True, indent=2).encode("utf-8"))
+
+    # The raw record still parses — this is a conflict, not corruption.
+    assert store.open_session("native-1").session_id == "native-elsewhere"
+    # …but neither gate accepts it.
+    with pytest.raises(SessionRecordInvalidError) as err:
+        validate_native_session_record(
+            store.open_session("native-1"), expected_session_id="native-1"
+        )
+    assert "session_id_conflict" in str(err.value)
+    assert read_native_session_record(store, "native-1") is None

@@ -25,9 +25,13 @@ PermissionHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 FsReadHandler = Callable[[dict[str, Any]], Awaitable[str]]
 FsWriteHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
+# The only thing an identity failure is ever allowed to say. It carries no
+# expected id, no observed id, and no derivative of either.
+SESSION_IDENTITY_VIOLATION = "SESSION_IDENTITY_VIOLATION"
+
 
 class SessionIdentityViolation(RuntimeError):
-    """An update arrived for a different external session than expected."""
+    """A callback arrived for a different external session than expected."""
 
 
 class UpdateCallbackError(RuntimeError):
@@ -61,16 +65,20 @@ class NativeAcpClient:
 
     # -- helpers -----------------------------------------------------------
 
-    def _observe_session_id(self, session_id: str) -> None:
-        if (
-            self.expected_session_id is not None
-            and session_id != self.expected_session_id
-            and self.identity_violation is None
-        ):
-            self.identity_violation = (
-                f"agent switched external session identity: expected "
-                f"{self.expected_session_id!r}, observed {session_id!r}"
-            )
+    def _require_session_id(self, session_id: Any) -> None:
+        """Compare first; on unbound-or-different, record and raise. Nothing else.
+
+        This runs at callback entry, before normalization, queueing, handler
+        invocation, filesystem access, sink persistence, or the formulation of
+        any response — including the unsupported-surface refusal, which is
+        still a response. An unbound expectation is itself a violation, so a
+        callback racing ahead of the bind cannot be serviced either.
+        """
+        expected = self.expected_session_id
+        if expected is None or session_id != expected:
+            if self.identity_violation is None:
+                self.identity_violation = SESSION_IDENTITY_VIOLATION
+            raise SessionIdentityViolation(SESSION_IDENTITY_VIOLATION)
 
     @staticmethod
     def _dump(model: Any) -> dict[str, Any]:
@@ -103,13 +111,17 @@ class NativeAcpClient:
 
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
         try:
-            self._observe_session_id(session_id)
+            # Identity first: a rejected frame is never dumped, normalized, or
+            # handed to the sink.
+            self._require_session_id(session_id)
             self._on_update(session_id, self._dump(update))
         except Exception as exc:
             if self.callback_failure is None:
                 self.callback_failure = f"session_update callback failed: {exc}"
             raise
         finally:
+            # The delivery barrier must still advance or shutdown would hang —
+            # but it carries no payload and services nothing.
             self._updates_completed += 1
             self._update_event.set()
 
@@ -120,7 +132,7 @@ class NativeAcpClient:
         options: Any,
         **kwargs: Any,
     ) -> Any:
-        self._observe_session_id(session_id)
+        self._require_session_id(session_id)
         schema = self._sdk.schema
         request = {
             "session_id": session_id,
@@ -146,7 +158,7 @@ class NativeAcpClient:
         limit: int | None = None,
         **kwargs: Any,
     ) -> Any:
-        self._observe_session_id(session_id)
+        self._require_session_id(session_id)
         if self._fs_read_handler is None:
             raise PermissionError("fs read is not permitted for this run")
         content = await self._fs_read_handler(
@@ -157,7 +169,7 @@ class NativeAcpClient:
     async def write_text_file(
         self, session_id: str, path: str, content: str, **kwargs: Any
     ) -> Any:
-        self._observe_session_id(session_id)
+        self._require_session_id(session_id)
         if self._fs_write_handler is None:
             raise PermissionError("fs write is not permitted for this run")
         await self._fs_write_handler(
@@ -166,24 +178,70 @@ class NativeAcpClient:
         return None
 
     # -- unsupported surfaces (declared absent at initialize) --------------
+    #
+    # Pinned SDK signatures, not varargs: the router dispatches by keyword from
+    # each request model's field names, so the names *are* the contract — and a
+    # surface that cannot name its ``session_id`` cannot check it. Identity is
+    # compared before the refusal, because "terminal capability is not
+    # provided" is itself a formulated response to a frame that was never ours
+    # to answer.
 
-    async def create_terminal(self, *args: Any, **kwargs: Any) -> Any:
+    async def create_terminal(
+        self,
+        session_id: str,
+        command: str,
+        args: list[Any] | None = None,
+        env: list[Any] | None = None,
+        cwd: str | None = None,
+        output_byte_limit: int | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        self._require_session_id(session_id)
         raise PermissionError("terminal capability is not provided")
 
-    async def terminal_output(self, *args: Any, **kwargs: Any) -> Any:
+    async def terminal_output(
+        self, session_id: str, terminal_id: str, **kwargs: Any
+    ) -> Any:
+        self._require_session_id(session_id)
         raise PermissionError("terminal capability is not provided")
 
-    async def release_terminal(self, *args: Any, **kwargs: Any) -> Any:
+    async def release_terminal(
+        self, session_id: str, terminal_id: str, **kwargs: Any
+    ) -> Any:
+        self._require_session_id(session_id)
         raise PermissionError("terminal capability is not provided")
 
-    async def wait_for_terminal_exit(self, *args: Any, **kwargs: Any) -> Any:
+    async def wait_for_terminal_exit(
+        self, session_id: str, terminal_id: str, **kwargs: Any
+    ) -> Any:
+        self._require_session_id(session_id)
         raise PermissionError("terminal capability is not provided")
 
-    async def kill_terminal(self, *args: Any, **kwargs: Any) -> Any:
+    async def kill_terminal(
+        self, session_id: str, terminal_id: str, **kwargs: Any
+    ) -> Any:
+        self._require_session_id(session_id)
         raise PermissionError("terminal capability is not provided")
 
-    async def create_elicitation(self, *args: Any, **kwargs: Any) -> Any:
+    async def create_elicitation(self, message: str, mode: Any, **kwargs: Any) -> Any:
+        """Session-scoped elicitation is identity-checked; request-scoped is not.
+
+        The pinned SDK's ``ElicitationMode`` is a plain union and the router
+        passes a **leaf** instance, so the id lives on the leaf's own
+        ``session_id`` field — there is no wrapper to reach through. A
+        request-scoped mode carries only a request id: it is simply
+        unsupported, and no Session id is invented for it.
+        """
+        schema = self._sdk.schema
+        session_scoped = (
+            schema.ElicitationFormSessionMode,
+            schema.ElicitationUrlSessionMode,
+        )
+        if isinstance(mode, session_scoped):
+            self._require_session_id(mode.session_id)
         raise PermissionError("elicitation is not provided")
 
-    async def complete_elicitation(self, *args: Any, **kwargs: Any) -> Any:
+    async def complete_elicitation(self, elicitation_id: str, **kwargs: Any) -> None:
+        # Carries no Session id at all, so there is nothing to compare and
+        # nothing may be invented.
         raise PermissionError("elicitation is not provided")

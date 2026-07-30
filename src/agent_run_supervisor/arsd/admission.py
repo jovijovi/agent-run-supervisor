@@ -268,6 +268,154 @@ def write_submission(run_dir: Path, artifact: Mapping[str, Any]) -> Path:
     return storage.write_once_json(Path(run_dir) / "submission.json", artifact)
 
 
+SUBMISSION_NAME = "submission.json"
+_REUSE_MODES = ("reuse", "none")
+
+# The exact field set ``build_submission_artifact`` emits, named once so the
+# writer and the strict validator cannot drift. A structural test asserts the
+# builder's own output key set equals this tuple.
+SUBMISSION_FIELDS = (
+    "schema_version",
+    "principal_id",
+    "request_id",
+    "run_id",
+    "retry_of_run_id",
+    "api_version",
+    "accepted_at",
+    "peer",
+    "owner",
+    "namespace",
+    "session_reuse",
+    "ars_session_id",
+    "profile_id",
+    "request_digest",
+    "prompt_sha256",
+    "prompt_bytes",
+)
+SUBMISSION_PEER_FIELDS = ("pid", "uid", "gid")
+
+
+@dataclasses.dataclass(frozen=True)
+class SubmissionAttribution:
+    """Exact run/owner/namespace/Session identity carried by a valid submission."""
+
+    run_id: str
+    owner: str
+    namespace: str
+    session_reuse: str
+    session_id: str
+
+
+@dataclasses.dataclass(frozen=True)
+class SubmissionState:
+    """Classification of the durable submission plus its attribution when valid."""
+
+    kind: storage.JsonDocumentKind
+    attribution: SubmissionAttribution | None = None
+
+
+def _nonempty_str(value: Any) -> bool:
+    return isinstance(value, str) and value != ""
+
+
+def _plain_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def validate_submission_artifact(
+    payload: Any, *, run_id: str
+) -> SubmissionAttribution | None:
+    """Strict v1 submission validation, or ``None``.
+
+    The single definition of "this submission record is usable evidence",
+    shared by admission and reconciliation so neither can drift into a weaker
+    reading. The document must carry **exactly** the field set the writer
+    emits — an unknown key, a missing key, or nested ``peer`` drift means this
+    is not a record ARS produced, and a document ARS did not produce is not
+    evidence about a Run ARS admitted. Attribution is exact: the record must
+    name **this** Run, and its Session identity is either the declared reuse id
+    or the already-defined deterministic ephemeral derivation — never a
+    directory name, a result field, or anything inferred.
+    """
+    if not isinstance(payload, dict):
+        return None
+    if set(payload) != set(SUBMISSION_FIELDS):
+        return None
+    if payload.get("schema_version") != SUBMISSION_SCHEMA_VERSION:
+        return None
+    if not _nonempty_str(payload.get("profile_id")):
+        return None
+    if payload.get("run_id") != run_id or not _nonempty_str(run_id):
+        return None
+    if not _nonempty_str(payload.get("principal_id")):
+        return None
+    request_id = payload.get("request_id")
+    if not isinstance(request_id, str) or _REQUEST_ID_RE.fullmatch(request_id) is None:
+        return None
+    owner = payload.get("owner")
+    namespace = payload.get("namespace")
+    if not _nonempty_str(owner) or not _nonempty_str(namespace):
+        return None
+    reuse = payload.get("session_reuse")
+    if reuse not in _REUSE_MODES:
+        return None
+    ars_session_id = payload.get("ars_session_id")
+    if reuse == "reuse":
+        if not _nonempty_str(ars_session_id):
+            return None
+        session_id = ars_session_id
+    else:
+        # Mirrors the Spec-side rule exactly: a non-reuse submission may carry
+        # a stray id because the request model and the wire parser accept one,
+        # and this writer preserves it. Attribution still derives only the
+        # deterministic ephemeral id — the same id the runtime selector uses —
+        # so the stray value is recorded evidence and never authority. The type
+        # domain stays null-or-non-empty-string.
+        if ars_session_id is not None and not _nonempty_str(ars_session_id):
+            return None
+        session_id = f"{run_id}-ephemeral"
+    if not _nonempty_str(payload.get("request_digest")):
+        return None
+    if not _nonempty_str(payload.get("prompt_sha256")):
+        return None
+    if not _plain_int(payload.get("prompt_bytes")) or payload["prompt_bytes"] < 0:
+        return None
+    if not _plain_int(payload.get("api_version")):
+        return None
+    if not _nonempty_str(payload.get("accepted_at")):
+        return None
+    peer = payload.get("peer")
+    if not isinstance(peer, dict) or set(peer) != set(SUBMISSION_PEER_FIELDS):
+        return None
+    if not all(_plain_int(peer.get(field)) for field in SUBMISSION_PEER_FIELDS):
+        return None
+    retry_of = payload.get("retry_of_run_id")
+    if retry_of is not None and not _nonempty_str(retry_of):
+        return None
+    return SubmissionAttribution(
+        run_id=run_id,
+        owner=owner,
+        namespace=namespace,
+        session_reuse=reuse,
+        session_id=session_id,
+    )
+
+
+def classify_submission(run_dir: Path, *, run_id: str) -> SubmissionState:
+    """VALID / ABSENT / CORRUPT for the durable submission of one Run.
+
+    A structurally readable document that fails strict validation is CORRUPT,
+    not a weaker "valid enough" attribution source.
+    """
+    state = storage.classify_json_document(Path(run_dir) / SUBMISSION_NAME)
+    if state.kind is not storage.JsonDocumentKind.VALID:
+        return SubmissionState(state.kind)
+    attribution = validate_submission_artifact(state.payload, run_id=run_id)
+    if attribution is None:
+        return SubmissionState(storage.JsonDocumentKind.CORRUPT)
+    return SubmissionState(storage.JsonDocumentKind.VALID, attribution)
+
+
 def read_submission(run_dir: Path) -> dict[str, Any] | None:
     path = Path(run_dir) / "submission.json"
     if not path.is_file():
