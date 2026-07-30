@@ -39,16 +39,19 @@
 ## Contents
 
 [What it is](#what-it-is) ·
+[Documented target vs. shipped code](#documented-target-vs-shipped-code) ·
 [How it works](#how-it-works) ·
 [Requirements](#requirements) ·
 [Install](#install) ·
 [Upgrade](#upgrade) ·
 [Uninstall](#uninstall) ·
 [Run `arsd`](#run-arsd) ·
+[The agent registry](#the-agent-registry) ·
 [Use from Python](#use-from-python) ·
 [ACP protocol support](#acp-protocol-support) ·
 [Supported agents](#supported-agents) ·
-[Required agent runtimes](#required-agent-runtimes) ·
+[Agent runtimes you install](#agent-runtimes-you-install) ·
+[Operator-visible changes](#operator-visible-changes) ·
 [Guarantees and boundaries](#guarantees-and-boundaries) ·
 [Development](#development) ·
 [Contributing](#contributing) ·
@@ -62,15 +65,40 @@ the run ended, and scrubbing secrets before anything reaches disk. Written ad-ho
 its own subtly unsafe copy.
 
 **Agent Run Supervisor (ARS)** factors that into one independent local layer. Your application
-submits a run — which agent profile, which model, which workspace, which prompt. ARS admits the
-request, launches exactly one supervised agent process, mediates every permission request under a
-default-deny policy, normalizes agent output into ordered events, classifies a supervisor-owned
-status, and writes redacted artifacts with restrictive permissions.
+submits a run — which registered agent, which model, which workspace, which prompt. ARS admits the
+request, launches exactly one supervised agent process from the command an operator registered,
+mediates every permission request under a default-deny policy, normalizes agent output into ordered
+events, classifies a supervisor-owned status, and writes redacted artifacts with restrictive
+permissions.
 
 You get **auditable evidence** instead of process-lifecycle code — enough to answer *what did the
 agent try to do, what was it allowed to do, and how did it actually end?*
 
+**ARS supervises external AGENTs it does not own.** It does not install, package, copy, freeze, promote,
+pin, host, or attest agents, their ACP adapters, their homes, credential stores, plugin trees, caches,
+or configuration. You install and upgrade those with your own package manager. ARS owns the *process it
+starts*; you own the *software it starts*.
+
 ARS reports technical supervision facts only. The business verdict stays yours.
+
+## Documented target vs. shipped code
+
+> **Read this before following any command below.** This README documents the **agent-registry
+> boundary** — one operator-owned registry file, `--agents-file`, and the `agents` / `run inspect`
+> operator surface. That is the project's tracked architecture and the target of staged work.
+>
+> The **shipped `v0.5.x` line implements the earlier artifact/Binding architecture instead**: a
+> different required daemon flag, an operator-owned Binding root with promoted generations, and frozen
+> artifact identity. That architecture is **retired as a target** and is therefore no longer documented
+> here. If you operate a `v0.5.x` deployment today, use that release's own notes in
+> [`CHANGELOG.md`](CHANGELOG.md) and the cold archive at
+> [`docs/archive/binding-era-2026-07/`](docs/archive/binding-era-2026-07/README.md); nothing in this
+> README describes how to operate it.
+>
+> Concretely: the registry file, the environment-value guard, and `api_version` 2 are **not runnable
+> yet**. The current gap and the sequence that closes it are on the board,
+> [`docs/roadmap/current-status.md`](docs/roadmap/current-status.md). No documentation change here
+> deploys, restarts, or migrates anything.
 
 ## How it works
 
@@ -83,44 +111,52 @@ The whole path is local:
 1. **Your application connects to `arsd`**, the small unprivileged supervisor daemon.
 2. **`arsd` listens on a Unix-domain socket** — a `0600` socket inside a `0700` directory. No TCP, no
    root, no public ingress.
-3. **The peer is authenticated, then the request is admitted.** `arsd` reads peer credentials from
+3. **At startup, `arsd` parses your agent registry exactly once**, reconciles durable facts, and only
+   then binds the socket. Any registry defect refuses to listen before anything is written.
+4. **The peer is authenticated, then the request is admitted.** `arsd` reads peer credentials from
    the socket and maps them to a principal, then admits the request against your caller-owned
    `request_id`, which doubles as the idempotency key. Runs and sessions are owner-scoped: only their
    owner can query, stream, cancel, or close them.
-4. **`ars-core` executes the work.** One in-process `RunTask` owns one supervised agent process and
-   one Native ACP connection, driven by an immutable run spec frozen at admission.
-5. **The agent is a registered external process** launched from a closed profile — no arbitrary
-   command, argv, or environment passthrough from the wire.
+5. **`ars-core` executes the work.** One in-process `RunTask` owns one supervised agent process and
+   one Native ACP connection, driven by an immutable run spec sealed at admission.
+6. **The agent is the command you registered**, launched exactly as declared — no arbitrary command,
+   argv, or environment passthrough from the wire, and no re-reading of the registry while serving.
 
 Back over the same socket you get normalized, seq-ordered events and a supervisor-owned status, plus
 redacted local artifacts on disk.
 
 ### Four authority layers
 
-Nothing merges launch semantics with deployment facts:
+Nothing merges ACP semantics with deployment facts, and there is no fifth layer:
 
-| Layer | Owner | Freezes |
+| Layer | Owner | Carries |
 |---|---|---|
-| `AgentProfile` / `AdapterContract` | code (registry) | launch shape, ACP protocol and capabilities, selectors, permission/config/session semantics |
-| Agent Registration *(optional)* | operator | which agent a conformance profile is instantiated as — only selecting inside or narrowing what the contract already declared |
-| Runtime Binding | operator | which CLI artifact is installed, at which immutable path, version, and digest |
-| `ResolvedLaunchSpec` | one run | the sealed launch and runtime identity, hashed before spawn |
+| ACP compatibility profile | ARS source, under review | how to speak ACP to a class of agent: protocol major, required and forbidden capabilities, session semantics, selector-id conventions, the base environment allowlist, permission-mediation semantics |
+| **Agent registry entry** | **operator** | which command is that agent here, its argv, its environment declarations, selector-id hints, capability narrowing, an optional continuity epoch |
+| Sealed per-run spec + launch snapshot | one run | the projection of profile × entry × request, taken once before spawn |
+| Observed evidence | one run | what was resolved and observed — recorded, never a gate |
 
-A caller chooses none of them. Admission reads the Binding exactly once per run and seals the result;
-spawn, finalization, and reconciliation never re-read it.
+A caller chooses none of them. A profile carries no path, version, digest, model literal, or deployment
+fact. An entry carries no capability requirement, protocol version, mediation pair, digest, or
+transport. Admission resolves the agent from the startup snapshot **in memory, with zero filesystem
+access**, seals the result, and never re-reads it: spawn, finalization, and reconciliation have no
+registry read path at all.
 
-### Two protocols, two different `1`s
+### Two protocols, two different versions
 
-ARS sits between two independently versioned protocols. Both currently say `1`, and they are not the
-same `1`:
+ARS sits between two independently versioned protocols, and neither implies the other:
 
 - **ACP Protocol v1** — the *downstream* Agent Client Protocol, spoken over stdio JSON-RPC between
   ARS and the agent process.
-- **`arsd` API v1** — the *upstream* ARS-owned wire between your application and `arsd`. Every frame
+- **`arsd` API** — the *upstream* ARS-owned wire between your application and `arsd`. Every frame
   carries `api_version`; an unknown version is rejected rather than guessed.
 
-An ACP change is an agent-compatibility fact, an `arsd` API change is a caller-compatibility fact,
-and neither implies the other.
+The `arsd` API moves to **2** with the registry boundary, because the primary selector's meaning
+changes: `profile_id` stops selecting a launch and `agent_id` starts, and silently reinterpreting an
+old frame is exactly the quiet fallback this project forbids. During the drain window only `submit` is
+refused at `api_version: 1`; the other seven operations are accepted, including `server_info`, which is
+how an older caller discovers *that* it must upgrade. The separate shutdown drain is unchanged: once
+shutdown begins, every frame is answered with `SHUTTING_DOWN`.
 
 Design detail: [`docs/design/architecture.md`](docs/design/architecture.md).
 
@@ -130,9 +166,9 @@ Design detail: [`docs/design/architecture.md`](docs/design/architecture.md).
 |---|---|
 | Runtime | **Python ≥ 3.11**. The package itself has **zero third-party runtime dependencies**. |
 | Driving a real agent | The `native` extra, which pins the official ACP client library (`agent-client-protocol==0.11.1`). A base install imports fine and fails only when the SDK is actually used. |
-| Running `arsd` | Linux with a POSIX user session for the AF_UNIX socket, plus a supervisor root, a Runtime Binding root, and at least one caller mapping you supply. |
+| Running `arsd` | Linux with a POSIX user session for the AF_UNIX socket, plus a supervisor root, an agent registry file, and at least one caller mapping you supply. |
 | Crash containment | A user-level service manager cgroup and a CPython build with pidfd support. |
-| Running an agent | The agent runtime installed and pinned locally, plus a promoted Binding generation for its profile. See [Required agent runtimes](#required-agent-runtimes). |
+| Running an agent | The agent installed locally by you, and one registry entry naming its command. See [Agent runtimes you install](#agent-runtimes-you-install). |
 
 ## Install
 
@@ -166,7 +202,9 @@ pip install -e '.[dev,native]'
 ```
 
 Nothing in ARS launches an agent implicitly. `doctor`, `replay`, `--print-service-unit`, and
-`runtime-binding inspect-run` are read-only and start no agent process.
+`run inspect` are read-only with respect to ARS and operator state. `agents doctor` is the one
+diagnostic that *does* start an external child — and that child writes its own agent-owned state, which
+this document does not pretend otherwise about.
 
 ## Upgrade
 
@@ -183,12 +221,13 @@ python3 -c "import agent_run_supervisor as a; print(a.__version__)"
 A new package version never restarts a running daemon and never touches operator storage. Restarting
 `arsd` after an upgrade is your decision.
 
-Two upgrades change operator inputs and fail closed rather than guessing:
-
-| Upgrade | What changed | What you do |
-|---|---|---|
-| → 0.5.1 | Daemon mode and `--print-service-unit` require `--binding-root`. | Re-render and reconfigure the service unit before restarting; an older unit fails closed. |
-| → 0.5.2 | The Binding root became profile-scoped. A single root-level `active.json` is refused with `LEGACY_BINDING_LAYOUT`; a missing profile subtree with `PROFILE_BINDING_ABSENT`. | Move each generation to `profiles/<profile-id>/generations/<generation-id>/`, delete the root-level `active.json`, then run `runtime-binding promote` once per profile. |
+**Upgrading across the boundary reset.** The retired artifact/Binding operator inputs — its required
+daemon flag, its Binding root with promoted generations, and its `runtime-binding` command group — are
+replaced by one registry file, `--agents-file`, and the `agents` commands. That change fails closed
+rather than guessing: an older service unit does not silently keep working. It also ends every live
+session once, because sessions created under the retired identity model are refused for reload with a
+stable code while staying readable. Old artifact roots and Binding roots simply stop being referenced —
+ARS never deletes them, and removing them is your separate decision.
 
 ARS never migrates operator storage on your behalf. Full history: [`CHANGELOG.md`](CHANGELOG.md).
 
@@ -217,8 +256,8 @@ rm -rf <supervisor-root>        # user-service default: ~/.local/share/agent-run
 make clean
 ```
 
-The **Runtime Binding root** and the **installed agent artifacts** are operator-owned and outside
-ARS. Remove them separately and deliberately.
+Your **agent registry file** and the **agents you installed** are operator-owned and outside ARS.
+Remove them separately and deliberately.
 
 ## Run `arsd`
 
@@ -230,74 +269,104 @@ python3 -m agent_run_supervisor.arsd --help
 
 # render a user-scope systemd unit to stdout and exit.
 # pure text: no privilege check, no reconciliation, no socket bind — nothing is
-# installed, enabled, or started. --binding-root is required here too, so a
+# installed, enabled, or started. --agents-file is required here too, so a
 # rendered unit can never silently omit it; the path is argv data, not accessed.
 python3 -m agent_run_supervisor.arsd \
-  --binding-root <binding-root> \
+  --agents-file <agents-file> \
   --print-service-unit
 
 # start the daemon
 python3 -m agent_run_supervisor.arsd \
   --supervisor-root <supervisor-root> \
-  --binding-root <binding-root> \
+  --agents-file <agents-file> \
   --caller-mapping <UID>:<principal_id>:<owner>:<namespace>
 ```
 
 From a checkout without installing, prefix with `PYTHONPATH=src`.
 
-Daemon mode requires `--supervisor-root`, `--binding-root`, and at least one `--caller-mapping` —
+Daemon mode requires `--supervisor-root`, `--agents-file`, and at least one `--caller-mapping` —
 **zero mappings refuse to listen** — and refuses to start as root. `--socket` defaults to
 `$XDG_RUNTIME_DIR/agent-run-supervisor/arsd.sock`, falling back to `<supervisor-root>/arsd/arsd.sock`.
 `--max-concurrent-runs`, `--max-connections`, and `--log-level` bound the rest.
 
-Caller mappings, socket paths, and the Binding root are deployment values. Keep them in a mode-`0600`
+Caller mappings, socket paths, and the registry path are deployment values. Keep them in a mode-`0600`
 unit file, never in a repository.
 
-On restart the daemon reconciles durable facts only: a run that may have been dispatched without a
-trustworthy terminal result ends `unknown` / `quarantined` / `retryable=false`, and is never
-re-prompted.
+Startup order is strict: **parse the registry once → reconcile → bind**. On restart the daemon
+reconciles durable facts only, and it is stricter than a tolerant reader: a corrupt terminal record,
+unattributable uncertainty, or a launch record without its spec each refuse to listen rather than
+guess. A run that may have been dispatched without a trustworthy terminal result ends `unknown` /
+`quarantined` / `retryable=false`, and is never re-prompted.
 
-### The Runtime Binding
+## The agent registry
 
-`--binding-root` points at the **operator-owned Runtime Binding**, the deployment half of a run. The
-source contract owns launch and compatibility semantics; the Binding owns which CLI artifact is
-installed, at which immutable path, version, and digest, plus any config-root value the profile
-declared. A Binding never declares a command, argv, env key, adapter, capability, or selector.
+`--agents-file` points at **one operator-owned TOML file, read exactly once at daemon startup** into an
+immutable in-memory snapshot. You replace it atomically; a replacement takes effect at the next daemon
+start.
 
-ARS opens the Binding root **read-only, exactly once per run**, and never creates, writes, or
-promotes it. Every profile refuses admission fail-closed until an operator has prepared an immutable
-artifact root the daemon's own UID cannot rewrite and promoted a generation for that profile — so a
-freshly started daemon with no promoted Binding runs nothing.
+```toml
+schema_version = 1
 
-One daemon takes one root, which carries **one independently promotable selection per profile**:
+# A standards-conforming native ACP agent — the common case.
+[agents.native-agent]
+profile   = "standard-native-acp-v1"
+command   = "some-agent"          # PATH-resolved bare name, exactly as typed
+args      = ["acp"]
+mediation = "ask-privileged-tool-families-v1"   # selects a source-owned binding
 
-```text
-<binding-root>/
-└── profiles/<profile-id>/
-    ├── active.json                        # regular file, atomically replaced — never a symlink
-    └── generations/<generation-id>/
-        └── manifest.json                  # immutable once written
+# An agent reached through an independently installed ACP adapter command.
+# Same profile: the adapter is a deployment fact, not a source constant.
+[agents.adapter-backed-agent]
+profile = "standard-native-acp-v1"
+command = "/home/<service-user>/.local/bin/<some-acp-adapter>"
+env_passthrough = ["SSH_AUTH_SOCK", "SOME_PROVIDER_TOKEN"]
+env_overlay     = { SOME_AGENT_HOME = "/home/<service-user>/.some-agent", NO_BROWSER = "1" }
+forbidden_capabilities = ["terminal"]
 ```
 
-The operator authors these directories; ARS creates nothing here and writes only `active.json`.
-Promoting or rolling back one profile replaces one file inside that profile's own subtree, so it
-cannot disable, overwrite, or race another profile's selection.
+Every value above is a **placeholder**. The complete closed field set is `profile`, `command`, `args`,
+`mediation`, `env_passthrough`, `env_overlay`, `model_selector`, `effort_selector`,
+`forbidden_capabilities`, and `session_epoch` — nothing else, and an unknown key at any level is
+refused. `transport` is refused as an unknown key: v1 is stdio by definition.
 
-The operator surface is a separate CLI, and each generation command acts on exactly one profile:
+**What ARS does and does not check.** It resolves the registry path, follows symlinks, and requires the
+resolved target to be a regular file that is not group- or world-writable — ARS declining to take
+orders from a file anyone can edit, bounded to *its own configuration file*. It performs **no
+ownership, mode, ancestor, symlink, or digest check on `command`**, on its ancestors, or on anything the
+agent later loads.
+
+**Your command is launched exactly as declared.** `argv[0]` is the declared string byte-for-byte; a bare
+name is located by ordinary PATH lookup over the child's projected `PATH`. So shims, symlink farms,
+package-relative resolution, and an agent's own self-update all keep working. There is no pre-flight
+resolution check: a failed exec is classified as `COMMAND_NOT_FOUND`, `COMMAND_NOT_EXECUTABLE`, or
+`SPAWN_FAILED`, and those read as ordinary configuration errors, not security refusals.
+
+**Read-once, and what it costs.** An **agent upgrade behind an unchanged registered command** — same
+PATH name, repointed shim, reinstalled symlink target, new version at the same absolute path — costs
+**nothing at all**: no restart, no re-acceptance, and an existing session still reuses through a real
+`session/load`. A **registry edit** costs one daemon restart, which means draining in-flight runs
+first. That restart is a service action, not a promotion: no measurement, no manifest, no receipt, no
+re-canary, and no session invalidation, because no session identity field derives from registry bytes.
+
+The operator surface is a separate CLI:
 
 ```bash
-agent-run-supervisor runtime-binding validate    --binding-root <root> --profile <id> --generation <gen>
-agent-run-supervisor runtime-binding promote     --binding-root <root> --profile <id> --generation <gen>
-agent-run-supervisor runtime-binding rollback    --binding-root <root> --profile <id> --generation <gen>
-agent-run-supervisor runtime-binding inspect-run --run-dir <native-run-dir>
+agent-run-supervisor agents validate --agents-file <path>
+agent-run-supervisor agents doctor   --agents-file <path> [--agent <agent-id>]
+agent-run-supervisor run inspect     --run-dir <native-run-dir>
 ```
 
-For a profile instantiated per Agent Registration, add `--agent <agent-id>`; it is required for such
-a profile and refused for any other.
+`agents validate` parses, bounds-checks, and applies the identical mediation-collision check the daemon
+applies at startup — printing only entry ids, counts, environment **names**, source classes, and rule
+outcomes, never a value. `agents doctor` runs a zero-prompt ACP `initialize` per agent and reports the
+projected environment **name** set, which is how you find the `PATH` gap that causes "works in my
+shell, fails under ARS". `run inspect` reports per-run evidence.
 
-There is no `--force`: a generation that does not validate is never promoted. Nothing here installs
-an artifact, edits a unit file, escalates privilege, or restarts the daemon. Promotion takes effect
-on the *next* run and never re-points a run that is already sealed.
+There is no `promote`, no `rollback`, and no `--force`. Nothing here installs software, edits a unit
+file, escalates privilege, or restarts the daemon.
+
+Full contract — grammar, bounds, every refusal code, environment layers and precedence,
+`session_epoch`, and the honest limits: [`docs/design/agent-registry.md`](docs/design/agent-registry.md).
 
 ## Use from Python
 
@@ -340,10 +409,11 @@ with ArsdClient(socket_path) as client:
             ...
 ```
 
-The `request` object is a versioned `AgentRunRequest`: `owner` / `namespace`, `profile_id`, the
+The `request` object is a versioned `AgentRunRequest`: `owner` / `namespace`, **`agent_id`**, the
 session-reuse choice, `requested_model` / `requested_effort`, input references, the frozen
-`execution_grant` reference and hashes, credential **references**, and limits. A profile instantiated
-per Agent Registration also takes `agent_id`; naming one for any other profile is refused.
+`execution_grant` reference and hashes, credential **references**, and limits. `agent_id` names one
+entry in the operator's registry; it passes its grammar before any resolution and names no path,
+executable, argv token, environment key, digest, or version.
 
 It never carries shell text, argv, environment values, executable paths, or credential material —
 those fields do not exist on the wire.
@@ -357,95 +427,107 @@ message text is never echoed back into an exception.
 ARS speaks **ACP Protocol v1** (`protocolVersion: 1`) over stdio JSON-RPC, using the official Python
 client library `agent-client-protocol`, pinned to **0.11.1** by the `native` extra.
 
-Every registered profile freezes ACP protocol version `1` in its contract. A live agent that reports
-anything else fails the run at `initialize`, before any prompt is dispatched. Every profile also
-requires the `loadSession` capability, because same-session continuity uses a real `session/load` on
-an unchanged external session ID — silently creating a new session is a failure, never a fallback.
+Every profile freezes ACP protocol version `1`. A live agent that reports anything else fails the run at
+`initialize`, before any prompt is dispatched. Every profile also requires the `loadSession` capability,
+because same-session continuity uses a real `session/load` on an unchanged external session ID.
+
+**A reuse request can never become a new session.** Not as a fallback, not after a failure, not under
+any error class — that is structural, not conditional. An absent or corrupt session record, a missing
+stored external ID, or a changed binding all fail *before* the lease, and every conflicting
+identity-bearing callback is rejected at entry before any handler, event, filesystem access, or
+permission decision runs.
 
 Before any prompt, one connection must complete `initialize` → `session/new` or `session/load` →
 discovery → set model → rediscovery → set effort → **exact readback**. A missing capability, an
-unadvertised value, or an inexact readback produces zero turns and no prompt.
+unadvertised value, or an inexact readback produces zero turns and no prompt. The **live-advertised**
+option set is the authority: ARS freezes no model or effort value domain, so an agent adding a model
+today is a non-event.
 
 A profile id that names an ACP generation — `standard-native-acp-v1` — freezes exactly that protocol
-major. A future v2 would be a separate profile, registration, Binding, and session domain, never a
-revision of this one.
+major. A future v2 would be a separate profile and session domain, never a revision of this one.
 
 ## Supported agents
 
-A profile is a closed, versioned, code-registered launch and compatibility contract. Submit every
-literal below verbatim.
+A profile is a small, source-owned, versioned description of **how to speak ACP to a class of agent**.
+It is not an agent list, and it carries no path, version, digest, model literal, or agent name.
 
-| `profile_id` | Agent | Launch | `requested_model` | `requested_effort` |
-|---|---|---|---|---|
-| `opencode-native-acp` | OpenCode | direct ACP | `kimi-for-coding/k3` | `low` / `high` / `max` *(default `max`)* |
-| `codex-acp-1.1.7` | Codex, via its official ACP adapter | wrapped ACP | `gpt-5.6-sol` | `max` |
-| `claude-agent-acp-0.63.0` | Claude, via its official ACP adapter | wrapped ACP | `claude-fable-5[1m]`, `opus[1m]` *(default)* | `max` |
-| `standard-native-acp-v1` | any ACP-v1-conforming direct-ACP agent | direct ACP | per Agent Registration | per Agent Registration |
-
-> `standard-native-acp-v1` is on `main` and **not in a published release yet** (see the
-> `Unreleased` section of [`CHANGELOG.md`](CHANGELOG.md)). It freezes ACP-v1 conformance only and
-> freezes no agent identity. Making a real agent runnable through it is an operator sequence —
-> install the artifact, run zero-prompt ACP discovery, run the code-owned version probe, run the
-> mandatory denied-action mediation canary, author a registration, then validate and promote a
-> generation.
-
-The literals come from two different namespaces. `profile_id` is ARS registry input, matched exactly
-at admission. Model and effort literals are live ACP values that the agent advertises and must read
-back exactly. Neither is interchangeable with the selector names a vendor's own CLI accepts — that is
-a third namespace.
-
-**A `profile_id` is not a CLI version.** It identifies a closed launch and compatibility contract.
-Which downstream CLI build is deployed — path, version, digest — is a Runtime Binding fact owned by
-the operator, which is why a profile id carrying an adapter version pins the *adapter contract*, not
-the agent CLI you installed. This is also why speaking generic ACP does not remove the need for
-profiles: ACP standardizes the wire, not the launch, the selector names, the permission semantics, or
-the literals a given agent will actually accept and read back.
-
-## Required agent runtimes
-
-ARS launches agents; it does not ship or install them. Each profile needs its runtime installed under
-a **root-owned immutable prefix that the `arsd` UID cannot rewrite**, and a promoted Binding
-generation. The source-frozen prefix is `/opt/agent-run-supervisor/artifacts/`.
-
-### Wrapped-ACP profiles: Codex and Claude
-
-Both wrapped profiles run through an ARS-controlled Node interpreter and an official npm ACP adapter.
-The contract source-freezes the interpreter and the adapter package closure — install root, whole-tree
-digest, contained entry, and the `--no-global-search-paths` interpreter prefix that closes Node's
-out-of-closure module search. All of it is re-proven at the spawn boundary.
-
-| Dependency | Pinned identity | Frozen location |
+| `profile` | Use it for | Extra ACP semantics |
 |---|---|---|
-| Node interpreter | v24.14.0, launched with `--no-global-search-paths` | `/opt/agent-run-supervisor/artifacts/node/v24.14.0/bin/node` |
-| `@agentclientprotocol/codex-acp` | 1.1.7 | `/opt/agent-run-supervisor/artifacts/adapters/codex-acp/1.1.7` |
-| `@agentclientprotocol/claude-agent-acp` | 0.63.0 | `/opt/agent-run-supervisor/artifacts/adapters/claude-agent-acp/0.63.0` |
+| `standard-native-acp-v1` | every agent, native ACP or reached through an independently installed ACP adapter command | — |
+| `claude-agent-acp-compat-v1` | one adapter whose ACP behavior deviates in a way live discovery cannot express | frozen session metadata sent on **both** `session/new` and `session/load`, plus a required permission-mode selector proven by exact readback |
 
-Each adapter entry resolves inside its own install root:
+**Which agents are supported is your registry, not this table.** Any agent that speaks ACP v1 over
+stdio — directly, or through an ACP adapter command you installed — is one registry entry against
+`standard-native-acp-v1`. A non-ACP CLI needs an adapter command; it does not, by itself, need a
+profile.
 
-```text
-<install root>/node_modules/@agentclientprotocol/<package>/dist/index.js
-```
+Admitting a *new* compatibility profile requires all three of: a cited, reproducible observation at the
+ACP layer; a demonstration that the deviation cannot be expressed by live discovery, exact readback, a
+selector-id hint, or an operator environment value; and review. That bar exists because a per-agent
+profile would re-couple that agent's routine upgrades to ARS releases — the exact cost this
+architecture removes.
 
-The **downstream CLI** each adapter drives is a Binding fact, not a source constant:
+Model and effort literals come from the running agent, not from ARS. You pass them per run and the agent
+must read them back exactly.
 
-| Profile | Binding slot | Env key the adapter honours |
-|---|---|---|
-| `codex-acp-1.1.7` | `downstream_cli` (package tree) | `CODEX_PATH` |
-| `codex-acp-1.1.7` | `codex_home` (config root, credentials) | `CODEX_HOME` |
-| `claude-agent-acp-0.63.0` | `downstream_cli` (package tree) | `CLAUDE_CODE_EXECUTABLE` |
+## Agent runtimes you install
 
-Claude manages its own credential storage, which ARS neither stages nor inspects, so its admission
-requires zero caller credential references. Codex binds its credential root through `codex_home`.
+ARS launches agents; it does not ship, install, host, freeze, or verify them. For each agent you want:
 
-### Direct-ACP profiles: OpenCode and standard-native
+1. install it with your own package manager, wherever you like — including below `$HOME`, behind a
+   version-manager shim, or through a symlink farm;
+2. add one registry entry naming its `command` (and `args`, if its ACP mode needs a subcommand);
+3. declare any environment it needs that the base allowlist does not cover — `PATH` first;
+4. run `agents validate`, then `agents doctor`, then the **mandatory denied-action canary** for that
+   agent before using it;
+5. restart `arsd` so the new registry is read.
 
-A direct-ACP agent has no separate adapter — the deployed executable is both the agent CLI and the
-ACP implementation — so its whole executable closure is bound through the Binding's `agent_cli` slot.
-OpenCode additionally declares the `kimi-for-coding` credential slot; slot **names** only, never
-values.
+Upgrading that agent afterwards, behind the same registered command, needs nothing from ARS.
 
-An adapter or CLI version bump is never a silent swap: it moves the frozen artifact identity, which
-means a contract revision, and every Binding generation accepted under the old contract fails closed.
+**No artifact ownership.** There is no ARS-owned artifact prefix, no package closure, no tree digest, no
+frozen interpreter identity, no promotion, and no attestation. ARS performs no ownership, mode,
+ancestor, symlink, or digest check on your command or on anything it loads. What ARS records per run is
+the declared command, the exact argv, the resolved environment **names**, and — as explicitly
+non-authoritative evidence — what it observed: the PATH hit, the image the kernel mapped, and the
+agent's self-reported name and version. None of that gates a run or blocks continuity.
+
+**What ARS gives up by that.** ARS no longer detects a swapped or modified executable. That trade is
+deliberate: the detection ran as the same UID that then executed the agent with full authority, so it
+never bounded what a byte-identical agent could do. Executable integrity belongs to your OS and
+deployment tooling — package signatures, immutable images, filesystem permissions, host integrity
+tooling — and ARS's contribution is per-run recorded evidence for after-the-fact audit.
+
+## Operator-visible changes
+
+Seven changes on the registry boundary deserve a note in your own runbook:
+
+1. **The agent project-config workspace refusal disappears.** ARS no longer refuses a workspace for
+   containing an agent's own project configuration file — that file is agent-owned.
+2. **You author `env_passthrough` / `env_overlay`** for anything the base allowlist does not cover.
+   `PATH` is the most likely cause of "works in my shell, fails under ARS", and `SSH_AUTH_SOCK` is
+   deliberately opt-in, because forwarding it hands the agent live use of your SSH keys.
+3. **New launch records carry environment names, source classes, and precedence only.** No value, no
+   digest of a value, no length. Older value-bearing records are read value-blind and their free-form
+   text is withheld behind stable categorical markers.
+4. **A registry edit takes effect at the next daemon start, not the next run** — while an agent upgrade
+   behind an unchanged registered command costs nothing.
+5. **Adding `session_epoch` for the first time cuts that agent's existing sessions**, because absent ≠
+   1. Comparison is symmetric equality, so this is the same deliberate act as a bump. If you do not want
+   the cut, do not add the field. Nothing else bumps it — not an agent upgrade, not an ARS upgrade, not
+   a command, args, environment, or selector edit, not a file replacement, not a restart.
+6. **Guarding short, common environment values erases substantial evidence.** `TERM`, `LANG`, `TZ`,
+   `USER`, `HOME`, and `PATH` elements are all in the guard's literal set, so run text that echoes them
+   is replaced or withheld. Confidentiality wins over evidence completeness: there is no minimum secret
+   length and no inconvenience waiver. Coarse suppression counters make the loss measurable rather than
+   invisible — and this is the tradeoff most likely to surprise you while triaging a failed run.
+7. **The canonical workspace root and the effective `cwd` stay complete literals and stay
+   hash-covered.** They are independently derived authority facts, not environment-value flow, and are
+   deliberately outside the guarded set — so a workspace under `$HOME` appears in full in `spec.json`.
+   Guarding them would break workspace binding, reconciliation attribution, and audit.
+
+At a cutover, additionally: **every live session ends once.** Sessions created under the retired
+identity model are refused for reload with a stable code while staying owner-scoped readable, and
+continuing that work means a new session with caller-owned context handoff.
 
 ## Guarantees and boundaries
 
@@ -456,22 +538,42 @@ means a contract revision, and every Binding generation accepted under the old c
 - **Default-deny, caller-frozen permissions.** The caller freezes the execution grant; ARS enforces
   it and never widens or refreshes it. Registered workspace-internal reads may be allowed; write,
   terminal, execute, and unknown operations are denied. Every decision produces redacted mediation
-  evidence.
+  evidence. The mediation environment binding is source-owned in key and value, applied last, and a
+  registry entry can select one or none but can never author, replace, or disable it.
+- **No environment value in an ARS sink.** Every environment value is treated as sensitive regardless
+  of key name, length, or shape. No projected literal — and no digest, fingerprint, or length of one —
+  reaches an ARS artifact, hash input, log, error, event, inspect response, or API response.
 - **Auditable by default.** Runs produce deterministic, redacted artifacts with restrictive
-  permissions: `0700` directories, `0600` files, atomic final writes.
+  permissions: `0700` directories, `0600` files, atomic final writes. ARS writes to exactly two
+  surfaces — the supervisor root and its socket path — and nothing else.
 - **Fail closed on uncertainty.** Invalid input, protocol drift, denied permissions, timeouts, and
   untrustworthy recovery resolve to deterministic non-success states rather than a guess. Nothing
-  auto-retries, replays, or resumes a prompt that may already have been dispatched.
+  auto-retries, replays, or resumes a prompt that may already have been dispatched, and there is no
+  unquarantine tool.
 - **Local and unprivileged.** A `0600` socket in a `0700` directory, peer-credential authentication
   against an explicit caller policy, and no root.
 
 **What ARS is not**
 
 - **Not a sandbox.** This is cooperative-agent policy mediation, not OS-level isolation, not
-  hostile-process containment, and not multi-tenancy.
+  hostile-process containment, and not multi-tenancy. The agent runs as the daemon's UID with that
+  UID's full authority. Real isolation belongs at the OS layer — a dedicated UID, user namespaces,
+  `seccomp`/Landlock, `bwrap`/container/VM boundaries, cgroup limits — and composes here, because you
+  can register the isolation wrapper as the command.
+- **Not an integrity or supply-chain check.** ARS does not verify that the executable it launched is
+  the one you intended, is unmodified, or came from a trusted publisher.
+- **Not a complete kill switch.** ARS reliably terminates its direct child and every descendant still
+  in the process group it created. A descendant that leaves the group, a payload handed to a service
+  manager as a separate unit, a container runtime that relocates it, or an agent that double-forks are
+  all outside that guarantee. If work continues elsewhere anyway, the run fails loudly as `unknown` /
+  `quarantined`, never silently.
 - **Not a crash-containment mechanism by itself.** Production expects a user-level service manager
   cgroup (`Restart=on-failure`, `KillMode=control-group`) so killing the daemon kills every agent
-  descendant.
+  descendant still inside it.
+- **Not a credential manager.** ARS resolves, mints, refreshes, and stores no credentials. Agents use
+  their own auth stores under their own `HOME`. If you project a token or an agent socket into the
+  child, that value reaches the child by your declaration — ARS records only its name and source class,
+  and cannot stop the child from writing it, sending it, or disclosing it in transformed form.
 - **Not an ingress, a gateway, or a chat integration.** No public ingress, no message delivery, no
   agent-to-agent routing. Those belong to the caller and its platform.
 
@@ -527,6 +629,7 @@ Issues and pull requests are welcome.
    [`docs/design/technical-solution.md`](docs/design/technical-solution.md) →
    [`docs/roadmap/features.md`](docs/roadmap/features.md) →
    [`docs/roadmap/current-status.md`](docs/roadmap/current-status.md).
+   [`docs/design/agent-registry.md`](docs/design/agent-registry.md) is the operator contract, and
    [`docs/roadmap/non-approvals.md`](docs/roadmap/non-approvals.md) records what is explicitly out of
    scope. Anything under `docs/archive/` is cold history and never current authority.
 2. **Branch from `main`** with a short-lived task branch: `feat/`, `fix/`, `docs/`, or `cicd/`.

@@ -2,9 +2,22 @@
 
 ## Product identity
 
-`agent-run-supervisor` (ARS) is local execution and supervision infrastructure for external ACP AGENTs.
-It accepts a caller-authorized, structured Run request and proves whether that Run happened under the
-frozen identity, configuration, workspace, permission, process, and evidence constraints.
+**ARS is a local, unprivileged, caller-authenticated execution supervisor for external ACP AGENTs.** It
+accepts a structured, caller-authorized Run request; starts one operator-registered external command
+exactly as declared; supervises the resulting local process; drives the ACP lifecycle with exact
+configuration fidelity; mediates permission requests against an immutable per-Run grant; and produces
+bounded, redacted, per-Run evidence with irreversible terminal facts.
+
+ARS does **not** install, package, copy, unpack, freeze, promote, pin, host, own, or attest external
+AGENTs, their ACP adapters, their homes, credential stores, plugin trees, caches, or configuration. Those
+are installed, configured, authenticated, upgraded, and removed by users and operators through their own
+package managers, entirely outside ARS.
+
+ARS v1 also does not discover, resolve, mint, refresh, or manage credentials, and never persists an
+environment value.
+
+Process lifecycle ownership is not software-entity ownership. ARS owns the *process it started*; the user
+owns the *software it started*.
 
 ARS is not a business orchestrator and never converts process/ACP completion into business success.
 
@@ -13,12 +26,16 @@ ARS is not a business orchestrator and never converts process/ACP completion int
 ```text
 Hermes / FlowWeaver / trusted local CLI
         │  AgentRunRequest + frozen execution_grant
+        │  agent_id · model · effort · grant · limits
+        │  NO command / argv / env / path / secret value
         ▼
 arsd — local Unix domain socket; sole production ingress
+        │  startup: parse the agents file once → immutable snapshot → reconcile → then bind
         ▼
 ars-core / RunTask / Native ACP Driver
+        │  one ARS-owned local ManagedProcess per Run, ACP JSON-RPC over stdio
         ▼
-registered external ACP AGENT process
+external ACP AGENT — the operator-registered command, launched exactly as declared
         ▼
 model / provider
 ```
@@ -36,68 +53,110 @@ model / provider
 Callers own user intent, business authorization, task decomposition, role/AGENT choice, retries,
 approvals, delivery, and business verdicts.
 
-ARS owns caller authentication, approved-resource binding, immutable per-Run execution grants,
-AgentProfile resolution, process/ACP lifecycle, Session/Run technical state, permission mediation,
-recovery semantics, and redacted evidence. ARS enforces the frozen grant but never widens it and is
-not a broad RBAC or policy-decision engine.
+Operators own which command is which AGENT here: installation, the agent registry file, configuration,
+credentials, `HOME` and AGENT state, environment declarations, and upgrades.
 
-External AGENTs own their actual conversation/context state. ARS stores only the minimal SessionBinding
-and runtime ledger needed for supervision, recovery, duplicate prevention, progress, configuration,
-and result verification.
+ARS owns caller authentication, approved-resource binding, immutable per-Run execution grants, ACP
+compatibility-profile resolution, process/ACP lifecycle, Session/Run technical state, permission
+mediation, recovery semantics, and redacted evidence. ARS enforces the frozen grant but never widens it
+and is not a broad RBAC or policy-decision engine.
+
+External AGENTs own their actual conversation/context state. ARS stores only the minimal Session binding
+and runtime ledger needed for supervision, recovery, duplicate prevention, progress, configuration, and
+result verification.
 
 ## vNext load-bearing contracts
 
-1. Three runtime-authority layers stay separate and are never merged: a code-closed
-   `AgentProfile`/`AdapterContract`, an operator-owned Runtime Binding, and a per-Run sealed
-   `ResolvedLaunchSpec` plus runtime provenance. Admission resolves the closed contract, projects the
-   accepted Binding slots, materializes a controlled `ResolvedLaunchSpec`, and seals immutable
-   `AgentRunSpec/spec_hash` before spawn.
+1. Four authority layers stay separate and are never merged, and no fifth layer exists: a source-owned
+   **ACP compatibility profile** (how to speak ACP to a class of agent), an **operator-owned agent
+   registry snapshot** (which command is that agent, here), a **per-Run sealed `AgentRunSpec` plus launch
+   snapshot** (what was requested, sealed before spawn), and **observed evidence** (what was resolved and
+   observed, non-authoritative). A profile never learns from operator data or from an observation; the
+   per-Run seal is a projection of profile × registry entry × request taken exactly once; observations
+   never flow backward; and the wire never reaches the registry's value space.
 2. A supervised `ManagedProcess` owns PID/PGID/identity, bounded stderr, timeout, terminate/kill/reap;
-   the ACP SDK exclusively owns the live stdin/stdout JSON-RPC wire.
+   the ACP SDK exclusively owns the live stdin/stdout JSON-RPC wire. Every Run owns exactly one such
+   local process, from spawn to reap, and it is non-optional after spawn.
 3. v1 uses process-per-Run. Same-Session continuity uses one external session ID and real
-   `session/load`; AGENT processes do not survive between Runs.
+   `session/load`; AGENT processes do not survive between Runs. A reuse request can never become
+   `session/new` — not as a fallback, not after a failure, not under any error class.
 4. model/effort are immutable per Run, switchable only between completed Runs on the same external
    AGENT Session: load → discovery → set model → rediscovery → set effort → exact readback → prompt.
+   The live-advertised option set is the domain authority; no source-frozen value domain gates it.
 5. A prompt that may have been dispatched without a trustworthy terminal result ends as
    `Run=unknown`, `Session=quarantined`, `retryable=false`. It is never replayed, resumed, or retried
    automatically; successor work is a separate caller-authorized Run.
 6. Permission mediation is default-deny and must be proven by a real denied-action canary. It is
-   cooperative-agent policy enforcement, not an OS sandbox.
+   cooperative-agent policy enforcement, not an OS sandbox. The mediation environment binding is
+   source-owned in key and value, applied last, and a registry entry may select one or none but can
+   never author, replace, or disable it.
 7. Native state uses isolated `native-runs/` and `native-sessions/` roots. Native code never reads,
    writes, imports, mirrors, or migrates acpx/legacy session storage.
 8. Production crash containment uses a user-level service manager/cgroup: an `arsd` crash terminates
-   all AGENT descendants; restart performs reconciliation only and never resends a prompt.
-9. Every AGENT is reached through a typed, versioned, code-registered closed profile with registered
-   selectors and no arbitrary command/argv/env/JSON passthrough. The profile's `AdapterContract` is
-   the source-frozen compatibility contract: stable profile ID, revision, `adapter_contract_hash`,
-   `launch_kind` (`wrapped_acp` or `direct_acp`), the accepted Binding schema and slot projection,
-   executable/argv construction, code-known env keys only, ACP protocol/name and required plus
-   forbidden capabilities, permission/config/model/effort/session semantics, wrapped
-   adapter/interpreter artifact identity, and a code-owned safe version-probe rule. The registry
-   holds one direct-ACP profile (OpenCode), two wrapped official adapters (Codex ACP, Claude Agent
-   ACP), and one versioned standard direct-ACP profile that freezes ACP-v1 conformance only and is
-   instantiated per operator-owned Agent Registration.
-10. A Runtime Binding carries operator-owned deployment facts only: the external CLI artifact
-    descriptor (immutable versioned path, actual version, digest), optional values for
-    Profile-declared config-root slots, a positive `session_compatibility_epoch`, and an acceptance
-    receipt reference recorded as provenance — never as self-authorization. A Binding never declares
-    a command, argv, env key, adapter, launch kind, capability, permission, or selector. Every slot
-    binds to the exact profile ID, revision, and `adapter_contract_hash` that accepted it; after a
-    contract revision a stale generation fails closed instead of being reinterpreted by a new source
-    contract.
-11. A profile whose contract declares `requires_agent_registration` is instantiated by a typed,
-    bounded, operator-owned **Agent Registration** anchored inside its Binding root at
-    `profiles/<profile_id>/agents/<agent_id>/`. A registration may only *select within* or *narrow*
-    a bound the source contract already declared — ACP name, bounded argv tokens, selector ids and
-    their value domains, a superset of the source forbidden-capability floor, one source-registered
-    permission-mediation binding or none, and credential slot names. It supplies no executable,
-    path, digest, version, env key, launch kind, protocol version, or capability requirement, and it
-    is never a runtime plugin surface. Its `agent_registration_hash` — computed over everything
-    except provenance — is sealed into the Run spec, the launch record, and Session identity, so an
-    edit fails stale work closed rather than reinterpreting it. Agent identity is carried, generic:
-    no runtime path branches on an agent name. A profile id that names an ACP generation
-    (`…-v<N>`) must freeze exactly that protocol major, so a future generation is a separate
-    profile, registration, Binding, and Session domain rather than a revision of this one.
+   all AGENT descendants that remain in its cgroup; restart performs reconciliation only and never
+   resends a prompt.
+9. A source profile freezes **ACP protocol and compatibility semantics only** — protocol major, required
+   capabilities, a forbidden-capability floor, session semantics including required real `session/load`,
+   selector-id conventions, the base environment allowlist, permission-mediation semantics, and, only
+   where cited ACP-level evidence requires it, frozen ACP session metadata and a required permission-mode
+   selector. It contains no path, version, digest, model literal, agent name, value domain, launch kind,
+   artifact identity, or deployment fact. Every AGENT is instead one **operator-owned registry entry**
+   that carries the command and its argv, read once at daemon startup into an immutable snapshot. There
+   is no ARS-owned artifact, ARS-managed AGENT home, or attestation of anything ARS does not own.
+   Therefore an AGENT or adapter upgrade behind an unchanged registered command costs no ARS action at
+   all, while a registry edit costs exactly one drain-and-restart and no Session invalidation.
+
+## Environment and credential guarantee
+
+Every environment value is sensitive, regardless of key name, source class, length, or apparent shape. A
+value may exist at its operator- or source-owned origin, in `arsd` memory, and in the child environment.
+No complete projected literal — and no digest, fingerprint, length-by-value, or other metadata computed to
+represent that value — may flow into an ARS durable artifact, hash input, log, exception or error message,
+event stream, inspect response, or daemon API response. Durable environment evidence records the name, its
+source class, its precedence layer, and its redaction status, and nothing else.
+
+ARS v1 does not discover, resolve, mint, refresh, store, or manage any credential. AGENTs authenticate
+through their own stores under their own `HOME`, exactly as they do interactively. `credential_refs` stay
+caller-supplied **references** recorded as admission evidence and grant material; they are never resolved
+to values and never reach the child environment.
+
+**ARS does not claim that no sensitive value reaches the child.** An operator who declares a provider
+token, a proxy URL with embedded credentials, an SSH agent socket, or any overlay literal transmits that
+value to the child process in memory, by their own declaration, recorded only by name and source class.
+
+## Filesystem boundary
+
+ARS-owned **writable** surfaces are exactly two: the supervisor root (`native-runs/`, `native-sessions/`)
+through the single storage seam, and the configured UDS runtime path. Nothing else.
+
+Read-only access is permitted wherever the paths live, including below `$HOME` and through symlinks and
+PATH shims: the operator registry file once at startup, everything the kernel and loader need to resolve
+and launch the declared command, `/proc/<pid>/exe` and liveness reads for its own child, and the
+caller-bound workspace.
+
+ARS never creates, writes, populates, stages, mirrors, repairs, deletes, or otherwise **manages** AGENT
+auth, configuration, cache, plugin, or Session state, and never **inspects** those surfaces as a control
+surface — no stat audit, no mode or ownership enforcement, no digest, no required-absence check. The child
+AGENT may mutate its own `HOME` and state normally, and such a Run completes normally.
+
+## Process boundary
+
+ARS guarantees a new POSIX session and process group for the child, `ProcessIdentity` recorded immediately
+after spawn, signals delivered to the process group on terminate and kill, and `wait()` plus reap of its
+direct child before releasing a lease or returning a terminal that permits deregistration.
+
+ARS therefore reliably terminates the direct child and every descendant that **remains in the process
+group ARS created**. It does not control a wrapper or descendant that calls `setsid()`/`setpgid()` and
+leaves the group, a payload handed to a service manager in a separate transient unit, a container runtime
+that relocates the payload to another namespace and cgroup, or an agent that double-forks and daemonizes
+itself. Crash containment through the user-level service manager cgroup is a real, load-bearing dependency
+that is **external** to ARS. When work continues elsewhere anyway, the uncertainty rules apply and the Run
+fails loudly as `unknown`/`quarantined`/`retryable=false`.
+
+ARS claims no isolation or containment of hostile code. An operator who wants isolation registers the
+isolation wrapper as the command; a wrapper that `exec`s into the payload composes cleanly, while one that
+relocates the payload to another supervisor breaks ARS's termination and timeout guarantees. That is the
+operator's knowing choice, and ARS makes no claim about it.
 
 ## acpx removal direction
 
@@ -111,58 +170,49 @@ work that this document does not perform or approve. Until it lands, acpx receiv
 is never a Native ACP driver, fallback, or degraded path, and never directs vNext development. Its
 old requirements, architecture, plans, and phase vocabulary are archived.
 
-The cold snapshot is `docs/archive/pre-vnext-reset-2026-07-21/`. Closed plans and phases remain under
-their archive directories. Git history remains the implementation audit trail.
+The cold snapshots are `docs/archive/pre-vnext-reset-2026-07-21/` and, for the retired artifact/Binding
+era, `docs/archive/binding-era-2026-07/`. Closed plans and phases remain under their archive
+directories. Git history remains the implementation audit trail.
 
 ## Current status and authorization
 
-This goal, the PRD, architecture, and technical solution are documentation authority. They describe the
-target and do not authorize work by their existence. Volatile implementation status belongs in
-`docs/roadmap/current-status.md`, which is where each merged change is expected to be recorded; that
-board is not restated here and does not, by itself, evidence the source facts below.
+This goal, the PRD, architecture, technical solution, and the operator-facing agent-registry document are
+documentation authority. They describe the target and do not authorize work by their existence. Volatile
+implementation status belongs in `docs/roadmap/current-status.md`, which is where each merged change is
+expected to be recorded; that board is not restated here and does not, by itself, evidence source facts.
 
-On current `main`, Stage 0/1 Native ACP and Stage 2 `arsd` (A1–A5, including the caller-UID policy and
-user-service/cgroup enablement) are merged, and the closed registry holds three profiles.
-Release/publication, Sachima integration, public ingress, and any Gateway/IM/live behavior each still
-require separate, explicit authorization — and registration plus local acceptance never transfers
-approval to the next change.
+**Authority and source differ right now, deliberately and visibly.** This document describes the V4
+boundary reset: the operator agent registry, the four-way boundary, the environment-value sink boundary,
+total ordered reconciliation, and fail-closed load-only Session reuse. Source on `main` still implements
+the retired artifact/Binding architecture that `docs/archive/binding-era-2026-07/` preserves. Closing that
+gap is staged source work that this document does not authorize; the board carries the exact delta and the
+sequence.
 
-The three-layer split in contracts 1, 9, and 10 is implemented in source on `main`. Each registered
-profile carries a source-frozen `AdapterContract`; a single Binding reader module is the only reader of
-an operator-owned Binding root; admission performs exactly one Binding read per Run, projects the
-accepted slots, and seals the resulting `ResolvedLaunchSpec` plus runtime provenance before spawn;
-`arsd` requires an explicit Binding root (`--binding-root`) both in daemon mode and when rendering a
-service unit; and every registered profile refuses admission fail-closed when no Binding is configured,
-validated, or promoted.
-
-The wrapped-adapter artifact identity is now a complete package closure in source: each `wrapped_acp`
-contract freezes the adapter's npm **install root** and that root's whole tree digest beside the
-interpreter and entry, so the sibling code and hoisted dependencies the entry resolves are frozen too;
-it also freezes the interpreter argv prefix that closes the runtime's out-of-closure module search,
-because a frozen tree is not a closure while the interpreter can still load code from elsewhere. Both
-wrapped profiles bumped a revision for it, and their frozen paths name the root-owned artifact location
-a later materialization step is expected to create — not the service account's home, whose ancestors no
-per-leaf ownership change could ever make non-writable by the service UID.
-
-Implemented source is still not closure of the Runtime Binding *layer*: operator gates are separate and
-open in their own right — materializing that immutable, non-service-writable artifact root, whose
-ancestor chain must also carry no further module-resolution root, authoring/validating/promoting a
-Binding generation, and re-accepting each profile at its current revision are operator actions. Nothing
-under that artifact prefix exists yet, and no Binding root creation, generation promotion, profile
-acceptance, artifact installation, service restart, rollout, or deployment is approved by this
-document.
+On current `main`, Stage 0/1 Native ACP and Stage 2 `arsd` are merged, and the closed source registry
+still holds four profiles. Retiring the three per-agent profiles is approved as **policy** and is not
+approved as a source act: deleting them from source needs its own separate confirmation. Release and
+publication, production cutover, service restart, migration, `/opt` and Binding-root removal, Sachima
+integration, public ingress, and any Gateway/IM/live behavior each still require separate, explicit
+authorization, and no local acceptance transfers approval to the next change.
 
 ## Non-goals
 
 Public ingress, TCP/root service, distributed scheduling, multi-tenant cloud control plane, broad RBAC,
-per-Run Worker, runtime plugin platform, arbitrary launch/config passthrough, acpx fallback, shared or
-imported acpx session storage, generalized Session rebind, cross-AGENT Session reuse, automatic replay,
-workspace content-digest service, filesystem watcher, hostile-process sandbox claims, and embedding
+per-Run Worker, runtime plugin platform, remote transport, attach-to-running-agent, plugin loading,
+containers, sandboxing, ARS credential resolution, acpx fallback, shared or imported acpx session storage,
+generalized Session rebind, cross-AGENT Session reuse, automatic replay, workspace content-digest service,
+filesystem watcher, second conversation database, hostile-process sandbox claims, and embedding
 Feishu/Gateway/business semantics in ARS.
 
-Runtime Binding adds no exception to that list: operator-declared launch commands, argv, env keys,
-adapters, launch kinds, capabilities, permissions, or selectors are a non-goal, and so is any
-caller-selected runtime, path, version, digest, or Binding generation.
+The agent registry adds no exception. The caller still supplies no command, argv, environment key or
+value, path, digest, version, or secret — those are not fields on the request. A registry entry still
+declares no capability, permission, protocol version, mediation pair, or transport: `transport` is refused
+as an unknown key, because v1 is stdio by definition and a one-valued key is remote scaffolding. Remote
+transport and attach remain future scope with their own design and their own approval, and no seam, key,
+field, dependency, or branch anticipating them exists in v1.
+
+Artifact identity, promotion, attestation, ARS-hosted artifact trees, ARS-managed AGENT homes, and
+credential-store inspection are non-goals, not deferred work.
 
 ## Development source of truth
 
@@ -176,4 +226,6 @@ New work reads, in order:
 6. `docs/roadmap/current-status.md`
 7. `docs/plans/active/`
 
-Archive documents are never default development context.
+`docs/design/agent-registry.md` is the operator-facing registry contract and is read with the design
+layer. `docs/design/result-event-schema.md` describes emitted JSON shapes and is derivative, never a
+source of product scope. Archive documents are never default development context.

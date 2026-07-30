@@ -2,7 +2,7 @@
 title: "agent-run-supervisor Result / Event Schema"
 status: active
 created_at: 2026-06-01
-last_validated_at: 2026-07-21
+last_validated_at: 2026-07-30
 ---
 # agent-run-supervisor Result / Event Schema
 
@@ -17,11 +17,21 @@ last_validated_at: 2026-07-21
 > **not** redefine product goals, expand scope, grant any runtime/live approval,
 > or introduce a business verdict.
 >
-> **Compatibility baseline, not vNext product direction.** This document remains active because released
-> callers need an exact description of the v0.1.7 result/event shapes and vNext must preserve or evolve
-> them additively. New product scope, Native terminal semantics, module design, staging, and acceptance
-> come only from GOAL/PRD/vNext design/roadmap/active plan. Do not use this schema to restore archived
-> acpx requirements or to claim Native ACP is implemented.
+> **Current-source description, not a compatibility baseline and not vNext product direction.** This
+> document remains active because it states exactly which result/event shapes the code on `main` emits
+> today, including the legacy acpx-named keys in the tables below. That is a fact about current source, not
+> a compatibility baseline, surface, or obligation: acpx is not an ARS product, runtime, fallback, or
+> session store, V4 owes it no compatibility, and removing the acpx code together with the fields it emits
+> is separately authorized work that this document neither performs nor approves. New product scope, Native
+> terminal semantics, module design, staging, and acceptance come only from GOAL/PRD/vNext
+> design/roadmap/active plan. Do not use this schema to restore archived acpx requirements, to create a
+> compatibility obligation, or to claim Native ACP is implemented.
+>
+> **Evidence rules for the reset line.** [§9](#9-native-reset-line-evidence-rules) records the
+> environment-value, guard, withholding, and policy-warning rules that every Native emitter on the V4
+> boundary-reset line must obey, and the audit that found no launch, provenance, or attestation field in the
+> caller-stable contract above. Those rules are **normative for the reset line and not yet implemented in
+> source**; §1–§8 continue to describe what the code emits today.
 >
 > **Stability rule (read this first).** `business_verdict` is **always `null`**
 > and caller-owned — the supervisor never sets it. Schema evolution is
@@ -466,7 +476,12 @@ never deletes an open or live-locked session.
   business pass/fail.
 - **Additive evolution only.** Future schema changes may *add* keys. Existing keys
   are never renamed, removed, or repurposed, and their meaning is fixed. Callers
-  should ignore unknown keys rather than reject them.
+  should ignore unknown keys rather than reject them. This governs how the emitters
+  described above evolve **while they exist**; it is not a commitment to keep the
+  legacy acpx line alive. Separately authorized removal of that code retires the
+  acpx-named keys together with the emitter that produces them — a removal
+  decision recorded elsewhere, not an exception to additive evolution and not a V4
+  compatibility obligation.
 - **Versioning / compatibility.** `result.json` has no embedded `schema_version`
   today; compatibility rests on the additive-only rule. The session record
   `session.json` carries an integer `schema_version` for record-format evolution.
@@ -475,3 +490,116 @@ never deletes an open or live-locked session.
 - **Drift guard.** `tests/test_result_event_schema.py` pins the [§1](#1-resultjson-payload)
   top-level key set against `result.build_result_payload`, so this contract cannot
   drift from the code unnoticed.
+
+## 9. Native reset-line evidence rules
+
+Normative for every Native emitter on the V4 boundary-reset line. **Not implemented in source yet** — the
+board carries the authority-versus-source delta. Nothing in this section changes any key documented in
+§1–§8: those keys keep their names, types, and meanings, and the additive-only rule still holds.
+
+### 9.1 Audit result — no launch, provenance, or attestation field, and no environment value
+
+The caller-stable contract in §1–§8 was audited field by field against the reset boundary. Result:
+
+| Looked for | Found |
+|---|---|
+| a launch/provenance/runtime-identity field (artifact path, version, digest, tree hash, interpreter identity, generation, slot hash, acceptance receipt) | **none.** No payload, projection, or event family above carries one |
+| an attestation or integrity field | **none** |
+| an environment key or value (`fixed_env`, `permission_env`, an overlay literal, a pass-through value, a mediation pair) | **none** |
+| a field that could carry one incidentally | `detail_code`, `final_message`, `stop_reason`, `usage`, `unknown_update.key_summary`, and the `doctor` `error_detail` fields — all free-form or agent-supplied, therefore all inside §9.2 |
+
+The retired Binding-era launch and attestation material lived in `launch.json` and `attestation.json`, which
+this document never described. It is retired with the architecture and preserved only under
+[`docs/archive/binding-era-2026-07/`](../archive/binding-era-2026-07/README.md).
+
+### 9.2 All dynamic keys and free-form text are guard-produced
+
+On the reset line, every free-form or child-influenced string and **every dynamic key** in a persisted or
+projected Native payload is produced by the per-Run environment-value guard before it is serialized. That
+covers agent, thought, and final message text and the final-message accumulator; normalized update fields
+and dynamic tool, config, and permission keys; permission and filesystem evidence; discovery and effective
+state; terminal and failure detail; bounded stderr, byte-matched **before decode** and text-matched again
+after; exception projections; log records; and every live or completed API projection.
+
+Structured environment evidence is value-blind by construction: per name, the name, its source class, its
+precedence layer, and its redaction status, plus a resolved count, the mediation id, and the
+declared-but-absent names. **No value, value digest, keyed digest, length, prefix, suffix, equality token, or
+matcher table is ever a field or a hash input.** Two Runs whose transmitted value changed may therefore share
+a launch hash: the hash proves the declared projection, not the secret.
+
+The canonical workspace root and the effective `cwd` are the deliberate exception. They remain complete
+literals and remain hash-covered — independently derived authority facts, not environment-value flow — and no
+emitter routes them through the guard.
+
+### 9.3 Categorical withholding metadata
+
+When safe replacement cannot be established, an emitter suppresses the whole field or record and emits a
+**stable categorical marker** instead of a partial value. Markers are fixed source literals that contain no
+input data, and they are the only thing a caller sees in place of the withheld content.
+
+| Marker class | Meaning for a caller |
+|---|---|
+| withheld field or record | the emitter could not establish a safe projection, so it withheld the whole thing. Treat it as "not available", never as empty content |
+| unsanitized log record suppressed | a Run-tagged log record reached a handler without a guard in context and was replaced wholesale |
+| legacy text evidence withheld | the record predates the reset and carries value-bearing material (§9.4) |
+| legacy value-bearing launch seal not verified | the record predates the reset, so no hash was recomputed over it (§9.4) |
+| external session id sensitive collision | a child-generated session id matched a projected environment literal and was refused before persistence, exposure, or prompt |
+
+Counting rules: an emitter may record only **coarse sink-local integers** — matched occurrences, suppressed
+fields, suppressed records. Original or replaced byte and character lengths are **not** recorded, because a
+length is metadata about a value. The redaction/suppression report is therefore value-blind and remains safe
+to return to a caller.
+
+Callers should treat every marker as forward-compatible: new marker classes may be added, existing ones never
+change meaning.
+
+### 9.4 Legacy text withholding
+
+Pre-reset Run and Session records may contain environment values in their launch material and unguarded
+free-form text everywhere else. They are **immutable historical evidence**: the reset rewrites nothing,
+migrates nothing, deletes nothing, and re-hashes nothing, and it makes **no retroactive-erasure claim**.
+
+Reset-line readers obey these rules:
+
+- classify the record schema **before** selecting a verifier, so the legacy branch returns through the safe
+  projection and the "recompute first, label legacy later" order is structurally impossible;
+- mark the record value-bearing with environment values withheld, and report launch-seal verification as not
+  performed for a value-bearing legacy record;
+- never return legacy environment fields, raw launch or spec documents, value-bearing embedded seal material,
+  or any pre-reset launch hash derived from values;
+- never call a launch-hash recomputation over a value-bearing record;
+- expose, for legacy Runs, only trusted categorical terminal status and independently safe owner and Run
+  metadata, withholding legacy free-form final messages, error detail, events, stderr, effective and
+  discovery text, and raw inspection documents categorically;
+- keep legacy Session `status`/`list`/`close` available and owner-scoped, while withholding the external
+  session id and the retired value-derived identity hashes from the response allowlist.
+
+Direct filesystem access to old files by an authorized operator stays outside the daemon projection. Those
+bytes may contain historical values; that is an honest limit, not a covered surface.
+
+### 9.5 Policy-warning event
+
+Observed facts never gate a Run and never block continuity, but drift is worth telling a human about. The
+reset line therefore adds one additive event family whose only purpose is to report an observation, never to
+change an outcome.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `type` | `string` | the policy-warning family name |
+| `subject` | `string` | which non-authoritative observation drifted — for example the agent self-reported name, the self-reported version, the advertised capability set, the path-lookup observation, or the mapped-image observation |
+| `comparison` | `string` | what it was compared against, always a *record*, never a gate: the previous Run of this Session, or the observation recorded earlier in this Run |
+| `authoritative` | `boolean` | **always `false`** |
+| `refused` | `boolean` | **always `false`** — the Run continued and the Session stayed reusable |
+
+The event carries no value, no digest, no length, and no raw child text: its subject names *which* fact
+drifted, not what the fact was. A caller must not treat a policy warning as a failure signal, a business
+verdict, or grounds to retire a Session, and no ARS code path branches on one. Zero policy-warning events
+means no observed drift, never that a check was skipped.
+
+### 9.6 What does not change
+
+The terminal vocabulary, the additive-only rule, `business_verdict: null`, owner scoping, event ordering with
+its monotonic `seq`, bounded queues and truncation markers, and the caller-facing event grammar are unchanged
+by the reset. The reset changes what may appear *inside* a free-form field, adds withholding metadata and the
+policy-warning family, and moves the caller wire to `api_version` 2 for the reasons in the PRD — not the
+grammar a caller parses.
