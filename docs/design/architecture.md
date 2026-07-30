@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext System Architecture"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-29
+last_validated_at: 2026-07-30
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/architecture.md"
 ---
 # agent-run-supervisor vNext System Architecture
@@ -10,59 +10,87 @@ supersedes: "docs/archive/pre-vnext-reset-2026-07-21/architecture.md"
 ## 0. Scope and status
 
 This is the system architecture authority for **new ARS development**. It describes the settled vNext
-target, not the released v0.1.7 topology. The previous mixed document is preserved at
-`docs/archive/pre-vnext-reset-2026-07-21/architecture.md` for history only.
+target after the V4 external-AGENT boundary reset, not the released v0.1.7 topology and not the retired
+artifact/Binding architecture. The previous mixed document is preserved at
+`docs/archive/pre-vnext-reset-2026-07-21/architecture.md`; the retired Binding-era sections §3.1–§3.3 are
+preserved at [`docs/archive/binding-era-2026-07/architecture-3.1-3.3.md`](../archive/binding-era-2026-07/architecture-3.1-3.3.md).
 
 Status markers:
 
-- ✅ released compatibility baseline reused unchanged;
-- 🟦 vNext supervision plane, implemented on `main` (Stage 0/1 closed, Stage 2 closed, and the Runtime
-  Binding layer of §3.1–§3.3 merged as source, including the complete wrapped-adapter package closure
-  of §3.3);
+- ✅ legacy released code still present on `main`, untouched by the reset and not a compatibility target;
+- 🟦 vNext supervision plane, implemented on `main` (Stage 0/1 closed, Stage 2 closed);
+- 🟨 settled target of the boundary reset, **not yet implemented in source**;
 - ⏸ separately approved later integration.
 
-Marker 🟦 records the settled design and the merged source that implements it, not an approval:
-per-stage implementation status, gates, and enablement decisions live in
-[`docs/roadmap/current-status.md`](../roadmap/current-status.md). Merged source is never operator
-activation — preparing an immutable artifact root, promoting a Binding generation, re-accepting a
-profile at its current revision, the permission canary owed at the current Claude revision, rollout,
-release, and deployment each remain separate operator decisions.
+🟨 is the honest marker for most of §3, §4, §6, and §8 below. Source on `main` still runs the retired
+Binding line: a Binding reader, artifact digests, promotion, attestation, a required Binding-root daemon
+flag, and four registered profiles. This document is the target; the board
+([`docs/roadmap/current-status.md`](../roadmap/current-status.md)) carries the exact
+authority-versus-source delta and the staged sequence that closes it. No marker here is an approval.
 
-## 1. System context
+## 1. System context and ownership
 
 ```text
-┌──────────────────────────────────────────────────────────────────────┐
-│ Caller/business authority                                            │
-│ Hermes / FlowWeaver / trusted CLI                                    │
-│ - user intent, task graph, AGENT/profile choice                      │
-│ - business approval, frozen execution_grant, retry/delivery/verdict  │
-└───────────────────────────────┬──────────────────────────────────────┘
-                                │ versioned AgentRunRequest
-                                ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│ 🟦 arsd — thin local UDS host; sole production ingress               │
-│ - SO_PEERCRED caller authentication and ownership                    │
-│ - admission, Run/Session/lease authority, bounded concurrency        │
-│ - startup reconciliation, query/events/cancel/session API            │
-└───────────────────────────────┬──────────────────────────────────────┘
-                                │ in-process RunTask
-                                ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│ 🟦 ars-core / Native ACP vertical                                    │
-│ AgentProfile → ResolvedLaunchSpec → AgentRunSpec                     │
-│ ManagedProcess + NativeAcpDriver + PermissionBridge + EventWriter     │
-└───────────────────────────────┬──────────────────────────────────────┘
-                                │ supervised stdio ACP
-                                ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│ External registered ACP AGENT → model/provider                       │
-│ Owns conversation/context; untrusted output/effects                  │
-└──────────────────────────────────────────────────────────────────────┘
+╔══════════════════════════════════════════════════════════════════════════════╗
+║ CALLER DOMAIN — business authority (outside ARS)                             ║
+║ owns: user intent, task graph, agent + model + effort choice, business        ║
+║       authorization, the frozen execution_grant, retry policy, delivery       ║
+╚═══════════════════════════════╤══════════════════════════════════════════════╝
+                                │  AgentRunRequest (versioned)
+                                │  agent_id · model · effort · grant · limits
+                                │  NO command / argv / env / path / secret value
+                                ▼            AF_UNIX 0600 inside a 0700 dir
+╔══════════════════════════════════════════════════════════════════════════════╗
+║ ARS DOMAIN — one unprivileged local process (arsd), one trust domain          ║
+║  startup ──── parse the agents file ONCE → immutable snapshot                 ║
+║          ──── reconcile (ordered, fail-closed) → then bind the socket         ║
+║  ingress ──── SO_PEERCRED · caller-UID policy · owner/namespace scoping       ║
+║  admission ── resolve profile · resolve agent from the snapshot (no I/O) ·    ║
+║               bind workspace · validate grant · resolve child env in memory · ║
+║               seal Spec then launch snapshot                                  ║
+║  RunTask ──── ManagedProcess (PID/PGID · bounded stderr · timeout · signals)  ║
+║          ──── NativeAcpDriver (stdio JSON-RPC · exact-config machine)         ║
+║          ──── PermissionBridge (default-deny against the frozen grant)        ║
+║          ──── EventWriter (bounded · monotonic · redacted)                    ║
+║  ARS-OWNED WRITABLE SURFACES — exactly two:                                   ║
+║     <supervisor_root>/native-runs/ · native-sessions/                         ║
+║     the configured UDS runtime path (dir create · socket · chmod · replace)   ║
+╚═════════╤════════════════════════════════════════════╤═══════════════════════╝
+          │ read-only, exactly once at startup         │ spawn + supervise
+          ▼                                            ▼
+╔═════════════════════════════╗          ╔═════════════════════════════════════╗
+║ OPERATOR DOMAIN (read-only) ║          ║ AGENT DOMAIN — not owned by ARS      ║
+║ agents file (may live below ║  read-   ║ agent / adapter executable            ║
+║ $HOME, may be a symlink)    ║  only    ║ $HOME · auth store · plugins · caches ║
+║ agent_id → command + args   ║ ───────► ║ user + project config · MCP servers   ║
+║ ARS never writes it         ║  resolve ║ MAY FREELY WRITE ALL OF THE ABOVE     ║
+╚═════════════════════════════╝  + exec  ║ owns conversation/context state       ║
+                                         ╚══════════════╤══════════════════════╝
+                                    ┌───────────────────┴──────────────┐
+                                    │ user-level service manager/cgroup │
+                                    │ owns daemon liveness and crash-   │
+                                    │ time descendant kill. Owns no     │
+                                    │ Run/Session/business state.       │
+                                    └───────────────────────────────────┘
 ```
 
-`arsd` is unprivileged, local, single-trust-domain infrastructure. It is not root, TCP/public,
-distributed, multi-tenant, or a business scheduler. Direct ars-core is test/dev-only; production has no
-in-process or acpx fallback.
+| Entity | Owner | ARS may | ARS must never |
+|---|---|---|---|
+| AGENT / adapter executable | user, via their package manager | resolve and spawn it exactly as declared, wherever it lives; record what it observed | copy, unpack, install, relocate, digest-gate, promote, freeze, or substitute a resolved path for it |
+| AGENT `$HOME`, auth store, plugins, caches, user + project config, Session state | AGENT / user | project declared environment names; read nothing there for control purposes | create, populate, stage, mirror, write, manage, inspect as a control surface, stat-audit, digest, or require-absent |
+| AGENT writes to its own HOME/config/cache/Session state during a Run | AGENT | expect and permit them | treat them as a violation, diff them, or fail a Run over them |
+| Agent registry file | operator | open read-only, exactly once at daemon startup, wherever it lives, including through a symlink; refuse to listen on defect | write, create, repair, migrate, promote, or re-read while serving |
+| ACP compatibility profiles | ARS source | version, register, revise under review with cited evidence | contain any path, version, digest, model literal, or deployment fact |
+| Permission-mediation env binding | ARS source (key **and** value) | apply last, unconditionally | let a registry entry author, replace, or disable it |
+| Environment values reaching the child | operator for ambient/pass-through/overlay; ARS source for mediation | resolve once in memory, construct the guard, and hand only the mapping to exec | copy into ARS evidence, hash, log, echo in an error, or return from any API |
+| Per-Run Spec + launch snapshot | one Run | seal before spawn; write once | re-read, re-resolve, or mutate after sealing |
+| Observed runtime evidence | one Run | record; report; warn | use as an admission gate or a continuity blocker |
+| Process created by the Run | ARS (lifecycle only) | PGID, signals, wait, reap, bound | claim isolation or containment of hostile code |
+| Conversation/context state | external AGENT | store the external session id + observations | become a second conversation database |
+
+`arsd` is unprivileged, local, single-trust-domain infrastructure. It is not root, TCP/public, distributed,
+multi-tenant, or a business scheduler. Direct ars-core is test/dev-only; production has no in-process or
+acpx fallback.
 
 ## 2. Single supervision authority
 
@@ -84,266 +112,158 @@ business state.
 | ACP SDK connection / `NativeAcpDriver` | live stdin/stdout JSON-RPC wire and ACP state machine | process identity, Run authority, profile selection |
 | `RunTask` | admission products, process/driver coordination, markers, events, finalization, Session switching | a second process/runtime layer |
 
-The released `execute_subprocess → SubprocessOutcome` remains ✅ compatibility code for acpx only; its
-`stdin=DEVNULL`, stdout-drain threads, and wait-before-return shape cannot carry Native ACP.
+The released `execute_subprocess → SubprocessOutcome` is ✅ legacy acpx-only code the reset leaves untouched,
+not a compatibility surface this architecture owes anything to; its `stdin=DEVNULL`, stdout-drain threads,
+and wait-before-return shape cannot carry Native ACP.
 
-## 3. Admission and immutable identity
-
-```text
-AgentRunRequest
-→ authenticate caller; bind owner/namespace/workspace/Session
-→ validate frozen execution_grant and referenced resources
-→ resolve closed AgentProfile revision/snapshot/hash + config schema hash + adapter_contract_hash
-→ read the Runtime Binding exactly once (active.json + selected generation)
-→ project only contract-accepted slots; revalidate contract match and artifact digest
-→ materialize ResolvedLaunchSpec incl. complete runtime identity
-→ seal immutable AgentRunSpec/spec_hash (launch sealed by launch_spec_hash)
-→ spawn
-→ observe EffectiveRunState
-→ exact requested/effective comparison
-→ prompt
-```
-
-`AgentProfile` owns registered launch/config compatibility. `execution_grant` owns per-Run authorization.
-`AgentRunSpec` owns immutable requested facts. `EffectiveRunState` owns observations only. No observed
-value flows backward into Profile, Binding, or Spec. No caller-supplied executable, arbitrary argv/env/
-JSON, credential value, runtime path/version/digest, or Binding generation crosses admission.
-
-### 3.1 Runtime authority layers 🟦
+## 3. Admission, spawn, and the ACP flow 🟨
 
 ```text
-LAYER 1 — code-closed AgentProfile / AdapterContract          owner: the registry
-  stable profile ID · revision · adapter_contract_hash
-  launch_kind: wrapped_acp | direct_acp
-  accepted Binding schema + slot projection
-  fixed executable/argv construction · code-known env keys only
-  ACP protocol/name · required + forbidden capabilities
-  permission / config / model / effort / session semantics
-  wrapped adapter + interpreter artifact identity
-  code-owned safe version-probe rule
-        │
-        │ accepts (profile_id, revision, adapter_contract_hash)
-        ▼
-LAYER 2 — operator-owned Runtime Binding generation           owner: the operator
-  declared contract identity: profile_id · profile_revision ·
-    adapter_contract_hash          ← the only acceptance inputs
-  external CLI artifact descriptor: immutable versioned path,
-    actual version, digest, complete executable code closure
-  optional values for Profile-declared config-root slots
-  positive session_compatibility_epoch
-  provenance block: created_at, accepted_by, accepted_at,
-    acceptance receipt ref/hash   ← recorded and reported, never consulted
-        │
-        │ read exactly once per Run, at admission
-        ▼
-LAYER 2b — operator-owned Agent Registration (agent-scoped profiles only)
-  registration.json under profiles/<profile_id>/agents/<agent_id>/
-  ACP agent_name · bounded argv tokens · probe argv suffix
-  selector ids + value domains · forbidden-capability superset
-  one source-registered mediation binding id, or null
-  credential slot names · provenance   ← recorded and reported, never consulted
-  agent_registration_hash (excludes provenance) → frozen by the generation,
-    and sealed into spec, launch, and Session identity
-        │
-        ▼
-LAYER 3 — per-Run sealed ResolvedLaunchSpec + provenance      owner: the Run
-  write-once launch.json · launch_spec_hash · never re-read after sealing
+ S1 parse the agents file ONCE → immutable snapshot        ✗ REGISTRY_* → refuse to listen
+ S2 reconcile, ordered and fail-closed (§6)                ✗ → refuse to listen
+ S3 bind UDS 0600 inside 0700, accept connections
+ ── the registry is never opened again for the daemon's whole lifetime ──
+
+  1 caller connects; SO_PEERCRED → peer uid/gid/pid
+  2 caller-UID policy → principal_id, owner, namespace        ✗ PEER_UID_DENIED
+  3 decode bounded frame; api_version checked per operation    ✗ UNSUPPORTED_API_VERSION
+  4 parse AgentRunRequest (bounded plain values only)         ✗ INVALID_REQUEST
+  5 idempotency: run_id = f(principal_id, request_id); keyed
+    admission lock; write-once submission record              ✗ IDEMPOTENCY_CONFLICT
+  6 validate agent_id grammar                                 ✗ AGENT_ID_INVALID
+  7 resolve agent_id against the STARTUP SNAPSHOT — pure
+    in-memory lookup, ZERO filesystem access                  ✗ AGENT_NOT_REGISTERED
+  8 resolve the entry's profile from the source registry      ✗ UNKNOWN_PROFILE
+  9 bind workspace (canonical root, effective cwd, hash)      ✗ WORKSPACE_*
+ 10 validate the frozen execution_grant + referenced refs     ✗ GRANT_INVALID
+ 11 build argv = [command_declared, *args]; RESOLVE THE FINAL
+    CHILD ENVIRONMENT ONCE, IN MEMORY, and construct its
+    ephemeral per-Run literal guard. No command resolution.
+    No realpath. No value is serialized or hashed.
+ 12 compute the Spec and the launch snapshot IN MEMORY; the
+    snapshot carries env NAMES + source class + precedence
+    only; launch_hash covers that value-blind material
+ 13 SEAL, in this order:
+      a. write-once spec.json  (+ spec_hash, incl. launch_hash)
+      b. write-once launch.json (+ launch_hash)
+    ── nothing is re-read, re-resolved, or re-derived after 13a
+ 14 derive one closed session start plan (§4):
+      · non-reuse only → new-session plan
+      · reuse only → open the existing record, validate it for
+        load, require its external id → load plan
+    BEFORE the lease; no reuse failure can create a Session   ✗ SESSION_*
+ 15 acquire the Session lease (one active Run per Session)     ✗ SESSION_BUSY / QUARANTINED
+ 16 SPAWN: new POSIX session + process group; exec the declared
+    command through declared PATH/shim/symlink semantics with
+    declared argv[0]; hand it the in-memory environment from
+    step 11; record ProcessIdentity immediately; bounded stderr
+    enters only through the byte-aware Run guard
+      · exec ENOENT  → COMMAND_NOT_FOUND
+      · exec EACCES  → COMMAND_NOT_EXECUTABLE
+      · other        → SPAWN_FAILED
+ 17 record guarded, non-authoritative resolution evidence
+ 18 ACP initialize over the child's stdin/stdout
+      · protocol major must equal the profile's               ✗ PROTOCOL_MISMATCH
+      · required capabilities present                         ✗ CAPABILITY_MISSING
+      · forbidden capabilities absent (floor ∪ entry)         ✗ CAPABILITY_FORBIDDEN
+      · record agentInfo{name,version} — EVIDENCE, gates nothing
+ 19 execute the closed start plan:
+      · new-session plan  → session/new
+      · load plan         → session/load with the stored id, and
+        never session/new under any return or exception        ✗ SESSION_LOAD_FAILED
+ 20 read the complete config option set (live discovery)
+ 21 set requested model → exact                               ✗ CONFIG_*
+ 22 consume the model-dependent option set; rediscover effort
+ 23 set requested effort → exact
+ 24 exact readback: requested == effective, literal, no coercion ✗ CONFIG_INEXACT
+    (a compatibility profile additionally proves its required mode)
+ 25 persist guarded observed runtime state; ready to prompt
+ 26 marker: prompt-dispatch-started      ← THE UNCERTAINTY BOUNDARY
+ 27 write the prompt frame
+ 28 marker: prompt-accepted
+ 29 at each callback entry, reject a conflicting session id
+    before any sink or handler; then guard normalized updates
+    and mediate every permission / fs / terminal request
+    default-deny against the frozen grant
+ 30 terminal ACP event | turn timeout | cancel | child exit
+ 31 finalize: one irreversible result.json; Session state;
+    lease release; ACP close; terminate_group → grace →
+    kill_group; wait; reap; guarded bounded stderr + a
+    value-blind redaction/suppression report
 ```
 
-Layer 2b exists so one source contract can serve many standards-conforming agents without a plugin
-platform. It is strictly *inside* layer 2, never beside layer 1: every value it supplies selects within
-or narrows a bound layer 1 already declared, and it supplies no executable, path, digest, version, env
-key, launch kind, protocol version, or capability requirement. `adapter_contract_hash` deliberately does
-**not** become agent-derived — synthesizing a per-agent contract from a registration would make the
-contract hash a function of operator data, so the operator's registration would satisfy the operator's
-own manifest. The registration carries its own `agent_registration_hash` instead.
+**Fail-closed invariants.** Steps 1–25 all fail *pre-dispatch*: the Run is `failed`, no prompt is written,
+and the Session remains reusable unless a between-Run config-switch rollback could not be proven exactly.
+Step 26 is the only irreversible line. **The Run path never reopens the operator registry and never reads
+AGENT auth/config/cache/plugin/Session state as a control surface.**
 
-A Binding never declares a command, argv, env key, adapter, launch kind, capability, permission, or
-selector. Every slot binds to the exact profile ID, revision, and `adapter_contract_hash` that accepted
-it, so a contract revision fails stale generations closed rather than letting a new source contract
-reinterpret operator-authored values.
+**Deliberately absent versus the retired line:** no pointer read, no generation read, no manifest digest, no
+contract-identity match, no slot projection, no artifact digest, no ownership/mode/ancestor walk, no
+`O_PATH` pin, no hash-through-inode, no descriptor-pinned exec, no credential-root structural check, no
+project-config closure check, no TOCTOU recheck, no `attestation.json`, and no epoch staleness comparison.
 
-Acceptance rests on those explicit machine fields plus trusted ownership and digest validation, and on
-nothing else. The provenance block is recorded and reported for audit; it never authorizes a generation,
-never substitutes for a missing or mismatched machine field, and never becomes part of profile identity.
-A generation with a valid acceptance receipt but the wrong declared contract identity is refused.
+### 3.1 The four-way boundary 🟨
 
-Read-once is structural, not advisory: `arsd` admission opens the Binding root once per Run — one
-pointer read and one generation read, both inside the resolved profile's own subtree — and spawn,
-finalization, and reconciliation have no Binding read path at all. Two Runs admitted on either side of a
-promotion are each sealed to what they read; an in-flight Run is never re-pointed, and a promotion for
-one profile is invisible to every other.
+| | **A. Source profile** | **B. Operator registry snapshot** | **C. Sealed per-Run Spec + launch** | **D. Observed evidence** |
+|---|---|---|---|---|
+| Owner | ARS source, under review | operator, editable at will | one Run, immutable from seal to terminal | one Run, append-only |
+| Lives in | Python source | an operator file outside the repository → immutable in-memory snapshot | `native-runs/<run_id>/{spec,launch}.json` | `effective.json`, `events.jsonl` |
+| Written by | a release | the operator's editor | ARS, exactly once, before spawn | ARS, during the Run |
+| Read by ARS | at import | **once, at daemon startup** | once, at seal | continuously, during the Run |
+| Changing it costs | a source release + review | an atomic file replacement, effective at the next daemon start | nothing — it is per-Run | nothing — it is a record |
+| Never contains | any path, version, digest, model literal, agent name, or deployment fact | any digest, approved version, promotion state, or receipt | anything re-read after sealing; **any environment value** | anything that gates admission or blocks continuity |
 
-### 3.2 Binding layout, validation, and operator surface 🟦
+Four directional rules make it real:
 
-```text
-<binding_root>/                            # operator/root-owned; outside the repository
-└── profiles/<profile_id>/                 # one independent selection per registered profile
-    ├── active.json                        # non-agent-scoped only — regular file, never a symlink
-    ├── generations/<generation_id>/
-    │   └── manifest.json                  # immutable once written
-    └── agents/<agent_id>/                 # agent-scoped profiles only
-        ├── registration.json              # operator-owned Agent Registration
-        ├── active.json
-        └── generations/<generation_id>/manifest.json
-```
+1. **A never learns from B or D.** No profile field is derived from operator data or from an observation.
+2. **C is a projection of A × B × request, taken once.** After the Spec write nothing re-reads the snapshot,
+   re-resolves a command, re-reads the ambient environment, or re-derives argv. An in-flight Run is never
+   re-pointed, and neither is a queued one.
+3. **D never flows backward.** Observations are compared only against *the request* (exact model/effort
+   readback) and against *the profile's protocol/capability contract* — never against a frozen artifact
+   constant, and never against a prior Session's self-report.
+4. **The wire never reaches B's value space.** `agent_id` is validated as a bounded key *before* any lookup
+   and names no path, argv token, env key, digest, or version. Command, argv, environment, and secret values
+   are not fields on the request, and a structural test asserts they never become fields.
 
-The agent anchor is a **new subtree that only an agent-scoped profile descends into**, never a rewrite
-of the existing one: a non-agent-scoped profile's descent, pointer field set, and `contract_identity`
-field set are byte-identical to what they were, so its already-promoted generations keep resolving
-without migration, re-promotion, or restart. An agent-scoped pointer adds `agent_id`, and its
-`contract_identity` adds `agent_id` and `agent_registration_hash`, so separation is proven one level
-deeper than `POINTER_PROFILE_MISMATCH`: a pointer or generation moved between agent subtrees is refused
-on `POINTER_AGENT_MISMATCH` or `REGISTRATION_CONTRACT_MISMATCH`.
+There is no fifth layer, no promotion, no digest gate, and no ARS-owned copy of anything the AGENT needs to
+run. Operator-facing registry detail — schema, grammar, bounds, refusals, environment layers, restart
+semantics, and worked examples — is normative in [`agent-registry.md`](agent-registry.md).
 
-That frozen digest is **compared against the Registration that is actually live**, not merely recorded.
-The comparison is one invariant in one place — the runtime pair that holds both halves — and operator
-validation applies it through that same object rather than restating it, so a generation whose
-Registration has drifted can be neither admitted nor promoted. Reading a generation is deliberately a
-separate, weaker act: it returns what the generation says and never claims to have admitted a
-Registration, because the object that reads one manifest is not the object that can compare two facts.
-Without that split the manifest would satisfy itself, and every other check — pointer bytes, manifest
-bytes, manifest digest, epoch, contract identity — would still pass on an in-place Registration swap,
-since none of them is about the Registration's contents.
+### 3.2 Registered command semantics are preserved exactly 🟨
 
-`agent_id` is the one place caller text becomes a path component. It is judged by the component grammar
-**before any filesystem query**, by exact type identity rather than `isinstance` and frozen once (a
-`str` subclass with a lying `__str__`/`__eq__` is the failure this codebase has already paid for once),
-and the descent below it is dirfd-relative and `O_NOFOLLOW` under an ownership-verified directory. ARS
-creates nothing, so a caller can only name a directory an operator authored under a trusted root, and
-the registration inside re-declares the same `agent_id` as a machine field.
+> **ARS executes the operator-declared command through its declared PATH, shim, symlink, and `argv[0]`
+> semantics. It never substitutes a resolved path as the executable or as `argv[0]`.**
 
-Reads stay exactly-once and are instrumented: three per agent-scoped Run — one `registration.json`, one
-`active.json`, one `manifest.json` — two for a non-agent-scoped Run, and **zero** during spawn,
-finalization, and reconciliation.
+- `argv[0]` is the **declared `command` string, byte-for-byte** — a bare name stays a bare name, exactly as
+  a shell would pass it.
+- The exec image is located by ordinary `execvp`-style lookup over the **child's** projected `PATH` when
+  `command` is a bare name, and by the declared absolute path otherwise. No `executable=` override, no
+  `/proc/self/fd/N` image, no realpath.
+- Consequences preserved by construction: version-manager and package-manager shims work; symlink farms
+  work; package-relative and require-relative resolution from the real script location works;
+  multicall/`argv[0]` dispatch works; and an agent's own self-update and self-relaunch logic works.
+- **There is no pre-flight resolution gate.** A pre-flight lookup would introduce a second resolution that
+  can disagree with exec, a TOCTOU window, and a false-refusal risk. ARS classifies the exec failure itself,
+  and those classifications are ordinary configuration errors, never security refusals. Because the child's
+  exec failure is reported to the parent before spawn returns, no process exists in those cases.
 
-The active-selection namespace is profile-scoped because the shape of the deployment demands it: one
-`arsd` takes one `--binding-root`, the registry is closed at several profiles, and each refuses admission
-until a generation is promoted **for that profile**. A single root-level pointer could satisfy exactly
-one of them at a time. Each subtree is therefore independent — promoting or rolling back one
-profile replaces one file inside that profile's own directory and cannot disable, overwrite, or race
-another's, concurrently or in sequence — and the generation namespace is per profile too, so two
-profiles may carry the same generation id without either meaning the other.
+### 3.3 Resolution facts are observations, never authority 🟨
 
-Separation is proven twice over. The subtree component is derived from the already-resolved closed
-profile, never from request text, and is refused unless it is a safe path component; and the pointer
-declares its own `profile_id` as a machine field, so a pointer moved or copied between subtrees is
-refused (`POINTER_PROFILE_MISMATCH`) rather than inheriting authority from its filename. A generation
-still has to declare the matching contract identity on top of that.
+After a successful spawn ARS records, best-effort, into `effective.json`: the declared command and exact
+argv (already sealed in `launch.json`); the first `PATH` hit for a bare command under the projected launch
+`PATH`, when one can be computed; `/proc/<pid>/exe`, the image the kernel actually mapped (for a script shim
+that is the interpreter, for a wrapper the wrapper — both are correct and useful); `agentInfo` name and
+version, protocol version, and advertised capabilities; and an optional operator-run version-probe result.
 
-Validation is fail-closed on every read: strict canonical JSON, finite size bound, `O_NOFOLLOW`/dirfd
-walks, verified ownership, modes, and full ancestor chain, and refusal of traversal, symlink, FIFO,
-device, unknown fields, and unknown slots. There is no active symlink to retarget. ARS creates nothing
-in a Binding root: `profiles/<profile_id>/generations/` is operator-authored, an absent subtree is
-`PROFILE_BINDING_ABSENT`, and a root still carrying a pre-0.5.2 root-level `active.json` is
-`LEGACY_BINDING_LAYOUT` — refused and never read, because that layout can hold only one activation and
-its pointer cannot say whose it is.
+Every one carries an explicit non-authoritative marker. **No code path compares any of them against a source
+constant, a prior Run, a Session record, or a registry value to decide admission or reuse.** Divergence, or
+drift in `agentInfo` or advertised capabilities between two Runs of one Session, is recorded and may be
+emitted as a **policy warning event** — never a refusal, never a continuity block. The complete set of
+observation-based refusals is protocol major, required capabilities, forbidden capabilities, exact config
+readback, and a compatibility profile's required permission mode.
 
-The operator command surface is exactly these, and no command beyond them is defined:
-
-```text
-agent-run-supervisor runtime-binding validate     # probe-backed check of a generation
-agent-run-supervisor runtime-binding promote      # atomically replace active.json
-agent-run-supervisor runtime-binding rollback     # re-promote a previously validated generation
-agent-run-supervisor runtime-binding inspect-run  # per-Run provenance recomputation
-```
-
-No `--force` is defined and no command escalates privilege internally; preparing an immutable artifact root
-is an operator action outside ARS. Each command names one registered profile — and, for an agent-scoped
-profile, one registered agent through `--agent`, which is required there and refused anywhere else — and
-touches only that subtree. Without `--agent` an operator would have no way to promote an agent-scoped
-generation at all, which would leave such a profile permanently unusable. `validate`/`promote` obtain the real external CLI version through the
-Profile's code-owned probe and compare it with the Binding — a manifest's version string alone is not
-proof. A pure Binding promotion does not restart `arsd`, because admission re-reads the active pointer
-per Run; changing the Binding root, the service unit, or the runtime does require a restart and stays
-separately approved.
-
-`inspect-run` recomputes the launch hash from the sealed launch record after excluding only the
-top-level `launch_spec_hash`, and reports profile/contract identity, adapter/protocol identity, Binding
-generation/set/slot hashes, the complete CLI artifact identity/version/digest, and the epoch.
-
-### 3.3 Launch kinds and artifact code closure 🟦
-
-| Launch kind | Source freezes | Binding freezes |
-|---|---|---|
-| `wrapped_acp` (Codex ACP, Claude Agent ACP) | interpreter/Node identity, the ACP adapter's complete package closure (install root + tree digest + entry), argv construction, env keys, protocol/capability contract | downstream CLI artifact identity/version/digest, config-root slot values |
-| `direct_acp` (OpenCode) | direct launch, protocol, and capability semantics | that one executable's identity/version/digest |
-| `direct_acp`, agent-scoped (`standard-native-acp-v1`) | ACP-v1 conformance only: protocol major, required `loadSession`, real `session/load`, the accepted slot schema, the code-known env key set, the probe rule, and the forbidden-capability **floor** | that one executable's identity/version/digest, plus — through the Agent Registration (§3.1 layer 2b) — the ACP name, argv tokens, selector ids and domains, capability narrowing, and mediation selection |
-
-OpenCode is one artifact, not two: the same executable is the AGENT CLI and the ACP implementation, and
-the documentation must not pretend otherwise.
-
-The agent-scoped row freezes no agent-specific constant at all, and that is deliberate rather than
-incomplete: across standards-conforming native ACP agents the facts that actually vary are a small typed
-bounded set, while launch kind, slot schema, env allowlist, session-load requirement, required
-capabilities, protocol version, permission/config/session semantics, and the probe parser and bounds are
-shared ACP-v1 conformance that belongs in one source contract. Its `executable_key` appears in neither
-the registered-executable map nor the profile-keyed mediation map, so its executable can only arrive
-through the slot and its mediation can only arrive through a registration's selection from the
-source-closed mediation registry — the two mediation registries are disjoint by profile-construction
-invariant rather than by convention.
-
-Artifact identity must cover the complete executable code closure:
-
-- **Standalone native binary** — regular-file SHA-256, plus the interpreter/dynamic-loader policy where
-  one applies.
-- **Package or launcher CLI** — an immutable package root/tree or canonical manifest digest, the
-  launcher identity, and the required interpreter/runtime identity. A launcher-file hash alone never
-  freezes the sibling code the launcher loads.
-- The artifact and every path ancestor are operator- or root-owned and non-writable by the `arsd`/AGENT
-  UID.
-
-A `direct_acp` executable is pinned by descriptor and exec'd from that descriptor, with TOCTOU rechecks
-on both sides of the spawn window. A wrapped downstream CLI is reopened later by the adapter, which ARS
-cannot fd-pin on the adapter's behalf; the guarantee there is that the path and package closure remain
-under an immutable operator-owned root that the `arsd`/AGENT UID cannot rewrite.
-
-🟦 The same rule now holds on the wrapped **adapter** side. `WrappedRuntimeArtifacts` freezes an
-`adapter_package_root` plus its `adapter_tree_sha256` beside the interpreter and entry, and the closure
-root is chosen so the runtime's own resolution cannot leave it:
-
-- the root is the adapter's npm **install root**, not its package directory, because a Node entry at
-  `<root>/node_modules/<scope>/<pkg>/dist/index.js` resolves bare specifiers by walking its parent
-  chain — hoisted dependencies live in `<root>/node_modules`, which the package directory does not
-  contain;
-- the frozen entry is required to lie inside the root, judged on path components, so a sibling like
-  `…/1.0.0-evil` can never pass as a member of `…/1.0.0`;
-- everything at or below the root is covered by the tree digest, and the spawn boundary refuses any
-  `node_modules` on the ancestor chain **above** the root, which is the only place that parent walk can
-  still reach. Preparing an artifact root with no such directory above it is therefore part of
-  preparing an immutable root, and is an operator action.
-
-A parent walk is not Node's only way out. Its CommonJS resolution also searches path-independent
-*global folders* — `$HOME/.node_modules`, `$HOME/.node_libraries`, `<node prefix>/lib/node` — which no
-closure root can contain, and both wrapped profiles forward `HOME`. The contract therefore also freezes
-an `interpreter_argv_prefix`, which for the frozen Node is exactly `--no-global-search-paths`:
-
-- it is required and non-empty for every `wrapped_acp` contract — an interpreter with no way to close
-  that search cannot honestly carry one;
-- it is the literal head of the profile's argv, and profile construction refuses any argv that does not
-  begin with exactly the declared tokens, so the declared prefix and the real launch cannot drift;
-- it rides in `adapter_contract_hash`, is sealed into `launch.json`, and the spawn boundary compares it
-  against the real argv as a token *sequence*, with the adapter entry bound to the position immediately
-  after it — so a dropped, reordered, altered, or padded prefix refuses the Run before spawn.
-
-`NODE_PATH` and any other resolution root that would come from the environment are closed by the
-profile's own closed env allowlist rather than by these checks.
-
-The consequence the earlier gap made concrete: one adapter's `dist/index.js` stayed byte-identical
-across two adapter versions while the siblings it imports moved, so an entry digest could not tell the
-two apart. A tree digest does.
-
-🟦 Every source-frozen runtime path names the root-owned artifact location a separate materialization
-step is expected to create, under `/opt/agent-run-supervisor/artifacts/`. That is a declaration, not an
-installation: nothing under it exists, ARS never creates, copies, or re-owns it, and admission simply
-fails closed until an operator materializes it. A path under the service account's home was not an
-option — C5 requires the artifact *and every ancestor* to be non-writable by the `arsd`/AGENT UID, and
-no per-leaf ownership change can make a service-owned home satisfy that, so freezing such a path would
-only have deferred the contradiction to deployment. The currently installed adapter trees remain
-discovery and measurement sources — the frozen digests are byte identity, which ownership, mode, and
-path do not enter — and are not activation targets.
-
-## 4. Process-per-Run Session model
+## 4. Process-per-Run Session model 🟨
 
 Cardinality:
 
@@ -354,25 +274,82 @@ Run 1 ── 1 external AGENT process
 true parallelism = multiple Sessions
 ```
 
-Each Run launches a new AGENT process. The first Run uses `session/new`; later Runs use `session/load`
-with the same opaque external session ID. The AGENT owns conversation/context storage; ARS stores only
-the binding and observed metadata.
+Each Run launches a new AGENT process. The first Run uses `session/new`; later Runs use `session/load` with
+the same opaque external session ID. The AGENT owns conversation/context storage; ARS stores only the
+binding and observed metadata.
 
-🟦 The Session record also persists the `session_compatibility_epoch` in force when it was created.
-Reuse requires equal profile ID/revision/`adapter_contract_hash`, equal workspace/owner/namespace, and
-equal epoch. A missing or different epoch is rejected before any lease mutation and before
-`session/load`, and never degrades into `session/new` — a silent new external Session would be exactly
-the continuity failure R4 forbids. An epoch may be retained across a Binding change only after an
-approved continuity canary proves the external AGENT still loads its own prior Sessions; otherwise the
-operator bumps it, and every older Session becomes non-reusable by construction.
+### 4.1 Identity is operator-owned and ARS-owned; proof is AGENT-owned
 
-🟦 For an agent-scoped profile the record also persists `agent_id` and `agent_registration_hash`, and
-reuse requires both to be equal on the same terms. Equality is symmetric on purpose: a Session created
-under one agent is refused for another, and an agent-bearing record is refused by a runtime carrying
-none, so a runtime that cannot enforce agent identity never silently loads an agent's Session. Because
-the registration hash excludes provenance, re-recording an acceptance, discovery, or canary receipt does
-not retire an agent's Sessions, while any compatibility-bearing edit does. A record created before
-agents existed keeps its exact serialized shape — the two fields are omitted, never written as null.
+Continuity is a property of the external AGENT's own ability to load its own session. ARS records a stable
+binding, refuses reuse when the *binding* changed, and lets the AGENT prove the rest. An ARS hash of an
+operator's file never proved continuity and stops pretending to.
+
+| Session identity field | Owner | Moves when |
+|---|---|---|
+| `agent_id` | operator | the caller targets a different registered agent |
+| `profile_id`, `profile_revision`, `profile_hash` | ARS source | **ACP semantics** move — never on an ordinary release |
+| `owner`, `namespace` | ARS | the authority binding changes |
+| `workspace_hash` | ARS | bound resources change |
+| `session_epoch` (optional) | **operator, explicitly** | the operator decides to cut continuity — never otherwise |
+
+**No automatic epoch bump exists anywhere.** An AGENT or adapter version change, an ARS package upgrade, a
+profile revision that does not change ACP semantics, a `command`/`args`/`env`/`mediation`/selector edit, a
+registry file replacement, and a daemon restart never change it. There is no code path that derives,
+increments, or infers an epoch from an observation, a digest, a version, or a file's bytes. Comparison is
+symmetric equality, so a record at epoch 1 is refused by a Run at epoch 2 *and* by a Run with no epoch —
+which is why **adding an epoch for the first time cuts that agent's existing Sessions: absent ≠ 1**.
+
+**Must not invalidate reuse:** an agent CLI or adapter version change; an `agentInfo` name or version change;
+the observed executable, mapped image, path-lookup hit, probe result, or any file hash; observed capability
+drift between Runs of one Session; a `command` path change from a repointed shim or reinstall; an `args`,
+overlay, pass-through, mediation, or selector-hint edit; the registry file's bytes, digest, mtime, or
+location; an ARS release that does not change ACP semantics; and any digest, tree hash, ownership, or mode
+change — those concepts no longer exist.
+
+**Deleted as Session-identity fields:** the adapter contract hash, the ARS-derived compatibility epoch, and
+the agent-registration hash. The operator-controlled `session_epoch` replaces the last of these and shares
+nothing with it but the idea of an epoch.
+
+**The trade-off, stated honestly.** An operator can edit `args` and restart, and the next Run reuses an
+existing Session. If that edit changed agent behavior materially, the change is *recorded* — full argv and
+the complete value-blind environment name/source/precedence material live in every Run's launch snapshot —
+but not *refused*, unless the operator also bumps `session_epoch`. The alternative, fingerprint-as-gate, is
+precisely the failure mode the reset exists to remove.
+
+### 4.2 The load proof and the closed start plan
+
+Reuse is proven when all four hold:
+
+1. ARS sends the **stored external session id, byte-unchanged**, as the session argument of `session/load`,
+   together with the bound `cwd` and — on a compatibility profile — the frozen session metadata.
+2. The call returns a **successful load response** whose `config_options` seed the fidelity machine. **No
+   identity field is required from, or read out of, the response.**
+3. ARS **never emits `session/new` on a reuse path** — not as a fallback, not after a failure, not under any
+   error class. This is structural, not conditional.
+4. **Every conflicting ID-bearing callback is rejected at callback entry**, before it can be serviced.
+
+The start plan is a closed union derived from the immutable request: a load plan exists only after an
+existing record is opened existing-only, passes the load-time binding validation, and supplies its stored
+external ID; a new-session plan is constructible only from a request whose reuse intent is "none". The
+startup sequence dispatches on the plan with disjoint arms, no default arm, and no conversion between plan
+types, so the load arm may only load and the new arm may only create. Every reuse failure — missing or
+corrupt record, missing external ID, binding mismatch, busy or quarantined lease, initialize or load
+capability failure, load RPC failure, callback identity violation, option-discovery failure, config
+inexactness, cancellation, timeout, child exit, cleanup failure — terminates without reaching the
+new-session call.
+
+The callback boundary is synchronous and fail-closed: compare against the expected bound ID; on unbound or
+different, record only a stable categorical violation and raise, with no IDs in the error text; only after a
+match may the callback normalize data, enqueue an event, invoke a permission or filesystem handler, touch
+the workspace, formulate a terminal or elicitation response, or return success. No `finally` block may
+service or persist a rejected callback. Because the expected ID is bound before the load request is issued,
+callbacks racing with `session/load` are covered; before a new session's ID is bound, any ID-bearing
+callback is an unbound-identity violation.
+
+Failure handling is unchanged in terminal meaning: a failed load or a pre-dispatch identity violation yields
+`failed` with a stable code and `retryable=false`, and the Session stays `active` and readable, because a
+clean pre-dispatch refusal is not uncertainty. An identity violation *after* the dispatch marker yields
+`unknown` plus quarantine.
 
 Between completed Runs on the same Session, model/effort may change:
 
@@ -380,7 +357,7 @@ Between completed Runs on the same Session, model/effort may change:
 previous Run terminal → acquire lease → spawn → initialize
 → session/load(same external ID)
 → discovery → set model → rediscovery → set effort → exact readback
-→ persist EffectiveRunState → dispatch markers → prompt
+→ persist observed state → dispatch markers → prompt
 ```
 
 model/effort never change during an active Run. Failed partial switching sends no prompt; exact rollback
@@ -406,31 +383,79 @@ it creates `prompt-accepted`. The conservative uncertainty boundary depends on t
 | trustworthy ACP terminal event | corresponding terminal result | normally yes |
 | dispatch may have occurred; supervisor stayed present and proves abnormal matched-child exit | `failed` | no; quarantine |
 | dispatch may have occurred; observation was lost | `unknown`, `retryable=false` | no; quarantine |
+| external session identity violation observed after dispatch | `unknown`, `retryable=false` | no; quarantine |
 
 An `unknown` Run is never retried, replayed, resumed, or rewritten. Caller-authorized successor work is a
-new Run linked by `retry_of_run_id`.
+new Run linked by `retry_of_run_id`. There is no unquarantine tool.
 
-## 6. Crash containment and reconciliation
+## 6. Crash containment and ordered reconciliation
 
 Production places `arsd` and every external AGENT descendant in one user-managed cgroup with semantics
 equivalent to `Restart=on-failure` and `KillMode=control-group`.
 
 ```text
 arsd crash/SIGKILL
-→ service manager kills the entire descendant tree
-→ restarted arsd reconciles durable facts
+→ service manager kills the descendant tree still inside that cgroup
+→ restarted arsd parses the registry, then reconciles durable facts
 → uncertain dispatched Runs become unknown/quarantined/retryable=false
 → no prompt redispatch
-→ accept later independent Runs after reconciliation
+→ accept later independent Runs only after reconciliation completes
 ```
 
-Normal cancellation/graceful shutdown uses ACP cancel and process-group escalation. Crash cleanup uses
-the external cgroup. These mechanisms are distinct. Full process identity, not PID/name/port guessing,
-governs any liveness or orphan decision.
+Normal cancellation/graceful shutdown uses ACP cancel and process-group escalation. Crash cleanup uses the
+external cgroup. These mechanisms are distinct. Full process identity, not PID/name/port guessing, governs
+any liveness or orphan decision.
 
 Every RunTask and connection has a top-level exception boundary. Malformed ACP, SDK, normalization,
 evidence I/O, and child faults terminate only that Run. Queues, events, stderr, output, concurrency,
 Session activity, and socket backlog are bounded.
+
+### 6.1 Absent is not corrupt 🟨
+
+Reconciliation classifies **all** inputs before any write, using bounded no-follow readers:
+
+| Input | Closed states | Meaning |
+|---|---|---|
+| terminal (`result.json`) | trusted-non-unknown, trusted-unknown, corrupt, absent | trusted terminals split by status, because `unknown` additionally requires a quarantine convergence check |
+| dispatch marker | present, absent | **present** when either marker name is found, regardless of contents or file type; a symlink, directory, malformed marker, or any I/O result that cannot prove clean absence is conservative evidence that dispatch may have happened |
+| Spec, launch, submission | valid, absent, corrupt | **absent only on a clean no-such-path result**; valid requires a bounded regular non-symlink file, a supported schema, the exact run id, known fields and types, and artifact-specific invariants; every other present-or-indeterminate state is corrupt |
+
+A race, symlink, FIFO, directory, oversize file, short or failed read, or any error after observed presence
+is **corrupt — never a second chance to become absent**, and the open never blocks. A corrupt artifact is
+never relabeled absent, though it is not automatically fatal when a higher-priority fact has already made it
+irrelevant.
+
+### 6.2 Attribution authority and outcome vocabulary 🟨
+
+Owner/namespace/Session attribution has one priority order: a **valid Spec is authoritative** and supplies
+owner, namespace, reuse intent, and Session id, with the submission ignored for attribution even when
+absent, corrupt, or conflicting; a **valid submission is a fallback** only when the Spec is not valid, and
+is sufficient only to fence a possibly dispatched Run or safely scope a terminal record; and launch records,
+result fields, directory names other than the deterministic ephemeral derivation, progress, events, locks,
+and marker contents are **never** attribution authority.
+
+For any outcome that requires quarantine, attribution is **actionable** only when the chosen identity
+resolves to an already-existing, strictly readable Session record whose id, owner, and namespace match and
+whose state is open/active or already quarantined. Reconciliation never creates, reopens, or repairs a
+Session; non-actionable attribution means startup is refused rather than guessed.
+
+One exhaustive first-match table covers every combination of the five classified inputs, and its whole
+outcome vocabulary is exactly four results: **authoritative terminal**, **`unknown` + quarantine**,
+**pre-dispatch failed/reusable**, or **refuse to listen**. Trusted non-unknown terminals are preserved
+byte-for-byte with no Run or Session mutation. A trusted `unknown` converges the fence, quarantine, and
+progress when attribution is actionable and refuses startup otherwise. A corrupt terminal always refuses,
+quarantining first only when dispatch is possible and attribution is actionable, and is never rewritten or
+deleted. Possible dispatch without a terminal becomes `unknown` + quarantine exactly when attribution is
+actionable. A valid Spec with an absent or valid launch and no marker settles as pre-dispatch
+failed/reusable — a missing launch is the allowed crash point between the ordered Spec and launch writes —
+while a corrupt referenced launch, a corrupt Spec, a launch without its Spec, or a corrupt submission on an
+otherwise empty tree all refuse to listen.
+
+Write ordering is exact and crash-idempotent: fence → quarantine → categorical progress → terminal last,
+with the terminal written only when no trusted terminal existed. If any earlier step fails, no new terminal
+is written and startup is refused. A crash after any step leaves a non-leasable fence, a quarantined
+Session, or both, and the next startup resumes the same outcome. Reconciliation never sends ACP, spawns a
+process, reconstructs a prompt, acquires or removes a lease, creates a Session, or opens the registry.
 
 ## 7. Permission and caller boundary
 
@@ -441,8 +466,25 @@ enforces `execution_grant` default-deny without widening or live-policy refresh.
 - write/create/delete/terminal/execute/fetch and unknown operations deny unless the frozen grant and
   registered mediation contract explicitly permit them.
 - Every mediation decision produces redacted evidence.
-- A real denied-action canary is mandatory; zero mediation events prove nothing.
+- A real denied-action canary is mandatory per registered agent; zero mediation events prove nothing.
 - `allowed_roots`, UDS auth, and ACP mediation are not OS sandboxing or hostile-process containment.
+
+🟨 **Mediation environment authority.** Mediation env routes an agent's privileged in-process tool families
+through ACP permission requests so the bridge decides *before* a side effect. If configuration could disable
+it, the default-deny claim would be decorative. Therefore: the binding is source-owned in **key and value**,
+keyed by the capability family it mediates rather than by the agent that needs it; a registry entry may
+**select** one id or none and can never author a pair, a key, or a value; reserved mediation keys are the
+**union of every key in any registered binding**, so the rule does not depend on which binding an entry
+chose or whether it chose one; a collision in an entry's overlay or pass-through fails the registry parse and
+**the daemon refuses to listen**, with the identical check available offline at authoring time; and layer 4
+is applied last anyway as defense in depth, so a defect in the collision check cannot silently disable
+mediation. A profile-registry construction invariant asserts the base allowlist and the reserved key set are
+disjoint. There is no "mediation off" and no per-entry key/value form.
+
+**Honest limit.** Mediation is cooperative. An agent that ignores the knob, or one with no registered
+binding, can execute in-process tools with no ACP permission event and the bridge will never see them. The
+mandatory denied-action canary proves the knob works *for a specific agent* and must precede that agent's
+use.
 
 Exact caller UID values and policy ownership are gate G12, closed as a recorded operator decision; the
 repository stores no production mapping value.
@@ -453,7 +495,7 @@ repository stores no production mapping value.
 .agent-run-supervisor/
 ├── native-runs/<run_id>/
 │   ├── spec.json                  # immutable; exclusive create
-│   ├── launch.json                # controlled launch; no secret values
+│   ├── launch.json                # sealed launch snapshot; value-blind
 │   ├── effective.json             # observed identity/capabilities/config
 │   ├── events.jsonl               # single writer; monotonic seq; bounded
 │   ├── result.json                # one terminal fact
@@ -461,79 +503,114 @@ repository stores no production mapping value.
 │   ├── prompt-accepted
 │   └── evidence / redaction / bounded stderr
 └── native-sessions/<session_id>/
-    ├── session.json               # stable binding + last_effective_* + state + epoch
+    ├── session.json               # stable binding + last_effective_* + state
     └── lock.json                  # lease/process identity while held
 ```
 
-🟦 `launch.json` carries the resolved runtime provenance — profile/contract identity, launch kind,
-adapter/interpreter identity for wrapped profiles, the complete external CLI artifact identity, the
-Binding generation/set/slot hashes, the epoch, and the acceptance receipt reference — and embeds its own
-`launch_spec_hash` so the record is self-verifying. The hash excludes exactly one top-level field,
-`launch_spec_hash`, and nothing else may be excluded. The Binding root itself is operator storage
-outside `.agent-run-supervisor/`; ARS reads it and never writes it.
+**ARS-owned writable surfaces are exactly two, and nothing else:** the supervisor root above, through the
+single `native_acp/storage.py` write-once seam, and the configured UDS runtime path, where ARS creates the
+parent, replaces a stale socket, binds, chmods `0600`, and unlinks at shutdown.
 
-`native_acp/storage.py` is the only constructor seam for Native roots. Legacy `runs/`/`sessions/` and
-acpx storage are never read, written, imported, mirrored, or migrated by Native code.
+**Read-only access ARS is explicitly permitted, wherever the paths live:** the operator registry file, once
+at startup, including through a symlink and including below `$HOME`; everything the kernel and loader need
+to resolve and launch the declared command — `PATH` directory lookup, a PATH shim, a symlink chain, an
+interpreter, a package-relative module tree — including below `$HOME` and including `argv[0]`-dispatch
+layouts; `/proc/<pid>/exe` and process-liveness reads for its own child; and the caller-bound workspace, as
+already bounded by workspace binding.
 
-The runtime ledger records supervision facts, not AGENT conversation memory. v1 no-change acceptance uses
-a disposable known-empty workspace and direct pre/post directory listing; `workspace_hash` is only a
-binding hash. No content-digest service or filesystem watcher is part of ARS.
+**What ARS is prohibited from doing:** ARS never creates, writes, populates, stages, mirrors, repairs,
+deletes, or otherwise **manages** AGENT auth, configuration, cache, plugin, or Session state, and never
+**inspects** those surfaces as a control surface — no stat audit, no mode or ownership enforcement, no
+digest, no required-absence check. ARS models no path inside the AGENT's state at all. The child AGENT may
+mutate its own HOME and state normally during a Run, and such a Run completes normally: those writes are the
+child's, and the attribution boundary is the process boundary. Acceptance instruments write-intent calls
+inside the `arsd` process only, so the child's writes are invisible to that interceptor by construction.
 
-Evidence grades:
+🟨 `launch.json` carries the declared command, the exact argv, the effective cwd, the environment
+**name/source-class/precedence** material with **no values**, the mediation id, profile identity,
+registry-source evidence, and its own value-blind `launch_spec_hash`, so the record is self-verifying. The
+hash excludes exactly one top-level field, `launch_spec_hash`, and nothing else may be excluded. The
+operator registry file is operator storage outside `.agent-run-supervisor/`; ARS reads it once and never
+writes it. There is no `attestation.json` and no Binding root.
 
-- A — pre-implementation compatibility context;
-- B — Stage 1 direct-drive real-AGENT evidence;
-- C — Stage 2 production socket-path acceptance.
+The workspace canonical root and effective `cwd` in `spec.json` remain complete literals and remain
+hash-covered even when the workspace lives under `$HOME`. They are independently derived authority facts,
+not environment-value flow, and are deliberately outside the guarded sink set: guarding them would break
+workspace binding, reconciliation attribution, and audit.
 
-No lower grade can claim a higher one.
+`native_acp/storage.py` is the only constructor seam for Native roots. Legacy `runs/`/`sessions/` and acpx
+storage are never read, written, imported, mirrored, or migrated by Native code.
+
+The runtime ledger records supervision facts, not AGENT conversation memory. v1 no-change acceptance uses a
+disposable known-empty workspace and direct pre/post directory listing; `workspace_hash` is only a binding
+hash. No content-digest service or filesystem watcher is part of ARS.
+
+Evidence grades: A — pre-implementation compatibility context; B — direct-drive real-AGENT evidence; C —
+`arsd` socket-path production acceptance. No lower grade can claim a higher one.
 
 ## 9. Deployment stages
 
 | Stage | Target | Evidence | Production claim |
 |---|---|---|---|
 | 0 | SDK/source/API/consumer/load capability gates | deterministic preflight | none |
-| 1 | ManagedProcess + Native ACP core + state/session/permission/evidence | L1/L2 + real OpenCode direct-drive B-grade | none |
+| 1 | ManagedProcess + Native ACP core + state/session/permission/evidence | L1/L2 + real direct-drive B-grade | none |
 | 2 | `arsd` UDS, ownership, reconciliation, cgroup containment | real S1–S5 C-grade | ARS production acceptance |
-| later | Sachima `ArsdBackend` | separate integration evidence | separately approved |
+| 🟨 reset | authority alignment, then fail-closed reuse + reconciliation, then the environment-value guard, then the boundary reset | per-gate hermetic suites; documentation gate for the authority stage | none until a separate cutover decision |
+| ⏸ later | Sachima `ArsdBackend` | separate integration evidence | separately approved |
 
-Stage 1 is intentionally an intermediate implementation boundary, not a downgrade of the production
-target. Production is achieved only after Stage 2 acceptance — which is closed on `main`; the board
-carries the closure and enablement facts. Publication and later integration are not implied by it.
+Stage 1 was an intermediate implementation boundary, not a downgrade of the production target. Production was
+achieved after Stage 2 acceptance, which is closed on `main`.
 
-🟦 The Runtime Binding refactor is not a fourth stage. It changed the authority shape on the closed
-Stage 2 line and its source framework is merged on `main`. Merging it was not a rollout: preparing an
-immutable artifact root, promoting a Binding against a real deployment, re-accepting a profile at its
-current revision, real-provider acceptance, publication, and any service restart each remain separate
-operator decisions.
+🟨 **The boundary reset is not a fifth stage of the original ladder and not a rollout.** Its documentation
+gate changes authority only. Its source gates each need a distinct source-implementation approval recorded
+after the documentation gate merges, and deleting the retired per-agent profiles from source needs one more
+confirmation on top of that.
+
+**Deploy sequence, for reference only and authorized by nothing here:** package upgrade → the operator
+authors the registry file → offline validation → per-agent diagnostics → the mandatory denied-action canary
+per agent → re-render the service unit → restart `arsd` → registry parse → reconcile-only → accept new
+submits. Restarts recur only when the registry itself changes, never for an agent upgrade behind an
+unchanged registered command.
 
 ## 10. Legacy coexistence and rollback
 
-The released v0.1.7 acpx paths remain ✅ compatibility surfaces until a separate retirement decision.
-They do not define vNext modules, Session semantics, status vocabulary, or production ingress. Native
-failure never routes to them.
+The legacy v0.1.7 acpx paths are ✅ still present in source and are **not** compatibility surfaces: not a
+product, runtime, fallback, or Session store, and nothing on the reset line owes them compatibility. They do
+not define vNext modules, Session semantics, status vocabulary, or production ingress; Native failure never
+routes to them; and their storage stays isolated from the Native roots (§8). Removing that code, and the
+documentation that describes it, is separately authorized work this architecture does not perform. Until
+then the only acpx material it retains is a bounded differential/comparison-test reference.
 
 Rollback disables Native/`arsd` ingress and stops new submissions. It never converts failures into acpx
 fallback and never rewrites terminal Run facts.
 
-🟦 Binding rollback is a distinct, narrower mechanism: `runtime-binding rollback` re-promotes a
-previously validated generation for one named profile and affects only that profile's Runs admitted
-afterwards. It never rewrites a sealed `launch.json`, never changes a terminal Run fact, never touches
-another profile's selection, and never substitutes for a source revert or for disabling ingress.
+🟨 **Reset-line migration and rollback.** The supervisor root is shared, so reconciliation and evidence
+history stay continuous. Old Run directories are immutable historical files: the new runtime never rewrites,
+migrates, deletes, or re-hashes them, and readers project them value-blind. Old Sessions stay owner-scoped
+`status`/`list`/`close`-readable through a value-blind categorical projection, while those carrying retired
+ARS-derived identity hashes are **refused for `session/load`** with a stable code — the new runtime cannot
+honor identities it no longer models and must not pretend it can, and there is no silent `session/new`. The
+`/opt` artifact trees and Binding roots simply stop being referenced; they are **not deleted**, and their
+removal is a separate, later operator decision.
 
-🟦 A *source* rollback that removes the Binding layer is fail-closed for Binding-era Sessions, not a
-return to pre-epoch reuse. The reverted runtime cannot enforce epoch or contract identity, so it must stop
-new admissions and must never silently `session/load` a Session created under the Binding era. Those
-Sessions stay read-only (`status`/`list`/`close`), closed, or quarantined; continuing that work needs a new
-Session, or an explicitly approved rollback procedure that states how epoch and contract identity are
-checked. Reuse is never inferred from a missing field. Terminal Run facts and sealed launch evidence
-remain immutable across any rollback.
+A *source* rollback is fail-closed in both directions with no new mechanism, no dual-write, no dual-read, no
+shim, and no alias. Sessions created under the reset line are automatically refused by a reverted runtime,
+because identity comparison is symmetric equality and a reset-line record carries neither the retired
+contract hash nor the retired epoch. Terminal Run facts and sealed launch records are immutable across a
+revert in either direction.
+
+The one-time legacy-Session load refusal is a deliberate continuity loss and an open human decision, not a
+technical detail: every live Session at cutover ends, and continuing that work means a new Session with
+caller-owned context handoff.
 
 ## 11. Authority map
 
 - Product intent: `GOAL.md`
 - Requirements: `docs/product/prd.md`
 - Module design: `docs/design/technical-solution.md`
-- Compatibility schema: `docs/design/result-event-schema.md`
+- Operator registry contract: `docs/design/agent-registry.md`
+- Emitted JSON shapes: `docs/design/result-event-schema.md`
 - Current status/gates: `docs/roadmap/`
 - Executable work: `docs/plans/active/`
-- Historical-only material: all archive directories
+- Historical-only material: all archive directories, including
+  `docs/archive/binding-era-2026-07/` for the retired artifact/Binding architecture

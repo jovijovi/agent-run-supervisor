@@ -1,11 +1,28 @@
 ---
 title: "Standard Native ACP (v1) — one conformance contract, many registered agents"
-status: active
+status: archived
 created_at: 2026-07-29
+archived_at: 2026-07-30
 ---
 # Standard Native ACP (v1) — one conformance contract, many registered agents
 
-Authority: `GOAL.md` contracts 9–11 · PRD R12/R13/**R14** · architecture §3.1–§3.3/§4 ·
+> **Archived as completed, 2026-07-30.** Its implemented scope **merged**: the conformance profile is
+> registered on the `v0.5.3` source line, together with the registration leaf, the `AgentInstance` seam, and
+> the agent-anchored Binding subtree. The *architecture it implemented* is then **retired by the V4
+> external-AGENT boundary reset**, which replaces the artifact-anchored Binding layer with one operator-owned
+> agent registry read once at daemon startup.
+>
+> This plan is therefore cold history on both counts, and it is **never target authority**. Its authority
+> references below — GOAL contracts 9–11, PRD R13/R14, architecture §3.1–§3.3 — no longer exist in the live
+> chain; they are preserved at
+> [`docs/archive/binding-era-2026-07/`](../../archive/binding-era-2026-07/README.md). The idea it was built
+> for — one source contract serving many conforming agents — survives, without an artifact anchor
+> underneath it, in [`docs/design/agent-registry.md`](../../design/agent-registry.md).
+>
+> Nothing in this archival changed source, deleted a profile, or touched a Binding root: the code this plan
+> landed is still merged and still running.
+
+Authority (historical, retired): `GOAL.md` contracts 9–11 · PRD R12/R13/**R14** · architecture §3.1–§3.3/§4 ·
 technical-solution §1.2/§1.4/§2/§3 · [board](../../roadmap/current-status.md) ·
 [features](../../roadmap/features.md) F-STANDARD-NATIVE-ACP-001.
 

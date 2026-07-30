@@ -2,11 +2,12 @@
 
 # Documentation Index
 
-Total: 70 documents tracked across 2 statuses.
+Total: 78 documents tracked across 2 statuses.
 
-## Active (16)
+## Active (17)
 
-- [Standard Native ACP (v1) — one conformance contract, many registered agents](plans/active/2026-07-29-standard-native-acp-v1.md) — created 2026-07-29
+- [ARS agent registry — the operator contract](design/agent-registry.md) — created 2026-07-30
+- [ARS V4 External AGENT Boundary Reset — proposed implementation plan](plans/active/2026-07-30-ars-v4-boundary-reset.md) — created 2026-07-30
 - [agent-run-supervisor vNext System Architecture](design/architecture.md) — created 2026-07-21
 - [agent-run-supervisor vNext Technical Solution](design/technical-solution.md) — created 2026-07-21
 - [agent-run-supervisor vNext PRD](product/prd.md) — created 2026-07-21
@@ -23,9 +24,16 @@ Total: 70 documents tracked across 2 statuses.
 - [Engineering practices](practices/README.md) — created 2026-05-28
 - [Verification gates for implementation PRs](roadmap/verification.md) — created 2026-05-28
 
-## Archived (54)
+## Archived (61)
 
+- [Binding-era authority archive (2026-07)](archive/binding-era-2026-07/README.md) — created 2026-07-30
+- [Binding-era architecture sections 3.1-3.3 (retired)](archive/binding-era-2026-07/architecture-3.1-3.3.md) — created 2026-07-30
+- [Binding-era implementation plans (retired architecture)](archive/binding-era-2026-07/binding-era-plans.md) — created 2026-07-30
+- [Binding-era GOAL contracts 9-11 (retired)](archive/binding-era-2026-07/goal-contracts-9-11.md) — created 2026-07-30
+- [Binding-era PRD R13 and R14 (retired)](archive/binding-era-2026-07/prd-r13-r14.md) — created 2026-07-30
+- [Why the Binding era was retired](archive/binding-era-2026-07/retirement-rationale.md) — created 2026-07-30
 - [Profile-scoped Runtime Binding activation](plans/archive/2026-07-29-multi-profile-runtime-binding.md) — created 2026-07-29
+- [Standard Native ACP (v1) — one conformance contract, many registered agents](plans/archive/2026-07-29-standard-native-acp-v1.md) — created 2026-07-29
 - [Runtime Binding Source and Wrapped-Adapter Package-Closure](roadmap/archive/phases/vnext-runtime-binding-source-closure.md) — created 2026-07-29
 - [Runtime Binding refactor — contract/Binding split and sealed runtime provenance](plans/archive/2026-07-26-runtime-binding-refactor.md) — created 2026-07-26
 - [Claude official ACP adapter — B3/B4/B5 closure](plans/archive/2026-07-25-claude-official-adapter-b3-b5-closure.md) — created 2026-07-25

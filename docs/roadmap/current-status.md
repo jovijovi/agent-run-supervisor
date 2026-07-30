@@ -2,7 +2,7 @@
 title: "ARS vNext Roadmap Current Status"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-29
+last_validated_at: 2026-07-30
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 ---
 # ARS vNext Roadmap Current Status
@@ -11,20 +11,45 @@ supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 
 ```text
 base_branch: main
-active_plan: ../plans/active/2026-07-29-standard-native-acp-v1.md
+active_plan: ../plans/active/2026-07-30-ars-v4-boundary-reset.md
 ```
 
 ## Current position
 
-- ARS vNext remains the local supervision path: `trusted caller → arsd UDS → ars-core/Native ACP → registered external AGENT`.
-- Stage 0/1 Native ACP core is closed on `main`.
-- Stage 2 `arsd` is closed and the previously accepted local user service is enabled. That local status does not imply release, Sachima, Gateway, public ingress, or further deployment approval.
-- Registered profiles on `main` are `opencode-native-acp` r3, `codex-acp-1.1.7` r3, and `claude-agent-acp-0.63.0` r4; all speak ACP Protocol v1. All three remain registered, runnable, and hash-identical, and `opencode-native-acp` remains the authoritative OpenCode path.
-- Source pins the optional Python ACP SDK as `agent-client-protocol==0.11.1`. It is distinct from the Claude adapter's bundled JavaScript ACP SDK.
-- The Runtime Binding framework, the wrapped-adapter package closure, and the profile-scoped active-selection namespace are complete and released on the v0.5.2 source line.
-- **Board correction (2026-07-29).** The earlier "operator activation remains open" line was stale. Production runs v0.5.2 with three profile-scoped Bindings promoted under a live root, so the artifact closure and the per-profile generations listed below as open gates are done. What remains open is recorded under Open gates.
-- In review on the active plan: a versioned `standard-native-acp-v1` conformance profile instantiated per operator-owned Agent Registration, plus the agent-anchored Binding subtree it descends into. Additive and merge-safe by construction — no hash, layout, digest, or daemon-surface movement for the three live profiles.
-- Sachima integration is Parked and separately approvable. Remaining acpx product, runtime, and compatibility content is planned for separately authorized removal; bounded differential/comparison tests and fixtures remain only as reference.
+- ARS vNext remains the local supervision path: `trusted caller → arsd UDS → ars-core/Native ACP → one local process running the registered command`.
+- **Tracked authority is now the V4 external-AGENT boundary reset**: one operator-owned agent registry read once at daemon startup, the four-way boundary, the environment-value sink boundary, total ordered reconciliation, and fail-closed load-only Session reuse. Operator contract: [`agent-registry.md`](../design/agent-registry.md).
+- The artifact/Binding-era authority is retired into [`docs/archive/binding-era-2026-07/`](../archive/binding-era-2026-07/README.md) as cold history. It is not an alternative source of truth.
+- **Decision 1 is recorded as option (a) on 2026-07-30**: policy-level retirement of the three per-agent profiles. That is a policy decision about authority. It is **not** approval to delete anything from source.
+- Stage 0/1 Native ACP core is closed on `main`. Stage 2 `arsd` is closed and the previously accepted local user service is enabled. Neither implies release, Sachima, Gateway, public ingress, or further deployment approval.
+- Source pins the optional Python ACP SDK as `agent-client-protocol==0.11.1`. It is distinct from any adapter's own bundled JavaScript ACP SDK.
+- Sachima integration is Parked and separately approvable. Remaining acpx product, runtime, and compatibility content is planned for separately authorized removal; bounded differential fixtures remain only as reference.
+
+## Authority versus source — the Stage 1→3 window
+
+**These differ right now, deliberately and visibly.** The documents describe the reset; the code does not
+implement it yet. In plain words: **the authority chain and both READMEs describe the operator agent
+registry, while source still implements the artifact/Binding architecture** — and that stays true until the
+three source stages land. The window opens when this documentation gate merges and closes when Stage 3
+merges.
+
+| | Authority says | Source on `main` still is |
+|---|---|---|
+| agent selection | one operator TOML registry, read once at startup, resolved in memory | a Binding root read per Run, with promoted generations |
+| profiles registered | two: one standard, one evidenced compat | four, including three per-agent profiles |
+| daemon operand | an agents file, required in daemon mode and for unit rendering | a Binding root, required in the same two places |
+| operator CLI | `agents validate`, `agents doctor`, `run inspect` | the `runtime-binding` command group |
+| artifact identity | none: no digest, closure, promotion, or attestation | frozen artifact identity, package closures, and spawn-boundary attestation |
+| environment values | never persisted, hashed, logged, or returned | serialized into launch records and re-hashed by legacy inspection |
+| reuse on an absent Session record | refused before the lease | can still fall through to a new external Session |
+| reconciliation | absent ≠ corrupt, one exhaustive first-match outcome | absent and corrupt collapse to the same result |
+| caller wire | `api_version` 2 with a per-operation drain matrix | `api_version` 1, version rejected at the envelope |
+
+Consequences an operator must not mis-read while the window is open:
+
+- **Production is untouched.** It runs v0.5.3 with three profile-scoped Bindings promoted under a live root. This documentation change deployed nothing, restarted nothing, migrated nothing, and removed no `/opt` or Binding-root path.
+- **The registry surface is not runnable.** No agents file is read by any released code, and authoring one against a live deployment changes nothing and is not approved.
+- **Both public READMEs describe the reset**, each carrying the same delta note, so neither language over-claims. They document the target operator surface, not the shipped `v0.5.x` one.
+- The window closes only when the staged source work lands, in order: **Stage 1** fail-closed reuse and total reconciliation, **Stage 2** the environment-value guard, **Stage 3** the boundary reset. Each stage needs its own approval, and Stage 3's profile deletion needs one more.
 
 ## Phase board
 
@@ -32,24 +57,34 @@ active_plan: ../plans/active/2026-07-29-standard-native-acp-v1.md
 |---|---|---|
 | Stage 0/1 — Native ACP core | Closed on `main` | [closed phase archive](archive/phases/vnext-stage01-native-acp.md) |
 | Stage 2 — `arsd` local production ingress | Closed; previously accepted local user service enabled | [closed phase archive](archive/phases/vnext-stage2-arsd-production-ingress.md) |
-| Runtime Binding and wrapped-adapter package closure | Source closure complete on `main`; operator activation open | [phase archive](archive/phases/vnext-runtime-binding-source-closure.md) · [feature tracker](features.md) |
-| Profile-scoped Binding activation | Released on v0.5.2 | [archived plan](../plans/archive/2026-07-29-multi-profile-runtime-binding.md) |
-| Standard Native ACP (v1) + Agent Registration | In review on branch | [active plan](../plans/active/2026-07-29-standard-native-acp-v1.md) |
+| Runtime Binding era | Retired as target architecture; implementing source still merged and running | [binding-era archive](../archive/binding-era-2026-07/README.md) · [feature tracker](features.md) |
+| Per-agent profiles | Superseded as authority; still registered in source | [features](features.md) F-NATIVE-ADAPTER-*, F-STANDARD-NATIVE-ACP-001 |
+| Standard Native ACP (v1) + agent identity | Merged on the v0.5.3 line; plan archived as completed | [archived plan](../plans/archive/2026-07-29-standard-native-acp-v1.md) |
+| V4 authority alignment (Stage 0) | Documentation only, on branch `docs/v4-authority-reset` | [active plan](../plans/active/2026-07-30-ars-v4-boundary-reset.md) |
+| V4 source stages 1–3 | Planned; none approved | [active plan](../plans/active/2026-07-30-ars-v4-boundary-reset.md) · [features](features.md) F-AGENT-REGISTRY-001, F-BOUNDARY-RESET-001, F-ENV-EVIDENCE-001, F-RECONCILE-ORDERED-001, F-OBSERVED-EVIDENCE-001, F-ARSD-API-002 |
 | Sachima `ArsdBackend` integration | Parked | separately approvable later integration |
 | acpx product/runtime/compatibility removal | Planned | separately authorized source work; bounded comparison fixtures remain |
 
-## Open gates / next operator decisions
+## Open gates / next decisions
 
-The artifact closure is materialized and one generation per profile is promoted under the live root; those gates are closed. These remain separate operator decisions and none is approved here:
+None of these is approved here. Each is separate and non-transitive.
 
-- Run the Claude R12 permission canary.
-- For the standard-native profile: install an agent artifact under a root-owned immutable prefix, run zero-prompt ACP `initialize` discovery, record the code-owned CLI probe as a separate fact, run the mandatory denied-action mediation canary, author `registration.json` plus a generation, then `validate --agent` and `promote --agent`.
-- Cut any caller over to `standard-native-acp-v1`.
-- Design, implement, and approve a retirement mechanism, and only then retire any registered profile. No such mechanism exists in source and none is introduced by the active plan; these are two separate decisions.
+**Recorded, and bounded:**
 
-If the Binding-root naming convention ties root name to deployed commit, the next deploy implies a new root and re-promotion of all profiles. Merging the active plan alone does not: the running daemon keeps the `--binding-root` it was started with.
+- **Decision 1 — profile-retirement policy: option (a), recorded 2026-07-30.** It authorized this authority retirement and nothing else.
 
-No source closure implies Binding promotion, deployment, service restart, rollout, publication, or a provider run.
+**Open human decisions:**
+
+- **Profile-retirement execution in source** — deleting the three registered per-agent profiles. Introducing a retirement capability and using one were always two decisions; the second is **not taken**, and it is required before that source work runs.
+- **Source implementation for the V4 stages** — a distinct approval, recordable only after the authority alignment merges. Neither the recorded decision, nor activating a plan, nor merging the authority alignment implies it.
+- **Decision 2 — cutover and the one-time legacy-Session load refusal.** Every live Session at cutover ends; continuing that work means a new Session with caller-owned context handoff. Open, and it does not block source work.
+- **Decision 3 — lifetime of the legacy `v0.5.x` line.** Open, and it governs release and branch policy, which is separately approved anyway.
+
+**Operator actions, unchanged by the reset:**
+
+- Run the mandatory denied-action mediation canary per agent before that agent's use.
+- Removal of the `/opt` artifact trees and the Binding roots. They simply stop being referenced by the target architecture; nothing deletes them.
+- Deployment, service restart, unit re-render, migration, release, and publication.
 
 ## Boundaries
 
@@ -58,10 +93,10 @@ it does not authorize operational changes, release/publication, integrations, or
 
 ## Cold history
 
+- [Binding-era authority archive](../archive/binding-era-2026-07/README.md)
 - [Runtime Binding source/package-closure archive](archive/phases/vnext-runtime-binding-source-closure.md)
 - [Closed phase archive](archive/README.md)
 - [Archived implementation plans](../plans/archive/README.md)
-- [Profile-scoped Binding activation plan](../plans/archive/2026-07-29-multi-profile-runtime-binding.md)
 - [Former authority snapshot](../archive/pre-vnext-reset-2026-07-21/README.md)
 
 ## Verification
