@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import hmac
 import json
 import os
 import selectors
@@ -50,6 +51,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .agent_registration import AgentRegistration, AgentRegistrationError
+from .agent_registration import parse_registration as _parse_registration
 from .profile import (
     ARTIFACT_SLOT_KINDS,
     SLOT_DESCRIPTOR_FIELDS,
@@ -65,8 +68,10 @@ BINDING_SCHEMA_VERSION = 1
 
 ACTIVE_FILENAME = "active.json"
 PROFILES_DIRNAME = "profiles"
+AGENTS_DIRNAME = "agents"
 GENERATIONS_DIRNAME = "generations"
 MANIFEST_FILENAME = "manifest.json"
+REGISTRATION_FILENAME = "registration.json"
 
 MAX_BINDING_FILE_BYTES = 65_536
 MAX_PACKAGE_TREE_ENTRIES = 20_000
@@ -89,6 +94,28 @@ _POINTER_FIELDS = frozenset(
 _CONTRACT_IDENTITY_FIELDS = frozenset(
     {"profile_id", "profile_revision", "adapter_contract_hash"}
 )
+# Field-set widening is contract-dependent, never global: a profile that is not
+# registration-scoped keeps the exact field sets above, so its promoted
+# generations and pointers stay byte-identical and keep resolving unchanged.
+_AGENT_POINTER_FIELDS = _POINTER_FIELDS | {"agent_id"}
+_AGENT_CONTRACT_IDENTITY_FIELDS = _CONTRACT_IDENTITY_FIELDS | {
+    "agent_id",
+    "agent_registration_hash",
+}
+
+
+def pointer_fields(profile: AgentProfile) -> frozenset[str]:
+    """The exact ``active.json`` field set this profile's pointer must carry."""
+    if profile.contract.requires_agent_registration:
+        return frozenset(_AGENT_POINTER_FIELDS)
+    return _POINTER_FIELDS
+
+
+def contract_identity_fields(profile: AgentProfile) -> frozenset[str]:
+    """The exact ``contract_identity`` field set this profile's manifest carries."""
+    if profile.contract.requires_agent_registration:
+        return frozenset(_AGENT_CONTRACT_IDENTITY_FIELDS)
+    return _CONTRACT_IDENTITY_FIELDS
 _PROVENANCE_FIELDS = frozenset(
     {"created_at", "accepted_by", "accepted_at", "acceptance_receipt"}
 )
@@ -114,7 +141,7 @@ class BindingRefusal(Exception):
 
 # -- read-once instrumentation ----------------------------------------------
 
-_READ_COUNTERS: dict[str, int] = {"active": 0, "generation": 0}
+_READ_COUNTERS: dict[str, int] = {"registration": 0, "active": 0, "generation": 0}
 
 
 def read_counters() -> dict[str, int]:
@@ -346,9 +373,13 @@ def _open_profile_dir(
     """Descend a verified root to ``profiles/<profile_id>/``.
 
     The component comes from the resolved closed profile object — the registry's
-    own constant — and never from request text, so no caller-supplied value
-    reaches a path here. Each step is dirfd-relative and ``O_NOFOLLOW``, so the
-    subtree that was proven is the subtree the returned descriptor belongs to.
+    own constant. Each step is dirfd-relative and ``O_NOFOLLOW``, so the subtree
+    that was proven is the subtree the returned descriptor belongs to.
+
+    One level deeper, an agent-scoped profile descends again through
+    :func:`_open_agent_dir`, and *that* component does come from request text.
+    It is proven safe by :func:`agent_component` before any filesystem call, so
+    the value that reaches a path here is judged text rather than trusted text.
 
     Both directories are protected objects rather than ambient traversal
     ancestors: what they contain *is* one profile's activation state, so they
@@ -385,6 +416,71 @@ def _open_profile_dir(
         raise
 
 
+def _open_agent_dir(
+    profile_fd: int, agent_id: str, *, ownership: TrustedOwnership
+) -> int:
+    """Descend a verified profile subtree to ``agents/<agent_id>/``.
+
+    ``agent_id`` is the first caller-supplied value in this repository ever to
+    become a path component, so the order here is the whole safety argument:
+    :func:`agent_component` has already judged and frozen it *before* this
+    function is reached and before any filesystem call is made. Beyond that,
+    the descent is dirfd-relative and ``O_NOFOLLOW`` under an
+    ownership-verified directory, ARS creates nothing, and the registration
+    inside re-declares the same ``agent_id`` as an explicit machine field — so
+    a caller can only ever name a directory an operator authored under a
+    trusted root, and naming it is not the same as being believed by it.
+    """
+    component = agent_component(agent_id)
+    fd = profile_fd
+    opened: int | None = None
+    try:
+        for name, surface, missing in (
+            (AGENTS_DIRNAME, f"{AGENTS_DIRNAME}/", "PROFILE_BINDING_ABSENT"),
+            (component, f"{AGENTS_DIRNAME}/{component}/", "AGENT_BINDING_ABSENT"),
+        ):
+            child = _open_dir(name, dir_fd=fd, surface=surface, missing_rule=missing)
+            if opened is not None:
+                os.close(opened)
+            opened = fd = child
+            check_ownership(os.fstat(fd), ownership, surface)
+        assert opened is not None  # the loop opens at least one descriptor
+        return opened
+    except BaseException:
+        if opened is not None:
+            os.close(opened)
+        raise
+
+
+def _open_anchor_dir(
+    root: Path | str,
+    profile: AgentProfile,
+    agent_id: str | None,
+    *,
+    ownership: TrustedOwnership,
+) -> int:
+    """The one directory this profile's (and agent's) Binding material lives in.
+
+    Read and write share this descent, so a promotion can never reach a
+    directory a resolution would not, or vice versa. For the three live
+    profiles it is exactly the descent they have always taken; the agent anchor
+    is a new subtree only an agent-scoped profile ever enters. The caller owns
+    closing the returned descriptor.
+    """
+    root_fd = open_trusted_dir(root, ownership=ownership, surface="binding root")
+    try:
+        check_ownership(os.fstat(root_fd), ownership, "binding root")
+        profile_fd = _open_profile_dir(root_fd, profile, ownership=ownership)
+    finally:
+        os.close(root_fd)
+    if agent_id is None:
+        return profile_fd
+    try:
+        return _open_agent_dir(profile_fd, agent_id, ownership=ownership)
+    finally:
+        os.close(profile_fd)
+
+
 def _absent_or_legacy(root_fd: int, surface: str) -> BindingRefusal:
     """Name a pre-0.5.2 root instead of reporting a bare missing directory.
 
@@ -415,10 +511,16 @@ def _absent_or_legacy(root_fd: int, surface: str) -> BindingRefusal:
     )
 
 
-def _read_regular_file(dir_fd: int, name: str, *, surface: str) -> bytes:
+def _read_regular_file(
+    dir_fd: int, name: str, *, surface: str, missing_rule: str | None = None
+) -> bytes:
     try:
         info = os.lstat(name, dir_fd=dir_fd)
-    except OSError:
+    except OSError as exc:
+        # "absent" and "unopenable" are different operator facts; only the
+        # caller knows whether absence deserves a rule of its own here.
+        if missing_rule is not None and exc.errno == errno.ENOENT:
+            raise _refuse(missing_rule, f"{surface} does not exist") from None
         raise _refuse("OPEN_FAILED", f"{surface} could not be inspected") from None
     if not stat.S_ISREG(info.st_mode):
         raise _refuse("NOT_A_REGULAR_FILE", f"{surface} is not a regular file")
@@ -509,22 +611,93 @@ def profile_component(profile_id: Any) -> str:
     return profile_id
 
 
+# An agent id names a directory under ``agents/``. Unlike a profile id it is
+# *caller text*, so this is input filtering rather than defence in depth, and it
+# is deliberately narrower: no dots at all, so ``.``, ``..``, and every
+# traversal run are excluded by the character set rather than by a special case.
+_AGENT_COMPONENT_MAX = 64
+
+
+def agent_component(agent_id: Any) -> str:
+    """The one directory component an agent's Binding material may live under.
+
+    Called before any filesystem query on every path that descends into an
+    agent subtree — the ordering is the safety property, not the grammar alone.
+
+    The type is judged by ``type(v) is str`` rather than ``isinstance``, and the
+    judged value is returned rather than the argument. A ``str`` subclass can
+    override ``__str__``, ``__eq__``, and ``__class__`` and so pass a check on
+    one value while presenting another to the reader that actually opens the
+    path; ``isinstance`` admits exactly that subclass, and ``type(v) in (...)``
+    still consults a metaclass ``__eq__``. This repository has already paid for
+    that bug once in :mod:`agent_run_supervisor.arsd.operand`, and the fix there
+    is the fix here.
+    """
+    if type(agent_id) is not str:
+        raise _refuse("AGENT_ID_UNSAFE", "agent id must be an exact string")
+    # Frozen once: everything below judges — and everything above returns — this
+    # value, never the caller's object.
+    value = str.__str__(agent_id)
+    if type(value) is not str:  # pragma: no cover - str.__str__ is not overridable here
+        raise _refuse("AGENT_ID_UNSAFE", "agent id did not freeze to an exact string")
+    if not value or len(value) > _AGENT_COMPONENT_MAX:
+        raise _refuse("AGENT_ID_UNSAFE", "agent id is missing or oversized")
+    if not value.isascii():
+        raise _refuse("AGENT_ID_UNSAFE", "agent id is not ASCII")
+    if not (value[0].isalnum() and value[0].isascii()):
+        raise _refuse("AGENT_ID_UNSAFE", "agent id must start alphanumeric")
+    for char in value[1:]:
+        if not (char.isalnum() or char in "_-"):
+            raise _refuse("AGENT_ID_UNSAFE", "agent id has an unsafe character")
+    return value
+
+
 def profile_binding_dir(root: Path | str, profile_id: str) -> Path:
     """``<root>/profiles/<profile_id>`` — lexical only, and never created here."""
     return Path(root) / PROFILES_DIRNAME / profile_component(profile_id)
 
 
-def active_pointer_path(root: Path | str, profile_id: str) -> Path:
-    """The one file a promotion for ``profile_id`` replaces."""
-    return profile_binding_dir(root, profile_id) / ACTIVE_FILENAME
+def agent_binding_dir(root: Path | str, profile_id: str, agent_id: str) -> Path:
+    """``<root>/profiles/<profile_id>/agents/<agent_id>`` — lexical only.
+
+    A new subtree that only an agent-scoped profile ever descends into; the
+    three live profiles' descent is untouched.
+    """
+    return (
+        profile_binding_dir(root, profile_id)
+        / AGENTS_DIRNAME
+        / agent_component(agent_id)
+    )
+
+
+def _binding_dir(root: Path | str, profile_id: str, agent_id: str | None) -> Path:
+    if agent_id is None:
+        return profile_binding_dir(root, profile_id)
+    return agent_binding_dir(root, profile_id, agent_id)
+
+
+def active_pointer_path(
+    root: Path | str, profile_id: str, *, agent_id: str | None = None
+) -> Path:
+    """The one file a promotion for this profile (and agent) replaces."""
+    return _binding_dir(root, profile_id, agent_id) / ACTIVE_FILENAME
+
+
+def registration_path(root: Path | str, profile_id: str, agent_id: str) -> Path:
+    """Where one agent's operator-authored registration lives."""
+    return agent_binding_dir(root, profile_id, agent_id) / REGISTRATION_FILENAME
 
 
 def generation_manifest_path(
-    root: Path | str, profile_id: str, generation_id: str
+    root: Path | str,
+    profile_id: str,
+    generation_id: str,
+    *,
+    agent_id: str | None = None,
 ) -> Path:
-    """Where one profile's generation manifest lives; operator-authored."""
+    """Where one generation manifest lives; operator-authored."""
     return (
-        profile_binding_dir(root, profile_id)
+        _binding_dir(root, profile_id, agent_id)
         / GENERATIONS_DIRNAME
         / _safe_generation_id(generation_id)
         / MANIFEST_FILENAME
@@ -979,6 +1152,17 @@ class ResolvedBinding:
             return value if isinstance(value, str) else None
         return None
 
+    @property
+    def frozen_agent_registration_hash(self) -> str | None:
+        """The Registration digest this generation was accepted against.
+
+        ``None`` for a generation that is not agent-scoped. Present as a
+        property rather than read inline so the freeze invariant below reads as
+        one comparison of two named facts.
+        """
+        value = self.contract_identity.get("agent_registration_hash")
+        return value if isinstance(value, str) else None
+
     def slot(self, name: str) -> ResolvedSlot:
         try:
             return self.slots[name]
@@ -1012,6 +1196,47 @@ class AdmittedRuntimeBinding:
 
     resolved: ResolvedBinding
     ownership: TrustedOwnership
+    # The agent this Run was admitted as, for a registration-scoped profile.
+    # ``None`` for the three legacy profiles, which have no agent to carry.
+    registration: AgentRegistration | None = None
+
+    def __post_init__(self) -> None:
+        """The freeze invariant: a generation binds the Registration it named.
+
+        This is the one place a live Registration meets a generation, so it is
+        the one place the comparison can happen — and putting it in
+        ``__post_init__`` means no construction site can forget it, including
+        test fixtures.
+
+        Without it the generation's ``agent_registration_hash`` is decorative:
+        an operator could validate and promote one Registration and then edit
+        ``registration.json`` in place under the same agent, and the pointer,
+        the manifest bytes, the manifest digest, the epoch, and the contract
+        identity would all still be exactly right — because none of them is
+        about the Registration's *contents*. The Run would then launch against
+        argv tokens, selector domains, capability narrowing, or a mediation
+        selection that nothing ever validated.
+
+        Because ``agent_registration_hash`` excludes provenance, re-recording an
+        acceptance, discovery, or canary receipt is not drift and stays
+        compatible here; any compatibility-bearing edit is drift and fails
+        closed.
+
+        Symmetric on purpose. An agent-scoped generation carried without a
+        Registration is refused, and a Registration carried alongside a
+        generation that freezes none is refused too — otherwise "no agent
+        identity" would be a way to opt out of the check.
+        """
+        frozen = self.resolved.frozen_agent_registration_hash
+        live = None if self.registration is None else self.registration.registration_hash
+        if frozen is None and live is None:
+            return
+        if frozen is None or live is None or not _digests_equal(frozen, live):
+            raise _refuse(
+                "REGISTRATION_HASH_MISMATCH",
+                "the live agent registration is not the one this generation was "
+                "accepted against",
+            )
 
 
 # -- the reader --------------------------------------------------------------
@@ -1028,34 +1253,81 @@ class BindingReader:
     def root(self) -> Path:
         return self._root
 
-    def resolve_active(self, profile: AgentProfile) -> ResolvedBinding:
+    def read_registration(
+        self, profile: AgentProfile, agent_id: str
+    ) -> AgentRegistration:
+        """The one ``registration.json`` read for an agent-scoped Run.
+
+        Deliberately *not* folded into the generation manifest, despite costing
+        a third read: folding would put agent identity inside ``generation_hash``,
+        so an artifact-only bump would force re-authoring agent facts and a
+        rollback would silently change the agent's ACP name.
+        """
+        self._require_agent_scope(profile, agent_id)
+        agent_fd = self._open_agent(profile, agent_id)
+        try:
+            raw = _read_regular_file(
+                agent_fd, REGISTRATION_FILENAME, surface="registration.json",
+                missing_rule="REGISTRATION_ABSENT",
+            )
+            _READ_COUNTERS["registration"] += 1
+            self._verify_entry(agent_fd, REGISTRATION_FILENAME, "registration.json")
+        finally:
+            os.close(agent_fd)
+        payload = _decode_canonical(raw, surface="registration.json")
+        try:
+            return _parse_registration(
+                payload, profile=profile, expected_agent_id=agent_component(agent_id)
+            )
+        except AgentRegistrationError as error:
+            # The rule name is preserved verbatim: the grammar lives in the pure
+            # leaf, but every refusal an operator sees still names one stable
+            # rule from one place.
+            raise _refuse(error.rule, error.message) from None
+
+    def resolve_active(
+        self, profile: AgentProfile, *, agent_id: str | None = None
+    ) -> ResolvedBinding:
         """One ``active.json`` read plus one generation read. Nothing else.
 
-        Both reads are anchored at the profile's own subtree, so a root serves
-        every registered profile at once and a Run can only ever see the
-        selection promoted for the profile that is resolving.
+        Both reads are anchored at the profile's own subtree — and, for an
+        agent-scoped profile, at that agent's subtree inside it — so a root
+        serves every registered profile and every registered agent at once, and
+        a Run can only ever see the selection promoted for the pair resolving.
+
+        This is a **generation-only primitive and admits no Agent Registration**.
+        It returns what the generation says, including the Registration digest
+        that generation was accepted against; it does not read, hold, or judge
+        the Registration that is actually live. Pairing the two is
+        :class:`AdmittedRuntimeBinding`'s job, and that pairing is where the
+        freeze invariant is enforced — so a caller that wants an admitted
+        runtime must go through it and cannot get one from here.
         """
-        generation_id, manifest_sha256 = self.read_active(profile)
+        generation_id, manifest_sha256 = self.read_active(profile, agent_id=agent_id)
         return self.read_generation(
-            generation_id, profile=profile, expected_manifest_sha256=manifest_sha256
+            generation_id,
+            profile=profile,
+            agent_id=agent_id,
+            expected_manifest_sha256=manifest_sha256,
         )
 
-    def read_active(self, profile: AgentProfile) -> tuple[str, str]:
-        root_fd = self._open_root()
+    def read_active(
+        self, profile: AgentProfile, *, agent_id: str | None = None
+    ) -> tuple[str, str]:
+        self._require_agent_scope(profile, agent_id)
+        anchor_fd = self._open_anchor(profile, agent_id)
         try:
-            self._verify_dir(root_fd, "binding root")
-            profile_fd = _open_profile_dir(root_fd, profile, ownership=self._ownership)
-        finally:
-            os.close(root_fd)
-        try:
-            raw = _read_regular_file(profile_fd, ACTIVE_FILENAME, surface="active.json")
+            raw = _read_regular_file(anchor_fd, ACTIVE_FILENAME, surface="active.json")
             _READ_COUNTERS["active"] += 1
-            self._verify_entry(profile_fd, ACTIVE_FILENAME, "active.json")
+            self._verify_entry(anchor_fd, ACTIVE_FILENAME, "active.json")
         finally:
-            os.close(profile_fd)
+            os.close(anchor_fd)
         payload = _decode_canonical(raw, surface="active.json")
         _require_fields(
-            payload, _POINTER_FIELDS, rule="UNKNOWN_POINTER_FIELD", surface="active.json"
+            payload,
+            pointer_fields(profile),
+            rule="UNKNOWN_POINTER_FIELD",
+            surface="active.json",
         )
         if payload.get("schema_version") != BINDING_SCHEMA_VERSION:
             raise _refuse("SCHEMA_VERSION", "active.json schema_version is unsupported")
@@ -1067,6 +1339,15 @@ class BindingReader:
                 "POINTER_PROFILE_MISMATCH",
                 "active.json activates a different profile than the one resolving it",
             )
+        if agent_id is not None:
+            # One level deeper than the profile rule, for the same reason: a
+            # pointer moved between two agent subtrees is refused on an explicit
+            # machine field rather than on path separation alone.
+            if payload.get("agent_id") != agent_component(agent_id):
+                raise _refuse(
+                    "POINTER_AGENT_MISMATCH",
+                    "active.json activates a different agent than the one resolving it",
+                )
         generation_id = _safe_generation_id(payload.get("generation_id"))
         manifest_sha256 = payload.get("manifest_sha256")
         if not _is_sha256(manifest_sha256):
@@ -1080,21 +1361,18 @@ class BindingReader:
         generation_id: str,
         *,
         profile: AgentProfile,
+        agent_id: str | None = None,
         expected_manifest_sha256: str | None = None,
     ) -> ResolvedBinding:
+        self._require_agent_scope(profile, agent_id)
         generation_id = _safe_generation_id(generation_id)
-        root_fd = self._open_root()
-        try:
-            self._verify_dir(root_fd, "binding root")
-            profile_fd = _open_profile_dir(root_fd, profile, ownership=self._ownership)
-        finally:
-            os.close(root_fd)
+        anchor_fd = self._open_anchor(profile, agent_id)
         try:
             generations_fd = _open_dir(
-                GENERATIONS_DIRNAME, dir_fd=profile_fd, surface="generations/"
+                GENERATIONS_DIRNAME, dir_fd=anchor_fd, surface="generations/"
             )
         finally:
-            os.close(profile_fd)
+            os.close(anchor_fd)
         try:
             self._verify_dir(generations_fd, "generations/")
             generation_fd = _open_dir(
@@ -1125,16 +1403,52 @@ class BindingReader:
         return self._project(
             payload,
             profile=profile,
+            agent_id=agent_id,
             generation_id=generation_id,
             manifest_sha256=manifest_sha256,
         )
 
     # -- internals ---------------------------------------------------------
 
+    @staticmethod
+    def _require_agent_scope(profile: AgentProfile, agent_id: str | None) -> None:
+        """The scope gate, symmetric and before any filesystem query.
+
+        A registration-scoped profile with no agent has no subtree to descend
+        into; a legacy profile with an agent is a caller asking for a subtree
+        that must not exist. Both are refused here rather than discovered as a
+        missing directory later, so the refusal names the real fact.
+
+        The component grammar runs here too, and that placement is the point:
+        every public read calls this first, so caller text is judged before the
+        Binding root is so much as opened.
+        """
+        requires = profile.contract.requires_agent_registration
+        if requires and agent_id is None:
+            raise _refuse(
+                "AGENT_SCOPE_REQUIRED",
+                f"profile {profile.profile_id} resolves only under an agent",
+            )
+        if not requires and agent_id is not None:
+            raise _refuse(
+                "AGENT_SCOPE_FORBIDDEN",
+                f"profile {profile.profile_id} is not agent-scoped",
+            )
+        if agent_id is not None:
+            agent_component(agent_id)
+
     def _open_root(self) -> int:
         return open_trusted_dir(
             self._root, ownership=self._ownership, surface="binding root"
         )
+
+    def _open_anchor(self, profile: AgentProfile, agent_id: str | None) -> int:
+        return _open_anchor_dir(
+            self._root, profile, agent_id, ownership=self._ownership
+        )
+
+    def _open_agent(self, profile: AgentProfile, agent_id: str) -> int:
+        return self._open_anchor(profile, agent_id)
 
     def _verify_dir(self, fd: int, surface: str) -> None:
         check_ownership(os.fstat(fd), self._ownership, surface)
@@ -1147,6 +1461,7 @@ class BindingReader:
         payload: Mapping[str, Any],
         *,
         profile: AgentProfile,
+        agent_id: str | None,
         generation_id: str,
         manifest_sha256: str,
     ) -> ResolvedBinding:
@@ -1169,13 +1484,14 @@ class BindingReader:
             raise _refuse("CONTRACT_IDENTITY_ABSENT", "manifest declares no identity")
         if not isinstance(identity, dict):
             raise _refuse("MANIFEST_FIELD_TYPE", "contract_identity must be an object")
+        expected_fields = contract_identity_fields(profile)
         _require_fields(
             identity,
-            _CONTRACT_IDENTITY_FIELDS,
+            expected_fields,
             rule="UNKNOWN_MANIFEST_FIELD",
             surface="contract_identity",
         )
-        if sorted(identity) != sorted(_CONTRACT_IDENTITY_FIELDS):
+        if sorted(identity) != sorted(expected_fields):
             raise _refuse(
                 "CONTRACT_IDENTITY_ABSENT", "contract_identity omits a machine field"
             )
@@ -1184,7 +1500,36 @@ class BindingReader:
             "profile_revision": profile.revision,
             "adapter_contract_hash": profile.adapter_contract_hash(),
         }
-        if identity != live:
+        if agent_id is not None:
+            # The agent half is checked separately so a generation authored for
+            # a different agent is refused by *its own* rule: "this is not the
+            # contract" and "this is not the agent" are different operator facts
+            # and deserve different names.
+            #
+            # What is checkable *here* is only shape: this method reads one
+            # manifest and never sees a Registration, so comparing the frozen
+            # digest against the live one is not something it could do. That
+            # comparison is the freeze invariant, and it belongs to
+            # :class:`AdmittedRuntimeBinding`, the one object that holds both
+            # halves. Folding the declared value into ``live`` below would make
+            # the manifest satisfy itself — which is exactly the defect this
+            # split exists to make unrepresentable.
+            component = agent_component(agent_id)
+            declared_agent = identity.get("agent_id")
+            declared_hash = identity.get("agent_registration_hash")
+            if declared_agent != component or not _is_sha256(declared_hash):
+                raise _refuse(
+                    "REGISTRATION_CONTRACT_MISMATCH",
+                    "generation was accepted for a different agent registration",
+                )
+        # Compared over the contract fields only. The agent fields were judged
+        # just above and are deliberately not re-judged here against themselves.
+        declared_contract = {
+            key: value
+            for key, value in identity.items()
+            if key in _CONTRACT_IDENTITY_FIELDS
+        }
+        if declared_contract != live:
             # A perfect provenance block never rescues this: acceptance rests
             # on the explicit machine fields only.
             raise _refuse(
@@ -1473,6 +1818,20 @@ def _is_sha256(value: Any) -> bool:
         and len(value) == 64
         and all(ch in "0123456789abcdef" for ch in value)
     )
+
+
+def _digests_equal(left: Any, right: Any) -> bool:
+    """Exact equality of two hex digests, in constant time.
+
+    Both operands are proven to be well-formed sha256 hex *before* comparison,
+    so a malformed or non-string value is a mismatch rather than an exception —
+    and ``compare_digest`` then sees two equal-length ASCII strings, which is
+    the shape it requires. Length is not a side channel here because both sides
+    are the same fixed width by construction.
+    """
+    if not _is_sha256(left) or not _is_sha256(right):
+        return False
+    return hmac.compare_digest(left, right)
 
 
 _PROVENANCE_TEXT_MAX = 256
@@ -2058,18 +2417,31 @@ class _ProbeAnchor:
                 self._outcome = _parse_probe_outcome(fields)
 
 
-def probe_slot_version(resolved: ResolvedBinding, profile: AgentProfile) -> str:
-    """Probe the CLI artifact the contract's ``cli_slot`` names."""
+def probe_slot_version(
+    resolved: ResolvedBinding,
+    profile: AgentProfile,
+    *,
+    rule: VersionProbeRule | None = None,
+) -> str:
+    """Probe the CLI artifact the contract's ``cli_slot`` names.
+
+    ``rule`` lets an agent-scoped caller pass the suffix its registration
+    selected. Only the suffix is ever registration-owned: the parser, the
+    timeout, and the output bound stay exactly as the contract froze them,
+    because :class:`AgentRegistration` copies them from it rather than
+    accepting them.
+    """
     contract = profile.contract
     if contract.cli_slot is None:
         raise _refuse("PROBE_FAILED", "contract declares no CLI slot to probe")
+    probe = rule if rule is not None else contract.version_probe
     slot = resolved.slot(contract.cli_slot)
     if slot.kind == SLOT_KIND_NATIVE_BINARY:
         return probe_cli_version(
-            executable=str(slot.descriptor["path"]), rule=contract.version_probe
+            executable=str(slot.descriptor["path"]), rule=probe
         )
     return probe_cli_version(
-        executable=str(slot.descriptor["launcher_path"]), rule=contract.version_probe
+        executable=str(slot.descriptor["launcher_path"]), rule=probe
     )
 
 
@@ -2087,18 +2459,34 @@ def validate_generation(
     *,
     profile: AgentProfile,
     ownership: TrustedOwnership,
+    agent_id: str | None = None,
     probe: bool = True,
 ) -> ResolvedBinding:
     """Full fail-closed validation of one generation against the live contract.
 
     With ``probe`` the real external CLI version is obtained through the
     contract's code-owned probe and compared with the Binding — a manifest's
-    version string alone is never proof.
+    version string alone is never proof. For an agent-scoped profile the
+    registration is read first, so the probe runs the suffix that agent's
+    registration actually selected.
     """
     reader = BindingReader(root, ownership=ownership)
-    resolved = reader.read_generation(generation_id, profile=profile)
+    registration = (
+        None if agent_id is None else reader.read_registration(profile, agent_id)
+    )
+    resolved = reader.read_generation(
+        generation_id, profile=profile, agent_id=agent_id
+    )
+    # The same freeze invariant the runtime pair enforces, applied through the
+    # same object rather than restated — so a generation whose Registration has
+    # drifted can never be validated, promoted, rolled back to, or otherwise
+    # blessed. Constructing the pair is the check; the value is discarded.
+    AdmittedRuntimeBinding(
+        resolved=resolved, ownership=ownership, registration=registration
+    )
     if probe and profile.contract.cli_slot is not None:
-        observed = probe_slot_version(resolved, profile)
+        rule = None if registration is None else registration.version_probe
+        observed = probe_slot_version(resolved, profile, rule=rule)
         declared = declared_cli_version(resolved, profile)
         if observed != declared:
             raise _refuse(
@@ -2113,6 +2501,7 @@ def validate_generation(
             confirmed = reader.read_generation(
                 generation_id,
                 profile=profile,
+                agent_id=agent_id,
                 expected_manifest_sha256=resolved.manifest_sha256,
             )
         except BindingRefusal:
@@ -2127,21 +2516,29 @@ def validate_generation(
 
 
 def read_active_pointer(
-    root: Path | str, *, profile: AgentProfile, ownership: TrustedOwnership
+    root: Path | str,
+    *,
+    profile: AgentProfile,
+    ownership: TrustedOwnership,
+    agent_id: str | None = None,
 ) -> tuple[str, str] | None:
-    """One profile's promoted generation, or ``None`` when it has none.
+    """One profile's (or agent's) promoted generation, or ``None`` for none.
 
-    ``None`` is "nothing is promoted for this profile", which is an ordinary
-    state in a root that serves several profiles. A pre-0.5.2 root is not that
-    state and is not absorbed into it: it raises.
+    ``None`` is "nothing is promoted here", which is an ordinary state in a
+    root that serves several profiles and several agents. A pre-0.5.2 root is
+    not that state and is not absorbed into it: it raises. Neither is a scope
+    error — asking for the wrong shape is a refusal, not an empty answer.
     """
     try:
-        return BindingReader(root, ownership=ownership).read_active(profile)
+        return BindingReader(root, ownership=ownership).read_active(
+            profile, agent_id=agent_id
+        )
     except BindingRefusal as refusal:
         if refusal.rule in (
             "OPEN_FAILED",
             "NOT_A_REGULAR_FILE",
             "PROFILE_BINDING_ABSENT",
+            "AGENT_BINDING_ABSENT",
         ):
             return None
         raise
@@ -2153,6 +2550,7 @@ def write_active_pointer(
     *,
     profile: AgentProfile,
     ownership: TrustedOwnership,
+    agent_id: str | None = None,
 ) -> Path:
     """Atomically replace one profile's ``active.json`` — the only file ARS writes.
 
@@ -2177,6 +2575,7 @@ def write_active_pointer(
     effect on the next Run and never re-points a sealed one.
     """
     root = Path(root)
+    BindingReader._require_agent_scope(profile, agent_id)
     if resolved.contract_identity.get("profile_id") != profile.profile_id:
         # Unreachable through projection, which already matched the live
         # contract — stated here so the write side carries the invariant rather
@@ -2191,12 +2590,16 @@ def write_active_pointer(
         "generation_id": resolved.generation_id,
         "manifest_sha256": resolved.manifest_sha256,
     }
+    if agent_id is not None:
+        component = agent_component(agent_id)
+        if resolved.contract_identity.get("agent_id") != component:
+            raise _refuse(
+                "POINTER_AGENT_MISMATCH",
+                "refusing to promote a generation accepted for a different agent",
+            )
+        payload["agent_id"] = component
     data = _canonical_json(payload).encode("utf-8")
-    root_fd = open_trusted_dir(root, ownership=ownership, surface="binding root")
-    try:
-        profile_fd = _open_profile_dir(root_fd, profile, ownership=ownership)
-    finally:
-        os.close(root_fd)
+    profile_fd = _open_anchor_dir(root, profile, agent_id, ownership=ownership)
     try:
         temp_name = f".active-{os.getpid()}-{os.urandom(8).hex()}.tmp"
         fd = os.open(
@@ -2224,4 +2627,4 @@ def write_active_pointer(
         os.fsync(profile_fd)
     finally:
         os.close(profile_fd)
-    return active_pointer_path(root, profile.profile_id)
+    return active_pointer_path(root, profile.profile_id, agent_id=agent_id)

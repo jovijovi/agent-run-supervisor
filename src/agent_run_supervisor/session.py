@@ -158,6 +158,13 @@ class SessionRecord:
     # whose epoch does not match the Run's fails closed before `session/load`.
     native_adapter_contract_hash: str | None = None
     session_compatibility_epoch: int | None = None
+    # The registered agent this Session belongs to, for a registration-scoped
+    # profile. Additive and omit-when-unset like everything above, so a record
+    # created before agents existed keeps its exact serialized shape. Reuse
+    # under a different agent — or a compatibility-bearing registration edit —
+    # fails closed before the lease and before ``session/load``.
+    native_agent_id: str | None = None
+    native_agent_registration_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -281,6 +288,8 @@ class SessionStore:
         matched_root: str | None,
         adapter_contract_hash: str | None = None,
         session_compatibility_epoch: int | None = None,
+        agent_id: str | None = None,
+        agent_registration_hash: str | None = None,
         now: _dt.datetime | None = None,
     ) -> SessionRecord:
         """Create a Native session record — the only Native creation API.
@@ -313,6 +322,8 @@ class SessionStore:
             native_profile_hash=profile_hash,
             native_adapter_contract_hash=adapter_contract_hash,
             session_compatibility_epoch=session_compatibility_epoch,
+            native_agent_id=agent_id,
+            native_agent_registration_hash=agent_registration_hash,
             agent_session_id=None,
             owner=owner,
             namespace=namespace,
@@ -914,6 +925,8 @@ _NATIVE_FIELDS = (
     "quarantine_reason",
     "quarantined_by_run_id",
     "session_compatibility_epoch",
+    "native_agent_id",
+    "native_agent_registration_hash",
 )
 
 
@@ -999,6 +1012,8 @@ def validate_native_binding(
     for_load: bool = False,
     expected_contract_hash: str | None = None,
     expected_epoch: int | None = None,
+    expected_agent_id: str | None = None,
+    expected_agent_registration_hash: str | None = None,
 ) -> None:
     """Fail closed unless ``record`` still matches the native Run's identity.
 
@@ -1018,6 +1033,14 @@ def validate_native_binding(
     epoch is refused by a Run that has none, so a runtime that cannot enforce
     the epoch never silently loads a Binding-era Session. An epoch is an
     identity, not an ordering: lower and higher are both refused.
+
+    Agent identity joins that era on the same terms: the record's ``agent_id``
+    and ``agent_registration_hash`` must equal the Run's exactly, and equality
+    is symmetric for the same reason — an agent-bearing record is refused by a
+    runtime that has none, so a Session created under one agent is never loaded
+    as another. Because the registration hash excludes provenance, re-recording
+    a receipt does not retire a Session while any compatibility-bearing edit
+    does.
 
     Called before the lease is acquired and long before ``session/load``, and
     there is no ``session/new`` fallback on any reuse path.
@@ -1048,6 +1071,10 @@ def validate_native_binding(
         mismatches.append("adapter_contract_hash")
     if record.session_compatibility_epoch != expected_epoch:
         mismatches.append("session_compatibility_epoch")
+    if record.native_agent_id != expected_agent_id:
+        mismatches.append("agent_id")
+    if record.native_agent_registration_hash != expected_agent_registration_hash:
+        mismatches.append("agent_registration_hash")
     if for_load and record.agent_session_id is None:
         mismatches.append("agent_session_id_missing")
     if mismatches:

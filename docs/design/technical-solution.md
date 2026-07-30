@@ -61,9 +61,10 @@ share their stdout consumer or wait-before-return contract.
 | Module | Responsibility |
 |---|---|
 | `spec.py` | versioned `AgentRunRequest`; immutable `AgentRunSpec/spec_hash`; controlled `ResolvedLaunchSpec`; observation-only `EffectiveRunState` |
-| `profile.py` | typed, versioned, closed `AgentProfile` registry; the OpenCode profile plus the official Codex ACP and Claude Agent ACP adapter profiles. Each profile carries an `AdapterContract` with `adapter_contract_hash`, `launch_kind`, accepted Binding schema/slot projection, a code-owned version-probe rule, and — for `wrapped_acp` — the adapter's complete package closure (install root, tree digest, entry inside it) plus the frozen `interpreter_argv_prefix` that closes the interpreter's path-independent module search, checked against the profile's own argv so the two cannot drift; deployment-specific CLI path/version/digest live in the Binding, not here. It also owns `path_within_root`, the one lexical containment predicate every closure surface shares |
-| `runtime_binding.py` | the only reader of a Binding root — per-profile `profiles/<profile_id>/active.json` + `.../generations/<id>/manifest.json` loading, the safe profile-component rule and the lexical path helpers built on it, canonical-JSON/size/ownership/mode/ancestor validation through `O_NOFOLLOW`/dirfd walks, contract-acceptance matching, slot projection, generation/set/slot hashing, and the typed fail-closed refusal surface |
+| `profile.py` | typed, versioned, closed `AgentProfile` registry; the OpenCode profile, the official Codex ACP and Claude Agent ACP adapter profiles, and the versioned `standard-native-acp-v1` conformance profile. It also owns `AgentInstance`, the `(profile, registration)` seam every generic consumer asks so no runtime path branches on an agent name, and `_REGISTERED_MEDIATION_BINDINGS`, a source-closed mediation registry keyed by capability rather than by agent. Each profile carries an `AdapterContract` with `adapter_contract_hash`, `launch_kind`, accepted Binding schema/slot projection, a code-owned version-probe rule, and — for `wrapped_acp` — the adapter's complete package closure (install root, tree digest, entry inside it) plus the frozen `interpreter_argv_prefix` that closes the interpreter's path-independent module search, checked against the profile's own argv so the two cannot drift; deployment-specific CLI path/version/digest live in the Binding, not here. It also owns `path_within_root`, the one lexical containment predicate every closure surface shares |
+| `runtime_binding.py` | the only reader of a Binding root — per-profile `profiles/<profile_id>/active.json` + `.../generations/<id>/manifest.json` loading, the agent anchor `.../agents/<agent_id>/{registration,active}.json` that only an agent-scoped profile descends into, the safe profile- and agent-component rules and the lexical path helpers built on them, the `AdmittedRuntimeBinding` pair whose construction *is* the Registration freeze check (`REGISTRATION_HASH_MISMATCH`, constant-time, one raise site, applied identically by operator validation), canonical-JSON/size/ownership/mode/ancestor validation through `O_NOFOLLOW`/dirfd walks, contract-acceptance matching, slot projection, generation/set/slot hashing, and the typed fail-closed refusal surface |
 | `attestation.py` | spawn-boundary proof that the frozen interpreter/adapter/CLI identity and launch env are what the profile registered. It proves the *sealed* runtime identity rather than a profile constant, extends artifact identity to package/tree closures on both the Binding-sealed CLI **and** the source-frozen adapter, refuses a module-resolution root above the adapter closure, binds the frozen interpreter argv prefix as a token sequence with the adapter entry pinned immediately after it, and adds the ownership/ancestor and TOCTOU rechecks for both launch kinds |
+| `agent_registration.py` | the typed operator-owned Agent Registration value plus its bounded grammars — argv tokens, probe suffix, selector ids, value domains, capability floor/conflict, mediation-binding selection, credential refs, provenance shape — and `agent_registration_hash` over everything except provenance. **Pure**: it performs no filesystem query, so the single reader of a Binding root stays `runtime_binding.py` |
 | `storage.py` | only Native root-binding constructors for `native-runs/` and `native-sessions/`; structural guard against direct legacy store construction |
 | `driver.py` | ACP wire/state machine over a supplied `ManagedProcess`; never spawns or selects policy/profile |
 | `config_fidelity.py` | exact-or-zero configuration and between-Run switch/rollback state machine |
@@ -94,7 +95,11 @@ No TCP, root mode, runtime plugin loader, arbitrary command adapter, or per-Run 
 per-Run provenance reader:
 
 Every generation command names one registered profile, and every path it touches lives under that
-profile's own `profiles/<profile_id>/` subtree.
+profile's own `profiles/<profile_id>/` subtree. For a registration-scoped profile it additionally names
+one registered agent through `--agent`, and the subtree narrows to
+`profiles/<profile_id>/agents/<agent_id>/`. `--agent` is required there and refused anywhere else, each
+by its own stable rule — without it an operator would have no way to promote an agent-scoped generation,
+leaving such a profile permanently unusable.
 
 | Command | Reads | Writes | Side effects |
 |---|---|---|---|
@@ -115,9 +120,16 @@ verifies it against `spec.json` alone rather than failing.
 
 ### `AgentRunRequest`
 
-Wire input contains schema version, caller namespace/owner expectation, profile ID, Session choice,
-workspace/resource references, requested model/config, frozen grant reference/hash, limits, and evidence
-policy. Inputs are validated as plain, bounded values before use.
+Wire input contains schema version, caller namespace/owner expectation, profile ID, an optional
+`agent_id` for a registration-scoped profile, Session choice, workspace/resource references, requested
+model/config, frozen grant reference/hash, limits, and evidence policy. Inputs are validated as plain,
+bounded values before use.
+
+`agent_id` is type-checked here and nowhere else: its value grammar belongs to the one function standing
+between it and a path component, so there is no second copy of the rules to keep in agreement. Admission
+refuses `requires_agent_registration XOR agent_id` in both directions before sealing, and the request
+schema version does not move — the digest material drops that one named field when it is `None`, so a
+pre-upgrade frame digests byte-identically.
 
 ### `AgentProfile`
 
@@ -146,10 +158,26 @@ The profile's source-frozen compatibility contract, hashed canonically into `ada
 - for `wrapped_acp`, the interpreter and adapter-entry artifact identity, which stay in source;
 - a code-owned safe version probe: a fixed non-prompt argv suffix, a hermetic environment with no
   workspace, no credential, and no network dependence, bounded output and timeout, and a code-owned
-  parser. The probe is the only sanctioned way to learn an external CLI's real version.
+  parser. The probe is the only sanctioned way to learn an external CLI's real version;
+- `requires_agent_registration` plus the `registration_schema_version` it accepts. Both are
+  omit-when-default in the canonical projection, so a contract that is not registration-scoped hashes
+  exactly as it did before the fields existed, and the three live contract hashes did not move. They are
+  declared together: the flag without the version leaves the accepted shape unstated, and the version
+  without the flag rides in the hash while nothing reads it.
 
 The contract hash changes whenever any of the above changes, and a changed hash invalidates every
-Binding generation accepted under the old one.
+Binding generation accepted under the old one — and, for a registration-scoped contract, every Agent
+Registration accepted under it too, since each must re-declare the same
+`(profile_id, profile_revision, adapter_contract_hash)`. Putting `registration_schema_version` inside
+the hash is what gives that property to a change in the accepted registration *shape*.
+
+A registration-scoped profile is additionally refused at construction unless it freezes nothing the
+registration owns — no selector ids, defaults, domains, argv template, or config schema — and unless its
+`executable_key` appears in neither the registered-executable map nor the profile-keyed mediation map.
+Two authorities for one fact is the failure mode those invariants exist to make unrepresentable: source
+would win silently, and the registration's narrowing would never take effect. A profile id naming an ACP
+generation (`…-v<N>`) must also freeze exactly that protocol major, so a revision bump can never turn a
+v1 contract into a v2 one.
 
 ### `RuntimeBinding`
 
@@ -251,9 +279,24 @@ Immutable, exclusive-created requested fact:
 - input/context references and hashes;
 - caller owner/namespace and Session reuse expectation;
 - profile/launch/schema hashes;
+- for a registration-scoped profile, `agent_id` and `agent_registration_hash` inside the agent block,
+  beside the requested `profile_id` and the resolved `profile_hash` that already live there;
 - frozen execution grant, role/capability, workspace, MCP, credential-reference hashes;
 - requested model/effort, limits, recovery/evidence policy;
 - `spec_hash` excluding generated control fields such as `run_id`/timestamps.
+
+Agent identity lives in the *requested* record rather than only in the resolved launch, because
+`spec.json` is written before `launch.json` as two separate write-once artifacts: a crash between them
+must not leave a Run whose durable record exists and whose agent identity does not, which is precisely
+the case reconciliation exists to adjudicate — and reconciliation reads `spec.json` and never opens
+`launch.json`. Run authorization and any audit answering "which Runs targeted which agent" read the same
+record.
+
+`to_dict()` is an explicit projection rather than raw `asdict`, dropping exactly the two agent fields
+when they are `None`. `asdict` was silently guaranteeing "every field is in the hash"; that guarantee is
+restored as a structural test that walks every spec dataclass field and asserts it appears in the
+projection except the declared omit set. Two goldens are pinned: the legacy spec hash, byte-identical,
+and a second for the agent-scoped shape.
 
 ### `EffectiveRunState`
 
@@ -274,6 +317,12 @@ different epoch is refused before the lease is mutated and before `session/load`
 fallback. The field is additive and omit-when-unset, so legacy and pre-PR-B records keep their exact
 serialized shape and stay status/list/close-readable — only `load` fails closed on them. Retaining an
 epoch across a Binding change requires an approved continuity canary; otherwise the operator bumps it.
+
+For a registration-scoped profile the record additionally persists `agent_id` and
+`agent_registration_hash` on the same additive, omit-when-unset terms, and reuse requires both equal.
+Equality is symmetric: an agent-bearing record is refused by a runtime carrying none and vice versa, so
+a Session is never loaded as an agent it was not created under. The hash excludes provenance, so
+re-recording a receipt does not retire an agent's Sessions while a compatibility-bearing edit does.
 
 Same Session has one lease and one active Run. A quarantined Session refuses new work. v1 has no
 unquarantine tool; successor work uses a new Session with caller-owned context handoff when needed.

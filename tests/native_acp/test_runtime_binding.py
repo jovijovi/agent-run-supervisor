@@ -1187,7 +1187,7 @@ def test_resolve_active_reads_the_pointer_once_and_one_generation_once(
     root = build_root(tmp_path)
     rb.reset_read_counters()
     _resolve(root)
-    assert rb.read_counters() == {"active": 1, "generation": 1}
+    assert rb.read_counters() == {"registration": 0, "active": 1, "generation": 1}
 
 
 def test_a_second_resolution_is_a_second_pair_of_reads(tmp_path: Path) -> None:
@@ -1195,7 +1195,7 @@ def test_a_second_resolution_is_a_second_pair_of_reads(tmp_path: Path) -> None:
     rb.reset_read_counters()
     _resolve(root)
     _resolve(root)
-    assert rb.read_counters() == {"active": 2, "generation": 2}
+    assert rb.read_counters() == {"registration": 0, "active": 2, "generation": 2}
 
 
 # ---------------------------------------------------------------------------
@@ -3517,10 +3517,27 @@ def test_well_formed_provenance_still_never_authorizes_a_mismatched_contract(
 _SHARED_ROOT = "shared-binding-root"
 
 
+def _profile_scoped_ids() -> tuple[str, ...]:
+    """The registered profiles whose Binding material lives directly under
+    ``profiles/<profile_id>/``.
+
+    A registration-scoped profile descends one level further, into
+    ``agents/<agent_id>/``, so it is not part of *this* namespace's coverage —
+    it has its own, in ``test_standard_native_acp_v1.py``. Stated as a filter
+    rather than a hard-coded list so a future profile joins the right one
+    automatically.
+    """
+    return tuple(
+        profile_id
+        for profile_id in DEFAULT_REGISTRY.ids()
+        if not DEFAULT_REGISTRY.get(profile_id).contract.requires_agent_registration
+    )
+
+
 def _multi_profile_root(tmp_path: Path, *, generation_id: str | None = None) -> Path:
     """One operator-configured root carrying a generation for every profile."""
     root = tmp_path / _SHARED_ROOT
-    for index, profile_id in enumerate(DEFAULT_REGISTRY.ids()):
+    for index, profile_id in enumerate(_profile_scoped_ids()):
         root = build_binding_root(
             tmp_path,
             DEFAULT_REGISTRY.get(profile_id),
@@ -3534,7 +3551,7 @@ def _multi_profile_root(tmp_path: Path, *, generation_id: str | None = None) -> 
 def test_one_root_serves_every_registered_profile_concurrently(tmp_path: Path) -> None:
     """The class-wide requirement: three promoted profiles, one configured root."""
     root = _multi_profile_root(tmp_path)
-    for index, profile_id in enumerate(DEFAULT_REGISTRY.ids()):
+    for index, profile_id in enumerate(_profile_scoped_ids()):
         profile = DEFAULT_REGISTRY.get(profile_id)
         resolved = rb.BindingReader(root, ownership=ownership()).resolve_active(profile)
         assert resolved.contract_identity["profile_id"] == profile_id
@@ -3547,7 +3564,7 @@ def test_two_profiles_may_use_the_same_generation_id_independently(
 ) -> None:
     """The generation namespace is per profile, so ``gen-0001`` is not one name."""
     root = _multi_profile_root(tmp_path, generation_id="gen-0001")
-    for profile_id in DEFAULT_REGISTRY.ids():
+    for profile_id in _profile_scoped_ids():
         profile = DEFAULT_REGISTRY.get(profile_id)
         resolved = rb.BindingReader(root, ownership=ownership()).resolve_active(profile)
         assert resolved.generation_id == "gen-0001"
@@ -3559,12 +3576,12 @@ def test_a_shared_root_still_reads_one_pointer_and_one_generation_per_run(
 ) -> None:
     """C8 is unchanged by the profile scope: still exactly one pair of reads."""
     root = _multi_profile_root(tmp_path)
-    for profile_id in DEFAULT_REGISTRY.ids():
+    for profile_id in _profile_scoped_ids():
         rb.reset_read_counters()
         rb.BindingReader(root, ownership=ownership()).resolve_active(
             DEFAULT_REGISTRY.get(profile_id)
         )
-        assert rb.read_counters() == {"active": 1, "generation": 1}
+        assert rb.read_counters() == {"registration": 0, "active": 1, "generation": 1}
 
 
 def test_promoting_one_profile_leaves_every_other_selection_byte_identical(
@@ -3574,7 +3591,7 @@ def test_promoting_one_profile_leaves_every_other_selection_byte_identical(
     root = _multi_profile_root(tmp_path)
     others = {
         profile_id: rb.active_pointer_path(root, profile_id).read_bytes()
-        for profile_id in DEFAULT_REGISTRY.ids()
+        for profile_id in _profile_scoped_ids()
         if profile_id != OPENCODE_NATIVE_ACP.profile_id
     }
     build_binding_root(

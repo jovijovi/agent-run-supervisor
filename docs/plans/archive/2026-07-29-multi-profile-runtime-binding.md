@@ -1,9 +1,15 @@
 ---
 title: "Profile-scoped Runtime Binding activation"
-status: active
+status: archived
 created_at: 2026-07-29
+archived_at: 2026-07-29
 ---
 # Profile-scoped Runtime Binding activation
+
+> **Archived.** This plan's work is implemented and released on the v0.5.2 source line, and
+> production runs it with three profile-scoped Bindings promoted under a live root. It is retained
+> as history and is not development authority. The current active plan is
+> [`2026-07-29-standard-native-acp-v1.md`](../active/2026-07-29-standard-native-acp-v1.md).
 
 Authority: `GOAL.md` contracts 9–10 · PRD R13 · architecture §3.1–§3.3 ·
 technical-solution §1.2/§2/§8 · [board](../../roadmap/current-status.md) ·

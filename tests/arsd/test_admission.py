@@ -327,9 +327,13 @@ def test_request_digest_pinned_canonical_form() -> None:
     command = submit_command()
     digest = admission.compute_request_digest(command)
     prompt = command.prompt_text.encode("utf-8")
+    request_material = dataclasses.asdict(command.request)
+    for name in admission._DIGEST_OMIT_WHEN_NONE:
+        if request_material.get(name) is None:
+            request_material.pop(name)
     material = {
         "digest_schema_version": admission.DIGEST_SCHEMA_VERSION,
-        "request": dataclasses.asdict(command.request),
+        "request": request_material,
         "workspace_root": command.workspace_root,
         "cwd": command.cwd,
         "retry_of_run_id": command.retry_of_run_id,
@@ -1764,3 +1768,85 @@ def test_claude_closed_admission_refused_over_socket(
         assert not (run_dir / "prompt-dispatch-started").exists(), label
 
     asyncio.run(scenario())
+
+
+# --- G1.3: the digest is byte-identical for a pre-upgrade frame -------------
+#
+# Production is live. A digest that moved would convert legitimate pre-upgrade
+# retries into idempotency conflicts for no information gain, so exactly one
+# named field drops when it is ``None`` — never a blanket null-strip, which
+# would collapse the meaningful existing nulls in the opposite direction.
+
+# Measured at the pre-change baseline, so it is the byte-identity *target*
+# rather than a value copied out of whatever the change happened to produce.
+LEGACY_REQUEST_DIGEST = (
+    "sha256:56d24e8c3cc6e4c89e31ecdbaf1b9c96ebde3b68a57fb8977e63ddead4799376"
+)
+
+
+def test_g1_3_a_legacy_frame_with_no_agent_digests_byte_identically() -> None:
+    command = protocol.parse_submit(submit_payload())
+    assert "agent_id" not in submit_payload()["request"]
+    assert admission.compute_request_digest(command).value == LEGACY_REQUEST_DIGEST
+
+
+def test_g1_3_naming_an_agent_changes_the_digest() -> None:
+    legacy = admission.compute_request_digest(protocol.parse_submit(submit_payload()))
+    agentic = admission.compute_request_digest(
+        protocol.parse_submit(
+            submit_payload(request=valid_wire_request(agent_id="fake-alpha"))
+        )
+    )
+    assert agentic.value != legacy.value
+
+
+def test_g1_3_only_agent_id_is_dropped_when_null() -> None:
+    assert admission._DIGEST_OMIT_WHEN_NONE == ("agent_id",)
+
+
+@pytest.mark.parametrize(
+    "field", ["ars_session_id", "expected_binding_hash", "cwd", "retry_of_run_id"]
+)
+def test_g1_3_every_other_null_valued_field_still_contributes(field: str) -> None:
+    """A blanket null-strip would make these four invisible; it is not one."""
+    null_frame = {"session_reuse": "none", "ars_session_id": None}
+    baseline = submit_payload(request=valid_wire_request(**null_frame))
+    if field in ("cwd", "retry_of_run_id"):
+        changed = submit_payload(
+            request=valid_wire_request(**null_frame), **{field: "value"}
+        )
+    else:
+        changed = submit_payload(
+            request=valid_wire_request(**{**null_frame, field: "value"})
+        )
+    assert admission.compute_request_digest(
+        protocol.parse_submit(changed)
+    ).value != admission.compute_request_digest(protocol.parse_submit(baseline)).value
+
+
+def test_g1_4_no_versioned_surface_moved() -> None:
+    """Production is live: none of these may change in this candidate."""
+    assert admission.DIGEST_SCHEMA_VERSION == 1
+    assert admission.SUBMISSION_SCHEMA_VERSION == 1
+    assert protocol.ARSD_API_VERSION == 1
+    assert protocol.SUPPORTED_API_VERSIONS == (1,)
+    from agent_run_supervisor.native_acp.spec import SPEC_SCHEMA_VERSION
+
+    assert SPEC_SCHEMA_VERSION == 1
+
+
+def test_agent_id_is_not_a_forbidden_runtime_selection_field() -> None:
+    """It selects among operator-authored registrations, exactly as profile_id
+    selects among source-registered profiles — it names no path, executable,
+    argv, env, digest, or version, and the grammar makes it unable to."""
+    assert "agent_id" not in admission.FORBIDDEN_RUNTIME_SELECTION_FIELDS
+    assert "profile_id" not in admission.FORBIDDEN_RUNTIME_SELECTION_FIELDS
+
+
+@pytest.mark.parametrize("value", [7, ["x"], {"a": 1}, True])
+def test_a_non_string_agent_id_is_an_invalid_request_never_internal(value) -> None:
+    with pytest.raises(protocol.ProtocolError) as excinfo:
+        protocol.parse_submit(
+            submit_payload(request=valid_wire_request(agent_id=value))
+        )
+    assert excinfo.value.code == protocol.INVALID_REQUEST

@@ -74,8 +74,9 @@ and result verification.
    executable/argv construction, code-known env keys only, ACP protocol/name and required plus
    forbidden capabilities, permission/config/model/effort/session semantics, wrapped
    adapter/interpreter artifact identity, and a code-owned safe version-probe rule. The registry
-   holds one direct-ACP profile (OpenCode) and two wrapped official adapters (Codex ACP, Claude
-   Agent ACP).
+   holds one direct-ACP profile (OpenCode), two wrapped official adapters (Codex ACP, Claude Agent
+   ACP), and one versioned standard direct-ACP profile that freezes ACP-v1 conformance only and is
+   instantiated per operator-owned Agent Registration.
 10. A Runtime Binding carries operator-owned deployment facts only: the external CLI artifact
     descriptor (immutable versioned path, actual version, digest), optional values for
     Profile-declared config-root slots, a positive `session_compatibility_epoch`, and an acceptance
@@ -84,6 +85,19 @@ and result verification.
     binds to the exact profile ID, revision, and `adapter_contract_hash` that accepted it; after a
     contract revision a stale generation fails closed instead of being reinterpreted by a new source
     contract.
+11. A profile whose contract declares `requires_agent_registration` is instantiated by a typed,
+    bounded, operator-owned **Agent Registration** anchored inside its Binding root at
+    `profiles/<profile_id>/agents/<agent_id>/`. A registration may only *select within* or *narrow*
+    a bound the source contract already declared — ACP name, bounded argv tokens, selector ids and
+    their value domains, a superset of the source forbidden-capability floor, one source-registered
+    permission-mediation binding or none, and credential slot names. It supplies no executable,
+    path, digest, version, env key, launch kind, protocol version, or capability requirement, and it
+    is never a runtime plugin surface. Its `agent_registration_hash` — computed over everything
+    except provenance — is sealed into the Run spec, the launch record, and Session identity, so an
+    edit fails stale work closed rather than reinterpreting it. Agent identity is carried, generic:
+    no runtime path branches on an agent name. A profile id that names an ACP generation
+    (`…-v<N>`) must freeze exactly that protocol major, so a future generation is a separate
+    profile, registration, Binding, and Session domain rather than a revision of this one.
 
 ## acpx removal direction
 

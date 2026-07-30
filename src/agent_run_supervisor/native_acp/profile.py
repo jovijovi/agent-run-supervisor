@@ -146,6 +146,23 @@ _REGISTERED_PERMISSION_ENV: dict[str, tuple[tuple[str, str], ...]] = {
 }
 
 
+# The same mediation knob, keyed by the *capability* it mediates rather than by
+# the agent that happens to need it. An operator-owned Agent Registration may
+# select one of these ids or select nothing; key and value both stay source
+# owned, so a registration can never introduce a mediation pair, an env key, or
+# a value of its own. This freezes no new evidence — the pair below is the one
+# already source-frozen above behind the A4-S2 canary — and the two registries
+# stay disjoint by profile construction invariant rather than by convention.
+#
+# An agent needing a mediation knob that is not here is exactly the
+# evidence-proven deviation that requires its own discovery, canary, and review.
+_REGISTERED_MEDIATION_BINDINGS: dict[str, tuple[tuple[str, str], ...]] = {
+    "ask-privileged-tool-families-v1": (
+        ("OPENCODE_PERMISSION", '{"bash":"ask","edit":"ask","webfetch":"ask"}'),
+    ),
+}
+
+
 def resolve_registered_executable(key: str) -> Path:
     try:
         return _REGISTERED_EXECUTABLES[key]
@@ -157,6 +174,25 @@ def resolve_registered_permission_env(key: str) -> tuple[tuple[str, str], ...]:
     """Registered permission-mediation env pairs for an executable key;
     executables without a registered binding launch with none."""
     return _REGISTERED_PERMISSION_ENV.get(key, ())
+
+
+def is_registered_mediation_binding(binding_id: Any) -> bool:
+    """Is ``binding_id`` a mediation binding this source owns?"""
+    return isinstance(binding_id, str) and binding_id in _REGISTERED_MEDIATION_BINDINGS
+
+
+def resolve_registered_mediation_binding(
+    binding_id: str | None,
+) -> tuple[tuple[str, str], ...]:
+    """The env pairs a registration selected, or none when it selected none."""
+    if binding_id is None:
+        return ()
+    try:
+        return _REGISTERED_MEDIATION_BINDINGS[binding_id]
+    except KeyError:
+        raise UnknownProfileError(
+            f"unregistered mediation binding: {binding_id!r}"
+        ) from None
 
 
 # ---------------------------------------------------------------------------
@@ -446,10 +482,22 @@ class AdapterContract:
     credential_root_slot: str | None = None
     # Workspace project-config surface whose ancestor chain must stay clean.
     project_config_relpath: str | None = None
+    # Whether this contract is instantiated per operator-owned Agent
+    # Registration (layer 1b) rather than frozen agent-by-agent in source.
+    # ``registration_schema_version`` is the accepted registration *shape*, and
+    # it rides inside ``adapter_contract_hash``: changing what a registration
+    # may say retires every registration accepted under the old hash, closed —
+    # the same C3 property a slot-schema change already has.
+    #
+    # Both are omit-when-default in ``to_dict()``, so a contract that is not
+    # registration-scoped hashes exactly as it did before the field existed.
+    requires_agent_registration: bool = False
+    registration_schema_version: int | None = None
 
     def __post_init__(self) -> None:
         if self.launch_kind not in LAUNCH_KINDS:
             raise ProfileValidationError(f"unknown launch kind: {self.launch_kind!r}")
+        self._validate_agent_registration()
         if not self.acp_agent_name:
             raise ProfileValidationError("contract requires an ACP agent name")
         if not self.acp_protocol_version.isdigit():
@@ -507,6 +555,30 @@ class AdapterContract:
                     "a direct_acp artifact slot must provide the executable"
                 )
 
+    def _validate_agent_registration(self) -> None:
+        """The flag and the accepted registration shape are declared together.
+
+        One without the other would leave either a registration-scoped contract
+        that never says which shape it accepts, or a version integer that
+        silently rides in the contract hash while nothing reads it.
+        """
+        if not isinstance(self.requires_agent_registration, bool):
+            raise ProfileValidationError(
+                "requires_agent_registration must be a bool"
+            )
+        version = self.registration_schema_version
+        if self.requires_agent_registration:
+            if isinstance(version, bool) or not isinstance(version, int) or version <= 0:
+                raise ProfileValidationError(
+                    "a registration-scoped contract must declare a positive "
+                    "registration_schema_version"
+                )
+        elif version is not None:
+            raise ProfileValidationError(
+                "registration_schema_version is declared only by a "
+                "registration-scoped contract"
+            )
+
     @property
     def requires_binding(self) -> bool:
         return bool(self.binding_slots)
@@ -539,6 +611,12 @@ class AdapterContract:
         }
         if self.wrapped_runtime is not None:
             payload["wrapped_runtime"] = self.wrapped_runtime.to_dict()
+        # Omit-when-default, exactly like ``wrapped_runtime`` above: the three
+        # live contracts must keep byte-identical ``adapter_contract_hash``
+        # values, because every promoted generation is closed against them.
+        if self.requires_agent_registration:
+            payload["requires_agent_registration"] = True
+            payload["registration_schema_version"] = self.registration_schema_version
         return payload
 
 
@@ -594,6 +672,8 @@ class AgentProfile:
         self._validate_session_meta()
         self._validate_fixed_env()
         self._validate_contract_binding()
+        self._validate_protocol_generation()
+        self._validate_agent_registration_scope()
         if self.required_credential_refs is not None:
             for ref in self.required_credential_refs:
                 if not isinstance(ref, str) or not ref:
@@ -758,6 +838,67 @@ class AgentProfile:
                 "after the interpreter_argv_prefix"
             )
 
+    def _validate_protocol_generation(self) -> None:
+        """Invariant 1: a versioned profile id carries its ACP major, exactly.
+
+        The id, not the revision, carries the protocol generation. A revision
+        bump therefore cannot turn a v1 contract into a v2 one, and a future v2
+        is a different id — hence a different registry entry, different
+        registrations, and a different Binding and Session domain. Isolation is
+        structural rather than a rule someone has to remember.
+        """
+        match = _PROTOCOL_GENERATION_RE.fullmatch(self.profile_id)
+        if match is None:
+            return
+        expected = match.group(1)
+        if self.contract.acp_protocol_version != expected:
+            raise ProfileValidationError(
+                f"profile id {self.profile_id!r} declares ACP protocol generation "
+                f"{expected!r} but its contract freezes "
+                f"{self.contract.acp_protocol_version!r}"
+            )
+
+    def _validate_agent_registration_scope(self) -> None:
+        """Invariants 2–4 for a registration-scoped profile.
+
+        Two authorities for one fact is the failure mode: whatever the profile
+        freezes here, the registration could not narrow, and source would win
+        silently. So a registration-scoped profile freezes none of it, owns no
+        source executable, and carries no profile-keyed mediation binding —
+        making the two mediation registries disjoint by construction rather than
+        by convention.
+        """
+        if not self.contract.requires_agent_registration:
+            return
+        owned_by_registration = (
+            ("model_selector_id", self.model_selector_id),
+            ("effort_selector_id", self.effort_selector_id),
+            ("default_model", self.default_model),
+            ("default_effort", self.default_effort),
+            ("registered_models", self.registered_models),
+            ("allowed_efforts", self.allowed_efforts),
+            ("argv_template", self.argv_template),
+            ("config_schema", self.config_schema),
+        )
+        for name, value in owned_by_registration:
+            if value:
+                raise ProfileValidationError(
+                    f"{name} is owned by the Agent Registration; a "
+                    "registration-scoped profile freezes none of it"
+                )
+        if self.executable_key in _REGISTERED_PERMISSION_ENV:
+            raise ProfileValidationError(
+                f"executable_key {self.executable_key!r} carries a profile-keyed "
+                "mediation binding; registration-selected and profile-keyed "
+                "mediation must never both apply"
+            )
+        if self.executable_key in _REGISTERED_EXECUTABLES:
+            raise ProfileValidationError(
+                f"executable_key {self.executable_key!r} names a source "
+                "executable; a registration-scoped profile takes its executable "
+                "from the contract's slot only"
+            )
+
     def snapshot(self) -> dict[str, Any]:
         # Additive fields are omit-when-empty/None so legacy rows keep
         # byte-identical snapshots, profile hashes, and launch hashes.
@@ -810,6 +951,146 @@ class AgentProfile:
 
     def adapter_contract_hash(self) -> str:
         return _sha256_hex(_canonical_json(self.contract_snapshot()))
+
+
+# A profile id may carry the ACP protocol generation it speaks. When it does,
+# the generation and the contract's frozen protocol version must agree.
+_PROTOCOL_GENERATION_RE = re.compile(r".*-v(\d+)")
+
+
+@dataclass(frozen=True)
+class AgentInstance:
+    """One profile as one agent — the seam every generic consumer asks.
+
+    Downstream code asks the *pair* for a fact and never asks which agent it is
+    holding. For the three legacy profiles ``registration`` is ``None`` and
+    every accessor returns the existing profile/contract value unchanged, so
+    there is no behavior change and no agent-name conditional anywhere on the
+    generic path.
+
+    The accessors are deliberately a closed, named set rather than a generic
+    ``getattr`` bridge: a fact that varies per agent has to be added here on
+    purpose, which is what keeps a registration from quietly acquiring
+    authority over something source still owns.
+    """
+
+    profile: AgentProfile
+    registration: Any = None
+
+    def __post_init__(self) -> None:
+        requires = self.profile.contract.requires_agent_registration
+        if requires and self.registration is None:
+            raise ProfileValidationError(
+                f"profile {self.profile.profile_id} requires an Agent Registration"
+            )
+        if not requires and self.registration is not None:
+            raise ProfileValidationError(
+                f"profile {self.profile.profile_id} accepts no Agent Registration"
+            )
+
+    # -- identity ---------------------------------------------------------
+
+    @property
+    def agent_id(self) -> str | None:
+        return None if self.registration is None else self.registration.agent_id
+
+    @property
+    def agent_registration_hash(self) -> str | None:
+        if self.registration is None:
+            return None
+        return self.registration.registration_hash
+
+    # -- ACP identity -----------------------------------------------------
+
+    @property
+    def acp_agent_name(self) -> str:
+        if self.registration is None:
+            return self.profile.contract.acp_agent_name
+        return self.registration.acp_agent_name
+
+    @property
+    def acp_agent_version(self) -> str | None:
+        # Always a source fact: a registration freezes no artifact identity, so
+        # it can never assert the version an ``initialize`` exchange must report.
+        return self.profile.contract.acp_agent_version
+
+    @property
+    def acp_protocol_version(self) -> str:
+        # Contract-owned in both cases: the protocol major is the profile's
+        # explicit ACP generation and a registration cannot move it.
+        return self.profile.contract.acp_protocol_version
+
+    @property
+    def required_capabilities(self) -> tuple[str, ...]:
+        return self.profile.contract.required_capabilities
+
+    @property
+    def forbidden_capabilities(self) -> tuple[str, ...]:
+        if self.registration is None:
+            return self.profile.contract.forbidden_capabilities
+        return self.registration.forbidden_capabilities
+
+    # -- launch -----------------------------------------------------------
+
+    @property
+    def argv_tokens(self) -> tuple[str, ...]:
+        if self.registration is None:
+            return self.profile.argv_template
+        return self.registration.argv_tokens
+
+    @property
+    def permission_env(self) -> tuple[tuple[str, str], ...]:
+        if self.registration is None:
+            return resolve_registered_permission_env(self.profile.executable_key)
+        return resolve_registered_mediation_binding(
+            self.registration.permission_binding_id
+        )
+
+    @property
+    def version_probe(self) -> VersionProbeRule:
+        if self.registration is None:
+            return self.profile.contract.version_probe
+        return self.registration.version_probe
+
+    # -- configuration ----------------------------------------------------
+
+    @property
+    def model_selector_id(self) -> str:
+        if self.registration is None:
+            return self.profile.model_selector_id
+        return self.registration.model_selector_id
+
+    @property
+    def effort_selector_id(self) -> str:
+        if self.registration is None:
+            return self.profile.effort_selector_id
+        return self.registration.effort_selector_id
+
+    @property
+    def registered_models(self) -> tuple[str, ...]:
+        if self.registration is None:
+            return self.profile.registered_models
+        return self.registration.registered_models
+
+    @property
+    def allowed_efforts(self) -> tuple[str, ...]:
+        if self.registration is None:
+            return self.profile.allowed_efforts
+        return self.registration.allowed_efforts
+
+    # -- credentials ------------------------------------------------------
+
+    @property
+    def credential_slots(self) -> tuple[str, ...]:
+        if self.registration is None:
+            return self.profile.credential_slots
+        return self.registration.credential_slots
+
+    @property
+    def required_credential_refs(self) -> tuple[str, ...] | None:
+        if self.registration is None:
+            return self.profile.required_credential_refs
+        return self.registration.required_credential_refs
 
 
 class ProfileRegistry:
@@ -1196,6 +1477,95 @@ CLAUDE_AGENT_ACP_0_63_0 = AgentProfile(
     ),
 )
 
+# The versioned standard Native ACP profile: one source contract for every
+# standards-conforming direct-ACP agent, instantiated per operator-owned Agent
+# Registration rather than frozen agent by agent.
+#
+# It freezes ACP-v1 *conformance* and nothing else. What it does freeze is
+# shared by construction across conforming agents — launch kind, the accepted
+# Binding slot schema, the code-known env key set, ``loadSession`` as a
+# requirement, the real-session-load rule, the code-owned probe rule, and the
+# protocol major itself. What varies per agent — ACP name, argv tokens, selector
+# ids and their value domains, the capabilities to narrow, which mediation
+# binding applies, which credential slots exist — is exactly what the
+# registration supplies, always by selecting inside or narrowing a bound
+# declared here.
+#
+# ``-v1`` is load-bearing. The id carries the ACP protocol generation, profile
+# construction refuses any contract whose frozen protocol disagrees with it, and
+# a future ``standard-native-acp-v2`` is therefore a separate profile with its
+# own registrations, Bindings, and Sessions — never a revision of this one.
+#
+# ``standard-native-acp`` appears in neither ``_REGISTERED_EXECUTABLES`` nor
+# ``_REGISTERED_PERMISSION_ENV``: the executable can only arrive through the
+# ``agent_cli`` slot, and mediation can only arrive through a registration's
+# selection from ``_REGISTERED_MEDIATION_BINDINGS``.
+#
+# No real agent's identity, capability, or selector constant is frozen here.
+# Registering a real agent against this profile is an operator action — install
+# the artifact, run zero-prompt ACP discovery, run the mandatory denied-action
+# mediation canary, author the registration, validate and promote a generation —
+# and each of those is a separate decision this source change does not make.
+STANDARD_NATIVE_ACP_V1 = AgentProfile(
+    profile_id="standard-native-acp-v1",
+    revision=1,
+    executable_key="standard-native-acp",
+    argv_template=(),
+    env_allowlist=(
+        "HOME",
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "TERM",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+    ),
+    credential_slots=(),
+    model_selector_id="",
+    effort_selector_id="",
+    default_model="",
+    default_effort="",
+    registered_models=(),
+    allowed_efforts=(),
+    requires_session_load=True,
+    config_schema={},
+    contract=AdapterContract(
+        launch_kind=LAUNCH_KIND_DIRECT,
+        # A placeholder ACP name would be asserted against a real
+        # ``initialize`` response and fail every Run, so the contract carries
+        # the profile's own identity and the registration supplies the name the
+        # agent actually reports.
+        acp_agent_name="standard-native-acp",
+        acp_protocol_version="1",
+        version_probe=VersionProbeRule(argv_suffix=("--version",)),
+        binding_slots=(
+            BindingSlot(
+                name="agent_cli",
+                kind=SLOT_KIND_NATIVE_BINARY,
+                provides_executable=True,
+            ),
+        ),
+        required_capabilities=("loadSession",),
+        # A floor, not a ceiling: a registration must forbid at least this and
+        # may forbid more. Empty here because forbidding a capability without
+        # that agent's own discovery evidence would be a claim about a runtime
+        # this contract has not observed.
+        forbidden_capabilities=(),
+        cli_slot="agent_cli",
+        credential_root_slot=None,
+        project_config_relpath=None,
+        requires_agent_registration=True,
+        registration_schema_version=1,
+    ),
+)
+
 DEFAULT_REGISTRY = ProfileRegistry(
-    (OPENCODE_NATIVE_ACP, CODEX_ACP_1_1_7, CLAUDE_AGENT_ACP_0_63_0)
+    (
+        OPENCODE_NATIVE_ACP,
+        CODEX_ACP_1_1_7,
+        CLAUDE_AGENT_ACP_0_63_0,
+        STANDARD_NATIVE_ACP_V1,
+    )
 )

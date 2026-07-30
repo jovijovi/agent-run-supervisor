@@ -197,6 +197,8 @@ def create_native_session(
     matched_root: str | None,
     adapter_contract_hash: str | None = None,
     session_compatibility_epoch: int | None = None,
+    agent_id: str | None = None,
+    agent_registration_hash: str | None = None,
     now: _dt.datetime | None = None,
 ) -> SessionRecord:
     """The only sanctioned Native call site for record creation."""
@@ -212,6 +214,8 @@ def create_native_session(
         matched_root=matched_root,
         adapter_contract_hash=adapter_contract_hash,
         session_compatibility_epoch=session_compatibility_epoch,
+        agent_id=agent_id,
+        agent_registration_hash=agent_registration_hash,
         now=now,
     )
 

@@ -596,8 +596,8 @@ def _retarget_seam(
     calls: list[int] = []
     original = rb.probe_slot_version
 
-    def racing(resolved, profile):
-        result = original(resolved, profile)
+    def racing(resolved, profile, **kwargs):
+        result = original(resolved, profile, **kwargs)
         calls.append(1)
         if len(calls) == 1:
             manifest.write_bytes(replacement)
@@ -743,3 +743,134 @@ def test_inspect_run_refuses_a_legacy_record_with_no_spec_to_verify(
     assert report["legacy_launch_record"] is True
     assert report["spec_launch_spec_hash"] is None
     assert report["matches_spec"] is False
+
+
+# -- --agent: the operator surface for an agent-anchored generation ----------
+
+
+def _agent_binding_root(tmp_path: Path, agent_id: str, *, version: str = "9.9.9", **kwargs):
+    from agent_run_supervisor.native_acp.profile import STANDARD_NATIVE_ACP_V1
+
+    scratch = tmp_path / "artifacts"
+    scratch.mkdir(parents=True, exist_ok=True)
+    shell = bf.stage_interpreter(scratch)
+    binary = bf.make_native_binary(
+        scratch,
+        name=f"agent-cli-{agent_id}",
+        body="#!" + str(shell) + "\nprintf '%s' '" + version + "'\n",
+    )
+    slots = {"agent_cli": bf.native_binary_slot(binary, version=version)}
+    return bf.build_agent_binding_root(
+        tmp_path, STANDARD_NATIVE_ACP_V1, agent_id, slots=slots, **kwargs
+    )
+
+
+def test_validate_requires_agent_for_a_registration_scoped_profile(
+    tmp_path: Path, capsys
+) -> None:
+    root = _agent_binding_root(tmp_path, bf.FAKE_ALPHA_ID)
+    code, report = _run(
+        capsys,
+        "runtime-binding",
+        "validate",
+        "--binding-root",
+        str(root),
+        "--profile",
+        "standard-native-acp-v1",
+        "--generation",
+        "gen-0001",
+        *_trusted(tmp_path),
+    )
+    assert code == 1
+    assert report["rule"] == "AGENT_SCOPE_REQUIRED"
+
+
+def test_validate_and_promote_one_agent_leaves_the_other_untouched(
+    tmp_path: Path, capsys
+) -> None:
+    root = _agent_binding_root(tmp_path, bf.FAKE_ALPHA_ID)
+    _agent_binding_root(tmp_path, bf.FAKE_BETA_ID)
+    _agent_binding_root(tmp_path, bf.FAKE_ALPHA_ID, generation_id="gen-0002")
+    beta_pointer = rb.active_pointer_path(
+        root, "standard-native-acp-v1", agent_id=bf.FAKE_BETA_ID
+    )
+    before = beta_pointer.read_bytes()
+
+    argv = [
+        "--binding-root",
+        str(root),
+        "--profile",
+        "standard-native-acp-v1",
+        "--agent",
+        bf.FAKE_ALPHA_ID,
+        "--generation",
+        "gen-0002",
+        *_trusted(tmp_path),
+    ]
+    code, report = _run(capsys, "runtime-binding", "validate", *argv)
+    assert code == 0 and report["valid"] is True
+    assert report["agent_id"] == bf.FAKE_ALPHA_ID
+
+    code, report = _run(capsys, "runtime-binding", "promote", *argv)
+    assert code == 0 and report["promoted"] is True
+    assert beta_pointer.read_bytes() == before
+
+
+def test_an_agent_on_a_legacy_profile_is_refused(tmp_path: Path, capsys) -> None:
+    root = _binding_root(tmp_path)
+    code, report = _run(
+        capsys,
+        "runtime-binding",
+        "validate",
+        "--binding-root",
+        str(root),
+        "--profile",
+        _PROFILE_ID,
+        "--agent",
+        bf.FAKE_ALPHA_ID,
+        "--generation",
+        "gen-0001",
+        *_trusted(tmp_path),
+    )
+    assert code == 1
+    assert report["rule"] == "AGENT_SCOPE_FORBIDDEN"
+
+
+def test_rollback_refuses_a_generation_already_active_for_that_agent(
+    tmp_path: Path, capsys
+) -> None:
+    root = _agent_binding_root(tmp_path, bf.FAKE_ALPHA_ID)
+    code, report = _run(
+        capsys,
+        "runtime-binding",
+        "rollback",
+        "--binding-root",
+        str(root),
+        "--profile",
+        "standard-native-acp-v1",
+        "--agent",
+        bf.FAKE_ALPHA_ID,
+        "--generation",
+        "gen-0001",
+        *_trusted(tmp_path),
+    )
+    assert code == 1
+    assert report["rule"] == "ALREADY_ACTIVE"
+
+
+def test_the_operator_surface_is_still_exactly_four_subcommands() -> None:
+    parser = _build_parser()
+    binding = next(
+        action
+        for action in parser._subparsers._group_actions[0].choices["runtime-binding"]
+        ._subparsers._group_actions
+    )
+    assert set(binding.choices) == {"validate", "promote", "rollback", "inspect-run"}
+    for name in ("validate", "promote", "rollback"):
+        options = {
+            option
+            for action in binding.choices[name]._actions
+            for option in action.option_strings
+        }
+        assert "--agent" in options
+        assert "--force" not in options

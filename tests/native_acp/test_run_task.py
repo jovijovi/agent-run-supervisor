@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -4056,3 +4057,234 @@ def test_inwindow_adapter_sibling_swap_refused_end_to_end(
         (harness.run_dir() / "result.json").read_text(encoding="utf-8")
     )
     assert payload["detail_code"] == "RUNTIME_IDENTITY_MISMATCH"
+
+
+# ---------------------------------------------------------------------------
+# G5 — two fake agents, one generic path (closure §5.5)
+#
+# The same admission → Binding → launch → Session sequence runs for both, with
+# only registration data differing. Nothing in RunTask, the driver, the
+# permission bridge, or the attestation layer learns which agent it is running.
+# ---------------------------------------------------------------------------
+
+_AGENT_SCRIPTS = {
+    bf.FAKE_ALPHA_ID: {
+        # The registration declares this ACP name, and the post-initialize
+        # identity gate compares the two — so the pair also proves the gate
+        # reads the *agent's* expected name rather than a source constant.
+        "agent_info": {"name": "FakeAlpha", "version": "1.0.0"},
+        "session_id": "alpha-external-session",
+        "initial_options": [
+            {
+                "id": "model",
+                "name": "Model",
+                "type": "select",
+                "currentValue": "alpha/zero",
+                "options": [
+                    {"value": "alpha/zero", "name": "Zero"},
+                    {"value": "alpha/one", "name": "One"},
+                ],
+            },
+            {
+                "id": "effort",
+                "name": "Effort",
+                "type": "select",
+                "currentValue": "low",
+                "options": [
+                    {"value": "low", "name": "Low"},
+                    {"value": "high", "name": "High"},
+                ],
+            },
+        ],
+        "final_message": "ALPHA_OK",
+    },
+    bf.FAKE_BETA_ID: {
+        # The registration declares this ACP name, and the post-initialize
+        # identity gate compares the two — so the pair also proves the gate
+        # reads the *agent's* expected name rather than a source constant.
+        "agent_info": {"name": "FakeBeta", "version": "1.0.0"},
+        "session_id": "beta-external-session",
+        "initial_options": [
+            {
+                "id": "modelId",
+                "name": "Model",
+                "type": "select",
+                "currentValue": "beta/one",
+                "options": [
+                    {"value": "beta/one", "name": "One"},
+                    {"value": "beta/two", "name": "Two"},
+                ],
+            },
+            {
+                "id": "reasoning",
+                "name": "Reasoning",
+                "type": "select",
+                "currentValue": "max",
+                "options": [{"value": "max", "name": "Max"}],
+            },
+        ],
+        "final_message": "BETA_OK",
+    },
+}
+
+_AGENT_MODELS = {bf.FAKE_ALPHA_ID: "alpha/one", bf.FAKE_BETA_ID: "beta/two"}
+_AGENT_EFFORTS = {bf.FAKE_ALPHA_ID: "high", bf.FAKE_BETA_ID: "max"}
+_AGENT_CREDS = {bf.FAKE_ALPHA_ID: ("alpha-auth",), bf.FAKE_BETA_ID: ()}
+
+
+class AgentHarness:
+    """One standard-native agent, staged exactly as an operator would stage it.
+
+    The agent's whole behavior lives in its own artifact, because the source
+    profile's ``env_allowlist`` is the frozen ACP-conformance nine and forwards
+    no test variable — which is precisely the point: the launch is built from
+    the registration and the slot, never from the harness.
+    """
+
+    def __init__(
+        self, tmp_path: Path, agent_id: str, *, dirname: str = "binding-root"
+    ) -> None:
+        from agent_run_supervisor.native_acp.profile import STANDARD_NATIVE_ACP_V1
+
+        self.agent_id = agent_id
+        self.profile = STANDARD_NATIVE_ACP_V1
+        self.tmp_path = tmp_path
+        self.root = tmp_path / ".agent-run-supervisor"
+        self.workspace = tmp_path / "workspace"
+        self.workspace.mkdir(exist_ok=True)
+        self.trace = tmp_path / f"{agent_id}-trace.log"
+
+        stage = tmp_path / f"stage-{agent_id}"
+        stage.mkdir(parents=True, exist_ok=True)
+        shell = bf.stage_interpreter(stage)
+        python = bf.trusted_system_interpreter()
+        entry = stage / "agent_entry.py"
+        shutil.copy2(FAKE_AGENT_PATH, entry)
+        script = json.dumps(_AGENT_SCRIPTS[agent_id])
+        binary = bf.make_native_binary(
+            stage,
+            name=f"{agent_id}-cli",
+            body=(
+                "#!" + str(shell) + "\n"
+                f"FAKE_AGENT_SCRIPT='{script}'\n"
+                f"FAKE_AGENT_TRACE='{self.trace}'\n"
+                "export FAKE_AGENT_SCRIPT FAKE_AGENT_TRACE\n"
+                f"exec '{python}' '{entry}' \"$@\"\n"
+            ),
+        )
+        bf.harden_tree(stage)
+        self.binding_root = bf.build_agent_binding_root(
+            tmp_path,
+            self.profile,
+            agent_id,
+            slots={"agent_cli": bf.native_binary_slot(binary, version="1.0.0")},
+            dirname=dirname,
+        )
+        self.registry = ProfileRegistry((self.profile,))
+        self.runtime = bf.admit_from_root(self.binding_root, self.profile, agent_id)
+
+    def request(self, **overrides) -> AgentRunRequest:
+        kwargs = dict(
+            profile_id=self.profile.profile_id,
+            agent_id=self.agent_id,
+            ars_session_id=f"sess-{self.agent_id}",
+            requested_model=_AGENT_MODELS[self.agent_id],
+            requested_effort=_AGENT_EFFORTS[self.agent_id],
+            credential_refs=_AGENT_CREDS[self.agent_id],
+        )
+        kwargs.update(overrides)
+        return _request(**kwargs)
+
+    def task(self, *, run_id: str | None = None, **overrides) -> RunTask:
+        kwargs = dict(
+            request=self.request(),
+            prompt_text="hello agent",
+            run_id=run_id or f"run-{self.agent_id}",
+            workspace_root=self.workspace,
+            registry=self.registry,
+            supervisor_root=self.root,
+            submitted_at="2026-07-29T00:00:00+00:00",
+            runtime_binding=self.runtime,
+        )
+        kwargs.update(overrides)
+        return RunTask(**kwargs)
+
+    def run_dir(self, run_id: str | None = None) -> Path:
+        return self.root / "native-runs" / (run_id or f"run-{self.agent_id}")
+
+
+@pytest.mark.parametrize("agent_id", [bf.FAKE_ALPHA_ID, bf.FAKE_BETA_ID])
+def test_the_full_sequence_runs_identically_for_both_fake_agents(
+    tmp_path: Path, agent_id: str
+) -> None:
+    harness = AgentHarness(tmp_path, agent_id)
+    result = _run(harness.task())
+    assert result.status is AgentRunStatus.COMPLETED
+
+    run_dir = harness.run_dir()
+    for artifact in (
+        "spec.json",
+        "launch.json",
+        "effective.json",
+        "attestation.json",
+        "initialize_attestation.json",
+        "result.json",
+    ):
+        assert (run_dir / artifact).exists(), artifact
+
+    spec = json.loads((run_dir / "spec.json").read_text(encoding="utf-8"))
+    launch = json.loads((run_dir / "launch.json").read_text(encoding="utf-8"))
+    assert spec["agent"]["agent_id"] == agent_id
+    assert spec["agent"]["profile_id"] == "standard-native-acp-v1"
+    assert launch["agent_id"] == agent_id
+    assert (
+        spec["agent"]["agent_registration_hash"] == launch["agent_registration_hash"]
+    )
+    effective = json.loads((run_dir / "effective.json").read_text(encoding="utf-8"))
+    assert effective["effective_model"] == _AGENT_MODELS[agent_id]
+    assert effective["effective_effort"] == _AGENT_EFFORTS[agent_id]
+
+    identity = json.loads(
+        (run_dir / "initialize_attestation.json").read_text(encoding="utf-8")
+    )
+    assert identity["pass"] is True
+    assert identity["expected"]["protocol_version"] == "1"
+
+
+def test_the_session_record_carries_the_agent_and_its_registration(
+    tmp_path: Path,
+) -> None:
+    harness = AgentHarness(tmp_path, bf.FAKE_ALPHA_ID)
+    _run(harness.task())
+    record = storage.native_session_store(harness.root).open_session(
+        f"sess-{bf.FAKE_ALPHA_ID}"
+    )
+    assert record.native_agent_id == bf.FAKE_ALPHA_ID
+    assert len(record.native_agent_registration_hash) == 64
+
+
+def test_g2_5_agent_identity_survives_the_crash_window_between_artifacts(
+    tmp_path: Path,
+) -> None:
+    """``spec.json`` is written before ``launch.json``; reconcile reads only the
+    first, so agent identity has to be in it."""
+    harness = AgentHarness(tmp_path, bf.FAKE_ALPHA_ID)
+    _run(harness.task())
+    run_dir = harness.run_dir()
+    (run_dir / "launch.json").unlink()
+    spec = json.loads((run_dir / "spec.json").read_text(encoding="utf-8"))
+    assert spec["agent"]["agent_id"] == bf.FAKE_ALPHA_ID
+    assert spec["agent"]["agent_registration_hash"]
+
+
+def test_g2_6_a_legacy_spec_json_stays_readable_and_carries_no_agent_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    _run(harness.task())
+    spec = json.loads(
+        (harness.run_dir() / "spec.json").read_text(encoding="utf-8")
+    )
+    assert spec["identity"]["owner"] == "hermes"
+    assert "agent_id" not in spec["agent"]
+    assert "agent_registration_hash" not in spec["agent"]
