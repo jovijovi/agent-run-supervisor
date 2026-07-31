@@ -33,8 +33,12 @@ from agent_run_supervisor.native_acp.spec import (
     SpecFreezeOrderError,
     SpecSealedError,
     SpecValidationError,
+    launch_hash_of_payload,
+    launch_payload_shape_is_exact,
     resolve_workspace_binding,
     spec_hash,
+    spec_hash_of_payload,
+    spec_payload_shape_is_exact,
 )
 
 from . import binding_fixtures as bf
@@ -341,6 +345,123 @@ def test_spec_hash_golden_stability() -> None:
     # the canonical-JSON hash is a portable golden.
     spec = AgentRunSpec.for_golden_fixture()
     assert spec_hash(spec) == GOLDEN_SPEC_HASH
+
+
+# -- one canonical digest rule, shared by writer and verifier ----------------
+
+
+def test_spec_hash_of_payload_is_the_writers_own_rule() -> None:
+    """A verifier recomputes the writer's digest, never a parallel one."""
+    spec = AgentRunSpec.for_golden_fixture()
+    payload = spec.to_dict()
+    payload["spec_hash"] = spec_hash(spec)
+    # The durable document verifies against itself, and the embedded field is
+    # not an input to its own computation.
+    assert spec_hash_of_payload(payload) == GOLDEN_SPEC_HASH
+    assert spec_hash_of_payload(spec.to_dict()) == GOLDEN_SPEC_HASH
+
+
+def test_a_hash_covered_mutation_changes_the_recomputed_spec_hash() -> None:
+    spec = AgentRunSpec.for_golden_fixture()
+    payload = spec.to_dict()
+    payload["spec_hash"] = spec_hash(spec)
+    tampered = json.loads(json.dumps(payload))
+    tampered["runtime"]["model_id"] = "tampered/model"
+    # The embedded hash is unchanged; only recomputation exposes the edit.
+    assert tampered["spec_hash"] == payload["spec_hash"]
+    assert spec_hash_of_payload(tampered) != tampered["spec_hash"]
+
+
+def _production_launch() -> ResolvedLaunchSpec:
+    return ResolvedLaunchSpec(
+        executable="/registered/agent",
+        argv=("/registered/agent", "acp"),
+        env_allowlist=("HOME", "PATH"),
+        credential_refs=(),
+        profile_id="synthetic-agent-1.0",
+        profile_revision=1,
+        profile_hash="0" * 64,
+        config_schema_hash="1" * 64,
+    )
+
+
+def test_launch_hash_of_payload_is_the_writers_own_rule() -> None:
+    launch = _production_launch()
+    payload = launch.to_dict()
+    payload["launch_spec_hash"] = launch.launch_hash()
+    assert launch_hash_of_payload(payload) == launch.launch_hash()
+
+    tampered = json.loads(json.dumps(payload))
+    tampered["executable"] = "/bin/false"
+    assert tampered["launch_spec_hash"] == payload["launch_spec_hash"]
+    assert launch_hash_of_payload(tampered) != tampered["launch_spec_hash"]
+
+
+def test_spec_payload_shape_is_exact_accepts_only_the_production_projection() -> None:
+    spec = AgentRunSpec.for_golden_fixture()
+    payload = spec.to_dict()
+    payload["spec_hash"] = spec_hash(spec)
+    assert spec_payload_shape_is_exact(payload)
+    # The agent-scoped projection carries the omit-when-None pair together.
+    agent_spec = AgentRunSpec.for_agent_golden_fixture()
+    agent_payload = agent_spec.to_dict()
+    agent_payload["spec_hash"] = spec_hash(agent_spec)
+    assert spec_payload_shape_is_exact(agent_payload)
+
+    for mutate in (
+        lambda p: p.__setitem__("unknown_top_level", 1),
+        lambda p: p.pop("execution_grant"),
+        lambda p: p["identity"].pop("namespace"),
+        lambda p: p["session"].__setitem__("unexpected", True),
+        lambda p: p.__setitem__("input_refs", "not-a-collection"),
+        lambda p: p.__setitem__("input_refs", ["not-an-object"]),
+        lambda p: p.__setitem__("input_refs", [{"ref": "prompt:only"}]),
+        lambda p: p.__setitem__(
+            "input_refs", [{"ref": "r", "content_hash": "h", "extra": 1}]
+        ),
+        lambda p: p.__setitem__("workspace", "not-a-block"),
+    ):
+        broken = json.loads(json.dumps(payload))
+        mutate(broken)
+        assert not spec_payload_shape_is_exact(broken)
+
+
+def test_an_empty_input_refs_collection_is_a_production_projection() -> None:
+    """``input_refs`` is zero-or-more: the writer emits ``[]`` for an empty request.
+
+    Neither ``AgentRunRequest`` nor the wire parser requires an input ref, and
+    ``seal`` copies the request's collection verbatim — so a hash-correct
+    ``spec.json`` carrying ``[]`` is exactly what production wrote, and the
+    strict validator must say so.
+    """
+    empty = dataclasses.replace(AgentRunSpec.for_golden_fixture(), input_refs=())
+    payload = empty.to_dict()
+    payload["spec_hash"] = spec_hash(empty)
+
+    assert spec_payload_shape_is_exact(payload)
+    # Still hash-bound, and still exact about everything else.
+    assert spec_hash_of_payload(payload) == payload["spec_hash"]
+    round_tripped = json.loads(json.dumps(payload))
+    assert round_tripped["input_refs"] == []
+    assert spec_payload_shape_is_exact(round_tripped)
+    assert spec_hash_of_payload(round_tripped) == payload["spec_hash"]
+
+
+def test_launch_payload_shape_is_exact_accepts_only_the_production_projection() -> None:
+    launch = _production_launch()
+    payload = launch.to_dict()
+    payload["launch_spec_hash"] = launch.launch_hash()
+    assert launch_payload_shape_is_exact(payload)
+
+    for mutate in (
+        lambda p: p.__setitem__("unknown_field", "planted"),
+        lambda p: p.pop("profile_hash"),
+        lambda p: p.__setitem__("argv", []),
+        lambda p: p.__setitem__("executable", ""),
+    ):
+        broken = json.loads(json.dumps(payload))
+        mutate(broken)
+        assert not launch_payload_shape_is_exact(broken)
 
 
 # -- workspace binding ------------------------------------------------------

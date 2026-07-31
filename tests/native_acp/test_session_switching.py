@@ -23,9 +23,19 @@ from agent_run_supervisor.native_acp.profile import (
     VersionProbeRule,
 )
 from agent_run_supervisor.native_acp.run_task import RunTask
-from agent_run_supervisor.native_acp.spec import AgentRunRequest, InputRef, RunLimits
+from agent_run_supervisor.native_acp.spec import (
+    AgentRunRequest,
+    InputRef,
+    RunLimits,
+    RunSpecAssembler,
+)
+from agent_run_supervisor.session import SessionNotFoundError
 
 FAKE_AGENT_PATH = Path(__file__).with_name("fake_agent.py")
+
+# The external Session id the fake agent returns from ``session/new``; every
+# script in this module leaves it at its default.
+EXTERNAL_SESSION_ID = "fake-external-session-1"
 
 BASE_SET = [
     {
@@ -157,9 +167,55 @@ class SwitchHarness:
         )
         self.registry = ProfileRegistry((_profile(),))
 
+    def seed_bound_session(self, request: AgentRunRequest) -> None:
+        """Arrange the precondition a reuse Run requires (B1 / PRD R4).
+
+        A reuse request opens its Session **existing-only** and needs a stored
+        external id, so no Run may conjure the record it reuses. The harness
+        therefore creates exactly the record an earlier Run would have left
+        behind — identity computed by the production assembler and written
+        through the production store seam, so a mismatch here would be a real
+        refusal rather than a fixture convenience. A record that already exists
+        (including one a test quarantined on purpose) is left untouched.
+        """
+        if request.session_reuse != "reuse":
+            return
+        session_id = request.ars_session_id
+        store = storage.native_session_store(self.root)
+        try:
+            store.open_session(session_id)
+            return
+        except SessionNotFoundError:
+            pass
+        assembler = RunSpecAssembler(request)
+        assembler.resolve_profile(self.registry)
+        assembler.bind_workspace(root=self.workspace, cwd=None)
+        assembler.resolve_launch(runtime=None)
+        spec = assembler.seal(
+            run_id="run-seed-0",
+            submitted_at="2026-07-21T00:00:00+00:00",
+            retry_of_run_id=None,
+        )
+        storage.create_native_session(
+            store,
+            session_id=session_id,
+            profile_id=spec.agent.profile_id,
+            profile_revision=spec.agent.profile_revision,
+            profile_hash=spec.agent.profile_hash,
+            owner=spec.identity.owner,
+            namespace=spec.identity.namespace,
+            workspace_hash=spec.workspace.workspace_hash,
+            effective_cwd=spec.workspace.cwd,
+            matched_root=spec.workspace.canonical_root,
+        )
+        storage.bind_agent_session(
+            store, session_id, agent_session_id=EXTERNAL_SESSION_ID
+        )
+
     def run(self, run_id: str, script: dict, request: AgentRunRequest, **overrides):
         self.monkeypatch.setenv("FAKE_AGENT_SCRIPT", json.dumps(script))
         self.monkeypatch.setenv("FAKE_AGENT_TRACE", str(self.trace_path(run_id)))
+        self.seed_bound_session(request)
         task = RunTask(
             request=request,
             prompt_text=f"prompt for {run_id}",
@@ -189,10 +245,16 @@ class SwitchHarness:
         return storage.native_session_store(self.root).open_session(session_id)
 
     def prepare_session(self) -> None:
+        # The bound record is seeded first (see ``seed_bound_session``), so this
+        # first Run exercises the real ``session/load`` continuity path rather
+        # than creating a Session through the Run path — which fail-closed
+        # reuse no longer permits.
         result = self.run("run-0001", FIRST_RUN_SCRIPT, _request("provider/base", "high"))
         assert result.status is AgentRunStatus.COMPLETED
+        assert "session/load" in self.methods("run-0001")
+        assert "session/new" not in self.methods("run-0001")
         record = self.record()
-        assert record.agent_session_id == "fake-external-session-1"
+        assert record.agent_session_id == EXTERNAL_SESSION_ID
         assert record.last_effective_model == "provider/base"
         assert record.last_effective_effort == "high"
 

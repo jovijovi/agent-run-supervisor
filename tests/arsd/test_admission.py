@@ -1850,3 +1850,102 @@ def test_a_non_string_agent_id_is_an_invalid_request_never_internal(value) -> No
             submit_payload(request=valid_wire_request(agent_id=value))
         )
     assert excinfo.value.code == protocol.INVALID_REQUEST
+
+
+# -- the strict submission validator accepts exactly what the writer emits ----
+
+
+def _written_submission(run_id: str = "run-strict-1") -> dict:
+    command = submit_command()
+    return admission.build_submission_artifact(
+        key=admission.AdmissionKey(principal_id="principal-a", request_id="req-1"),
+        run_id=run_id,
+        command=command,
+        digest=admission.compute_request_digest(command),
+        accepted_at="2026-07-22T00:00:00+00:00",
+        peer={"pid": 1, "uid": 1000, "gid": 1000},
+    )
+
+
+def test_the_writers_field_set_is_the_validators_field_set() -> None:
+    """One named field set, so writer and verifier cannot drift apart."""
+    assert set(_written_submission()) == set(admission.SUBMISSION_FIELDS)
+    assert set(_written_submission()["peer"]) == set(admission.SUBMISSION_PEER_FIELDS)
+
+
+def test_a_written_submission_validates_and_attributes_exactly() -> None:
+    attribution = admission.validate_submission_artifact(
+        _written_submission(), run_id="run-strict-1"
+    )
+    assert attribution is not None
+    assert attribution.run_id == "run-strict-1"
+    assert attribution.owner == "hermes"
+    assert attribution.namespace == "hermes/doc-check"
+    assert attribution.session_id == valid_wire_request()["ars_session_id"]
+
+
+def test_the_validator_accepts_the_writers_whole_value_domain() -> None:
+    """Every request the parser admits must yield an acceptable submission.
+
+    ``session_reuse="none"`` with a non-null ``ars_session_id`` is admitted by
+    the wire parser and preserved verbatim by the writer, while runtime Session
+    selection ignores it. The durable validator therefore accepts the document
+    and derives only the deterministic ephemeral id — the stray value is never
+    attribution authority.
+    """
+    command = protocol.parse_submit(
+        submit_payload(
+            request=valid_wire_request(
+                session_reuse="none", ars_session_id="sess-stray-ignored"
+            )
+        )
+    )
+    payload = admission.build_submission_artifact(
+        key=admission.AdmissionKey(principal_id="principal-a", request_id="req-1"),
+        run_id="run-stray-1",
+        command=command,
+        digest=admission.compute_request_digest(command),
+        accepted_at="2026-07-22T00:00:00+00:00",
+        peer={"pid": 1, "uid": 1000, "gid": 1000},
+    )
+    assert payload["ars_session_id"] == "sess-stray-ignored"
+
+    attribution = admission.validate_submission_artifact(payload, run_id="run-stray-1")
+    assert attribution is not None
+    assert attribution.session_reuse == "none"
+    assert attribution.session_id == "run-stray-1-ephemeral"
+    # The same id the runtime selector derives for this Run.
+    assert attribution.session_id == admission.bound_session_id_for_run(
+        run_id="run-stray-1", submission=payload
+    )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda p: p.pop("profile_id"),
+        lambda p: p.__setitem__("profile_id", ""),
+        lambda p: p.__setitem__("unknown_field", "accepted-but-not-produced"),
+        lambda p: p.pop("prompt_bytes"),
+        lambda p: p["peer"].__setitem__("euid", 0),
+        lambda p: p["peer"].pop("uid"),
+        lambda p: p.__setitem__("ars_session_id", 17),
+        lambda p: p.__setitem__("ars_session_id", ""),
+    ],
+    ids=[
+        "missing_profile_id",
+        "empty_profile_id",
+        "unknown_field",
+        "missing_field",
+        "peer_extra_key",
+        "peer_missing_key",
+        "non_string_session_id",
+        "empty_session_id",
+    ],
+)
+def test_shape_drift_from_the_writers_output_is_refused(mutate) -> None:
+    payload = _written_submission()
+    mutate(payload)
+    assert (
+        admission.validate_submission_artifact(payload, run_id="run-strict-1") is None
+    )

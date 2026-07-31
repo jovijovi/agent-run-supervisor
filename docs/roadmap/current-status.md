@@ -49,7 +49,7 @@ Consequences an operator must not mis-read while the window is open:
 - **Production is untouched.** It runs v0.5.3 with three profile-scoped Bindings promoted under a live root. This documentation change deployed nothing, restarted nothing, migrated nothing, and removed no `/opt` or Binding-root path.
 - **The registry surface is not runnable.** No agents file is read by any released code, and authoring one against a live deployment changes nothing and is not approved.
 - **Both public READMEs describe the reset**, each carrying the same delta note, so neither language over-claims. They document the target operator surface, not the shipped `v0.5.x` one.
-- The window closes only when the staged source work lands, in order: **Stage 1** fail-closed reuse and total reconciliation, **Stage 2** the environment-value guard, **Stage 3** the boundary reset. Each stage needs its own approval, and Stage 3's profile deletion needs one more.
+- The window closes only when the staged source work lands, in order: **Stage 1** fail-closed reuse and total reconciliation, **Stage 2** the environment-value guard, **Stage 3** the boundary reset. Local development of all three is authorized as of 2026-07-30 and is dependency-gated in that order; landing each still needs its own PR and merge decision, and Stage 3's profile deletion needs one more approval on top.
 
 ## Phase board
 
@@ -60,8 +60,9 @@ Consequences an operator must not mis-read while the window is open:
 | Runtime Binding era | Retired as target architecture; implementing source still merged and running | [binding-era archive](../archive/binding-era-2026-07/README.md) · [feature tracker](features.md) |
 | Per-agent profiles | Superseded as authority; still registered in source | [features](features.md) F-NATIVE-ADAPTER-*, F-STANDARD-NATIVE-ACP-001 |
 | Standard Native ACP (v1) + agent identity | Merged on the v0.5.3 line; plan archived as completed | [archived plan](../plans/archive/2026-07-29-standard-native-acp-v1.md) |
-| V4 authority alignment (Stage 0) | Documentation only, on branch `docs/v4-authority-reset` | [active plan](../plans/active/2026-07-30-ars-v4-boundary-reset.md) |
-| V4 source stages 1–3 | Planned; none approved | [active plan](../plans/active/2026-07-30-ars-v4-boundary-reset.md) · [features](features.md) F-AGENT-REGISTRY-001, F-BOUNDARY-RESET-001, F-ENV-EVIDENCE-001, F-RECONCILE-ORDERED-001, F-OBSERVED-EVIDENCE-001, F-ARSD-API-002 |
+| V4 authority alignment (Stage 0) | Merged on `main`; documentation only | [active plan](../plans/active/2026-07-30-ars-v4-boundary-reset.md) |
+| V4 Stage 1 — fail-closed reuse + total reconciliation | Local source work authorized 2026-07-30 and in flight on branch `feat/v4-failclosed-hardening` | [active plan](../plans/active/2026-07-30-ars-v4-boundary-reset.md) · [features](features.md) F-RECONCILE-ORDERED-001 |
+| V4 Stages 2–3 | Local source work authorized; not started — Stage 2 waits on Stage 1 merging, Stage 3 on Stage 2 | [active plan](../plans/active/2026-07-30-ars-v4-boundary-reset.md) · [features](features.md) F-AGENT-REGISTRY-001, F-BOUNDARY-RESET-001, F-ENV-EVIDENCE-001, F-OBSERVED-EVIDENCE-001, F-ARSD-API-002 |
 | Sachima `ArsdBackend` integration | Parked | separately approvable later integration |
 | acpx product/runtime/compatibility removal | Planned | separately authorized source work; bounded comparison fixtures remain |
 
@@ -72,11 +73,12 @@ None of these is approved here. Each is separate and non-transitive.
 **Recorded, and bounded:**
 
 - **Decision 1 — profile-retirement policy: option (a), recorded 2026-07-30.** It authorized this authority retirement and nothing else.
+- **Source implementation for V4 Stages 1–3 — recorded 2026-07-30, after the authority alignment merged.** It covers **local** source, test, and status work only, taken serially at the stage gates, plus per-stage commit and push once a stage candidate has passed verification, independent review, and acceptance. It carries **no** PR, merge, release, deployment, restart, migration, canary, or production authority, and it does not reach the profile deletion below.
 
 **Open human decisions:**
 
-- **Profile-retirement execution in source** — deleting the three registered per-agent profiles. Introducing a retirement capability and using one were always two decisions; the second is **not taken**, and it is required before that source work runs.
-- **Source implementation for the V4 stages** — a distinct approval, recordable only after the authority alignment merges. Neither the recorded decision, nor activating a plan, nor merging the authority alignment implies it.
+- **Profile-retirement execution in source** — deleting the three registered per-agent profiles (Stage 3 WP3.3). Introducing a retirement capability and using one were always two decisions; the second is **not taken**, and it is required before that source work runs.
+- **PR creation and merge for each V4 stage** — separate controller decisions; the source-implementation approval above does not imply either.
 - **Decision 2 — cutover and the one-time legacy-Session load refusal.** Every live Session at cutover ends; continuing that work means a new Session with caller-owned context handoff. Open, and it does not block source work.
 - **Decision 3 — lifetime of the legacy `v0.5.x` line.** Open, and it governs release and branch policy, which is separately approved anyway.
 

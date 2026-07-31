@@ -77,9 +77,13 @@ document specifically does not approve:
   in source.** Introducing a retirement capability and using one remain two separate decisions, and the
   second is **not taken**. It is required, in writing, before that source work runs — and no such mechanism
   may be added in the meantime as a field defaulting to `False`, an unused rule constant, or a marker.
-- **Not approved: source implementation of any V4 stage.** That is a distinct approval, recordable only
-  after the authority alignment merges. Recording Decision 1, activating a plan, and merging the authority
-  alignment each individually and jointly do **not** imply it.
+- **Decided (2026-07-30, after the authority alignment merged): local source implementation of V4 Stages
+  1–3.** It authorizes local source, test, and status work on task branches, taken serially at the stage
+  gates, and per-stage commit and push **only** after that stage candidate has passed verification,
+  independent review, and acceptance. It authorizes nothing else: **PR creation, merge, release,
+  deployment, service restart, migration/cutover, the real-agent canary, production changes, and the Stage 3
+  profile deletion above all remain separately unapproved.** Recording Decision 1, activating a plan, and
+  merging the authority alignment still do not imply any of those.
 - **Not approved: production cutover** (Decision 2, including the one-time legacy-Session load refusal) or
   any decision about the **legacy `v0.5.x` line lifetime** (Decision 3). Both remain open.
 - **Not approved: touching the retired deployment.** The `/opt` artifact trees, the Binding roots, their

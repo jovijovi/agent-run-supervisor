@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 from pathlib import Path
@@ -104,3 +105,125 @@ def test_r7_b1_no_legacy_root_reads_or_writes(tmp_path: Path) -> None:
         "runs",
         "sessions",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Descriptor identity and exact-length controls (B4 invariant 4)
+# ---------------------------------------------------------------------------
+
+
+def _write(path: Path, text: str) -> Path:
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_an_untampered_document_is_valid(tmp_path: Path) -> None:
+    """Positive control: the strict reader still accepts a real document."""
+    state = storage.classify_json_document(_write(tmp_path / "d.json", '{"a": 1}'))
+    assert state.kind is storage.JsonDocumentKind.VALID
+    assert state.payload == {"a": 1}
+
+
+def test_successful_short_read_after_fstat_is_corrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A shrink between ``fstat`` and the read is a race, not a smaller doc.
+
+    The truncated bytes are *valid JSON* and the read *succeeds*, so nothing
+    but the exact-length control can catch this: the reader observed a size for
+    this descriptor and must read exactly that many bytes.
+    """
+    path = _write(tmp_path / "shrink.json", '{"original": "longer"}\n')
+    real_reader = storage._read_fd_capped
+
+    def shrink_then_read(fd: int, limit: int) -> bytes:
+        path.write_bytes(b"{}")
+        os.lseek(fd, 0, os.SEEK_SET)
+        return real_reader(fd, limit)
+
+    monkeypatch.setattr(storage, "_read_fd_capped", shrink_then_read)
+    state = storage.classify_json_document(path)
+    assert state.kind is storage.JsonDocumentKind.CORRUPT
+    assert state.payload is None
+
+
+def test_regular_file_replacement_between_observation_and_open_is_corrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A different regular inode at the same path is a different object."""
+    path = _write(tmp_path / "swap.json", '{"original": true}')
+    replacement = _write(tmp_path / "replacement.json", '{"planted": true}')
+    real_open = os.open
+
+    def swapping_open(target, flags, *args, **kwargs):
+        if Path(os.fspath(target)).name == "swap.json":
+            os.replace(replacement, path)
+        return real_open(target, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swapping_open)
+    assert (
+        storage.classify_json_document(path).kind
+        is storage.JsonDocumentKind.CORRUPT
+    )
+
+
+def test_growth_during_the_read_is_corrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A size change under the descriptor fails closed in either direction.
+
+    Scope stated honestly: the controls detect a size change, an inode change
+    before the open, and a mutation landing in a later timestamp tick. A
+    same-length in-place rewrite inside a single coarse clock tick is not
+    observable through ``stat`` at all — no reader can catch it — while every
+    ARS writer publishes through exclusive-create or atomic replace, which
+    changes the inode and is therefore caught by the identity control above.
+    """
+    path = _write(tmp_path / "grow.json", '{"a": "one"}')
+    real_reader = storage._read_fd_capped
+
+    def grow_then_read(fd: int, limit: int) -> bytes:
+        path.write_bytes(b'{"a": "one", "grown": true}')
+        os.lseek(fd, 0, os.SEEK_SET)
+        return real_reader(fd, limit)
+
+    monkeypatch.setattr(storage, "_read_fd_capped", grow_then_read)
+    assert (
+        storage.classify_json_document(path).kind
+        is storage.JsonDocumentKind.CORRUPT
+    )
+
+
+def test_the_terminal_reader_shares_the_same_controls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The trusted terminal reader is the same bounded, identity-bound read."""
+    run_dir = tmp_path / "run-short"
+    run_dir.mkdir()
+    result = run_dir / "result.json"
+    payload = {
+        "schema_version": 1,
+        "run_id": "run-short",
+        "status": "completed",
+        "retryable": False,
+    }
+    result.write_text(json.dumps(payload) + " " * 32, encoding="utf-8")
+    real_reader = storage._read_fd_capped
+
+    def shrink_then_read(fd: int, limit: int) -> bytes:
+        result.write_bytes(b"{}")
+        os.lseek(fd, 0, os.SEEK_SET)
+        return real_reader(fd, limit)
+
+    monkeypatch.setattr(storage, "_read_fd_capped", shrink_then_read)
+    assert (
+        storage.read_native_terminal_result(result, run_id="run-short").kind
+        is storage.NativeTerminalKind.INVALID
+    )
+    # Clean absence stays the only route to ABSENT.
+    assert (
+        storage.read_native_terminal_result(
+            run_dir / "missing.json", run_id="run-short"
+        ).kind
+        is storage.NativeTerminalKind.ABSENT
+    )

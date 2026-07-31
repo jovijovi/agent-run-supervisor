@@ -47,10 +47,13 @@ from agent_run_supervisor.result import (
 )
 from agent_run_supervisor.session import (
     STATE_OPEN,
+    SessionBindingError,
     SessionLock,
     SessionNotFoundError,
+    SessionRecordInvalidError,
     SessionStore,
     validate_native_binding,
+    validate_native_session_record,
 )
 
 from . import storage
@@ -187,6 +190,39 @@ class NativeRunResult:
     session_state: str | None
 
 
+@dataclass(frozen=True)
+class NewSessionPlan:
+    """Start a brand-new external Session.
+
+    Constructible **only** from a request whose immutable reuse intent is
+    "none": it is the sole plan type the ``session/new`` startup arm matches,
+    so a reuse request cannot reach ``driver.new_session`` structurally rather
+    than by branch ordering.
+    """
+
+    ar_session_id: str
+
+
+@dataclass(frozen=True)
+class LoadSessionPlan:
+    """Load an already-existing external Session by its stored id.
+
+    ``external_session_id`` is captured exactly from an already-existing
+    Native Session record and is replayed byte-for-byte: no trimming,
+    normalization, parsing, case conversion, canonicalization, or
+    regeneration, and no id is ever read back from the load response. It is
+    ``repr=False`` so an accidental repr of the plan cannot print it.
+    """
+
+    ar_session_id: str
+    external_session_id: str = field(repr=False)
+
+
+# The closed union. There is no third member, no default arm, and no
+# conversion between the two: every startup arm matches one member exactly.
+SessionStartPlan = NewSessionPlan | LoadSessionPlan
+
+
 class _PreDispatchFailure(Exception):
     """Internal control flow: admission/config/spawn failed before dispatch."""
 
@@ -202,6 +238,10 @@ _CATEGORICAL_FAILURE_REASON_BY_DETAIL: dict[str, str] = {
     "STARTUP_TIMEOUT": "startup timed out",
     "LOAD_SESSION_UNADVERTISED": "session load unavailable",
     "SILENT_SESSION_RECREATION": "silent session recreation",
+    "SESSION_NOT_FOUND_FOR_REUSE": "session not found for reuse",
+    "SESSION_RECORD_INVALID": "session record invalid",
+    "SESSION_EXTERNAL_ID_MISSING": "session external id missing",
+    "SESSION_BINDING_MISMATCH": "session binding mismatch",
     "CONFIG_FIDELITY": "config fidelity failed",
     "EVIDENCE_PIPELINE": "evidence pipeline failed",
     "SUPERVISOR_CANCELLED": "supervisor cancellation",
@@ -262,8 +302,6 @@ class _RunContext:
     handle: Any = None
     session_id: str | None = None
     ephemeral: bool = False
-    reuse_load: bool = False
-    load_external_id: str | None = None
     previous_pair: tuple[str | None, str | None] = (None, None)
     rollback_unproven: bool = False
     lock: SessionLock | None = None
@@ -449,7 +487,7 @@ class RunTask:
         spec, launch, binding, instance = self._admit(ctx)
         limits = spec.limits
 
-        self._bind_session(ctx, spec, binding, instance, launch)
+        plan = self._bind_session(ctx, spec, binding, instance, launch)
 
         # Identity-pinned profiles attest the spawn boundary here: after the
         # session is bound and immediately before the child is created, so the
@@ -540,7 +578,7 @@ class RunTask:
 
         try:
             await asyncio.wait_for(
-                self._startup_sequence(ctx, spec, binding),
+                self._startup_sequence(ctx, spec, binding, plan),
                 limits.startup_timeout_seconds,
             )
         except asyncio.TimeoutError:
@@ -576,7 +614,17 @@ class RunTask:
         self._spec = spec
         return spec, launch, binding, instance
 
-    def _bind_session(self, ctx: _RunContext, spec, binding, instance, launch) -> None:
+    def _bind_session(
+        self, ctx: _RunContext, spec, binding, instance, launch
+    ) -> SessionStartPlan:
+        """Derive the closed start plan from the immutable reuse intent (B1).
+
+        The intent decides the branch once, and each branch builds exactly one
+        plan type. There is no third path, no conversion, and no recovery
+        behavior that could turn a reuse request into a new Session: a reuse
+        request that cannot produce a ``LoadSessionPlan`` fails here, before
+        the lease and before any spawn.
+        """
         # The Binding era this Run was sealed under (C11). Both are ``None``
         # for a profile whose contract accepts no Binding, so such a Session
         # keeps its exact pre-epoch shape and its exact reuse semantics.
@@ -584,17 +632,99 @@ class RunTask:
         contract_hash = provenance.adapter_contract_hash if provenance else None
         epoch = provenance.session_compatibility_epoch if provenance else None
         if spec.session.reuse == "reuse":
-            session_id = spec.session.ars_session_id
-            ctx.ephemeral = False
+            plan: SessionStartPlan = self._plan_reuse_session(
+                ctx, spec, binding, instance, contract_hash, epoch
+            )
         else:
-            session_id = f"{self._run_id}-ephemeral"
-            ctx.ephemeral = True
-        assert session_id is not None
+            plan = self._plan_new_session(
+                ctx, spec, binding, instance, contract_hash, epoch
+            )
+        ctx.lock = self._session_store.acquire_lock(
+            plan.ar_session_id,
+            spec.identity.owner,
+            reclaimable=False,
+            required_state=STATE_OPEN,
+        )
+        return plan
+
+    def _plan_reuse_session(
+        self, ctx: _RunContext, spec, binding, instance, contract_hash, epoch
+    ) -> LoadSessionPlan:
+        """Existing-only open, strict validation, then the load-time gate.
+
+        Every refusal below happens before the lease is touched and long before
+        ``session/load``, and none of them creates, repairs, or reopens a
+        record. The four categories stay distinct because they mean different
+        things to a caller: the Session is gone, its record is unusable, it was
+        never bound to an external Session, or it belongs to a different Run
+        identity.
+        """
+        session_id = spec.session.ars_session_id
+        assert session_id is not None  # spec validation requires it for reuse
         ctx.session_id = session_id
+        ctx.ephemeral = False
+        try:
+            record = self._session_store.open_session(session_id)
+        except SessionNotFoundError as exc:
+            raise _PreDispatchFailure(
+                "session reuse requires an already-existing session record",
+                "SESSION_NOT_FOUND_FOR_REUSE",
+            ) from exc
+        except Exception as exc:
+            # Unreadable/malformed persisted record: never a second chance to
+            # be created, and never a fallback to a new Session.
+            raise _PreDispatchFailure(
+                "session record could not be read", "SESSION_RECORD_INVALID"
+            ) from exc
+        try:
+            validate_native_session_record(record, expected_session_id=session_id)
+        except SessionRecordInvalidError as exc:
+            raise _PreDispatchFailure(
+                "session record failed strict validation", "SESSION_RECORD_INVALID"
+            ) from exc
+        external_id = record.agent_session_id
+        if external_id is None:
+            raise _PreDispatchFailure(
+                "session record carries no external session id",
+                "SESSION_EXTERNAL_ID_MISSING",
+            )
+        try:
+            # Before the lease is acquired and long before session/load.
+            validate_native_binding(
+                record,
+                profile=instance.profile,
+                workspace_result=binding,
+                owner=spec.identity.owner,
+                namespace=spec.identity.namespace,
+                for_load=True,
+                expected_contract_hash=contract_hash,
+                expected_epoch=epoch,
+                expected_agent_id=spec.agent.agent_id,
+                expected_agent_registration_hash=spec.agent.agent_registration_hash,
+            )
+        except SessionBindingError as exc:
+            raise _PreDispatchFailure(
+                "session binding mismatch", "SESSION_BINDING_MISMATCH"
+            ) from exc
+        ctx.previous_pair = (
+            record.last_effective_model,
+            record.last_effective_effort,
+        )
+        return LoadSessionPlan(
+            ar_session_id=session_id, external_session_id=external_id
+        )
+
+    def _plan_new_session(
+        self, ctx: _RunContext, spec, binding, instance, contract_hash, epoch
+    ) -> NewSessionPlan:
+        """The only path allowed to create a record without an external ID."""
+        session_id = f"{self._run_id}-ephemeral"
+        ctx.session_id = session_id
+        ctx.ephemeral = True
         try:
             record = self._session_store.open_session(session_id)
         except SessionNotFoundError:
-            record = storage.create_native_session(
+            storage.create_native_session(
                 self._session_store,
                 session_id=session_id,
                 profile_id=spec.agent.profile_id,
@@ -611,7 +741,8 @@ class RunTask:
                 agent_registration_hash=spec.agent.agent_registration_hash,
             )
         else:
-            # Before the lease is acquired and long before session/load.
+            # A record already reserved under this Run's own derived id (a
+            # resumed Run identity) is still identity-checked before the lease.
             validate_native_binding(
                 record,
                 profile=instance.profile,
@@ -623,23 +754,11 @@ class RunTask:
                 expected_agent_id=spec.agent.agent_id,
                 expected_agent_registration_hash=spec.agent.agent_registration_hash,
             )
-            if record.agent_session_id is not None:
-                # Later Runs on a bound session use real session/load with
-                # the unchanged external ID (PRD R4).
-                ctx.reuse_load = True
-                ctx.load_external_id = record.agent_session_id
-                ctx.previous_pair = (
-                    record.last_effective_model,
-                    record.last_effective_effort,
-                )
-        ctx.lock = self._session_store.acquire_lock(
-            session_id,
-            spec.identity.owner,
-            reclaimable=False,
-            required_state=STATE_OPEN,
-        )
+        return NewSessionPlan(ar_session_id=session_id)
 
-    async def _startup_sequence(self, ctx: _RunContext, spec, binding) -> None:
+    async def _startup_sequence(
+        self, ctx: _RunContext, spec, binding, plan: SessionStartPlan
+    ) -> None:
         driver = ctx.driver
         assert driver is not None and ctx.bridge is not None
         # The frozen session metadata comes only from the resolved profile and
@@ -661,36 +780,40 @@ class RunTask:
 
             self._attest_initialize(ctx, ctx.instance, summary)
 
-            if ctx.reuse_load:
-                if not summary.load_session_advertised:
-                    raise _PreDispatchFailure(
-                        "agent does not advertise loadSession; session reuse "
-                        "is unsatisfiable — escalate per G6",
-                        "LOAD_SESSION_UNADVERTISED",
+            # Disjoint arms over the closed union: one arm per plan type, no
+            # default arm, no guard, and no conversion between the two. The
+            # reuse request never reaches the ``session/new`` arm because it
+            # cannot produce the plan type that arm matches.
+            match plan:
+                case NewSessionPlan():
+                    self._emit(ctx, {"type": "session_new_requested"})
+                    external_id = await driver.new_session(
+                        cwd=binding.effective_cwd, meta=session_meta
                     )
-                assert ctx.load_external_id is not None
-                self._emit(ctx, {"type": "session_load_requested"})
-                # Real session/load on the unchanged external ID; this path
-                # never calls session/new — silent re-creation is failure.
-                await driver.load_session(
-                    agent_session_id=ctx.load_external_id,
-                    cwd=binding.effective_cwd,
-                    meta=session_meta,
-                )
-                ctx.effective.agent_session_id = ctx.load_external_id
-            else:
-                self._emit(ctx, {"type": "session_new_requested"})
-                external_id = await driver.new_session(
-                    cwd=binding.effective_cwd, meta=session_meta
-                )
-                ctx.effective.agent_session_id = external_id
-                record = self._session_store.open_session(ctx.session_id)
-                if record.agent_session_id is None:
-                    storage.bind_agent_session(
-                        self._session_store,
-                        ctx.session_id,
-                        agent_session_id=external_id,
+                    ctx.effective.agent_session_id = external_id
+                    record = self._session_store.open_session(ctx.session_id)
+                    if record.agent_session_id is None:
+                        storage.bind_agent_session(
+                            self._session_store,
+                            ctx.session_id,
+                            agent_session_id=external_id,
+                        )
+                case LoadSessionPlan(external_session_id=stored_external_id):
+                    if not summary.load_session_advertised:
+                        raise _PreDispatchFailure(
+                            "agent does not advertise loadSession; session reuse "
+                            "is unsatisfiable — escalate per G6",
+                            "LOAD_SESSION_UNADVERTISED",
+                        )
+                    self._emit(ctx, {"type": "session_load_requested"})
+                    # Real session/load on the unchanged external ID; this path
+                    # never calls session/new — silent re-creation is failure.
+                    await driver.load_session(
+                        agent_session_id=stored_external_id,
+                        cwd=binding.effective_cwd,
+                        meta=session_meta,
                     )
+                    ctx.effective.agent_session_id = stored_external_id
 
             model, effort = await driver.set_config_exact()
         except _PreDispatchFailure:
@@ -702,7 +825,7 @@ class RunTask:
                     f"{ctx.client.identity_violation}",
                     "SILENT_SESSION_RECREATION",
                 ) from exc
-            if ctx.reuse_load and ctx.machine is not None and (
+            if isinstance(plan, LoadSessionPlan) and ctx.machine is not None and (
                 ctx.machine.phase not in ("init", "initial_options")
             ):
                 # A set may have been dispatched: partial switch. No prompt;

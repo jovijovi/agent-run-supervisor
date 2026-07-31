@@ -55,6 +55,10 @@ def test_session_update_sink_completes_before_first_await() -> None:
     client = NativeAcpClient(
         on_update=lambda session_id, update: recorded.append((session_id, update))
     )
+    # The expected external id is bound before any callback can be delivered
+    # (B1): an unbound expectation is itself an identity violation, so this pin
+    # measures the delivery path of a *valid* callback, not the refusal path.
+    client.expected_session_id = "sess-contract-1"
     update = {
         "sessionUpdate": "agent_message_chunk",
         "content": {"type": "text", "text": "CURRENT_TURN"},

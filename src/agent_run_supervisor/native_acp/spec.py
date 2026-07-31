@@ -556,11 +556,150 @@ SPEC_OMIT_WHEN_NONE = ("agent.agent_id", "agent.agent_registration_hash")
 _GENERATED_FIELDS = ("run_id", "submitted_at", "retry_of_run_id")
 
 
+def spec_hash_of_payload(payload: Mapping[str, Any]) -> str:
+    """The spec hash of an already-projected Spec document.
+
+    The single canonical rule: exclude exactly the generated Run identity and
+    lineage fields, then hash the canonical JSON of what remains. Both the
+    production writer below and any reader verifying a durable ``spec.json``
+    call *this* function, so a verifier can never drift into a subtly
+    different digest. ``spec_hash`` itself is excluded because it is the field
+    being verified, not an input to itself.
+    """
+    material = {
+        key: value
+        for key, value in payload.items()
+        if key not in _GENERATED_FIELDS and key != "spec_hash"
+    }
+    return _sha256_hex(_canonical_json(material))
+
+
 def spec_hash(spec: AgentRunSpec) -> str:
-    payload = spec.to_dict()
-    for name in _GENERATED_FIELDS:
-        payload.pop(name, None)
-    return _sha256_hex(_canonical_json(payload))
+    return spec_hash_of_payload(spec.to_dict())
+
+
+def launch_hash_of_payload(payload: Mapping[str, Any]) -> str:
+    """The launch seal of an already-projected launch document.
+
+    Excludes exactly one field — the seal itself, which the writer appends to
+    the projection after computing it — and hashes the canonical JSON of the
+    rest. :meth:`ResolvedLaunchSpec.launch_hash` is the same computation over
+    the same projection, so a durable ``launch.json`` can be re-sealed by a
+    reader without duplicating the rule.
+    """
+    material = {
+        key: value for key, value in payload.items() if key != "launch_spec_hash"
+    }
+    return _sha256_hex(_canonical_json(material))
+
+
+def _dataclass_projection_keys(model: type) -> set[str]:
+    """The key set ``to_dict``/``asdict`` produces for one spec dataclass."""
+    return {f.name for f in dataclasses.fields(model)}
+
+
+def _spec_block_models() -> dict[str, type]:
+    """Every nested Spec block, taken from the production dataclass itself."""
+    return {
+        "identity": RunIdentity,
+        "session": SpecSession,
+        "agent": SpecAgent,
+        "execution_grant": SpecGrant,
+        "workspace": SpecWorkspace,
+        "runtime": SpecRuntime,
+        "bindings": SpecBindings,
+        "limits": RunLimits,
+    }
+
+
+def spec_payload_shape_is_exact(payload: Any) -> bool:
+    """Does this document carry exactly the production Spec projection?
+
+    Key sets are derived from the production dataclasses rather than restated,
+    so a field added to the Spec cannot silently become an unknown key here.
+    Unknown, missing, or wrongly shaped blocks are all rejected: a durable Spec
+    is either exactly what the writer sealed or it is not evidence.
+    """
+    if not isinstance(payload, dict):
+        return False
+    expected_top = _dataclass_projection_keys(AgentRunSpec) | {"spec_hash"}
+    omitted = {qualified.split(".")[1] for qualified in SPEC_OMIT_WHEN_NONE}
+    if set(payload) != expected_top:
+        return False
+    for name, model in _spec_block_models().items():
+        block = payload.get(name)
+        if not isinstance(block, dict):
+            return False
+        expected = _dataclass_projection_keys(model)
+        if name == "agent":
+            # The omit-when-None pair is present together or absent together.
+            present = set(block)
+            if present not in (expected, expected - omitted):
+                return False
+            continue
+        if set(block) != expected:
+            return False
+    # Accepted as list *or* tuple: the in-memory projection carries the tuple
+    # the dataclass holds, and a JSON round trip turns it into a list. Both are
+    # the same production projection. The collection is zero-or-more — neither
+    # the request nor the wire parser requires an input ref, and ``seal`` copies
+    # whatever the request carried — so an empty one is a production projection
+    # too, while every element present must still be an exact ``InputRef``.
+    input_refs = payload.get("input_refs")
+    if not isinstance(input_refs, (list, tuple)):
+        return False
+    ref_keys = _dataclass_projection_keys(InputRef)
+    for ref in input_refs:
+        if not isinstance(ref, dict) or set(ref) != ref_keys:
+            return False
+    return True
+
+
+def launch_payload_shape_is_exact(payload: Any) -> bool:
+    """Does this document carry exactly a production launch projection?
+
+    ``ResolvedLaunchSpec.to_dict`` omits several fields when the profile owns
+    no such surface, so the accepted key set is the required core plus any
+    subset of the optional ones — and nothing else.
+    """
+    if not isinstance(payload, dict):
+        return False
+    required = {
+        "executable",
+        "argv",
+        "env_allowlist",
+        "credential_refs",
+        "profile_id",
+        "profile_revision",
+        "profile_hash",
+        "config_schema_hash",
+        "permission_env",
+        "transport",
+        "launch_spec_hash",
+    }
+    optional = {
+        "fixed_env",
+        "expected_runtime",
+        "runtime_provenance",
+        "session_meta",
+        "agent_id",
+        "agent_registration_hash",
+    }
+    present = set(payload)
+    if not required <= present or not present <= (required | optional):
+        return False
+    if not isinstance(payload.get("executable"), str) or not payload["executable"]:
+        return False
+    argv = payload.get("argv")
+    if not isinstance(argv, (list, tuple)) or not argv:
+        return False
+    if not all(isinstance(token, str) for token in argv):
+        return False
+    if not isinstance(payload.get("profile_id"), str) or not payload["profile_id"]:
+        return False
+    if not isinstance(payload.get("launch_spec_hash"), str):
+        return False
+    return True
 
 
 @dataclass
