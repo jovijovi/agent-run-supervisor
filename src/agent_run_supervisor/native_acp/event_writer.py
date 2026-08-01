@@ -16,6 +16,12 @@ import json
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from agent_run_supervisor.redaction import (
+    GUARDED_RECORD_WITHHELD,
+    RunTextGuard,
+    serialized_projection_is_safe,
+)
+
 from .spec import (
     LIMIT_MAX_EVENT_BYTES_MAX,
     LIMIT_MAX_EVENT_BYTES_MIN,
@@ -52,6 +58,7 @@ class EventWriter:
         queue_maxsize: int = DEFAULT_QUEUE_MAXSIZE,
         producer_timeout_seconds: float = DEFAULT_PRODUCER_TIMEOUT_SECONDS,
         filename: str = EVENTS_FILENAME,
+        guard: RunTextGuard | None = None,
     ) -> None:
         if (
             isinstance(max_event_bytes, bool)
@@ -68,6 +75,7 @@ class EventWriter:
         ):
             raise ValueError("max_events out of bounds")
         self._handle = handle
+        self._guard = guard
         self._max_event_bytes = max_event_bytes
         self._max_events = max_events
         self._queue: asyncio.Queue[_QueueEntry | None] = asyncio.Queue(
@@ -432,9 +440,17 @@ class EventWriter:
                 return
             event = item.event
             ack = item.ack
+            # The last common boundary, and deliberately not the only one: the
+            # producer guards at enqueue too. Guarding *before* the sequence is
+            # assigned keeps a suppressed record inside the same monotonic
+            # stream rather than creating a gap a reader would have to explain.
+            if self._guard is not None:
+                event = self._guard.guard_event(event)
             self._seq += 1
             record = self._bounded(event)
             record["seq"] = self._seq
+            # Last: the composed document only exists now, sequence included.
+            record = self._serialization_safe(record)
             try:
                 await asyncio.to_thread(
                     self._handle.append_ndjson, self._filename, record
@@ -445,6 +461,43 @@ class EventWriter:
                 raise
             if ack is not None and not ack.done():
                 ack.set_result(None)
+
+    @staticmethod
+    def _rendered(record: Mapping[str, Any]) -> str:
+        """Exactly what ``RunHandle.append_ndjson`` is about to serialize."""
+        return json.dumps(dict(record), sort_keys=True)
+
+    def _serialization_safe(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Suppress a record whose *serialized* form recomposes a value.
+
+        Suppression keeps the ordinal, so a reader never sees an unexplained
+        gap in the stream, and keeps the family when the family itself is
+        clean — the event's meaning survives even when its body cannot.
+        """
+        guard = self._guard
+        if guard is None:
+            return record
+        if serialized_projection_is_safe(guard, self._rendered(record)):
+            return record
+        guard.counters.suppressed_records += 1
+        family = record.get("type")
+        safe_family = (
+            family
+            if isinstance(family, str) and guard.guard_text(family) == family
+            else "unknown_update"
+        )
+        fallback: dict[str, Any] = {
+            "seq": record.get("seq"),
+            "type": safe_family,
+            "withheld": True,
+            "withheld_reason": GUARDED_RECORD_WITHHELD,
+        }
+        if serialized_projection_is_safe(guard, self._rendered(fallback)):
+            return fallback
+        # Source-owned keys and the ordinal only. Emitted unconditionally:
+        # there is nothing smaller to fall back to, and a value whose bytes
+        # coincide with this fixed shape is coincidence, not flow.
+        return {"seq": record.get("seq"), "withheld": True}
 
     def _bounded(self, event: dict[str, Any]) -> dict[str, Any]:
         rendered = json.dumps(event, sort_keys=True, ensure_ascii=False)

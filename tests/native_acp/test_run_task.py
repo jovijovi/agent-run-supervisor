@@ -44,6 +44,7 @@ from agent_run_supervisor.native_acp.spec import (
     RunLimits,
     RunSpecAssembler,
 )
+from agent_run_supervisor.redaction import ENV_VALUE_REPLACEMENT
 from agent_run_supervisor.session import SessionNotFoundError, SessionStore
 
 from . import binding_fixtures as bf
@@ -871,12 +872,23 @@ def test_without_prepared_handle_exactly_one_exclusive_create(
 def test_without_prepared_handle_create_failure_path_unchanged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The control flow is unchanged — occupied run dir, failed exclusive
+    # create, no run_dir on the result — but the projection is now categorical.
+    # The store's own message names the absolute path it refused to clobber,
+    # which is exactly the class of text WP2.5 keeps out of a caller-visible
+    # payload; the stable code carries the diagnosis instead.
     harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
     _precreated_handle(harness)  # occupy the run dir: exclusive create fails
     result = _run(harness.task())
     assert result.status is AgentRunStatus.FAILED
     assert result.run_dir is None
-    assert "already exists" in result.payload["error"]
+    assert result.payload["error"] == "run reservation failed"
+    assert result.payload["detail_code"] == "RUN_RESERVATION_FAILED"
+    blob = json.dumps(result.payload)
+    assert "already exists" not in blob
+    assert "EventStore" not in blob
+    assert str(harness.run_dir()) not in blob
+    assert str(tmp_path) not in blob
 
 
 def test_prepared_handle_wrong_type_fails_closed(
@@ -2726,11 +2738,17 @@ def test_read_ask_is_client_mediated_allowed(
 def test_registered_permission_env_reaches_spawned_agent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Launch binding must reach the real spawned process environment (not
-    # only serialization): the fake agent echoes the injected variable.
+    # Launch binding must reach the real spawned process environment (not only
+    # serialization). It can no longer be proven by echoing the value into the
+    # final message: every projected environment value is guarded out of every
+    # ARS sink, so the value would be erased before it reached ``result.json``
+    # and the assertion would prove the guard, not the delivery. The child
+    # therefore reports delivery to a test-owned file outside the Run tree and
+    # answers ARS with a value-free marker.
     binding_value = '{"bash":"ask","edit":"ask","webfetch":"ask"}'
+    probe_path = tmp_path / "child-env-probe.txt"
     script = dict(HAPPY_SCRIPT)
-    script["echo_env"] = "OPENCODE_PERMISSION"
+    script["env_probe"] = {"name": "OPENCODE_PERMISSION", "path": str(probe_path)}
     harness = Harness(tmp_path, monkeypatch, script)
     monkeypatch.setitem(
         profile_module._REGISTERED_PERMISSION_ENV,
@@ -2740,8 +2758,12 @@ def test_registered_permission_env_reaches_spawned_agent(
     result = _run(harness.task())
 
     assert result.status is AgentRunStatus.COMPLETED
+    assert probe_path.read_text(encoding="utf-8") == binding_value
     payload = json.loads((harness.run_dir() / "result.json").read_text())
-    assert payload["final_message"] == f"ENV:{binding_value}"
+    assert payload["final_message"] == "ENV_PROBE:PRESENT"
+    # launch.json still serializes the pair: making launch material
+    # structurally value-blind is Stage 3 (B2b) and depends on the new launch
+    # schema, so it is deliberately unchanged here.
     launch_payload = json.loads((harness.run_dir() / "launch.json").read_text())
     assert launch_payload["permission_env"] == [
         ["OPENCODE_PERMISSION", binding_value]
@@ -2764,7 +2786,20 @@ def test_registered_permission_env_reaches_spawned_agent(
 CODEX_CANONICAL_CONFIG = '{"features":{"use_legacy_landlock":true}}'
 CODEX_AUTH_PLACEHOLDER = b'{"placeholder":"not-a-real-credential"}'
 
+# This profile's frozen environment includes ``NO_BROWSER="1"``, so the shared
+# ``fake-external-session-1`` default *contains* one of this Run's final
+# environment values. That is a real external-Session-id collision, and the
+# only correct outcome is the categorical refusal — an id that must later be
+# replayed byte-for-byte can be neither redacted nor retained. The ordinary
+# success fixture therefore uses an id that contains none of its own final
+# environment literals (no ``1``, no ``read-only``, no config JSON). The
+# refusal itself, including the one-character no-minimum case, is proven
+# directly in ``tests/native_acp/test_env_value_sinks.py`` rather than as a
+# side effect of a fixture that happened to collide.
+CODEX_EXTERNAL_ID = "codex-external-session-alpha"
+
 CODEX_SCRIPT = {
+    "session_id": CODEX_EXTERNAL_ID,
     "initial_options": [
         {
             "id": "model",
@@ -3108,7 +3143,7 @@ def test_codex_project_config_inserted_between_runs_refused(
     # Session record intact and the lease released.
     record = harness.session_store().open_session("sess-native-1")
     assert record.state == "open"
-    assert record.agent_session_id == "fake-external-session-1"
+    assert record.agent_session_id == CODEX_EXTERNAL_ID
     assert not (
         harness.root / "native-sessions" / "sess-native-1" / "lock.json"
     ).exists()
@@ -3386,10 +3421,18 @@ def test_codex_agent_info_mismatch_pre_dispatch_failed(
     assert artifact["pass"] is False
     rows = {row["name"]: row for row in artifact["checks"]}
     assert rows["agent_name"]["expected"] == "fake-acp-agent"
-    assert rows["agent_version"]["expected"] == "1.0.0"
+    # Golden moved by the documented fixed replacement marker, not by a
+    # weakening: this profile freezes ``NO_BROWSER="1"``, so ``1`` is one of
+    # this Run's final environment values and the frozen expectation ``1.0.0``
+    # contains it. There is no minimum length and no inconvenience waiver, so
+    # the durable projection loses that character and keeps the rest.
+    assert rows["agent_version"]["expected"] == f"{ENV_VALUE_REPLACEMENT}.0.0"
+    assert "1" not in rows["agent_version"]["expected"]
     assert rows["agent_name"]["observed"] == "impostor-agent"
     assert rows["agent_name"]["passed"] is False
     assert rows["agent_version"]["observed"] == "9.9.9"
+    # The comparison itself still ran on the raw observation, so the mismatch
+    # verdict is unaffected by what the projection later withheld.
     assert rows["agent_version"]["passed"] is False
     # Zero session call, zero prompt, clean process group.
     assert "session/new" not in harness_methods(harness)
@@ -3442,8 +3485,12 @@ def test_codex_protocol_version_mismatch_refused(
     rows = {
         row["name"]: row for row in harness.initialize_attestation()["checks"]
     }
-    assert rows["protocol_version"]["expected"] == "1"
+    # Same documented marker, same reason: the frozen protocol major is the
+    # single character ``1``, which is also this profile's ``NO_BROWSER`` value.
+    assert rows["protocol_version"]["expected"] == ENV_VALUE_REPLACEMENT
+    assert "1" not in rows["protocol_version"]["expected"]
     assert rows["protocol_version"]["observed"] == "2"
+    # Refusal semantics are untouched: the check compared the raw values.
     assert rows["protocol_version"]["passed"] is False
 
 
@@ -3488,7 +3535,7 @@ def test_initialize_attestation_sanitized_closed_keyset(
         for value in artifact[block].values():
             assert isinstance(value, (str, bool, list)) or value is None
     raw = (harness.run_dir() / "initialize_attestation.json").read_bytes()
-    assert b"fake-external-session-1" not in raw   # no session id
+    assert CODEX_EXTERNAL_ID.encode() not in raw   # no session id
     assert b"CODEX_FAKE_OK" not in raw             # no model body
     assert b"CODEX_HOME" not in raw                # no env dump
     assert CODEX_AUTH_PLACEHOLDER not in raw       # no credential value

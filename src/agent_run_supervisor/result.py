@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from agent_run_supervisor.exit_classifier import _RETRYABLE_DEFAULT, AgentRunStatus
+from agent_run_supervisor.redaction import EMPTY_SAFE_TEXT, SafeText
 
 # Native final-message UTF-8 budget at ingestion. Sized so worst-case JSON
 # escaping plus the result envelope stays below reconciliation's 1 MiB reader
@@ -99,7 +100,7 @@ def build_minimal_evidence_pipeline_result(
     session_id: str | None = None,
 ) -> dict[str, Any]:
     """Minimal failed/non-retryable EVIDENCE_PIPELINE terminal that fits the ceiling."""
-    payload = build_result_payload(
+    payload = build_native_result_payload(
         run_id=run_id,
         status=AgentRunStatus.FAILED,
         origin="supervisor",
@@ -109,7 +110,7 @@ def build_minimal_evidence_pipeline_result(
         signal=None,
         stop_reason=None,
         usage=None,
-        final_message="",
+        final_message=EMPTY_SAFE_TEXT,
         truncated=False,
         truncate_reason=None,
         run_dir=run_dir,
@@ -180,6 +181,23 @@ def build_result_payload(
         "redaction_report_path": redaction_report_path,
     }
     return payload
+
+
+def build_native_result_payload(*, final_message: SafeText, **fields: Any) -> dict[str, Any]:
+    """The Native terminal builder: ``final_message`` must be guard-produced.
+
+    Free-form Run text is the only field of a Native terminal a child can
+    author, so it is the one field whose *type* has to prove it crossed the
+    guard. Every other field of a Native terminal is a stable code, an
+    ARS-derived identity, or an already-guarded structure. The acpx-era
+    :func:`build_result_payload` keeps its ``str`` parameter and is untouched.
+    """
+    if type(final_message) is not SafeText:
+        raise TypeError(
+            "native final_message requires a guard-produced SafeText "
+            "projection, not an unguarded str"
+        )
+    return build_result_payload(final_message=final_message.text, **fields)
 
 
 _ERROR_CODE_FOR_STATUS: dict[AgentRunStatus, str | None] = {

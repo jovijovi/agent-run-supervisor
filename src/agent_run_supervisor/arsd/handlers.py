@@ -318,7 +318,10 @@ class RunRegistry:
         except asyncio.CancelledError:
             raise
         except Exception:
-            _LOGGER.exception("arsd: run task failed (%s)", run_id)
+            # Class name only, never ``exception``: this runs after the Run's
+            # guard binding is gone, so a rendered traceback would project
+            # frame text the guard can no longer see.
+            _LOGGER.error("arsd: run task failed (%s)", run_id)
             return None
         finally:
             # Single-threaded asyncio: a non-awaiting pop is cancellation-safe
@@ -615,7 +618,9 @@ class EventFollowStream:
         except protocol.ProtocolError as err:
             self._fail(err)
         except Exception:
-            _LOGGER.exception("arsd: follow watcher failed for %s", self._run_id)
+            # The watcher handles Run evidence; a traceback here would render
+            # event text outside any Run guard binding.
+            _LOGGER.error("arsd: follow watcher failed for %s", self._run_id)
             self._fail(
                 protocol.ProtocolError(protocol.INTERNAL, "event follow failed")
             )
