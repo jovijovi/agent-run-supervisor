@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime as _dt
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,11 +36,22 @@ from agent_run_supervisor.managed_process import (
     ManagedProcessLimits,
     spawn_managed_process,
 )
-from agent_run_supervisor.redaction import RedactionReport, redact_text
+from agent_run_supervisor.arsd import safe_logging
+from agent_run_supervisor.redaction import (
+    EMPTY_SAFE_TEXT,
+    GUARDED_RECORD_WITHHELD,
+    GUARDED_TEXT_WITHHELD,
+    RedactionReport,
+    RunTextGuard,
+    SafeText,
+    redact_text,
+    serialized_projection_is_safe,
+)
 from agent_run_supervisor.result import (
     COMPLETED_ACP_STOP_REASONS,
     MAX_FINAL_MESSAGE_BYTES,
-    build_result_payload,
+    build_minimal_evidence_pipeline_result,
+    build_native_result_payload,
     enforce_native_result_ceiling,
     sanitize_failure_reason,
     sanitize_usage,
@@ -60,7 +72,12 @@ from . import storage
 from .attestation import AttestationRefusal, attest_spawn_boundary
 from .client import NativeAcpClient
 from .config_fidelity import ConfigFidelityError, ConfigFidelityMachine
-from .driver import NativeAcpDriver, NativeDriverError
+from .driver import (
+    SESSION_EXTERNAL_ID_SENSITIVE_COLLISION,
+    NativeAcpDriver,
+    NativeDriverError,
+    SessionExternalIdSensitiveCollision,
+)
 from .event_writer import EventWriter, EventWriterOverflow
 from .events import NativeAcpEventNormalizer
 from .permissions import MediationEvent, PermissionBridge
@@ -76,6 +93,9 @@ from .spec import (
 
 DISPATCH_STARTED_MARKER = "prompt-dispatch-started"
 PROMPT_ACCEPTED_MARKER = "prompt-accepted"
+
+# The only thing an allowed-but-failed workspace read is ever allowed to say.
+FS_READ_FAILED = "FS_READ_FAILED"
 
 # Recorded-only expectation marker for a fact the contract deliberately does
 # not freeze, so the report never shows an empty expectation as a silent pass.
@@ -257,20 +277,50 @@ def _categorical_failure_reason(detail_code: str | None) -> str:
 
 @dataclass
 class FinalMessageAccumulator:
-    """Bounded agent-message accumulation at ingestion (not only finalization).
+    """Bounded, guarded agent-message accumulation at ingestion.
 
-    Keeps only accepted UTF-8 parts under ``max_bytes`` plus a discarded-chunk
-    count and truncation flag — never retains unbounded discarded chunk bodies.
+    Two bounds, not one. The byte bound keeps evidence finite; the guard keeps
+    it value-free. Guarding only at finalization would be too late: the raw
+    chunks would already be retained, and an agent that splits a projected
+    value across two ``agent_message_chunk`` frames would defeat a per-chunk
+    matcher. So ingestion holds back a rolling ``max_literal_chars - 1``
+    carry — the smallest window in which any literal that begins in the
+    emitted prefix necessarily ends — guards the resolved prefix, and retains
+    only that. Nothing unguarded is retained beyond the carry.
     """
 
     max_bytes: int = MAX_FINAL_MESSAGE_BYTES
+    guard: RunTextGuard | None = None
     _parts: list[str] = field(default_factory=list)
     _byte_len: int = 0
+    _carry: str = ""
+    _finished: bool = False
     truncated: bool = False
     discarded_chunks: int = 0
 
     def ingest(self, text: str) -> None:
-        if not isinstance(text, str) or not text:
+        if not isinstance(text, str) or not text or self._finished:
+            return
+        if self.guard is None:
+            self._retain(text)
+            return
+        emitted, self._carry = self.guard.guard_prefix(self._carry + text)
+        if emitted:
+            self._retain(emitted)
+
+    def finish(self) -> None:
+        """Guard and retain the held-back carry. Idempotent."""
+        if self._finished:
+            return
+        self._finished = True
+        carry = self._carry
+        self._carry = ""
+        if not carry:
+            return
+        self._retain(self.guard.guard_text(carry) if self.guard else carry)
+
+    def _retain(self, text: str) -> None:
+        if not text:
             return
         raw = text.encode("utf-8")
         if self._byte_len >= self.max_bytes:
@@ -290,6 +340,7 @@ class FinalMessageAccumulator:
         self.discarded_chunks += 1
 
     def text(self) -> str:
+        self.finish()
         return "".join(self._parts)
 
     @property
@@ -336,6 +387,11 @@ class _RunContext:
     )
     exit_state: ManagedExit | None = None
     redaction: RedactionReport = field(default_factory=RedactionReport)
+    # The ephemeral per-Run literal guard and its log-context binding. Both
+    # exist only from the moment the final environment is resolved until the
+    # last sink of this Run has been served.
+    guard: RunTextGuard | None = None
+    log_binding: safe_logging.RunGuardBinding | None = None
     error: BaseException | None = None
     # When True, required quarantine/disposition failed: retain lease and
     # refuse to publish a terminal result.
@@ -442,11 +498,14 @@ class RunTask:
         else:
             try:
                 ctx.handle = self._event_store.create_run(self._run_id)
-            except Exception as exc:
+            except Exception:
+                # Stable code only: the store's exception text names paths and
+                # errno detail that no caller-visible payload may carry.
                 payload = {
                     "run_id": self._run_id,
                     "status": "failed",
-                    "error": str(exc),
+                    "error": "run reservation failed",
+                    "detail_code": "RUN_RESERVATION_FAILED",
                 }
                 return NativeRunResult(
                     run_id=self._run_id,
@@ -458,34 +517,56 @@ class RunTask:
                 )
         cancelled = False
         try:
-            await self._drive(ctx)
-        except _PreDispatchFailure as failure:
-            ctx.pre_dispatch = failure
-        except asyncio.CancelledError:
-            # Supervisor-side cancellation still finalizes (bounded): child
-            # shutdown/reap, one terminal fact, session disposition, lease
-            # release — then the cancellation is re-raised, never hidden.
-            cancelled = True
-            ctx.supervisor_cancelled = True
-            if ctx.dispatch_started and ctx.stop_reason is None:
-                # The wind-down kills the child without an ACP terminal: the
-                # escalated-kill-after-dispatch row (conservative, never
-                # completed).
-                ctx.escalated_kill = True
-        except BaseException as exc:  # top-level exception guard
-            ctx.error = exc
-            if ctx.dispatch_started and ctx.stop_reason is None:
-                ctx.observation_interrupted = True
-        result = await self._finalize_bounded(ctx)
+            try:
+                await self._drive(ctx)
+            except _PreDispatchFailure as failure:
+                ctx.pre_dispatch = failure
+            except asyncio.CancelledError:
+                # Supervisor-side cancellation still finalizes (bounded): child
+                # shutdown/reap, one terminal fact, session disposition, lease
+                # release — then the cancellation is re-raised, never hidden.
+                cancelled = True
+                ctx.supervisor_cancelled = True
+                if ctx.dispatch_started and ctx.stop_reason is None:
+                    # The wind-down kills the child without an ACP terminal: the
+                    # escalated-kill-after-dispatch row (conservative, never
+                    # completed).
+                    ctx.escalated_kill = True
+            except BaseException as exc:  # top-level exception guard
+                ctx.error = exc
+                if ctx.dispatch_started and ctx.stop_reason is None:
+                    ctx.observation_interrupted = True
+            result = await self._finalize_bounded(ctx)
+        finally:
+            # Lifetime minimization, not erasure: the guard stays installed
+            # through SDK close, child reap, persistence, and the final
+            # response projection, and is released only once every sink of
+            # this Run has been served — including the cancelled path.
+            self._release_guard(ctx)
         if cancelled:
             raise asyncio.CancelledError()
         return result
+
+    def _release_guard(self, ctx: _RunContext) -> None:
+        safe_logging.unbind_run_guard(ctx.log_binding)
+        ctx.log_binding = None
+        if ctx.guard is not None:
+            ctx.guard.clear()
+        ctx.final_message_acc.guard = None
 
     # -- drive -------------------------------------------------------------
 
     async def _drive(self, ctx: _RunContext) -> None:
         spec, launch, binding, instance = self._admit(ctx)
         limits = spec.limits
+
+        # The final projected environment is resolved exactly once here and the
+        # very same mapping is both guarded and handed to the child, so the
+        # guard's literal set can never disagree with what the child received.
+        spawn_env = self._spawn_env(launch)
+        ctx.guard = RunTextGuard.from_environment(spawn_env)
+        ctx.log_binding = safe_logging.bind_run_guard(ctx.guard, run_id=self._run_id)
+        ctx.final_message_acc.guard = ctx.guard
 
         plan = self._bind_session(ctx, spec, binding, instance, launch)
 
@@ -515,7 +596,7 @@ class RunTask:
                 ctx.proc = await spawn_managed_process(
                     argv=list(launch.argv),
                     cwd=Path(binding.effective_cwd),
-                    env=self._spawn_env(launch),
+                    env=spawn_env,
                     limits=ManagedProcessLimits(
                         max_stderr_bytes=limits.max_stderr_bytes,
                         cancel_grace_seconds=limits.cancel_grace_seconds,
@@ -523,9 +604,10 @@ class RunTask:
                     interpreter_fd=interpreter_fd,
                 )
             except Exception as exc:
-                raise _PreDispatchFailure(
-                    f"spawn failed: {exc}", "SPAWN_FAILED"
-                ) from exc
+                # A spawn failure is a known class with a stable code; the OS
+                # error text names the image path and errno detail and is never
+                # interpolated into a projectable reason.
+                raise _PreDispatchFailure("spawn failed", "SPAWN_FAILED") from exc
         finally:
             # The exec'd child inherited its own copy; the supervisor never
             # keeps the pin, on success or failure.
@@ -547,6 +629,7 @@ class RunTask:
             max_event_bytes=limits.max_event_bytes,
             max_events=limits.max_events,
             filename="events.jsonl",
+            guard=ctx.guard,
         )
         await ctx.writer.start()
         normalizer = NativeAcpEventNormalizer()
@@ -554,6 +637,7 @@ class RunTask:
             capabilities=spec.execution_grant.capabilities,
             workspace_root=Path(binding.effective_cwd),
             evidence_sink=self._mediation_sink(ctx),
+            guard=ctx.guard,
         )
         client = NativeAcpClient(
             on_update=self._update_sink(ctx, normalizer),
@@ -574,7 +658,9 @@ class RunTask:
             permission_mode_selector_id=instance.profile.permission_mode_selector_id,
             required_permission_mode=instance.profile.required_permission_mode,
         )
-        ctx.driver = NativeAcpDriver(client=client, machine=ctx.machine)
+        ctx.driver = NativeAcpDriver(
+            client=client, machine=ctx.machine, guard=ctx.guard
+        )
 
         try:
             await asyncio.wait_for(
@@ -818,6 +904,13 @@ class RunTask:
             model, effort = await driver.set_config_exact()
         except _PreDispatchFailure:
             raise
+        except SessionExternalIdSensitiveCollision as exc:
+            # Categorical and terminal: the id was never assigned, never
+            # persisted, never serviced, never prompted, never exposed.
+            raise _PreDispatchFailure(
+                SESSION_EXTERNAL_ID_SENSITIVE_COLLISION,
+                SESSION_EXTERNAL_ID_SENSITIVE_COLLISION,
+            ) from exc
         except (ConfigFidelityError, NativeDriverError) as exc:
             if ctx.client is not None and ctx.client.identity_violation:
                 raise _PreDispatchFailure(
@@ -832,7 +925,12 @@ class RunTask:
                 # roll back to the last exact-readback-proven pair or
                 # quarantine.
                 await self._rollback_after_partial_switch(ctx)
-            raise _PreDispatchFailure(str(exc), "CONFIG_FIDELITY") from exc
+            # Fidelity errors quote the exact requested/observed option values,
+            # which are child-advertised strings.
+            detail = str(exc)
+            if ctx.guard is not None:
+                detail = ctx.guard.guard_text(detail)
+            raise _PreDispatchFailure(detail, "CONFIG_FIDELITY") from exc
 
         ctx.effective.effective_model = model
         ctx.effective.effective_effort = effort
@@ -845,10 +943,77 @@ class RunTask:
             ctx.session_id, model=model, effort=effort
         )
         storage.write_once_json(
-            ctx.handle.run_dir / "effective.json", ctx.effective.to_dict()
+            ctx.handle.run_dir / "effective.json", self._effective_payload(ctx)
         )
         ctx.effective_written = True
         self._write_progress(ctx, "running")
+
+    def _effective_payload(self, ctx: _RunContext) -> dict[str, Any]:
+        """``effective.json`` is observed child data end to end.
+
+        ``agentInfo``, the advertised capability structure, every discovery
+        snapshot, and the external Session id are all agent-authored, so the
+        whole document crosses the guard once, immediately before the write —
+        including its dynamic keys.
+        """
+        payload = ctx.effective.to_dict()
+        return self._guarded_document(ctx, payload)
+
+    @staticmethod
+    def _guarded_document(ctx: _RunContext, payload: dict[str, Any]) -> dict[str, Any]:
+        if ctx.guard is None:
+            return payload
+        guarded = ctx.guard.guard_value(payload)
+        if not isinstance(guarded, dict):
+            guarded = {
+                "withheld": True,
+                "withheld_reason": GUARDED_RECORD_WITHHELD,
+            }
+        # The serialized form is the artifact; the dict is not. Indentation,
+        # separators, and quoting all arrive at ``write_once_json`` time, after
+        # every field-level matcher has run.
+        rendered = json.dumps(guarded, sort_keys=True, indent=2)
+        if serialized_projection_is_safe(ctx.guard, rendered):
+            return guarded
+        ctx.guard.counters.suppressed_records += 1
+        return {"withheld": True, "withheld_reason": GUARDED_RECORD_WITHHELD}
+
+    def _serialization_safe_terminal(
+        self, ctx: _RunContext, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """The terminal's own serialized postcondition, grammar preserved.
+
+        A terminal must exist and must stay schema-valid, so this withholds
+        the two child-authored free-form fields before it falls back to the
+        minimal evidence-pipeline terminal — evidence completeness is given up
+        one step at a time, confidentiality never is.
+        """
+        if ctx.guard is None:
+            return payload
+
+        def render(document: dict[str, Any]) -> str:
+            return json.dumps(document, sort_keys=True, indent=2)
+
+        if serialized_projection_is_safe(ctx.guard, render(payload)):
+            return payload
+        ctx.guard.counters.suppressed_records += 1
+        reduced = dict(payload)
+        reduced["final_message"] = GUARDED_TEXT_WITHHELD
+        reduced["usage"] = None
+        if serialized_projection_is_safe(ctx.guard, render(reduced)):
+            return reduced
+        return build_minimal_evidence_pipeline_result(
+            run_id=self._run_id,
+            run_dir=ctx.handle.run_dir,
+            session_id=ctx.session_id,
+        )
+
+    def _write_guarded_once(
+        self, ctx: _RunContext, name: str, payload: dict[str, Any]
+    ) -> None:
+        storage.write_once_json(
+            ctx.handle.run_dir / name, self._guarded_document(ctx, payload)
+        )
 
     def _attest_initialize(self, ctx: _RunContext, instance, summary) -> None:
         """Post-initialize identity gate (D10c), before any session call.
@@ -916,8 +1081,12 @@ class RunTask:
                     "passed": not present,
                 }
             )
-        storage.write_once_json(
-            ctx.handle.run_dir / "initialize_attestation.json",
+        # Identity is compared on the *raw* observation — guarding first would
+        # turn a value-colliding agent name into a different comparison — and
+        # only the durable projection crosses the guard.
+        self._write_guarded_once(
+            ctx,
+            "initialize_attestation.json",
             {
                 "schema_version": 1,
                 "expected": {
@@ -1034,8 +1203,23 @@ class RunTask:
             else:
                 ctx.observation_interrupted = True
             return
+        # Both are agent-authored: the stop reason is a wire string and usage
+        # is a free-form object. They are guarded at capture so every later
+        # consumer — event, terminal, API projection — sees only safe text.
         ctx.stop_reason = outcome.stop_reason
-        ctx.usage = sanitize_usage(outcome.usage)
+        raw_usage = outcome.usage
+        if ctx.guard is not None:
+            if isinstance(ctx.stop_reason, str):
+                ctx.stop_reason = ctx.guard.guard_text(ctx.stop_reason)
+            if raw_usage is not None:
+                guarded_usage = ctx.guard.guard_value(raw_usage)
+                raw_usage = guarded_usage if isinstance(guarded_usage, dict) else None
+        # Bounded only *after* guarding. Sizing the raw object first makes the
+        # truncation branch a function of a projected value's length, and that
+        # branch is durable evidence — a value-derived fact about a value the
+        # rest of this stage exists to keep out. Guarded first, the same value
+        # is a short fixed token and the size decision is never reached.
+        ctx.usage = sanitize_usage(raw_usage)
         # The durable completed lifecycle fact is recorded only when this ACP
         # terminal can actually finalize completed permission-wise: a known
         # permission violation already forces FAILED, and a completed→failed
@@ -1078,6 +1262,11 @@ class RunTask:
         if ctx.writer is None:
             return
         try:
+            # Guarded at enqueue as well as inside the writer: the queue is an
+            # in-memory fan-out that a failing Run can be inspected around, so
+            # unguarded child text must not sit in it even briefly.
+            if ctx.guard is not None:
+                event = ctx.guard.guard_event(event)
             ctx.writer.emit_nowait(event)
         except EventWriterOverflow as exc:
             if ctx.pipeline_error is None:
@@ -1111,12 +1300,25 @@ class RunTask:
             # suppressed frames never leave phantom ordinals).
             ctx.updates_delivered += 1
             try:
+                text: Any = None
                 if update.get("sessionUpdate") == "agent_message_chunk":
                     content = update.get("content") or {}
                     text = content.get("text")
                     if isinstance(text, str) and self._current_turn_chunk(ctx):
                         ctx.final_message_acc.ingest(text)
-                self._emit(ctx, normalizer.normalize_update(update))
+                event = normalizer.normalize_update(update)
+                # ``text_length`` is structural for ordinary chatter, but a
+                # chunk that *contains* a projected value would turn it into a
+                # length-by-value. Withhold the number, never shrink it.
+                if (
+                    ctx.guard is not None
+                    and "text_length" in event
+                    and isinstance(text, str)
+                    and ctx.guard.matches(text)
+                ):
+                    del event["text_length"]
+                    event["text_length_withheld"] = True
+                self._emit(ctx, event)
                 if ctx.bridge is not None:
                     violation = ctx.bridge.observe_tool_update(update)
                     if violation is not None:
@@ -1152,7 +1354,24 @@ class RunTask:
                 raise PermissionError(decision["reason"])
             # Read exactly the canonical workspace-bound path the decision
             # validated — never a supervisor-cwd-relative resolution.
-            return Path(decision["resolved_path"]).read_text(encoding="utf-8")
+            try:
+                content: str | None = Path(
+                    decision["resolved_path"]
+                ).read_text(encoding="utf-8")
+            except (OSError, ValueError):
+                # The refusal path was already categorical; the *allowed* path
+                # was not. An OSError here names the absolute path and the
+                # errno, and a decode error names the offending byte — and
+                # this exception is what ARS hands the SDK, which renders it
+                # into a protocol error and a log record. The path is
+                # child-chosen and workspace-relative, so it routinely carries
+                # projected values.
+                content = None
+            if content is None:
+                # Raised outside the handler so no traceback, cause, or
+                # context retains the original message.
+                raise PermissionError(FS_READ_FAILED)
+            return content
 
         return handler
 
@@ -1441,7 +1660,7 @@ class RunTask:
                     if ctx.dispatch_started and ctx.stop_reason is None
                     else AgentRunStatus.FAILED
                 )
-                payload = build_result_payload(
+                payload = build_native_result_payload(
                     run_id=self._run_id,
                     status=status,
                     origin="supervisor",
@@ -1451,7 +1670,7 @@ class RunTask:
                     signal=None,
                     stop_reason=ctx.stop_reason,
                     usage=sanitize_usage(ctx.usage),
-                    final_message="",
+                    final_message=EMPTY_SAFE_TEXT,
                     truncated=False,
                     truncate_reason=None,
                     run_dir=ctx.handle.run_dir,
@@ -1465,6 +1684,7 @@ class RunTask:
                     run_dir=ctx.handle.run_dir,
                     session_id=ctx.session_id,
                 )
+                payload = self._serialization_safe_terminal(ctx, payload)
                 storage.write_once_json(
                     ctx.handle.run_dir / "result.json", payload
                 )
@@ -1657,38 +1877,59 @@ class RunTask:
                 ]
             try:
                 storage.write_once_json(
-                    ctx.handle.run_dir / "effective.json", ctx.effective.to_dict()
+                    ctx.handle.run_dir / "effective.json",
+                    self._effective_payload(ctx),
                 )
             except FileExistsError:
                 pass
 
-        final_message = ""
+        # Drain the accumulator's held-back carry through the guard before any
+        # emptiness test: a whole short final message can still be sitting in
+        # the carry, and reading ``retained_bytes`` first would drop it.
+        ctx.final_message_acc.finish()
+        final_message: SafeText = EMPTY_SAFE_TEXT
         truncated = False
         truncate_reason: str | None = None
-        if ctx.final_message_acc.retained_bytes or ctx.final_message_acc.truncated:
+        # ``ctx.guard`` is None only when the Run failed before the environment
+        # was resolved — which is also before any child existed, so there is no
+        # child text to project on that path.
+        if ctx.guard is not None and (
+            ctx.final_message_acc.retained_bytes or ctx.final_message_acc.truncated
+        ):
             joined = ctx.final_message_acc.text()
-            final_message, report = redact_text(joined, location="final_message")
+            redacted, report = redact_text(joined, location="final_message")
             ctx.redaction.merge(report)
+            # Guarded once more after the static patterns: the assembled
+            # message is a different string from any chunk that formed it.
+            final_message = ctx.guard.safe_text(redacted)
             if ctx.final_message_acc.truncated:
                 truncated = True
                 truncate_reason = "max_final_message_bytes"
-        stderr_text = ""
-        if ctx.proc is not None:
-            raw_stderr = ctx.proc.stderr_bytes().decode("utf-8", errors="replace")
-            stderr_text, stderr_report = redact_text(raw_stderr, location="stderr")
+        stderr_text: SafeText = EMPTY_SAFE_TEXT
+        if ctx.proc is not None and ctx.guard is not None:
+            # Bytes first: a value that survives ``os.fsencode`` but not UTF-8
+            # would otherwise reach retained diagnostics through
+            # ``errors="replace"`` with its bytes intact. Text second, because
+            # decoding produces a string no byte matcher ever saw.
+            guarded_bytes = ctx.guard.guard_bytes(ctx.proc.stderr_bytes())
+            decoded = guarded_bytes.decode("utf-8", errors="replace")
+            redacted_stderr, stderr_report = redact_text(decoded, location="stderr")
             ctx.redaction.merge(stderr_report)
-        ctx.handle.write_text("stderr.log", stderr_text)
-        ctx.handle.write_json(
-            "redaction-report.json",
-            {
-                "matches": [
-                    {"pattern": match.pattern_name, "note": match.note}
-                    for match in ctx.redaction.matches
-                ]
-            },
-        )
+            stderr_text = ctx.guard.safe_text(redacted_stderr)
+        storage.write_run_text(ctx.handle, "stderr.log", stderr_text)
+        redaction_payload: dict[str, Any] = {
+            "matches": [
+                {"pattern": match.pattern_name, "note": match.note}
+                for match in ctx.redaction.matches
+            ]
+        }
+        if ctx.guard is not None:
+            # Coarse sink-local integers only: how much was erased is itself a
+            # length-by-value and is deliberately absent.
+            redaction_payload["environment_guard"] = ctx.guard.report()
+        ctx.handle.write_json("redaction-report.json", redaction_payload)
 
-        payload = build_result_payload(
+        payload = build_native_result_payload(
             run_id=self._run_id,
             status=status,
             origin="acp" if ctx.stop_reason is not None else "supervisor",
@@ -1726,6 +1967,7 @@ class RunTask:
             run_dir=ctx.handle.run_dir,
             session_id=ctx.session_id,
         )
+        payload = self._serialization_safe_terminal(ctx, payload)
         if payload is not before_ceiling and payload.get("status") == "failed":
             status = AgentRunStatus.FAILED
 

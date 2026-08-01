@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from agent_run_supervisor.redaction import RunTextGuard
+
 # Registered read-like ACP tool kinds that the first-E2E read-only grant may
 # allow inside the bound workspace. Every other registered kind — and any
 # unregistered kind — denies.
@@ -47,6 +49,13 @@ _REGISTERED_KINDS = frozenset(
 # allow is ever selected (a prompt offering only that form denies fail-closed).
 _ALLOW_OPTION_PREFERENCE = ("allow_once",)
 _REJECT_OPTION_PREFERENCE = ("reject_once", "reject_always")
+
+# An option id is an exact child protocol identifier: it must travel back over
+# the wire byte-for-byte to select anything, so a redacted copy selects
+# nothing and a verbatim copy is a projected environment value inside an
+# ARS-formulated response. There is no third option, so mediation fails
+# closed — the same rule the external Session id already follows.
+OPTION_ID_SENSITIVE_COLLISION = "PERMISSION_OPTION_ID_SENSITIVE_COLLISION"
 
 # Write-family ACP tool kinds and the grant capability each one requires. A
 # write-family tool call that reaches ``completed`` without that capability in
@@ -92,12 +101,17 @@ class PermissionBridge:
         capabilities: Any,
         workspace_root: Path,
         evidence_sink: Callable[[MediationEvent], None],
+        guard: RunTextGuard | None = None,
     ) -> None:
         # Grant snapshot only: the capability set is frozen at construction
         # and never re-read, so runtime widening is invisible.
         self._capabilities = frozenset(capabilities)
         self._workspace_root = Path(workspace_root).resolve()
         self._evidence_sink = evidence_sink
+        # Mediation evidence is built from child-supplied tool ids, kinds, and
+        # paths; the reason strings interpolate them by design so an operator
+        # can see what was refused. That makes this a projection boundary.
+        self._guard = guard
         self.turn_failed = False
         self.turn_failure_reason: str | None = None
         # A4-S2 backstop state: a write-family tool completed without the
@@ -121,6 +135,11 @@ class PermissionBridge:
 
     # -- helpers -----------------------------------------------------------
 
+    def _guarded(self, value: str | None) -> str | None:
+        if value is None or self._guard is None:
+            return value
+        return self._guard.guard_text(value)
+
     def _emit(
         self,
         *,
@@ -129,15 +148,21 @@ class PermissionBridge:
         reason: str,
         tool_call_id: str | None = None,
     ) -> dict[str, Any]:
+        safe_op = self._guard.guard_text(requested_op) if self._guard else requested_op
+        safe_reason = self._guard.guard_text(reason) if self._guard else reason
+        safe_tool_call_id = self._guarded(tool_call_id)
         self._evidence_sink(
             MediationEvent(
-                requested_op=requested_op,
+                requested_op=safe_op,
                 decision=decision,
-                reason=reason,
-                tool_call_id=tool_call_id,
+                reason=safe_reason,
+                tool_call_id=safe_tool_call_id,
             )
         )
-        result: dict[str, Any] = {"decision": decision, "reason": reason}
+        # The same guarded reason goes back over the wire: the child already
+        # holds its own values, and a raw reason here would travel on into the
+        # SDK's own failure logging.
+        result: dict[str, Any] = {"decision": decision, "reason": safe_reason}
         return result
 
     def _resolve_workspace_path(self, path: str) -> Path:
@@ -281,15 +306,21 @@ class PermissionBridge:
         if required is None or required in self._capabilities:
             return None
         self.grant_violation = True
+        # ``kind`` is child text and the reason interpolates it, so the whole
+        # projection crosses the guard before it becomes durable evidence or a
+        # finalization detail. ``required`` is source-owned.
+        safe_kind = self._guarded(kind)
         reason = (
-            f"write-family tool kind {kind!r} completed without the required "
+            f"write-family tool kind {safe_kind!r} completed without the required "
             f"{required!r} capability in the frozen grant"
         )
         self.grant_violation_reason = reason
         return {
             "type": "permission_violation",
-            "tool_call_id": tool_call_id if isinstance(tool_call_id, str) else None,
-            "kind": kind,
+            "tool_call_id": (
+                self._guarded(tool_call_id) if isinstance(tool_call_id, str) else None
+            ),
+            "kind": safe_kind,
             "required_capability": required,
             "reason": reason,
         }
@@ -308,6 +339,13 @@ class PermissionBridge:
             return self._deny_with_option(
                 requested_op=f"permission:{kind}",
                 reason="no once-scoped allow option offered; denying",
+                tool_call_id=tool_call_id,
+                options=options,
+            )
+        if self._collides(allow_option):
+            return self._deny_with_option(
+                requested_op=f"permission:{kind}",
+                reason=OPTION_ID_SENSITIVE_COLLISION,
                 tool_call_id=tool_call_id,
                 options=options,
             )
@@ -335,9 +373,15 @@ class PermissionBridge:
             tool_call_id=tool_call_id,
         )
         reject_option = _option_id(options, _REJECT_OPTION_PREFERENCE)
-        if reject_option is not None:
+        # A colliding reject id is simply omitted: the deny response is
+        # ``cancelled`` and needs no option id, so nothing is lost by refusing
+        # to echo it.
+        if reject_option is not None and not self._collides(reject_option):
             decision["option_id"] = reject_option
         return decision
+
+    def _collides(self, option_id: str) -> bool:
+        return self._guard is not None and self._guard.matches(option_id)
 
 
 def _option_id(options: Any, preference: tuple[str, ...]) -> str | None:

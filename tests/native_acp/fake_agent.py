@@ -40,11 +40,26 @@ Script keys (all optional):
   answer ``ASK_ALLOWED``, otherwise write nothing and answer ``ASK_DENIED``.
   Optional keys: ``options`` (wire-shaped option list, e.g. the official
   Claude adapter's always-first ordering), ``allow_option_ids`` (option ids
-  that count as an allow; default ``["once", "always"]``), and
-  ``choice_path`` (file receiving the exact selected option id, so a test can
-  prove *which* option the client chose — never only that it allowed).
+  that count as an allow; default ``["once", "always"]``), ``tool_call_id``
+  (the exact ``toolCallId`` the ask carries, so a fixture can put arbitrary
+  child text into mediation evidence), and ``choice_path`` (file receiving the
+  exact selected option id, so a test can prove *which* option the client
+  chose — never only that it allowed).
 - ``echo_env``: final message becomes ``ENV:<value>`` of that environment
-  variable (``ENV_MISSING`` when unset) — proves spawn-env injection.
+  variable (``ENV_MISSING`` when unset) — the deliberate leak shape the
+  environment-value sink boundary has to erase.
+- ``env_probe``: ``{"name":..., "path":...}`` — writes the raw value of that
+  variable to ``path`` (a test-owned file **outside** the Run tree) and makes
+  the final message the value-free ``ENV_PROBE:PRESENT``/``ENV_PROBE:MISSING``.
+  Proves the value reached the child without asking an ARS sink to carry it.
+- ``final_message_chunks``: list of texts emitted as separate
+  ``agent_message_chunk`` updates before the terminal — lets a fixture split
+  one value across two frames.
+- ``stderr_text`` / ``stderr_raw_hex``: written to the child's stderr at
+  startup as text and as raw (possibly undecodable) bytes.
+- ``usage``: the exact terminal ``usage`` object, replacing the default token
+  counts — real adapters attach free-form vendor blocks there, so it is
+  child-controlled text on the terminal path.
 - ``capture_meta_path``: append one JSON line per session/new and
   session/load recording the exact ``_meta`` the client sent (``null`` when
   the argument was absent) — proves the frozen session metadata on the wire.
@@ -275,7 +290,7 @@ class FakeAgent:
                     "params": {
                         "sessionId": self.update_session_id or self.session_id,
                         "toolCall": {
-                            "toolCallId": "perm-call-1",
+                            "toolCallId": ask.get("tool_call_id", "perm-call-1"),
                             "title": "Scripted permission ask",
                             "kind": ask.get("kind", "edit"),
                             "status": "pending",
@@ -325,8 +340,22 @@ class FakeAgent:
         if self.script.get("echo_env"):
             value = os.environ.get(self.script["echo_env"])
             message = f"ENV:{value}" if value is not None else "ENV_MISSING"
+        if self.script.get("env_probe"):
+            probe = self.script["env_probe"]
+            message = (
+                "ENV_PROBE:PRESENT"
+                if os.environ.get(probe["name"]) is not None
+                else "ENV_PROBE:MISSING"
+            )
         if self.script.get("nonce_memory"):
             message = " ".join(self.remembered[:-1]) or message
+        for chunk in self.script.get("final_message_chunks", []):
+            self._notify_update(
+                {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": chunk},
+                }
+            )
         self._notify_update(
             {
                 "sessionUpdate": "agent_message_chunk",
@@ -337,7 +366,7 @@ class FakeAgent:
             request_id,
             {
                 "stopReason": "end_turn",
-                "usage": {"totalTokens": 30, "inputTokens": 20, "outputTokens": 10},
+                "usage": self._usage(),
             },
         )
 
@@ -359,7 +388,7 @@ class FakeAgent:
             prompt_id,
             {
                 "stopReason": "end_turn",
-                "usage": {"totalTokens": 30, "inputTokens": 20, "outputTokens": 10},
+                "usage": self._usage(),
             },
         )
 
@@ -393,8 +422,19 @@ class FakeAgent:
             prompt_id,
             {
                 "stopReason": "end_turn",
-                "usage": {"totalTokens": 30, "inputTokens": 20, "outputTokens": 10},
+                "usage": self._usage(),
             },
+        )
+
+    def _usage(self) -> dict[str, Any]:
+        """Terminal usage metadata, scriptable end to end.
+
+        Real adapters attach free-form vendor blocks here, so it is
+        child-controlled text on the terminal path and a fixture must be able
+        to make it arbitrarily large.
+        """
+        return self.script.get(
+            "usage", {"totalTokens": 30, "inputTokens": 20, "outputTokens": 10}
         )
 
     def _on_cancel(self) -> None:
@@ -406,6 +446,22 @@ class FakeAgent:
 def main() -> None:
     script = json.loads(os.environ.get("FAKE_AGENT_SCRIPT", "{}"))
     trace_path = os.environ.get("FAKE_AGENT_TRACE")
+    raw_stderr = script.get("stderr_raw_hex")
+    if raw_stderr:
+        sys.stderr.buffer.write(bytes.fromhex(raw_stderr))
+        sys.stderr.buffer.flush()
+    text_stderr = script.get("stderr_text")
+    if text_stderr:
+        sys.stderr.write(text_stderr)
+        sys.stderr.flush()
+    probe = script.get("env_probe")
+    if probe:
+        # Written outside the Run tree on purpose: this file is the test's own
+        # evidence that the child received the value, and it must never be
+        # something ARS persists.
+        value = os.environ.get(probe["name"])
+        with open(probe["path"], "w", encoding="utf-8") as handle:
+            handle.write("" if value is None else value)
     agent = FakeAgent(script, trace_path)
     for raw_line in sys.stdin:
         line = raw_line.strip()

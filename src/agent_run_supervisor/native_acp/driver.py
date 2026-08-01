@@ -17,14 +17,29 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from agent_run_supervisor.managed_process import ManagedProcess
+from agent_run_supervisor.redaction import RunTextGuard
 
 from . import require_sdk
 from .client import NativeAcpClient, UpdateCallbackError
 from .config_fidelity import ConfigFidelityError, ConfigFidelityMachine
 
+# The only thing an external-Session-id collision is ever allowed to say.
+SESSION_EXTERNAL_ID_SENSITIVE_COLLISION = "SESSION_EXTERNAL_ID_SENSITIVE_COLLISION"
+
 
 class NativeDriverError(RuntimeError):
     """Controlled wire/protocol failure of the native ACP conversation."""
+
+
+class SessionExternalIdSensitiveCollision(NativeDriverError):
+    """The agent's new external Session id contains a projected env value.
+
+    This id is the one child-supplied string ARS cannot redact: it must be
+    replayed byte-for-byte on every later ``session/load``, so a redacted copy
+    is worthless and a retained copy is a durable environment value. There is
+    no third option, so the Run refuses: nothing is assigned, persisted,
+    serviced, prompted, or exposed, and only the categorical code is emitted.
+    """
 
 
 @dataclass(frozen=True)
@@ -78,9 +93,16 @@ class _PromptBoundaryWriter:
 
 
 class NativeAcpDriver:
-    def __init__(self, *, client: NativeAcpClient, machine: ConfigFidelityMachine) -> None:
+    def __init__(
+        self,
+        *,
+        client: NativeAcpClient,
+        machine: ConfigFidelityMachine,
+        guard: RunTextGuard | None = None,
+    ) -> None:
         self._client = client
         self._machine = machine
+        self._guard = guard
         self._connection: Any | None = None
         self._session_id: str | None = None
         # Fired synchronously after the complete session/prompt frame has been
@@ -246,7 +268,13 @@ class NativeAcpDriver:
         except (asyncio.CancelledError, ConfigFidelityError, NativeDriverError):
             raise
         except Exception as exc:
-            raise NativeDriverError(f"{action} failed: {exc}") from exc
+            # The action name is source-owned; the SDK's exception text is not
+            # and routinely renders rejected wire values. It crosses the guard
+            # before it becomes an exception message anything can project.
+            detail = f"{action} failed: {exc}"
+            if self._guard is not None:
+                detail = self._guard.guard_text(detail)
+            raise NativeDriverError(detail) from exc
 
     # -- ACP sequence ------------------------------------------------------
 
@@ -296,10 +324,28 @@ class NativeAcpDriver:
         response = await self._call(
             "session/new", connection.new_session(cwd=cwd, **self._meta_kwargs(meta))
         )
+        # Certification happens here — before the id is recorded on the driver,
+        # before the client will service a single callback bearing it, before
+        # any config option is recorded, before persistence, before the prompt,
+        # and before it can be returned to an API projection.
+        await self._certify_external_session_id(response.session_id)
         self._machine.record_initial_options(_dump_options(response.config_options))
         self._session_id = response.session_id
         self._client.expected_session_id = response.session_id
         return response.session_id
+
+    async def _certify_external_session_id(self, external_id: Any) -> None:
+        if self._guard is None:
+            return
+        if not isinstance(external_id, str) or not self._guard.matches(external_id):
+            return
+        # Tear the wire down first: a live connection whose expected id was
+        # never set would keep refusing callbacks, but leaving it open invites
+        # the agent to keep sending them.
+        await self.close()
+        raise SessionExternalIdSensitiveCollision(
+            SESSION_EXTERNAL_ID_SENSITIVE_COLLISION
+        )
 
     async def load_session(
         self,
@@ -414,7 +460,12 @@ class NativeAcpDriver:
         try:
             await self._client.wait_for_updates_completed(self._updates_observed)
         except UpdateCallbackError as exc:
-            raise NativeDriverError(str(exc)) from exc
+            # The client records a callback failure by interpolating whatever
+            # the sink raised with, which is agent-shaped data by definition.
+            detail = str(exc)
+            if self._guard is not None:
+                detail = self._guard.guard_text(detail)
+            raise NativeDriverError(detail) from exc
         usage = _dump(response.usage) if response.usage is not None else None
         self._check_identity()
         return PromptOutcome(stop_reason=response.stop_reason, usage=usage)

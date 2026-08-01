@@ -513,3 +513,102 @@ def test_r11_b1_validate_rejects_hostile_failure_reason() -> None:
     )
     assert validated is not None
     assert validated["failure_reason"] == allowed
+
+
+# -- WP2.7: the free-form terminal field is typed, not merely documented -----
+
+
+def _native_builder_fields(tmp_path):
+    from agent_run_supervisor.exit_classifier import AgentRunStatus as Status
+
+    return dict(
+        run_id="run_probe",
+        status=Status.COMPLETED,
+        origin="acp",
+        detail_code=None,
+        retryable=False,
+        exit_code=0,
+        signal=None,
+        stop_reason="end_turn",
+        usage=None,
+        truncated=False,
+        truncate_reason=None,
+        run_dir=tmp_path,
+        raw_event_path="events.jsonl",
+    )
+
+
+def test_native_result_builder_refuses_an_unguarded_final_message(tmp_path) -> None:
+    """``final_message`` is the one field a child authors end to end.
+
+    Every other Native terminal field is a stable code, an ARS-derived
+    identity, or an already-guarded structure — so this is the field whose
+    *type* has to carry the proof that it crossed the guard.
+    """
+    from agent_run_supervisor.result import build_native_result_payload
+
+    with pytest.raises(TypeError):
+        build_native_result_payload(
+            final_message="raw child text", **_native_builder_fields(tmp_path)
+        )
+
+
+def test_native_result_builder_accepts_a_guard_produced_projection(tmp_path) -> None:
+    from agent_run_supervisor.redaction import RunTextGuard
+    from agent_run_supervisor.result import build_native_result_payload
+
+    guard = RunTextGuard.from_environment({"SECRET": "terminal-sentinel-4c19"})
+    payload = build_native_result_payload(
+        final_message=guard.safe_text("said terminal-sentinel-4c19 aloud"),
+        **_native_builder_fields(tmp_path),
+    )
+
+    assert "terminal-sentinel-4c19" not in payload["final_message"]
+    assert isinstance(payload["final_message"], str)
+
+
+def test_a_directly_constructed_safe_text_never_reaches_the_terminal(
+    tmp_path,
+) -> None:
+    """B2 at the seam it protects: forging the accepted type must not work.
+
+    The bare-``str`` and subclass cases below only prove the type check runs.
+    They say nothing about the shortest way around it, which is to construct
+    the accepted type directly with unguarded child text.
+    """
+    from agent_run_supervisor.redaction import SafeText
+    from agent_run_supervisor.result import build_native_result_payload
+
+    with pytest.raises(TypeError):
+        build_native_result_payload(
+            final_message=SafeText("raw child text"),
+            **_native_builder_fields(tmp_path),
+        )
+
+
+def test_a_directly_constructed_safe_text_never_reaches_run_text_storage() -> None:
+    from agent_run_supervisor.native_acp import storage
+    from agent_run_supervisor.redaction import SafeText
+
+    class _Handle:
+        def write_text(self, name: str, value: str):  # pragma: no cover
+            raise AssertionError("the refusal must happen before the write")
+
+    with pytest.raises(TypeError):
+        storage.write_run_text(_Handle(), "stderr.log", SafeText("raw child text"))
+
+
+def test_a_str_subclass_does_not_pass_for_the_safe_projection(tmp_path) -> None:
+    # ``type(x) is SafeText``, not ``isinstance``: a subclass — or a class that
+    # merely lies about ``__class__`` — must not be able to talk its way in.
+    from agent_run_supervisor.redaction import SafeText
+    from agent_run_supervisor.result import build_native_result_payload
+
+    class Impostor(SafeText):
+        pass
+
+    with pytest.raises(TypeError):
+        build_native_result_payload(
+            final_message=Impostor("raw child text"),
+            **_native_builder_fields(tmp_path),
+        )
