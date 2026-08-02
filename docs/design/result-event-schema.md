@@ -2,7 +2,7 @@
 title: "agent-run-supervisor Result / Event Schema"
 status: active
 created_at: 2026-06-01
-last_validated_at: 2026-08-01
+last_validated_at: 2026-08-02
 ---
 # agent-run-supervisor Result / Event Schema
 
@@ -30,9 +30,9 @@ last_validated_at: 2026-08-01
 > **Evidence rules for the reset line.** [§9](#9-native-reset-line-evidence-rules) records the
 > environment-value, guard, withholding, and policy-warning rules that every Native emitter on the V4
 > boundary-reset line must obey, and the audit that found no launch, provenance, or attestation field in the
-> caller-stable contract above. Those rules are normative for the reset line and are **implemented in source
-> on branch `feat/v4-boundary-reset`** — not merged, not released, so no released artifact emits them yet.
-> §1–§8 describe the caller-stable contract, which the reset does not change.
+> caller-stable contract above. Those rules are normative for the reset line and are **merged on `main`** —
+> but not published and not deployed, so no released artifact emits them yet. §1–§8 describe the
+> caller-stable contract, which the reset does not change.
 >
 > **Stability rule (read this first).** `business_verdict` is **always `null`**
 > and caller-owned — the supervisor never sets it. Schema evolution is
@@ -494,10 +494,9 @@ never deletes an open or live-locked session.
 
 ## 9. Native reset-line evidence rules
 
-Normative for every Native emitter on the V4 boundary-reset line, and **implemented in source on branch
-`feat/v4-boundary-reset`** — not merged, not released; the board carries the exact position. Nothing in this
-section changes any key documented in §1–§8: those keys keep their names, types, and meanings, and the
-additive-only rule still holds.
+Normative for every Native emitter on the V4 boundary-reset line, and **merged on `main`** — not published,
+not deployed; the board carries the exact position. Nothing in this section changes any key documented in
+§1–§8: those keys keep their names, types, and meanings, and the additive-only rule still holds.
 
 ### 9.1 Audit result — no launch, provenance, or attestation field, and no environment value
 

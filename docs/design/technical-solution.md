@@ -2,15 +2,15 @@
 title: "agent-run-supervisor vNext Technical Solution"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-01
+last_validated_at: 2026-08-02
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/technical-solution.md"
 ---
 # agent-run-supervisor vNext Technical Solution
 
 ## 0. Scope and implementation status
 
-This is the module-level design authority for new ARS work. It describes the target shape after the V4
-external-AGENT boundary reset. The previous mixed v0.1.7/vNext solution is preserved at
+This is the module-level design authority for new ARS work. It describes the shape of the package after the
+V4 external-AGENT boundary reset. The previous mixed v0.1.7/vNext solution is preserved at
 `docs/archive/pre-vnext-reset-2026-07-21/technical-solution.md` and must not direct new development.
 
 ARS stays Python and **stdlib-only at runtime**. `tomllib` and `contextvars` are standard library on the
@@ -21,18 +21,16 @@ fallback, or session store: no module below owes it compatibility, removing it i
 work this document does not perform, and it survives here only as a bounded differential/comparison-test
 reference.
 
-**Authority and released source differ right now, deliberately.** Every module disposition below is the
-*target*. Source on `main` still carries the retired Binding line: `native_acp/runtime_binding.py` as the
-only reader of a Binding root, `native_acp/attestation.py` at the spawn boundary, four registered profiles,
-artifact digests and package closures, promotion, and a required Binding-root daemon flag. The retired
-module design is preserved under
-[`docs/archive/binding-era-2026-07/`](../archive/binding-era-2026-07/architecture-3.1-3.3.md).
+**Authority and source are aligned on `main`.** Every module disposition below describes merged source:
+`native_acp/runtime_binding.py` and `native_acp/attestation.py` are deleted, `native_acp/agent_registry.py`
+is the one reader of the operator agents file, the sealed launch snapshot is value-blind, and exactly two
+profiles are registered. The retired Binding-era module design is preserved under
+[`docs/archive/binding-era-2026-07/`](../archive/binding-era-2026-07/architecture-3.1-3.3.md) as cold
+history.
 
-The Stage 3 candidate implements this target — both files above are deleted, the registry reader and the
-value-blind launch snapshot exist, and the suite is green — **on a task branch that is uncommitted,
-unmerged, unreleased, and undeployed**. So "target" still means target for anyone reading `main` or
-operating a deployment. The board carries the delta; this document grants no approval, and neither the
-authority alignment, nor a green local verification, nor any later gate authorizes the next one.
+Merged is not published or deployed. Package metadata is prepared as `0.6.0`, and no tag, GitHub Release,
+PyPI upload, deployment, service restart, or cutover follows from that. This document grants no approval,
+and a green verification transfers approval to nothing.
 
 ## 1. Package shape
 
@@ -556,13 +554,13 @@ deleting the rest would silently drop the only real-agent continuity evidence.
 
 - Stage 0/1 (`native_acp/` plus the shared additive seams) and Stage 2 (`arsd/`, production acceptance, G12)
   landed under their own approvals. Landing them authorized nothing further.
-- The retired Binding source framework is still merged on `main`. This document describes its replacement;
-  it does not authorize writing it. Each reset gate needs a distinct source-implementation approval recorded
-  after the authority alignment merges, and deleting the three per-agent profiles from source needs one more
-  explicit confirmation on top of that.
-- Publication (version bump, tag, GitHub Release, PyPI) is separate from implementation. Dependency and
-  lockfile files stay unchanged throughout: the runtime remains stdlib-only, which the locked-dependency and
-  version-sync gates assert at every stage.
+- The four boundary-reset gates — authority alignment, fail-closed reuse and total reconciliation, the
+  environment-value guard, and the reset itself, including deletion of the three per-agent profiles — each
+  landed under its own recorded approval and are merged on `main`. The retired Binding source framework is
+  deleted.
+- Publication (tag, GitHub Release, PyPI) is separate from implementation, and a prepared version number is
+  not a publication. The runtime remains stdlib-only, which the locked-dependency and version-sync gates
+  assert at every stage.
 - Rollback disables Native ingress; there is no auto-fallback to acpx and no terminal-fact rewrite.
 - Each reset gate is one revertable merge commit. Reverting the authority alignment restores the Binding-era
   authority chain exactly and touches no source, runtime, or deployment state. Reverting the fail-closed
@@ -574,5 +572,7 @@ deleting the rest would silently drop the only real-agent continuity evidence.
   intact because no gate ever wrote to them.
 - Sachima `ArsdBackend` and pin changes are later work.
 
-The executable slice sequence, fresh worktree/branch rules, exact commands, and separate push/PR/merge
-approvals live only in `docs/plans/active/`.
+Executable slice sequences, fresh worktree/branch rules, exact commands, and separate push/PR/merge
+approvals live only in `docs/plans/active/`, which is empty right now: the reset's plan is archived at
+[`docs/plans/archive/2026-07-30-ars-v4-boundary-reset.md`](../plans/archive/2026-07-30-ars-v4-boundary-reset.md)
+as cold history, and an archived plan authorizes nothing.

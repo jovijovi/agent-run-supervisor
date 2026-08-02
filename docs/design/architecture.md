@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext System Architecture"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-01
+last_validated_at: 2026-08-02
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/architecture.md"
 ---
 # agent-run-supervisor vNext System Architecture
@@ -18,18 +18,21 @@ preserved at [`docs/archive/binding-era-2026-07/architecture-3.1-3.3.md`](../arc
 Status markers:
 
 - ✅ legacy released code still present on `main`, untouched by the reset and not a compatibility target;
-- 🟦 vNext supervision plane, implemented on `main` (Stage 0/1 closed, Stage 2 closed);
-- 🟨 settled target of the boundary reset, **not implemented in any released or merged source**;
+- 🟦 vNext supervision plane, merged on `main` (Stage 0/1 closed, Stage 2 closed, the V4 boundary reset
+  closed);
 - ⏸ separately approved later integration.
 
-🟨 is the honest marker for most of §3, §4, §6, and §8 below. Source on `main` still runs the retired
-Binding line: a Binding reader, artifact digests, promotion, attestation, a required Binding-root daemon
-flag, and four registered profiles. What 🟨 no longer means is "unwritten": the Stage 3 candidate
-implements these sections on a task branch, verified locally and **uncommitted, unmerged, unreleased, and
-undeployed**. A reader operating a deployment gets nothing from that branch, which is why the marker
-stays. This document is the target; the board
-([`docs/roadmap/current-status.md`](../roadmap/current-status.md)) carries the exact
-authority-versus-source delta and the staged sequence that closes it. No marker here is an approval.
+**Authority and source are aligned on `main`.** The boundary reset described here — the operator agent
+registry read once at startup, the four-way boundary, value-blind sealed launch material, `api_version` 2,
+fail-closed load-only reuse, and total ordered reconciliation — is merged, and the retired Binding reader,
+attestation module, and three per-agent profiles are deleted from source. The former 🟨 "target, not yet in
+source" marker is therefore retired; `docs/archive/binding-era-2026-07/` holds the retired architecture as
+cold history.
+
+Merged is not published, deployed, or activated. Package metadata is prepared as `0.6.0`; no tag, GitHub
+Release, PyPI upload, deployment, service restart, or cutover has happened, and each remains its own
+explicit decision. The board ([`docs/roadmap/current-status.md`](../roadmap/current-status.md)) carries the
+current position and the open decisions. No marker here is an approval.
 
 ## 1. System context and ownership
 
@@ -119,7 +122,7 @@ The released `execute_subprocess → SubprocessOutcome` is ✅ legacy acpx-only 
 not a compatibility surface this architecture owes anything to; its `stdin=DEVNULL`, stdout-drain threads,
 and wait-before-return shape cannot carry Native ACP.
 
-## 3. Admission, spawn, and the ACP flow 🟨
+## 3. Admission, spawn, and the ACP flow 🟦
 
 ```text
  S1 parse the agents file ONCE → immutable snapshot        ✗ REGISTRY_* → refuse to listen
@@ -205,7 +208,7 @@ contract-identity match, no slot projection, no artifact digest, no ownership/mo
 `O_PATH` pin, no hash-through-inode, no descriptor-pinned exec, no credential-root structural check, no
 project-config closure check, no TOCTOU recheck, no `attestation.json`, and no epoch staleness comparison.
 
-### 3.1 The four-way boundary 🟨
+### 3.1 The four-way boundary 🟦
 
 | | **A. Source profile** | **B. Operator registry snapshot** | **C. Sealed per-Run Spec + launch** | **D. Observed evidence** |
 |---|---|---|---|---|
@@ -233,7 +236,7 @@ There is no fifth layer, no promotion, no digest gate, and no ARS-owned copy of 
 run. Operator-facing registry detail — schema, grammar, bounds, refusals, environment layers, restart
 semantics, and worked examples — is normative in [`agent-registry.md`](agent-registry.md).
 
-### 3.2 Registered command semantics are preserved exactly 🟨
+### 3.2 Registered command semantics are preserved exactly 🟦
 
 > **ARS executes the operator-declared command through its declared PATH, shim, symlink, and `argv[0]`
 > semantics. It never substitutes a resolved path as the executable or as `argv[0]`.**
@@ -251,7 +254,7 @@ semantics, and worked examples — is normative in [`agent-registry.md`](agent-r
   and those classifications are ordinary configuration errors, never security refusals. Because the child's
   exec failure is reported to the parent before spawn returns, no process exists in those cases.
 
-### 3.3 Resolution facts are observations, never authority 🟨
+### 3.3 Resolution facts are observations, never authority 🟦
 
 After a successful spawn ARS records, best-effort, into `effective.json`: the declared command and exact
 argv (already sealed in `launch.json`); the first `PATH` hit for a bare command under the projected launch
@@ -266,7 +269,7 @@ emitted as a **policy warning event** — never a refusal, never a continuity bl
 observation-based refusals is protocol major, required capabilities, forbidden capabilities, exact config
 readback, and a compatibility profile's required permission mode.
 
-## 4. Process-per-Run Session model 🟨
+## 4. Process-per-Run Session model 🟦
 
 Cardinality:
 
@@ -413,7 +416,7 @@ Every RunTask and connection has a top-level exception boundary. Malformed ACP, 
 evidence I/O, and child faults terminate only that Run. Queues, events, stderr, output, concurrency,
 Session activity, and socket backlog are bounded.
 
-### 6.1 Absent is not corrupt 🟨
+### 6.1 Absent is not corrupt 🟦
 
 Reconciliation classifies **all** inputs before any write, using bounded no-follow readers:
 
@@ -428,7 +431,7 @@ is **corrupt — never a second chance to become absent**, and the open never bl
 never relabeled absent, though it is not automatically fatal when a higher-priority fact has already made it
 irrelevant.
 
-### 6.2 Attribution authority and outcome vocabulary 🟨
+### 6.2 Attribution authority and outcome vocabulary 🟦
 
 Owner/namespace/Session attribution has one priority order: a **valid Spec is authoritative** and supplies
 owner, namespace, reuse intent, and Session id, with the submission ignored for attribution even when
@@ -472,7 +475,7 @@ enforces `execution_grant` default-deny without widening or live-policy refresh.
 - A real denied-action canary is mandatory per registered agent; zero mediation events prove nothing.
 - `allowed_roots`, UDS auth, and ACP mediation are not OS sandboxing or hostile-process containment.
 
-🟨 **Mediation environment authority.** Mediation env routes an agent's privileged in-process tool families
+🟦 **Mediation environment authority.** Mediation env routes an agent's privileged in-process tool families
 through ACP permission requests so the bridge decides *before* a side effect. If configuration could disable
 it, the default-deny claim would be decorative. Therefore: the binding is source-owned in **key and value**,
 keyed by the capability family it mediates rather than by the agent that needs it; a registry entry may
@@ -529,7 +532,7 @@ mutate its own HOME and state normally during a Run, and such a Run completes no
 child's, and the attribution boundary is the process boundary. Acceptance instruments write-intent calls
 inside the `arsd` process only, so the child's writes are invisible to that interceptor by construction.
 
-🟨 `launch.json` carries the declared command, the exact argv, the effective cwd, the environment
+🟦 `launch.json` carries the declared command, the exact argv, the effective cwd, the environment
 **name/source-class/precedence** material with **no values**, the mediation id, profile identity,
 registry-source evidence, and its own value-blind `launch_spec_hash`, so the record is self-verifying. The
 hash excludes exactly one top-level field, `launch_spec_hash`, and nothing else may be excluded. The
@@ -558,16 +561,15 @@ Evidence grades: A — pre-implementation compatibility context; B — direct-dr
 | 0 | SDK/source/API/consumer/load capability gates | deterministic preflight | none |
 | 1 | ManagedProcess + Native ACP core + state/session/permission/evidence | L1/L2 + real direct-drive B-grade | none |
 | 2 | `arsd` UDS, ownership, reconciliation, cgroup containment | real S1–S5 C-grade | ARS production acceptance |
-| 🟨 reset | authority alignment, then fail-closed reuse + reconciliation, then the environment-value guard, then the boundary reset | per-gate hermetic suites; documentation gate for the authority stage | none until a separate cutover decision |
+| 🟦 reset | authority alignment, then fail-closed reuse + reconciliation, then the environment-value guard, then the boundary reset | per-gate hermetic suites; documentation gate for the authority stage | none until a separate cutover decision |
 | ⏸ later | Sachima `ArsdBackend` | separate integration evidence | separately approved |
 
 Stage 1 was an intermediate implementation boundary, not a downgrade of the production target. Production was
 achieved after Stage 2 acceptance, which is closed on `main`.
 
-🟨 **The boundary reset is not a fifth stage of the original ladder and not a rollout.** Its documentation
-gate changes authority only. Its source gates each need a distinct source-implementation approval recorded
-after the documentation gate merges, and deleting the retired per-agent profiles from source needs one more
-confirmation on top of that.
+**The boundary reset was not a fifth stage of the original ladder and was not a rollout.** Its four gates
+are merged on `main` and make no production claim: publication, deployment, service restart, and cutover
+remain separate decisions, and a merged source change implies none of them.
 
 **Deploy sequence, for reference only and authorized by nothing here:** package upgrade → the operator
 authors the registry file → offline validation → per-agent diagnostics → the mandatory denied-action canary
@@ -587,7 +589,7 @@ then the only acpx material it retains is a bounded differential/comparison-test
 Rollback disables Native/`arsd` ingress and stops new submissions. It never converts failures into acpx
 fallback and never rewrites terminal Run facts.
 
-🟨 **Reset-line migration and rollback.** The supervisor root is shared, so reconciliation and evidence
+🟦 **Reset-line migration and rollback.** The supervisor root is shared, so reconciliation and evidence
 history stay continuous. Old Run directories are immutable historical files: the new runtime never rewrites,
 migrates, deletes, or re-hashes them, and readers project them value-blind. Old Sessions stay owner-scoped
 `status`/`list`/`close`-readable through a value-blind categorical projection, while those carrying retired

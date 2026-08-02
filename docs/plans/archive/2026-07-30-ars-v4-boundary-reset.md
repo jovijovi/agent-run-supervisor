@@ -1,8 +1,9 @@
 ---
 title: "ARS V4 External AGENT Boundary Reset — proposed implementation plan"
-status: active
+status: archived
 revision: 2
 created_at: 2026-07-30
+archived_at: 2026-08-02
 implementation_authorized: true
 implementation_authorized_at: 2026-07-30
 profile_retirement_approved: true
@@ -26,6 +27,22 @@ human_decisions_open: [cutover-and-legacy-session-load-refusal, legacy-line-life
 ---
 
 # ARS V4 External AGENT Boundary Reset — proposed implementation plan
+
+> **Archived as completed, 2026-08-02.** All four gates — Stage 0 authority alignment, Stage 1 fail-closed
+> reuse and total reconciliation, Stage 2 the environment-value sink boundary, and Stage 3 the boundary
+> reset including deletion of the three per-agent profiles — are **merged on `main`**. The live authority
+> chain (GOAL, PRD, architecture, technical solution, `docs/design/agent-registry.md`) now describes merged
+> source rather than a target, and the board records the current position.
+>
+> This file is **cold history from here on**. Its branch names, baseline commit and tag, `.cache` review
+> paths, stage sequencing, approval matrix, and every frontmatter flag are expired records of what was true
+> while the work ran. They select no branch, approve nothing, and are not development context; the body
+> below is preserved unedited for audit.
+>
+> Still open and *not* closed by this archival, each its own decision: release and publication of the
+> `0.6.0` line, Decision 2 (production cutover and the one-time legacy-Session load refusal), Decision 3
+> (the legacy `0.5.x` line's lifetime), deployment and service restart, Sachima integration, and the
+> mandatory per-agent denied-action canary before any registered agent's use.
 
 This plan turns the reviewed V4 architecture closure into an executable engineering sequence. It implements V4 exactly. It invents no architecture, opens no new scope, and authorizes nothing.
 

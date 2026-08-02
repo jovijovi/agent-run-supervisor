@@ -104,7 +104,11 @@ result verification.
    that carries the command and its argv, read once at daemon startup into an immutable snapshot. There
    is no ARS-owned artifact, ARS-managed AGENT home, or attestation of anything ARS does not own.
    Therefore an AGENT or adapter upgrade behind an unchanged registered command costs no ARS action at
-   all, while a registry edit costs exactly one drain-and-restart and no Session invalidation.
+   all, while any registry edit costs exactly one drain-and-restart. That restart invalidates no Session
+   by itself, because no Session identity field derives from registry bytes, mtimes, digests, command
+   paths, or observed runtime facts: an identity-preserving edit keeps reuse. Continuity is cut only by a
+   deliberate change to a semantic identity choice — the operator's `session_epoch`, the entry's
+   `agent_id`, or its selected profile.
 
 ## Environment and credential guarantee
 
@@ -181,23 +185,19 @@ documentation authority. They describe the target and do not authorize work by t
 implementation status belongs in `docs/roadmap/current-status.md`, which is where each merged change is
 expected to be recorded; that board is not restated here and does not, by itself, evidence source facts.
 
-**Authority and source differ right now, deliberately and visibly.** This document describes the V4
-boundary reset: the operator agent registry, the four-way boundary, the environment-value sink boundary,
-total ordered reconciliation, and fail-closed load-only Session reuse. Source on `main` still implements
-the retired artifact/Binding architecture that `docs/archive/binding-era-2026-07/` preserves. Closing that
-gap is staged source work that this document does not authorize; the board carries the exact delta and the
-sequence.
+**Authority and source are aligned on `main`.** The V4 boundary reset this document describes — the
+operator agent registry, the four-way boundary, the environment-value sink boundary, total ordered
+reconciliation, and fail-closed load-only Session reuse — is merged. Stage 0/1 Native ACP and Stage 2
+`arsd` were already closed; the retired artifact/Binding implementation is deleted from source and
+preserved as cold history under `docs/archive/binding-era-2026-07/`, and the source registry now holds
+exactly `standard-native-acp-v1` and `claude-agent-acp-compat-v1`, with the three per-agent profiles
+deleted rather than aliased or disabled.
 
-On current `main`, Stage 0/1 Native ACP and Stage 2 `arsd` are merged, and the closed source registry
-still holds four profiles. Retiring the three per-agent profiles was approved as **policy** on 2026-07-30
-and, as the separate source act the standing rule always required, on **2026-08-01**. That second approval
-is narrow and has been exercised **locally only**: on the Stage 3 task branch the source registry holds
-exactly `standard-native-acp-v1` and `claude-agent-acp-compat-v1`, the three per-agent profiles are
-deleted rather than aliased or disabled, and the change is neither committed, merged, nor released — so
-`main` is unchanged and every released artifact still registers four profiles. Commit and push, PR,
-merge, release and publication, production cutover, service restart, migration, `/opt` and Binding-root
-removal, Sachima integration, public ingress, and any Gateway/IM/live behavior each still require
-separate, explicit authorization, and no local verification transfers approval to the next change.
+Merged is neither published nor live. Package metadata is prepared as `0.6.0`; nothing is tagged,
+released, uploaded to PyPI, deployed, restarted, or cut over, and the released `0.5.x` line still runs the
+retired architecture. Release and publication, production cutover, service restart, migration, `/opt` and
+Binding-root removal, Sachima integration, public ingress, and any Gateway/IM/live behavior each still
+require separate, explicit authorization, and no verification transfers approval to the next change.
 
 ## Non-goals
 

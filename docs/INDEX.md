@@ -4,10 +4,9 @@
 
 Total: 78 documents tracked across 2 statuses.
 
-## Active (17)
+## Active (16)
 
 - [ARS agent registry — the operator contract](design/agent-registry.md) — created 2026-07-30
-- [ARS V4 External AGENT Boundary Reset — proposed implementation plan](plans/active/2026-07-30-ars-v4-boundary-reset.md) — created 2026-07-30
 - [agent-run-supervisor vNext System Architecture](design/architecture.md) — created 2026-07-21
 - [agent-run-supervisor vNext Technical Solution](design/technical-solution.md) — created 2026-07-21
 - [agent-run-supervisor vNext PRD](product/prd.md) — created 2026-07-21
@@ -24,7 +23,7 @@ Total: 78 documents tracked across 2 statuses.
 - [Engineering practices](practices/README.md) — created 2026-05-28
 - [Verification gates for implementation PRs](roadmap/verification.md) — created 2026-05-28
 
-## Archived (61)
+## Archived (62)
 
 - [Binding-era authority archive (2026-07)](archive/binding-era-2026-07/README.md) — created 2026-07-30
 - [Binding-era architecture sections 3.1-3.3 (retired)](archive/binding-era-2026-07/architecture-3.1-3.3.md) — created 2026-07-30
@@ -32,6 +31,7 @@ Total: 78 documents tracked across 2 statuses.
 - [Binding-era GOAL contracts 9-11 (retired)](archive/binding-era-2026-07/goal-contracts-9-11.md) — created 2026-07-30
 - [Binding-era PRD R13 and R14 (retired)](archive/binding-era-2026-07/prd-r13-r14.md) — created 2026-07-30
 - [Why the Binding era was retired](archive/binding-era-2026-07/retirement-rationale.md) — created 2026-07-30
+- [ARS V4 External AGENT Boundary Reset — proposed implementation plan](plans/archive/2026-07-30-ars-v4-boundary-reset.md) — created 2026-07-30
 - [Profile-scoped Runtime Binding activation](plans/archive/2026-07-29-multi-profile-runtime-binding.md) — created 2026-07-29
 - [Standard Native ACP (v1) — one conformance contract, many registered agents](plans/archive/2026-07-29-standard-native-acp-v1.md) — created 2026-07-29
 - [Runtime Binding Source and Wrapped-Adapter Package-Closure](roadmap/archive/phases/vnext-runtime-binding-source-closure.md) — created 2026-07-29
