@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -15,12 +16,10 @@ pytest.importorskip("acp")
 from agent_run_supervisor.exit_classifier import AgentRunStatus
 from agent_run_supervisor.native_acp import profile as profile_module
 from agent_run_supervisor.native_acp import storage
+from agent_run_supervisor.native_acp.agent_registration import AgentEntry
 from agent_run_supervisor.native_acp.profile import (
-    LAUNCH_KIND_DIRECT,
-    AdapterContract,
-    AgentProfile,
+    AcpCompatProfile,
     ProfileRegistry,
-    VersionProbeRule,
 )
 from agent_run_supervisor.native_acp.run_task import RunTask
 from agent_run_supervisor.native_acp.spec import (
@@ -28,6 +27,7 @@ from agent_run_supervisor.native_acp.spec import (
     InputRef,
     RunLimits,
     RunSpecAssembler,
+    resolve_run_environment,
 )
 from agent_run_supervisor.session import SessionNotFoundError
 
@@ -101,30 +101,24 @@ HAPPY_SWITCH_SCRIPT = {
 }
 
 
-def _profile() -> AgentProfile:
-    return AgentProfile(
-        profile_id="fake-agent-1.0",
+def _profile() -> AcpCompatProfile:
+    """ACP-v1 conformance only. The fake agent's command is an operator fact."""
+    return AcpCompatProfile(
+        profile_id="fake-agent-v1",
         revision=1,
-        executable_key="python-fake",
-        argv_template=(str(FAKE_AGENT_PATH),),
-        env_allowlist=("PATH", "HOME", "FAKE_AGENT_SCRIPT", "FAKE_AGENT_TRACE"),
-        credential_slots=(),
-        model_selector_id="model",
-        effort_selector_id="effort",
-        default_model="kimi-for-coding/k3",
-        default_effort="max",
-        registered_models=("kimi-for-coding/k3", "provider/base"),
-        allowed_efforts=("low", "medium", "high", "max"),
+        acp_protocol_version="1",
+        required_capabilities=(),
+        base_allowlist=("PATH", "HOME", "FAKE_AGENT_SCRIPT", "FAKE_AGENT_TRACE"),
         requires_session_load=True,
-        config_schema={"selectors": {"model": "string", "effort": "string"}},
-        # Wholly source-frozen: the fake agent is not a deployment, so its
-        # contract accepts no operator Binding value at all.
-        contract=AdapterContract(
-            launch_kind=LAUNCH_KIND_DIRECT,
-            acp_agent_name="fake-acp-agent",
-            acp_protocol_version="1",
-            version_probe=VersionProbeRule(argv_suffix=("--version",)),
-        ),
+    )
+
+
+def _entry() -> AgentEntry:
+    return AgentEntry(
+        agent_id="fake-agent",
+        profile_id="fake-agent-v1",
+        command=sys.executable,
+        args=(str(FAKE_AGENT_PATH),),
     )
 
 
@@ -132,7 +126,7 @@ def _request(model: str, effort: str, session_id: str = "sess-switch-1", **overr
     kwargs = dict(
         owner="hermes",
         namespace="hermes/doc-check",
-        profile_id="fake-agent-1.0",
+        agent_id="fake-agent",
         session_reuse="reuse",
         ars_session_id=session_id,
         expected_binding_hash=None,
@@ -160,12 +154,8 @@ class SwitchHarness:
         self.root = tmp_path / ".agent-run-supervisor"
         self.workspace = tmp_path / "workspace"
         self.workspace.mkdir(exist_ok=True)
-        monkeypatch.setitem(
-            profile_module._REGISTERED_EXECUTABLES,
-            "python-fake",
-            Path(sys.executable),
-        )
         self.registry = ProfileRegistry((_profile(),))
+        self.entry = _entry()
 
     def seed_bound_session(self, request: AgentRunRequest) -> None:
         """Arrange the precondition a reuse Run requires (B1 / PRD R4).
@@ -188,9 +178,13 @@ class SwitchHarness:
         except SessionNotFoundError:
             pass
         assembler = RunSpecAssembler(request)
-        assembler.resolve_profile(self.registry)
+        instance = assembler.resolve_agent(self.entry, registry=self.registry)
         assembler.bind_workspace(root=self.workspace, cwd=None)
-        assembler.resolve_launch(runtime=None)
+        assembler.resolve_launch(
+            environment=resolve_run_environment(
+                arsd_env=dict(os.environ), profile=instance.profile, entry=self.entry
+            )
+        )
         spec = assembler.seal(
             run_id="run-seed-0",
             submitted_at="2026-07-21T00:00:00+00:00",
@@ -207,6 +201,8 @@ class SwitchHarness:
             workspace_hash=spec.workspace.workspace_hash,
             effective_cwd=spec.workspace.cwd,
             matched_root=spec.workspace.canonical_root,
+            agent_id=spec.agent.agent_id,
+            session_epoch=spec.agent.session_epoch,
         )
         storage.bind_agent_session(
             store, session_id, agent_session_id=EXTERNAL_SESSION_ID
@@ -222,6 +218,7 @@ class SwitchHarness:
             run_id=run_id,
             workspace_root=self.workspace,
             registry=self.registry,
+            agent_entry=self.entry,
             supervisor_root=self.root,
             submitted_at="2026-07-21T00:00:00+00:00",
             **overrides,
@@ -257,6 +254,257 @@ class SwitchHarness:
         assert record.agent_session_id == EXTERNAL_SESSION_ID
         assert record.last_effective_model == "provider/base"
         assert record.last_effective_effort == "high"
+
+
+def _events(harness, run_id: str) -> list[dict]:
+    path = harness.root / "native-runs" / run_id / "events.jsonl"
+    return [
+        json.loads(line) for line in path.read_text().splitlines() if line.strip()
+    ]
+
+
+def _initialize_evidence(harness, run_id: str) -> dict:
+    path = harness.root / "native-runs" / run_id / "initialize_evidence.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_a11_agent_self_report_drift_across_two_runs_warns_and_never_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A11 on the production path: an agent upgrade costs no ARS action.
+
+    Two Runs of one Session against the same registered command, with the agent
+    reporting a different name and version the second time. That is exactly what
+    happens when an operator upgrades the agent behind an unchanged command, and
+    it must not refuse: the second Run completes, records the drift as a
+    non-authoritative policy warning, and reuses the Session through a real
+    ``session/load``.
+
+    Driven end to end through ``RunTask`` rather than ``judge_initialize``,
+    because the defect this pins was that nothing loaded the previous
+    observation on the production path at all.
+    """
+    harness = SwitchHarness(tmp_path, monkeypatch)
+
+    first = dict(FIRST_RUN_SCRIPT)
+    first["agent_info"] = {"name": "fake-acp-agent", "version": "1.0.0"}
+    assert harness.run(
+        "run-0001", first, _request("provider/base", "high")
+    ).status is AgentRunStatus.COMPLETED
+    assert not [
+        event
+        for event in _events(harness, "run-0001")
+        if event["type"] == "policy_warning"
+    ], "a first Run has nothing to have drifted from"
+
+    second = dict(HAPPY_SWITCH_SCRIPT)
+    second["agent_info"] = {"name": "fake-acp-agent", "version": "2.0.0"}
+    result = harness.run("run-0002", second, _request("kimi-for-coding/k3", "max"))
+
+    assert result.status is AgentRunStatus.COMPLETED
+    assert "session/load" in harness.methods("run-0002")
+    assert "session/new" not in harness.methods("run-0002")
+
+    warnings = [
+        event
+        for event in _events(harness, "run-0002")
+        if event["type"] == "policy_warning"
+    ]
+    assert [warning["code"] for warning in warnings] == ["AGENT_SELF_REPORT_CHANGED"]
+    assert warnings[0]["authoritative"] is False
+
+    evidence = _initialize_evidence(harness, "run-0002")
+    assert evidence["authoritative"] is False
+    assert evidence["refusal"] is None
+    assert evidence["observed"]["agent_info"]["version"] == "2.0.0"
+
+
+def test_a11_capability_drift_across_two_runs_warns_and_never_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Advertised capabilities may change between Runs of one Session."""
+    harness = SwitchHarness(tmp_path, monkeypatch)
+
+    assert harness.run(
+        "run-0001", FIRST_RUN_SCRIPT, _request("provider/base", "high")
+    ).status is AgentRunStatus.COMPLETED
+
+    # A real capability the SDK models, so the drift survives validation rather
+    # than being dropped as an unknown key on the way in.
+    second = dict(HAPPY_SWITCH_SCRIPT)
+    second["agent_capabilities"] = {"sessionCapabilities": {"fork": {}}}
+    result = harness.run("run-0002", second, _request("kimi-for-coding/k3", "max"))
+
+    assert result.status is AgentRunStatus.COMPLETED
+    codes = [
+        event["code"]
+        for event in _events(harness, "run-0002")
+        if event["type"] == "policy_warning"
+    ]
+    assert "ADVERTISED_CAPABILITIES_CHANGED" in codes
+
+
+def test_a11_a_stable_agent_emits_no_drift_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The paired guard: the warning means something only if silence is possible."""
+    harness = SwitchHarness(tmp_path, monkeypatch)
+    harness.prepare_session()
+    assert harness.run(
+        "run-0002", HAPPY_SWITCH_SCRIPT, _request("kimi-for-coding/k3", "max")
+    ).status is AgentRunStatus.COMPLETED
+    assert not [
+        event
+        for event in _events(harness, "run-0002")
+        if event["type"] == "policy_warning"
+    ]
+
+
+ENV_SENTINEL = "ArS-SeNtInEl-projected-value-4c9b"
+
+
+def _sentinel_entry() -> AgentEntry:
+    """The registered command, plus one projected environment value to leak."""
+    return AgentEntry(
+        agent_id="fake-agent",
+        profile_id="fake-agent-v1",
+        command=sys.executable,
+        args=(str(FAKE_AGENT_PATH),),
+        env_overlay=(("AGENT_TOKEN", ENV_SENTINEL),),
+    )
+
+
+def _session_root_text(harness) -> str:
+    """Every byte under the Session root, as text."""
+    root = harness.root / "native-sessions"
+    return "\n".join(
+        path.read_text(encoding="utf-8", errors="replace")
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    )
+
+
+def test_a1_no_projected_environment_value_survives_in_session_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A1 — the durable observation is guard-produced, so a child cannot seed it.
+
+    ``agentInfo`` and the advertised capability *keys* are child-controlled free
+    text that ``judge_initialize`` deliberately does not gate — a self-report is
+    evidence, never identity, so there is nothing to check it against. An agent
+    that echoes a projected environment value back through either one would then
+    have ARS write that value into ``session.json``, where it outlives the Run,
+    the guard, and the process.
+
+    The Session root is scanned, not the Run root: this is the sink the Run-scoped
+    proofs do not cover.
+    """
+    harness = SwitchHarness(tmp_path, monkeypatch)
+    harness.entry = _sentinel_entry()
+
+    script = dict(FIRST_RUN_SCRIPT)
+    script["agent_info"] = {"name": f"agent-{ENV_SENTINEL}", "version": ENV_SENTINEL}
+    script["agent_capabilities"] = {f"cap-{ENV_SENTINEL}": True}
+    result = harness.run("run-0001", script, _request("provider/base", "high"))
+    assert result.status is AgentRunStatus.COMPLETED
+
+    assert ENV_SENTINEL not in _session_root_text(harness)
+
+    record = harness.record()
+    for field in (
+        record.native_last_agent_info_name,
+        record.native_last_agent_info_version,
+    ):
+        assert ENV_SENTINEL not in (field or "")
+    for name in record.native_last_advertised_capabilities or ():
+        assert ENV_SENTINEL not in name
+
+
+def test_a1_guarded_drift_is_still_reported_across_two_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guarding the projection must not cost the evidence it exists to carry."""
+    harness = SwitchHarness(tmp_path, monkeypatch)
+    harness.entry = _sentinel_entry()
+
+    first = dict(FIRST_RUN_SCRIPT)
+    first["agent_info"] = {"name": "fake-acp-agent", "version": "1.0.0"}
+    assert harness.run(
+        "run-0001", first, _request("provider/base", "high")
+    ).status is AgentRunStatus.COMPLETED
+
+    second = dict(HAPPY_SWITCH_SCRIPT)
+    second["agent_info"] = {"name": "fake-acp-agent", "version": "2.0.0"}
+    assert harness.run(
+        "run-0002", second, _request("kimi-for-coding/k3", "max")
+    ).status is AgentRunStatus.COMPLETED
+
+    warnings = [
+        event
+        for event in _events(harness, "run-0002")
+        if event["type"] == "policy_warning"
+    ]
+    assert [warning["code"] for warning in warnings] == ["AGENT_SELF_REPORT_CHANGED"]
+    assert ENV_SENTINEL not in _session_root_text(harness)
+
+
+def test_a11_the_persisted_observation_is_never_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recorded, and load-bearing for nothing.
+
+    The Session record carries the previous observation so drift can be
+    *reported*. It must not become an identity field, a gate, or an epoch: a Run
+    whose agent reports something new still binds, and the operator's epoch is
+    untouched.
+    """
+    from agent_run_supervisor.session import (
+        LEGACY_SESSION_IDENTITY_FIELDS,
+        validate_native_binding,
+    )
+
+    harness = SwitchHarness(tmp_path, monkeypatch)
+    first = dict(FIRST_RUN_SCRIPT)
+    first["agent_info"] = {"name": "fake-acp-agent", "version": "1.0.0"}
+    harness.run("run-0001", first, _request("provider/base", "high"))
+
+    record = harness.record()
+    assert record.native_last_agent_info_version == "1.0.0"
+    assert record.native_session_epoch is None
+    for retired in LEGACY_SESSION_IDENTITY_FIELDS:
+        assert getattr(record, retired) is None
+
+    # The identity gate does not read it: a record whose observation differs
+    # from anything still binds.
+    from agent_run_supervisor.native_acp.spec import resolve_workspace_binding
+
+    validate_native_binding(
+        record,
+        profile=_profile(),
+        workspace_result=resolve_workspace_binding(root=harness.workspace),
+        owner="hermes",
+        namespace="hermes/doc-check",
+        expected_agent_id="fake-agent",
+    )
+
+
+def test_a11_no_observation_is_ever_hashed_or_bumped_into_an_epoch() -> None:
+    """Structural: recording an observation must not grow into a gate."""
+    from pathlib import Path as _Path
+
+    from agent_run_supervisor import session as session_mod
+    from agent_run_supervisor.native_acp import observation, run_task
+
+    for module in (session_mod, observation, run_task):
+        text = _Path(module.__file__).read_text(encoding="utf-8")
+        for banned in (
+            "agent_info_hash",
+            "observation_hash",
+            "bump_epoch",
+            "session_epoch + 1",
+            "session_epoch += 1",
+        ):
+            assert banned not in text, f"{module.__name__} carries {banned!r}"
 
 
 def test_load_reuse_happy_path_keeps_external_id_and_switches(
@@ -462,7 +710,11 @@ def test_load_capability_missing_fails_and_escalates(
     payload = json.loads(
         (harness.root / "native-runs" / "run-0002" / "result.json").read_text()
     )
-    assert payload["detail_code"] == "LOAD_SESSION_UNADVERTISED"
+    # An agent that does not advertise ``loadSession`` fails a *declared
+    # contract term* of a profile whose session semantics require a real load,
+    # so it lands inside the closed five-member observation-refusal set rather
+    # than adding a sixth code of its own.
+    assert payload["detail_code"] == "CAPABILITY_MISSING"
     assert "session/load" not in harness.methods("run-0002")
     assert "session/prompt" not in harness.methods("run-0002")
     assert harness.record().state == "open"

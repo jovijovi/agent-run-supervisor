@@ -1,18 +1,38 @@
-"""Typed, versioned, closed AgentProfile registry (PRD R12/R13).
+"""Source-owned ACP compatibility profiles — layer 1 of the four-way boundary.
 
-Profiles are code-registered constants: fixed executable reference (resolved
-only through the operator-managed registered installation mapping — no
-caller or environment path override), fixed argv template with registered
-substitutions only, credential/env slot *names* (never values), typed config
-selectors, and capability flags. No command/argv/env/JSON passthrough
-surface exists.
+A profile answers exactly one question: **how do you speak ACP to a class of
+agent?** It freezes the protocol major, the required capabilities, a
+forbidden-capability floor, session semantics including required real
+``session/load``, the selector-id conventions, the base environment allowlist,
+permission-mediation semantics, and — only where cited ACP-level evidence
+requires it — frozen ACP session metadata plus a required permission-mode
+selector proven by readback.
 
-Each profile also carries its source-frozen :class:`AdapterContract` — layer 1
-of the three runtime-authority layers (PRD R13). The contract freezes
-compatibility semantics and the *shape* of the Binding it accepts; it never
-freezes a deployment-specific downstream CLI path, version, or digest. Those
-are layer-2 operator facts read once per Run through
-:mod:`agent_run_supervisor.native_acp.runtime_binding`.
+It freezes nothing else. There is no path, version, digest, model literal, agent
+name, value domain, launch kind, artifact identity, or deployment fact here,
+because none of those is an ACP semantic. **Which command is which agent, here**
+is the operator's answer, carried by one registry entry
+(:mod:`agent_run_supervisor.native_acp.agent_registration`) that ARS reads once
+at daemon startup.
+
+That split is what makes an AGENT or adapter upgrade behind an unchanged
+registered command cost no ARS action at all: no identity field anywhere derives
+from what the agent turned out to be.
+
+Two profiles are registered. ``standard-native-acp-v1`` is the ACP-v1
+conformance contract every standards-conforming agent runs under.
+``claude-agent-acp-compat-v1`` exists because one adapter carries a cited
+ACP-semantic deviation: it resolves its initial permission mode from ambient
+settings through its own settings manager and auto-allows tool calls in process
+while that mode is permissive, so the mode is frozen as a config selector and
+proven by exact readback before any prompt, and the frozen session metadata
+removes the ambient setting sources that would otherwise define the underlying
+SDK's permission rules and tool surface. Neither half is sufficient alone.
+
+The ``-v1`` suffix is load-bearing: the id carries the ACP protocol generation,
+construction refuses a profile whose frozen protocol disagrees with it, and a
+future ``standard-native-acp-v2`` is therefore a separate profile with its own
+registry entries and its own Sessions.
 """
 
 from __future__ import annotations
@@ -21,12 +41,12 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from types import MappingProxyType
+from typing import Any, Iterable, Mapping
 
 
 class UnknownProfileError(ValueError):
-    """Lookup of a profile or executable key outside the closed registry."""
+    """Lookup of a profile or mediation id outside the closed source set."""
 
 
 class ProfileValidationError(ValueError):
@@ -41,645 +61,183 @@ def _sha256_hex(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _is_sha256_hex(value: Any) -> bool:
-    return (
-        isinstance(value, str)
-        and len(value) == 64
-        and all(ch in "0123456789abcdef" for ch in value)
-    )
-
-
-def path_within_root(root: str | Path, candidate: str | Path) -> bool:
-    """Is ``candidate`` strictly inside the closure ``root``? (C5)
-
-    The one containment authority every closure surface shares — contract
-    construction, the sealed runtime identity, and the tree digest's symlink
-    rule — so the three cannot disagree about what "inside" means.
-
-    Judged on **path components**, never on string prefixes: ``/pkg-evil`` has
-    ``/pkg`` as a text prefix and is not inside it. Lexical by construction: it
-    asks no question of the filesystem, so it is safe to call while validating a
-    frozen constant and cannot be raced. Both operands must be absolute and free
-    of ``..``, and a path equal to the root is *not* inside it — a closure root
-    is not its own member.
-    """
-    root_path, candidate_path = Path(root), Path(candidate)
-    if not root_path.is_absolute() or not candidate_path.is_absolute():
-        return False
-    root_parts, candidate_parts = root_path.parts, candidate_path.parts
-    if ".." in root_parts or ".." in candidate_parts:
-        return False
-    return (
-        len(candidate_parts) > len(root_parts)
-        and candidate_parts[: len(root_parts)] == root_parts
-    )
-
-
-# Operator-managed registered installation mapping. Resolution never consults
-# caller input, PATH, or any environment variable.
-#
-# ``codex-acp`` and ``claude-agent-acp`` map to the controller-frozen Node
-# interpreter, not to the adapters' ``.bin`` shims: each adapter entrypoint is
-# an ESM script whose ``#!/usr/bin/env node`` shebang would otherwise let the
-# kernel resolve the interpreter from the child's ambient PATH. The process
-# image is Node and the entry JS is argv[1], so interpreter selection never
-# involves PATH at all.
-#
-# A ``direct_acp`` profile has no entry here at all: its one executable is both
-# the AGENT CLI and the ACP implementation, so it is a deployment fact the
-# operator-owned Binding supplies through the contract's executable slot.
-#
-# Every source-frozen runtime path names the root-owned artifact location a
-# separate materialization step is expected to create. It is deliberately not a
-# path under the service account's home: C5 requires the artifact *and every
-# ancestor* to be non-writable by the `arsd`/AGENT UID, and no per-leaf
-# ownership change can make a service-owned home directory satisfy that. These
-# constants declare the expected source paths only — this module creates,
-# copies, installs, and chowns nothing, and a path that has not been
-# materialized simply fails admission closed.
-ARTIFACT_MATERIALIZATION_PREFIX = "/opt/agent-run-supervisor/artifacts"
-
-# Node searches its CommonJS "global folders" — ``$HOME/.node_modules``,
-# ``$HOME/.node_libraries`` and ``<node prefix>/lib/node`` — outside every
-# package root, so an adapter package closure is *not* complete while they are
-# live: measured on the frozen v24.14.0, a `createRequire` inside a bundled
-# adapter loads code from ``$HOME/.node_modules``, and both wrapped profiles
-# forward ``HOME``. This is the exact frozen flag that closes them, and the
-# contract below refuses a frozen-Node interpreter that does not carry it.
-NODE_NO_GLOBAL_SEARCH_PATHS = "--no-global-search-paths"
-
-_FROZEN_NODE = Path(f"{ARTIFACT_MATERIALIZATION_PREFIX}/node/v24.14.0/bin/node")
-_REGISTERED_EXECUTABLES: dict[str, Path] = {
-    "codex-acp": _FROZEN_NODE,
-    "claude-agent-acp": _FROZEN_NODE,
-}
-
-# Profile-owned frozen non-model launch environment (D2). The key set is closed
-# per slice; values are bounded printable non-secret strings and never
-# credential material.
-_FIXED_ENV_ALLOWED_KEYS = frozenset(
-    {
-        "CODEX_HOME",
-        "CODEX_PATH",
-        "CODEX_CONFIG",
-        "CLAUDE_CODE_EXECUTABLE",
-        "INITIAL_AGENT_MODE",
-        "NO_BROWSER",
-    }
-)
-_INITIAL_AGENT_MODES = frozenset({"read-only", "agent", "agent-full-access"})
-_MAX_FIXED_ENV_VALUE_LENGTH = 512
 _MAX_SESSION_META_LENGTH = 4096
 
-# Registered agent-side permission mediation binding, keyed like the
-# installation mapping and injected only at spawn by the supervisor — never
-# caller input and never a credential value. OpenCode's default build agent
-# permission base is "*": allow, so without this binding its in-process
-# write/edit tools complete with zero client mediation (the A4-S2 blocker).
-# Forcing edit/bash/webfetch to "ask" routes every privileged tool family
-# through session/request_permission, making the frozen-grant
-# PermissionBridge the deciding authority before any side effect.
-_REGISTERED_PERMISSION_ENV: dict[str, tuple[tuple[str, str], ...]] = {
-    "opencode": (
-        ("OPENCODE_PERMISSION", '{"bash":"ask","edit":"ask","webfetch":"ask"}'),
-    ),
-}
+# A profile id may carry the ACP protocol generation it speaks. When it does,
+# the generation and the frozen protocol version must agree.
+_PROTOCOL_GENERATION_RE = re.compile(r".*-v(\d+)")
 
 
-# The same mediation knob, keyed by the *capability* it mediates rather than by
-# the agent that happens to need it. An operator-owned Agent Registration may
-# select one of these ids or select nothing; key and value both stay source
-# owned, so a registration can never introduce a mediation pair, an env key, or
-# a value of its own. This freezes no new evidence — the pair below is the one
-# already source-frozen above behind the A4-S2 canary — and the two registries
-# stay disjoint by profile construction invariant rather than by convention.
-#
-# An agent needing a mediation knob that is not here is exactly the
-# evidence-proven deviation that requires its own discovery, canary, and review.
-_REGISTERED_MEDIATION_BINDINGS: dict[str, tuple[tuple[str, str], ...]] = {
+# ---------------------------------------------------------------------------
+# Mediation authority — source-owned in key and value
+# ---------------------------------------------------------------------------
+
+# Mediation environment values route an agent's privileged in-process tool
+# families through ACP permission requests, so the permission bridge decides
+# *before* a side effect. If configuration could shadow that, the default-deny
+# claim would be decorative. Therefore the binding is source-owned in key and
+# value, keyed by the capability family it mediates; a registry entry may select
+# one id or none, and can never author a pair, a key, or a value.
+_MEDIATION_BINDINGS: dict[str, tuple[tuple[str, str], ...]] = {
     "ask-privileged-tool-families-v1": (
         ("OPENCODE_PERMISSION", '{"bash":"ask","edit":"ask","webfetch":"ask"}'),
     ),
 }
 
-
-def resolve_registered_executable(key: str) -> Path:
-    try:
-        return _REGISTERED_EXECUTABLES[key]
-    except KeyError:
-        raise UnknownProfileError(f"unregistered executable key: {key!r}") from None
+MEDIATION_BINDINGS: Mapping[str, tuple[tuple[str, str], ...]] = MappingProxyType(
+    dict(_MEDIATION_BINDINGS)
+)
+MEDIATION_BINDING_IDS: frozenset[str] = frozenset(MEDIATION_BINDINGS)
 
 
-def resolve_registered_permission_env(key: str) -> tuple[tuple[str, str], ...]:
-    """Registered permission-mediation env pairs for an executable key;
-    executables without a registered binding launch with none."""
-    return _REGISTERED_PERMISSION_ENV.get(key, ())
+def reserved_mediation_keys(
+    bindings: Mapping[str, tuple[tuple[str, str], ...]],
+) -> frozenset[str]:
+    """The union of every key in **any** binding of ``bindings``.
+
+    Global by construction rather than per-selection: the reserved set must not
+    depend on which binding an entry chose, or whether it chose one at all.
+    """
+    return frozenset(key for pairs in bindings.values() for key, _ in pairs)
 
 
-def is_registered_mediation_binding(binding_id: Any) -> bool:
-    """Is ``binding_id`` a mediation binding this source owns?"""
-    return isinstance(binding_id, str) and binding_id in _REGISTERED_MEDIATION_BINDINGS
+RESERVED_MEDIATION_KEYS: frozenset[str] = reserved_mediation_keys(MEDIATION_BINDINGS)
 
 
-def resolve_registered_mediation_binding(
-    binding_id: str | None,
-) -> tuple[tuple[str, str], ...]:
-    """The env pairs a registration selected, or none when it selected none."""
-    if binding_id is None:
+def mediation_pairs(mediation_id: str | None) -> tuple[tuple[str, str], ...]:
+    """The source-owned pairs an entry selected, or none when it selected none."""
+    if mediation_id is None:
         return ()
     try:
-        return _REGISTERED_MEDIATION_BINDINGS[binding_id]
+        return MEDIATION_BINDINGS[mediation_id]
     except KeyError:
         raise UnknownProfileError(
-            f"unregistered mediation binding: {binding_id!r}"
+            f"unregistered mediation binding: {mediation_id!r}"
         ) from None
 
 
 # ---------------------------------------------------------------------------
-# AdapterContract — layer 1 of PRD R13
+# The base environment allowlist
 # ---------------------------------------------------------------------------
 
-LAUNCH_KIND_WRAPPED = "wrapped_acp"
-LAUNCH_KIND_DIRECT = "direct_acp"
-LAUNCH_KINDS = (LAUNCH_KIND_WRAPPED, LAUNCH_KIND_DIRECT)
-
-SLOT_KIND_NATIVE_BINARY = "native_binary"
-SLOT_KIND_PACKAGE_TREE = "package_tree"
-SLOT_KIND_CONFIG_ROOT = "config_root"
-SLOT_KINDS = (SLOT_KIND_NATIVE_BINARY, SLOT_KIND_PACKAGE_TREE, SLOT_KIND_CONFIG_ROOT)
-
-ARTIFACT_SLOT_KINDS = (SLOT_KIND_NATIVE_BINARY, SLOT_KIND_PACKAGE_TREE)
-
-# The exact descriptor field set a Binding slot of each kind must carry — no
-# more, no less. Declared here because it is contract shape, not operator data.
-# ``package_tree`` deliberately requires the tree digest *and* the interpreter
-# identity beside the launcher: a launcher hash alone never freezes the sibling
-# code the launcher loads (C5).
-# ``native_binary`` carries the same pair for the same reason: a script or a
-# dynamically linked image is executed by an interpreter or loader that lives
-# outside the hashed file, so its identity is frozen beside the file's own
-# digest. Only an image that needs no external interpreter may leave both null.
-SLOT_DESCRIPTOR_FIELDS: dict[str, tuple[str, ...]] = {
-    SLOT_KIND_NATIVE_BINARY: (
-        "path",
-        "version",
-        "sha256",
-        "interpreter",
-        "interpreter_sha256",
-    ),
-    SLOT_KIND_PACKAGE_TREE: (
-        "package_root",
-        "tree_sha256",
-        "launcher_path",
-        "launcher_sha256",
-        "interpreter_path",
-        "interpreter_sha256",
-        "version",
-    ),
-    SLOT_KIND_CONFIG_ROOT: ("path",),
-}
-
-_SEMVER_RE = re.compile(r"\b(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.\-]+)?)\b")
-
-
-def _parse_first_semver(text: str) -> str | None:
-    match = _SEMVER_RE.search(text)
-    return match.group(1) if match is not None else None
+# Layer 1 of the environment projection: names taken from the daemon's own
+# environment, only when present, values unchanged. A filtered environment is
+# not the interactive environment, so this covers the ordinary interactive
+# essentials and the operator declares the rest per agent.
+#
+# ``SSH_AUTH_SOCK`` is deliberately absent. Forwarding it hands the AGENT live
+# use of the operator's SSH keys — a real authority transfer, and therefore an
+# explicit per-agent ``env_passthrough`` opt-in rather than a default.
+BASE_ENV_ALLOWLIST: tuple[str, ...] = (
+    "HOME",
+    "PATH",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    "TERM",
+    "TMPDIR",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+    "XDG_RUNTIME_DIR",
+    "http_proxy",
+    "https_proxy",
+    "ftp_proxy",
+    "all_proxy",
+    "no_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "FTP_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "NODE_EXTRA_CA_CERTS",
+)
 
 
-# Closed set of code-owned probe output parsers. A Binding names nothing here:
-# the contract picks the parser, and the operator can never supply one.
-VERSION_PROBE_PARSERS: dict[str, Callable[[str], str | None]] = {
-    "first_semver": _parse_first_semver,
-}
+def base_env_allowlist(profile: "AcpCompatProfile") -> tuple[str, ...]:
+    """The layer-1 names this profile projects. One accessor, one authority."""
+    return profile.base_allowlist
+
+
+# ---------------------------------------------------------------------------
+# AcpCompatProfile
+# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
-class VersionProbeRule:
-    """The only sanctioned way to learn an external CLI's real version (C6).
+class AcpCompatProfile:
+    """How to speak ACP to a class of agent, and nothing else."""
 
-    A fixed non-prompt argv suffix, a hermetic environment, bounded output and
-    timeout, and a code-owned parser. The rule is contract data; running it is
-    an operator-command action, never an admission-path action.
-    """
-
-    argv_suffix: tuple[str, ...]
-    parser_id: str = "first_semver"
-    timeout_seconds: float = 15.0
-    max_output_bytes: int = 8192
-
-    def __post_init__(self) -> None:
-        if not self.argv_suffix:
-            raise ProfileValidationError("version probe requires a fixed argv suffix")
-        for token in self.argv_suffix:
-            if not isinstance(token, str) or not token or not token.startswith("-"):
-                raise ProfileValidationError(
-                    "version probe argv suffix accepts option tokens only"
-                )
-        if self.parser_id not in VERSION_PROBE_PARSERS:
-            raise ProfileValidationError(
-                f"version probe parser {self.parser_id!r} is not code-owned"
-            )
-        if not (0 < self.timeout_seconds <= 60):
-            raise ProfileValidationError("version probe timeout must be in (0, 60]")
-        if not (256 <= self.max_output_bytes <= 1 << 20):
-            raise ProfileValidationError("version probe output bound is out of range")
-
-    def parse(self, text: str) -> str | None:
-        return VERSION_PROBE_PARSERS[self.parser_id](text)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "argv_suffix": list(self.argv_suffix),
-            "parser_id": self.parser_id,
-            "timeout_seconds": self.timeout_seconds,
-            "max_output_bytes": self.max_output_bytes,
-        }
-
-
-@dataclass(frozen=True)
-class BindingSlot:
-    """One slot the contract accepts a Binding value into (C2).
-
-    A slot declares a name, a kind, and — at most — the code-known env key the
-    projected value fills. It never declares the value itself, and a Binding
-    can never introduce a slot or an env key the contract has not declared.
-    """
-
-    name: str
-    kind: str
-    env_key: str | None = None
-    provides_executable: bool = False
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not self.name.isidentifier():
-            raise ProfileValidationError("binding slot name must be an identifier")
-        if self.kind not in SLOT_KINDS:
-            raise ProfileValidationError(f"unknown binding slot kind: {self.kind!r}")
-        if self.env_key is not None and self.env_key not in _FIXED_ENV_ALLOWED_KEYS:
-            raise ProfileValidationError(
-                f"binding slot env key {self.env_key!r} is not a code-known key"
-            )
-        if self.provides_executable and self.kind != SLOT_KIND_NATIVE_BINARY:
-            raise ProfileValidationError(
-                "only a native_binary slot may provide the executable"
-            )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "kind": self.kind,
-            "env_key": self.env_key,
-            "provides_executable": self.provides_executable,
-            # C1 freezes the *accepted Binding schema*, not only the slot's
-            # name and kind, so the descriptor field set rides in the contract
-            # hash: widening or narrowing what a generation may declare is a
-            # contract change and fails prior generations closed (C3).
-            "descriptor_fields": list(SLOT_DESCRIPTOR_FIELDS[self.kind]),
-        }
-
-
-@dataclass(frozen=True)
-class WrappedRuntimeArtifacts:
-    """Source-frozen interpreter and ACP adapter identity for ``wrapped_acp``.
-
-    These stay in code (C9): the interpreter and the adapter package are ARS-
-    controlled artifacts, not deployment facts an operator re-points.
-
-    The adapter is frozen as a **complete package closure**, not as one entry
-    file (F-RUNTIME-BINDING-002; PRD R13 artifact closure, GOAL contract 9).
-    ``adapter_package_root`` is the npm *install* root and
-    ``adapter_tree_sha256`` is the digest of everything under it, because that
-    is the smallest root Node's module resolution cannot escape downward from:
-    starting at the entry, ``NODE_MODULES_PATHS`` walks the parent chain and
-    finds the adapter's hoisted dependencies in ``<install root>/node_modules``.
-    A package directory alone would leave every hoisted dependency unfrozen,
-    and the entry digest alone freezes neither the siblings the entry imports
-    nor the ``package.json`` it reads its own version from — which is exactly
-    how one launcher's bytes stayed identical across two adapter versions.
-
-    ``adapter_entry_path`` is required to lie strictly inside the closure root,
-    judged on path components so a sibling like ``…/1.0.0-evil`` can never pass
-    as a member of ``…/1.0.0``.
-
-    A frozen tree is still not a closure while the interpreter can resolve code
-    from somewhere else entirely, so ``interpreter_argv_prefix`` freezes the
-    fixed option tokens that close its out-of-closure search. It is required and
-    non-empty: an interpreter with no way to close that search cannot honestly
-    carry a wrapped contract, and this field is where that question has to be
-    answered rather than assumed. The tokens are options only — never a path,
-    never caller or environment input — they ride in ``adapter_contract_hash``,
-    and :class:`AgentProfile` refuses any argv that does not begin with exactly
-    them.
-    """
-
-    interpreter_path: str
-    interpreter_sha256: str
-    adapter_entry_path: str
-    adapter_entry_sha256: str
-    # Declared with defaults so an omission is a typed, fail-closed contract
-    # refusal rather than a constructor TypeError; all three are required.
-    adapter_package_root: str | None = None
-    adapter_tree_sha256: str | None = None
-    interpreter_argv_prefix: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        self._validate_interpreter_argv_prefix()
-        for name in ("interpreter_path", "adapter_entry_path", "adapter_package_root"):
-            value = getattr(self, name)
-            if value is None:
-                raise ProfileValidationError(
-                    f"{name} is required: a wrapped adapter freezes its complete "
-                    "package closure, never its entry file alone"
-                )
-            if not isinstance(value, str) or not Path(value).is_absolute():
-                raise ProfileValidationError(f"{name} must be an absolute path")
-        for name in ("interpreter_sha256", "adapter_entry_sha256", "adapter_tree_sha256"):
-            value = getattr(self, name)
-            if value is None:
-                raise ProfileValidationError(
-                    f"{name} is required: a wrapped adapter freezes its complete "
-                    "package closure tree digest, never its entry digest alone"
-                )
-            if not _is_sha256_hex(value):
-                raise ProfileValidationError(f"{name} must be a sha256 hex digest")
-        if not path_within_root(self.adapter_package_root, self.adapter_entry_path):
-            raise ProfileValidationError(
-                "adapter_entry_path must be inside adapter_package_root"
-            )
-
-    def _validate_interpreter_argv_prefix(self) -> None:
-        prefix = self.interpreter_argv_prefix
-        if not isinstance(prefix, tuple) or not prefix:
-            raise ProfileValidationError(
-                "interpreter_argv_prefix is required: a wrapped contract must "
-                "freeze the option tokens that close its interpreter's "
-                "out-of-closure module search"
-            )
-        for token in prefix:
-            if not isinstance(token, str) or not token or not token.startswith("-"):
-                raise ProfileValidationError(
-                    "interpreter_argv_prefix accepts option tokens only"
-                )
-            if any(ch.isspace() for ch in token) or not token.isprintable():
-                # One argv token is one option. A token carrying whitespace
-                # would read as several in a report and as one on the wire.
-                raise ProfileValidationError(
-                    "interpreter_argv_prefix tokens carry no whitespace"
-                )
-        if len(set(prefix)) != len(prefix):
-            raise ProfileValidationError("duplicate interpreter_argv_prefix token")
-        if (
-            self.interpreter_path == str(_FROZEN_NODE)
-            and NODE_NO_GLOBAL_SEARCH_PATHS not in prefix
-        ):
-            raise ProfileValidationError(
-                f"the frozen Node interpreter requires {NODE_NO_GLOBAL_SEARCH_PATHS!r}: "
-                "its CommonJS global folders resolve outside every package root"
-            )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "interpreter_path": self.interpreter_path,
-            "interpreter_sha256": self.interpreter_sha256,
-            "interpreter_argv_prefix": list(self.interpreter_argv_prefix),
-            "adapter_entry_path": self.adapter_entry_path,
-            "adapter_entry_sha256": self.adapter_entry_sha256,
-            "adapter_package_root": self.adapter_package_root,
-            "adapter_tree_sha256": self.adapter_tree_sha256,
-        }
-
-
-@dataclass(frozen=True)
-class AdapterContract:
-    """The source-frozen adapter compatibility contract (PRD R13, C1).
-
-    It freezes ``launch_kind``, the accepted Binding schema and slot
-    projection, the ACP protocol/name plus required *and forbidden*
-    capabilities, the wrapped interpreter/adapter artifact identity, and the
-    code-owned version-probe rule. It freezes no downstream CLI path, version,
-    digest, or config-root value: those are Binding facts.
-    """
-
-    launch_kind: str
-    acp_agent_name: str
+    profile_id: str
+    revision: int
     acp_protocol_version: str
-    version_probe: VersionProbeRule
-    # The ACP-reported agent version, asserted only where it is itself a
-    # *source* artifact fact — a wrapped adapter whose entry digest this
-    # contract already freezes. ``None`` for ``direct_acp``, where
-    # ``agentInfo.version`` reports the deployed executable: freezing it would
-    # re-freeze a deployment fact, and it may never be asserted equal to a CLI
-    # ``--version``.
-    acp_agent_version: str | None = None
-    binding_slots: tuple[BindingSlot, ...] = ()
     required_capabilities: tuple[str, ...] = ("loadSession",)
+    # A floor, not a ceiling: a registry entry must forbid at least this and may
+    # forbid more. Empty means no capability has been observed to warrant it.
     forbidden_capabilities: tuple[str, ...] = ()
-    wrapped_runtime: WrappedRuntimeArtifacts | None = None
-    # Slot names that carry, respectively, the downstream CLI artifact and an
-    # ARS-managed credential root. Both are slot *names*, never values.
-    cli_slot: str | None = None
-    credential_root_slot: str | None = None
-    # Workspace project-config surface whose ancestor chain must stay clean.
-    project_config_relpath: str | None = None
-    # Whether this contract is instantiated per operator-owned Agent
-    # Registration (layer 1b) rather than frozen agent-by-agent in source.
-    # ``registration_schema_version`` is the accepted registration *shape*, and
-    # it rides inside ``adapter_contract_hash``: changing what a registration
-    # may say retires every registration accepted under the old hash, closed —
-    # the same C3 property a slot-schema change already has.
-    #
-    # Both are omit-when-default in ``to_dict()``, so a contract that is not
-    # registration-scoped hashes exactly as it did before the field existed.
-    requires_agent_registration: bool = False
-    registration_schema_version: int | None = None
+    requires_session_load: bool = True
+    base_allowlist: tuple[str, ...] = BASE_ENV_ALLOWLIST
+    # Selector-id *conventions*, not value domains. An entry may hint a
+    # different id; the live-advertised option set is the domain authority and
+    # exact readback is the proof.
+    model_selector_id: str = "model"
+    effort_selector_id: str = "effort"
+    # Declared together or not at all: a selector with no required literal
+    # proves nothing, and a required literal with no selector cannot be set.
+    permission_mode_selector_id: str | None = None
+    required_permission_mode: str | None = None
+    # Frozen ACP session metadata, stored as canonical JSON **text** so the
+    # value is deeply immutable by construction and hashes canonically. It is
+    # sent identically on ``session/new`` and ``session/load``: the agent
+    # rebuilds its underlying query from the load request, so omitting it there
+    # would silently restore ambient setting sources on every reused Session.
+    # There is no caller metadata surface anywhere; this is the only source.
+    session_meta: str | None = None
 
     def __post_init__(self) -> None:
-        if self.launch_kind not in LAUNCH_KINDS:
-            raise ProfileValidationError(f"unknown launch kind: {self.launch_kind!r}")
-        self._validate_agent_registration()
-        if not self.acp_agent_name:
-            raise ProfileValidationError("contract requires an ACP agent name")
+        if not self.profile_id or not isinstance(self.profile_id, str):
+            raise ProfileValidationError("profile_id must be a non-empty string")
+        if isinstance(self.revision, bool) or not isinstance(self.revision, int):
+            raise ProfileValidationError("revision must be an integer")
         if not self.acp_protocol_version.isdigit():
             raise ProfileValidationError("acp_protocol_version must be decimal text")
-        names = [slot.name for slot in self.binding_slots]
-        if len(names) != len(set(names)):
-            raise ProfileValidationError("duplicate binding slot name")
         overlap = set(self.required_capabilities) & set(self.forbidden_capabilities)
         if overlap:
             raise ProfileValidationError(
                 f"capability declared both required and forbidden: {sorted(overlap)}"
             )
-        artifact_slots = [
-            slot for slot in self.binding_slots if slot.kind in ARTIFACT_SLOT_KINDS
-        ]
-        if len(artifact_slots) > 1:
-            raise ProfileValidationError(
-                "a contract declares at most one external CLI artifact slot"
-            )
-        if self.cli_slot is not None and self.cli_slot not in names:
-            raise ProfileValidationError(f"cli_slot {self.cli_slot!r} is not declared")
-        if self.credential_root_slot is not None:
-            if self.credential_root_slot not in names:
-                raise ProfileValidationError(
-                    f"credential_root_slot {self.credential_root_slot!r} is not declared"
-                )
-            if self.slot(self.credential_root_slot).kind != SLOT_KIND_CONFIG_ROOT:
-                raise ProfileValidationError(
-                    "credential_root_slot must be a config_root slot"
-                )
-        if self.launch_kind == LAUNCH_KIND_DIRECT and self.acp_agent_version is not None:
-            raise ProfileValidationError(
-                "a direct_acp contract must not freeze the deployed agent version"
-            )
-        if self.launch_kind == LAUNCH_KIND_WRAPPED:
-            if self.wrapped_runtime is None:
-                raise ProfileValidationError(
-                    "a wrapped_acp contract must freeze its interpreter and adapter"
-                )
-            if artifact_slots and artifact_slots[0].kind != SLOT_KIND_PACKAGE_TREE:
-                raise ProfileValidationError(
-                    "a wrapped downstream CLI binds as a package_tree closure"
-                )
-            if artifact_slots and artifact_slots[0].env_key is None:
-                raise ProfileValidationError(
-                    "a wrapped downstream CLI slot must fill a code-known env key"
-                )
-        else:
-            if self.wrapped_runtime is not None:
-                raise ProfileValidationError(
-                    "a direct_acp contract freezes no wrapped interpreter/adapter"
-                )
-            if artifact_slots and not artifact_slots[0].provides_executable:
-                raise ProfileValidationError(
-                    "a direct_acp artifact slot must provide the executable"
-                )
-
-    def _validate_agent_registration(self) -> None:
-        """The flag and the accepted registration shape are declared together.
-
-        One without the other would leave either a registration-scoped contract
-        that never says which shape it accepts, or a version integer that
-        silently rides in the contract hash while nothing reads it.
-        """
-        if not isinstance(self.requires_agent_registration, bool):
-            raise ProfileValidationError(
-                "requires_agent_registration must be a bool"
-            )
-        version = self.registration_schema_version
-        if self.requires_agent_registration:
-            if isinstance(version, bool) or not isinstance(version, int) or version <= 0:
-                raise ProfileValidationError(
-                    "a registration-scoped contract must declare a positive "
-                    "registration_schema_version"
-                )
-        elif version is not None:
-            raise ProfileValidationError(
-                "registration_schema_version is declared only by a "
-                "registration-scoped contract"
-            )
-
-    @property
-    def requires_binding(self) -> bool:
-        return bool(self.binding_slots)
-
-    def slot(self, name: str) -> BindingSlot:
-        for slot in self.binding_slots:
-            if slot.name == name:
-                return slot
-        raise UnknownProfileError(f"unknown binding slot: {name!r}")
-
-    def executable_slot(self) -> BindingSlot | None:
-        for slot in self.binding_slots:
-            if slot.provides_executable:
-                return slot
-        return None
-
-    def to_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "launch_kind": self.launch_kind,
-            "acp_agent_name": self.acp_agent_name,
-            "acp_protocol_version": self.acp_protocol_version,
-            "acp_agent_version": self.acp_agent_version,
-            "version_probe": self.version_probe.to_dict(),
-            "binding_slots": [slot.to_dict() for slot in self.binding_slots],
-            "required_capabilities": list(self.required_capabilities),
-            "forbidden_capabilities": list(self.forbidden_capabilities),
-            "cli_slot": self.cli_slot,
-            "credential_root_slot": self.credential_root_slot,
-            "project_config_relpath": self.project_config_relpath,
-        }
-        if self.wrapped_runtime is not None:
-            payload["wrapped_runtime"] = self.wrapped_runtime.to_dict()
-        # Omit-when-default, exactly like ``wrapped_runtime`` above: the three
-        # live contracts must keep byte-identical ``adapter_contract_hash``
-        # values, because every promoted generation is closed against them.
-        if self.requires_agent_registration:
-            payload["requires_agent_registration"] = True
-            payload["registration_schema_version"] = self.registration_schema_version
-        return payload
-
-
-@dataclass(frozen=True)
-class AgentProfile:
-    profile_id: str
-    revision: int
-    executable_key: str
-    argv_template: tuple[str, ...]
-    env_allowlist: tuple[str, ...]
-    credential_slots: tuple[str, ...]
-    model_selector_id: str
-    effort_selector_id: str
-    default_model: str
-    default_effort: str
-    # Closed, registered value domains for the typed config selectors: a
-    # request outside them is refused at admission (live advertisement checks
-    # then gate the run itself).
-    registered_models: tuple[str, ...]
-    allowed_efforts: tuple[str, ...]
-    requires_session_load: bool
-    config_schema: Mapping[str, Any]
-    # The source-frozen adapter compatibility contract (PRD R13 layer 1). It
-    # owns launch kind, accepted Binding shape, ACP identity/capabilities, the
-    # wrapped interpreter/adapter artifacts, and the version-probe rule.
-    contract: AdapterContract
-    # Profile-owned frozen launch environment, deeply immutable and injected
-    # only at spawn (D2). Empty for profiles that own no fixed environment.
-    # Deployment-specific values never live here: a Binding slot fills the
-    # code-known env key its contract declared.
-    fixed_env: tuple[tuple[str, str], ...] = ()
-    # Exact caller credential references this profile admits (D11). ``None``
-    # means unconstrained, preserving legacy behavior.
-    required_credential_refs: tuple[str, ...] | None = None
-    # Profile-frozen ACP permission mode (B4): the config selector id and the
-    # exact literal every Run must prove by readback before it may prompt.
-    # ``None``/``None`` means the profile freezes no permission mode and the
-    # legacy two-selector fidelity sequence applies unchanged.
-    permission_mode_selector_id: str | None = None
-    required_permission_mode: str | None = None
-    # Profile-owned frozen ACP session metadata (B5): the exact ``_meta``
-    # argument sent on ``session/new`` *and* ``session/load``, stored as
-    # canonical JSON **text** so the value is deeply immutable by construction
-    # and hashes canonically. ``None`` means the profile owns no metadata and
-    # the argument is omitted entirely (legacy wire frames stay byte-identical).
-    # There is no caller metadata surface anywhere: this is the only source.
-    session_meta: str | None = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.contract, AdapterContract):
-            raise ProfileValidationError("profile requires an AdapterContract")
+        if self.model_selector_id == self.effort_selector_id:
+            raise ProfileValidationError("the two selector ids must be distinct")
+        self._validate_protocol_generation()
         self._validate_permission_mode()
         self._validate_session_meta()
-        self._validate_fixed_env()
-        self._validate_contract_binding()
-        self._validate_protocol_generation()
-        self._validate_agent_registration_scope()
-        if self.required_credential_refs is not None:
-            for ref in self.required_credential_refs:
-                if not isinstance(ref, str) or not ref:
-                    raise ProfileValidationError(
-                        "required_credential_refs entries must be non-empty strings"
-                    )
+        self._validate_mediation_disjointness()
+
+    def _validate_protocol_generation(self) -> None:
+        """A versioned profile id carries its ACP major, exactly.
+
+        The id, not the revision, carries the protocol generation, so a revision
+        bump cannot turn a v1 contract into a v2 one and a future v2 is a
+        different id — hence different registry entries and a different Session
+        domain. Isolation is structural rather than a rule to remember.
+        """
+        match = _PROTOCOL_GENERATION_RE.fullmatch(self.profile_id)
+        if match is None:
+            return
+        expected = match.group(1)
+        if self.acp_protocol_version != expected:
+            raise ProfileValidationError(
+                f"profile id {self.profile_id!r} declares ACP protocol generation "
+                f"{expected!r} but freezes {self.acp_protocol_version!r}"
+            )
 
     def _validate_permission_mode(self) -> None:
         selector = self.permission_mode_selector_id
@@ -698,9 +256,7 @@ class AgentProfile:
             if not isinstance(value, str) or not value:
                 raise ProfileValidationError(f"{name} must be a non-empty string")
             if not all(ch.isprintable() for ch in value):
-                raise ProfileValidationError(
-                    f"{name} contains non-printable characters"
-                )
+                raise ProfileValidationError(f"{name} contains non-printable characters")
 
     def _validate_session_meta(self) -> None:
         value = self.session_meta
@@ -720,14 +276,28 @@ class AgentProfile:
             raise ProfileValidationError("session_meta must be a JSON object")
         if _canonical_json(parsed) != value:
             raise ProfileValidationError(
-                "session_meta must equal its canonical re-serialization byte "
-                "for byte"
+                "session_meta must equal its canonical re-serialization byte for byte"
             )
         for key in parsed:
             if not isinstance(key, str) or not key:
                 raise ProfileValidationError(
                     "session_meta top-level keys must be non-empty strings"
                 )
+
+    def _validate_mediation_disjointness(self) -> None:
+        """One environment key never has two owners.
+
+        A base-allowlist name that is also a reserved mediation key would let an
+        ambient value and a source-owned pair claim the same variable. Asserted
+        at construction so the two tables cannot drift apart silently.
+        """
+        collisions = sorted(set(self.base_allowlist) & RESERVED_MEDIATION_KEYS)
+        if collisions:
+            raise ProfileValidationError(
+                f"base allowlist collides with reserved mediation keys: {collisions}"
+            )
+
+    # -- frozen session metadata ------------------------------------------
 
     def session_meta_payload(self) -> dict[str, Any] | None:
         """A fresh deep copy of the frozen metadata, or ``None``.
@@ -739,189 +309,30 @@ class AgentProfile:
             return None
         return json.loads(self.session_meta)
 
-    def _validate_fixed_env(self) -> None:
-        seen: set[str] = set()
-        for pair in self.fixed_env:
-            if not isinstance(pair, tuple) or len(pair) != 2:
-                raise ProfileValidationError("fixed_env entries must be (name, value)")
-            name, value = pair
-            if name in seen:
-                raise ProfileValidationError(f"duplicate fixed_env key: {name!r}")
-            seen.add(name)
-            if name not in _FIXED_ENV_ALLOWED_KEYS:
-                raise ProfileValidationError(f"fixed_env key {name!r} is not registered")
-            if not isinstance(value, str) or not value:
-                raise ProfileValidationError(
-                    f"fixed_env value for {name!r} must be a non-empty string"
-                )
-            if len(value) > _MAX_FIXED_ENV_VALUE_LENGTH:
-                raise ProfileValidationError(
-                    f"fixed_env value for {name!r} exceeds "
-                    f"{_MAX_FIXED_ENV_VALUE_LENGTH} characters"
-                )
-            if not all(ch.isprintable() for ch in value):
-                raise ProfileValidationError(
-                    f"fixed_env value for {name!r} contains non-printable characters"
-                )
-            if name == "CODEX_CONFIG":
-                try:
-                    parsed = json.loads(value)
-                except ValueError as exc:
-                    raise ProfileValidationError(
-                        "fixed_env CODEX_CONFIG must be valid JSON"
-                    ) from exc
-                if not isinstance(parsed, dict):
-                    raise ProfileValidationError(
-                        "fixed_env CODEX_CONFIG must be a JSON object"
-                    )
-                if _canonical_json(parsed) != value:
-                    raise ProfileValidationError(
-                        "fixed_env CODEX_CONFIG must equal its canonical "
-                        "re-serialization byte for byte"
-                    )
-            if name == "INITIAL_AGENT_MODE" and value not in _INITIAL_AGENT_MODES:
-                raise ProfileValidationError(
-                    f"fixed_env INITIAL_AGENT_MODE {value!r} is not registered"
-                )
-    def _validate_contract_binding(self) -> None:
-        """A Binding-filled env key is never also a source-frozen constant.
+    def session_meta_for(self, call: str) -> dict[str, Any] | None:
+        """The ``_meta`` argument for ``session/new`` or ``session/load``.
 
-        The contract declares which code-known env keys a Binding slot fills;
-        freezing the same key in ``fixed_env`` would give one launch variable
-        two authorities, and the source constant would silently win.
+        One accessor for both calls, because they must carry the identical
+        frozen metadata and a second code path is how they would stop.
         """
-        seen = {name for name, _ in self.fixed_env}
-        for slot in self.contract.binding_slots:
-            if slot.env_key is not None and slot.env_key in seen:
-                raise ProfileValidationError(
-                    f"fixed_env {slot.env_key!r} collides with binding slot "
-                    f"{slot.name!r}"
-                )
-        self._validate_wrapped_argv()
-        if (
-            self.contract.launch_kind == LAUNCH_KIND_DIRECT
-            and self.contract.requires_binding
-            and self.contract.executable_slot() is None
-        ):
-            raise ProfileValidationError(
-                "a direct_acp profile must bind its executable through a slot"
-            )
+        if call not in ("new", "load"):
+            raise UnknownProfileError(f"unknown session call: {call!r}")
+        return self.session_meta_payload()
 
-    def _validate_wrapped_argv(self) -> None:
-        """The declared interpreter prefix and the real argv cannot drift.
-
-        ``resolve_launch`` builds ``[interpreter, *argv_template]``, so the
-        contract's frozen option tokens are only actually passed to the
-        interpreter if they are literally the head of this profile's argv. Two
-        places could otherwise disagree — the contract could declare the flag
-        while the argv omitted it, and the attestation would then be proving a
-        prefix the child never received. The adapter entry is pinned to the
-        first position after the prefix for the same reason: a token wedged
-        between them would be an interpreter option this contract never froze.
-        """
-        wrapped = self.contract.wrapped_runtime
-        if wrapped is None:
-            return
-        prefix = wrapped.interpreter_argv_prefix
-        if tuple(self.argv_template[: len(prefix)]) != prefix:
-            raise ProfileValidationError(
-                "argv_template must begin with the contract's "
-                f"interpreter_argv_prefix {list(prefix)!r}"
-            )
-        entry_index = len(prefix)
-        if (
-            len(self.argv_template) <= entry_index
-            or self.argv_template[entry_index] != wrapped.adapter_entry_path
-        ):
-            raise ProfileValidationError(
-                "argv_template must carry the frozen adapter entry immediately "
-                "after the interpreter_argv_prefix"
-            )
-
-    def _validate_protocol_generation(self) -> None:
-        """Invariant 1: a versioned profile id carries its ACP major, exactly.
-
-        The id, not the revision, carries the protocol generation. A revision
-        bump therefore cannot turn a v1 contract into a v2 one, and a future v2
-        is a different id — hence a different registry entry, different
-        registrations, and a different Binding and Session domain. Isolation is
-        structural rather than a rule someone has to remember.
-        """
-        match = _PROTOCOL_GENERATION_RE.fullmatch(self.profile_id)
-        if match is None:
-            return
-        expected = match.group(1)
-        if self.contract.acp_protocol_version != expected:
-            raise ProfileValidationError(
-                f"profile id {self.profile_id!r} declares ACP protocol generation "
-                f"{expected!r} but its contract freezes "
-                f"{self.contract.acp_protocol_version!r}"
-            )
-
-    def _validate_agent_registration_scope(self) -> None:
-        """Invariants 2–4 for a registration-scoped profile.
-
-        Two authorities for one fact is the failure mode: whatever the profile
-        freezes here, the registration could not narrow, and source would win
-        silently. So a registration-scoped profile freezes none of it, owns no
-        source executable, and carries no profile-keyed mediation binding —
-        making the two mediation registries disjoint by construction rather than
-        by convention.
-        """
-        if not self.contract.requires_agent_registration:
-            return
-        owned_by_registration = (
-            ("model_selector_id", self.model_selector_id),
-            ("effort_selector_id", self.effort_selector_id),
-            ("default_model", self.default_model),
-            ("default_effort", self.default_effort),
-            ("registered_models", self.registered_models),
-            ("allowed_efforts", self.allowed_efforts),
-            ("argv_template", self.argv_template),
-            ("config_schema", self.config_schema),
-        )
-        for name, value in owned_by_registration:
-            if value:
-                raise ProfileValidationError(
-                    f"{name} is owned by the Agent Registration; a "
-                    "registration-scoped profile freezes none of it"
-                )
-        if self.executable_key in _REGISTERED_PERMISSION_ENV:
-            raise ProfileValidationError(
-                f"executable_key {self.executable_key!r} carries a profile-keyed "
-                "mediation binding; registration-selected and profile-keyed "
-                "mediation must never both apply"
-            )
-        if self.executable_key in _REGISTERED_EXECUTABLES:
-            raise ProfileValidationError(
-                f"executable_key {self.executable_key!r} names a source "
-                "executable; a registration-scoped profile takes its executable "
-                "from the contract's slot only"
-            )
+    # -- identity ----------------------------------------------------------
 
     def snapshot(self) -> dict[str, Any]:
-        # Additive fields are omit-when-empty/None so legacy rows keep
-        # byte-identical snapshots, profile hashes, and launch hashes.
         payload: dict[str, Any] = {
             "profile_id": self.profile_id,
             "revision": self.revision,
-            "executable_key": self.executable_key,
-            "argv_template": list(self.argv_template),
-            "env_allowlist": list(self.env_allowlist),
-            "credential_slots": list(self.credential_slots),
+            "acp_protocol_version": self.acp_protocol_version,
+            "required_capabilities": list(self.required_capabilities),
+            "forbidden_capabilities": list(self.forbidden_capabilities),
+            "requires_session_load": self.requires_session_load,
+            "base_allowlist": list(self.base_allowlist),
             "model_selector_id": self.model_selector_id,
             "effort_selector_id": self.effort_selector_id,
-            "default_model": self.default_model,
-            "default_effort": self.default_effort,
-            "registered_models": list(self.registered_models),
-            "allowed_efforts": list(self.allowed_efforts),
-            "requires_session_load": self.requires_session_load,
-            "config_schema": dict(self.config_schema),
         }
-        if self.fixed_env:
-            payload["fixed_env"] = [list(pair) for pair in self.fixed_env]
-        if self.required_credential_refs is not None:
-            payload["required_credential_refs"] = list(self.required_credential_refs)
         if self.permission_mode_selector_id is not None:
             payload["permission_mode_selector_id"] = self.permission_mode_selector_id
             payload["required_permission_mode"] = self.required_permission_mode
@@ -935,637 +346,178 @@ class AgentProfile:
     def profile_hash(self) -> str:
         return _sha256_hex(_canonical_json(self.snapshot()))
 
-    def config_schema_hash(self) -> str:
-        return _sha256_hex(_canonical_json(dict(self.config_schema)))
 
-    def contract_snapshot(self) -> dict[str, Any]:
-        """Everything the AdapterContract freezes, in one canonical projection.
-
-        The profile snapshot is included wholesale because argv construction,
-        code-known env keys, selectors, domains, permission mode, and frozen
-        session metadata are all contract semantics (C1). Profile ID and
-        revision ride along, so a revision bump necessarily changes the
-        contract hash and fails every prior Binding generation closed (C3).
-        """
-        return {"profile": self.snapshot(), "contract": self.contract.to_dict()}
-
-    def adapter_contract_hash(self) -> str:
-        return _sha256_hex(_canonical_json(self.contract_snapshot()))
-
-
-# A profile id may carry the ACP protocol generation it speaks. When it does,
-# the generation and the contract's frozen protocol version must agree.
-_PROTOCOL_GENERATION_RE = re.compile(r".*-v(\d+)")
+# ---------------------------------------------------------------------------
+# AgentInstance — one profile paired with one operator registry entry
+# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class AgentInstance:
-    """One profile as one agent — the seam every generic consumer asks.
+    """The seam every generic consumer asks: this profile, as this agent.
 
     Downstream code asks the *pair* for a fact and never asks which agent it is
-    holding. For the three legacy profiles ``registration`` is ``None`` and
-    every accessor returns the existing profile/contract value unchanged, so
-    there is no behavior change and no agent-name conditional anywhere on the
-    generic path.
-
-    The accessors are deliberately a closed, named set rather than a generic
-    ``getattr`` bridge: a fact that varies per agent has to be added here on
-    purpose, which is what keeps a registration from quietly acquiring
-    authority over something source still owns.
+    holding. The accessors are a closed, named set rather than a generic
+    ``getattr`` bridge, so a fact that varies per agent has to be added here on
+    purpose — which is what keeps an entry from quietly acquiring authority over
+    something source still owns.
     """
 
-    profile: AgentProfile
-    registration: Any = None
+    profile: AcpCompatProfile
+    entry: Any
 
     def __post_init__(self) -> None:
-        requires = self.profile.contract.requires_agent_registration
-        if requires and self.registration is None:
+        if self.entry is None:
             raise ProfileValidationError(
-                f"profile {self.profile.profile_id} requires an Agent Registration"
+                f"profile {self.profile.profile_id} runs only as a registered agent"
             )
-        if not requires and self.registration is not None:
+        if getattr(self.entry, "profile_id", None) != self.profile.profile_id:
             raise ProfileValidationError(
-                f"profile {self.profile.profile_id} accepts no Agent Registration"
+                "registry entry names a different profile than the one resolving it"
             )
 
-    # -- identity ---------------------------------------------------------
+    # -- identity ----------------------------------------------------------
 
     @property
-    def agent_id(self) -> str | None:
-        return None if self.registration is None else self.registration.agent_id
+    def agent_id(self) -> str:
+        return self.entry.agent_id
 
     @property
-    def agent_registration_hash(self) -> str | None:
-        if self.registration is None:
-            return None
-        return self.registration.registration_hash
-
-    # -- ACP identity -----------------------------------------------------
+    def profile_id(self) -> str:
+        return self.profile.profile_id
 
     @property
-    def acp_agent_name(self) -> str:
-        if self.registration is None:
-            return self.profile.contract.acp_agent_name
-        return self.registration.acp_agent_name
+    def session_epoch(self) -> int | None:
+        """Operator-controlled continuity, or ``None``. Never derived.
+
+        No code path anywhere increments or infers this: only an operator's edit
+        changes it, and ``None`` is not ``1``.
+        """
+        return self.entry.session_epoch
+
+    # -- launch ------------------------------------------------------------
 
     @property
-    def acp_agent_version(self) -> str | None:
-        # Always a source fact: a registration freezes no artifact identity, so
-        # it can never assert the version an ``initialize`` exchange must report.
-        return self.profile.contract.acp_agent_version
+    def command(self) -> str:
+        return self.entry.command
 
     @property
-    def acp_protocol_version(self) -> str:
-        # Contract-owned in both cases: the protocol major is the profile's
-        # explicit ACP generation and a registration cannot move it.
-        return self.profile.contract.acp_protocol_version
-
-    @property
-    def required_capabilities(self) -> tuple[str, ...]:
-        return self.profile.contract.required_capabilities
-
-    @property
-    def forbidden_capabilities(self) -> tuple[str, ...]:
-        if self.registration is None:
-            return self.profile.contract.forbidden_capabilities
-        return self.registration.forbidden_capabilities
-
-    # -- launch -----------------------------------------------------------
-
-    @property
-    def argv_tokens(self) -> tuple[str, ...]:
-        if self.registration is None:
-            return self.profile.argv_template
-        return self.registration.argv_tokens
+    def argv(self) -> tuple[str, ...]:
+        """``argv[0]`` is the declared command string, byte for byte."""
+        return self.entry.argv()
 
     @property
     def permission_env(self) -> tuple[tuple[str, str], ...]:
-        if self.registration is None:
-            return resolve_registered_permission_env(self.profile.executable_key)
-        return resolve_registered_mediation_binding(
-            self.registration.permission_binding_id
-        )
+        return mediation_pairs(self.entry.mediation_id)
 
     @property
-    def version_probe(self) -> VersionProbeRule:
-        if self.registration is None:
-            return self.profile.contract.version_probe
-        return self.registration.version_probe
+    def mediation_id(self) -> str | None:
+        return self.entry.mediation_id
 
-    # -- configuration ----------------------------------------------------
+    @property
+    def env_passthrough(self) -> tuple[str, ...]:
+        return self.entry.env_passthrough
+
+    @property
+    def env_overlay(self) -> tuple[tuple[str, str], ...]:
+        return self.entry.env_overlay
+
+    @property
+    def base_allowlist(self) -> tuple[str, ...]:
+        return self.profile.base_allowlist
+
+    # -- ACP contract ------------------------------------------------------
+
+    @property
+    def acp_protocol_version(self) -> str:
+        return self.profile.acp_protocol_version
+
+    @property
+    def required_capabilities(self) -> tuple[str, ...]:
+        return self.profile.required_capabilities
+
+    @property
+    def forbidden_capabilities(self) -> tuple[str, ...]:
+        """The profile floor raised by the entry's own narrowing."""
+        return tuple(
+            sorted(
+                set(self.profile.forbidden_capabilities)
+                | set(self.entry.forbidden_capabilities)
+            )
+        )
+
+    # -- configuration -----------------------------------------------------
 
     @property
     def model_selector_id(self) -> str:
-        if self.registration is None:
-            return self.profile.model_selector_id
-        return self.registration.model_selector_id
+        return self.entry.model_selector_id or self.profile.model_selector_id
 
     @property
     def effort_selector_id(self) -> str:
-        if self.registration is None:
-            return self.profile.effort_selector_id
-        return self.registration.effort_selector_id
+        return self.entry.effort_selector_id or self.profile.effort_selector_id
 
-    @property
-    def registered_models(self) -> tuple[str, ...]:
-        if self.registration is None:
-            return self.profile.registered_models
-        return self.registration.registered_models
 
-    @property
-    def allowed_efforts(self) -> tuple[str, ...]:
-        if self.registration is None:
-            return self.profile.allowed_efforts
-        return self.registration.allowed_efforts
-
-    # -- credentials ------------------------------------------------------
-
-    @property
-    def credential_slots(self) -> tuple[str, ...]:
-        if self.registration is None:
-            return self.profile.credential_slots
-        return self.registration.credential_slots
-
-    @property
-    def required_credential_refs(self) -> tuple[str, ...] | None:
-        if self.registration is None:
-            return self.profile.required_credential_refs
-        return self.registration.required_credential_refs
+# ---------------------------------------------------------------------------
+# The closed source registry
+# ---------------------------------------------------------------------------
 
 
 class ProfileRegistry:
     """Closed set of code-registered profiles; unknown IDs are errors."""
 
-    def __init__(self, profiles: Iterable[AgentProfile]) -> None:
-        registered: dict[str, AgentProfile] = {}
+    def __init__(self, profiles: Iterable[AcpCompatProfile]) -> None:
+        registered: dict[str, AcpCompatProfile] = {}
         for profile in profiles:
             if profile.profile_id in registered:
                 raise ValueError(f"duplicate profile id: {profile.profile_id!r}")
             registered[profile.profile_id] = profile
         self._profiles = registered
 
-    def get(self, profile_id: str) -> AgentProfile:
+    def get(self, profile_id: Any) -> AcpCompatProfile:
         try:
             return self._profiles[profile_id]
-        except KeyError:
+        except (KeyError, TypeError):
             raise UnknownProfileError(f"unknown profile id: {profile_id!r}") from None
 
     def ids(self) -> tuple[str, ...]:
         return tuple(sorted(self._profiles))
 
 
-# Revision 3 (C15): the stable ID ``opencode-native-acp`` replaces the retired
-# ``opencode-1.18.4`` with **no** compatibility alias — the old ID is simply an
-# unknown profile and is refused at admission. The version left the ID because
-# the executable's version is a Binding fact, not a source constant.
-#
-# Every identity/capability/selector constant below is a byte-copy of the
-# operator-run zero-prompt ACP discovery against the installed executable:
-# ``agentInfo`` OpenCode/1.18.5, protocol 1, ``loadSession`` advertised,
-# selectors ``model``/``effort``, and — after the exact model was set to
-# kimi-for-coding/k3 — the model-dependent effort domain low|high|max. The ACP
-# ``agentInfo.version`` and the CLI ``--version`` stay independent facts; the
-# CLI version is proven only by the contract's own probe at validate/promote,
-# and this profile asserts no equality between the two.
-#
-# Only the model whose model-dependent effort domain the discovery actually
-# observed is registered. ``deepseek/deepseek-v4-pro`` was registered at r2
-# under the retired 1.18.4 evidence; re-registering it here would freeze a
-# selector domain this discovery does not prove, so it stays out until its own
-# discovery exists.
-OPENCODE_NATIVE_ACP = AgentProfile(
-    profile_id="opencode-native-acp",
-    revision=3,
-    executable_key="opencode",
-    argv_template=("acp",),
-    env_allowlist=(
-        "HOME",
-        "PATH",
-        "LANG",
-        "LC_ALL",
-        "TERM",
-        "XDG_CACHE_HOME",
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
-    ),
-    credential_slots=("kimi-for-coding",),
-    model_selector_id="model",
-    effort_selector_id="effort",
-    default_model="kimi-for-coding/k3",
-    default_effort="max",
-    registered_models=("kimi-for-coding/k3",),
-    allowed_efforts=("low", "high", "max"),
+# The ACP-v1 conformance contract. It freezes conformance and nothing else: no
+# real agent's identity, capability, or selector constant appears here, because
+# every one of those is an operator fact carried by a registry entry.
+STANDARD_NATIVE_ACP_V1 = AcpCompatProfile(
+    profile_id="standard-native-acp-v1",
+    revision=1,
+    acp_protocol_version="1",
+    required_capabilities=("loadSession",),
+    forbidden_capabilities=(),
     requires_session_load=True,
-    config_schema={
-        "schema_version": 3,
-        "selectors": {
-            "model": {
-                "config_id": "model",
-                "type": "string",
-                "domain": ["kimi-for-coding/k3"],
-            },
-            "effort": {
-                "config_id": "effort",
-                "type": "string",
-                "domain": ["low", "high", "max"],
-            },
-        },
-    },
-    contract=AdapterContract(
-        launch_kind=LAUNCH_KIND_DIRECT,
-        acp_agent_name="OpenCode",
-        acp_protocol_version="1",
-        version_probe=VersionProbeRule(argv_suffix=("--version",)),
-        binding_slots=(
-            BindingSlot(
-                name="agent_cli",
-                kind=SLOT_KIND_NATIVE_BINARY,
-                provides_executable=True,
-            ),
-        ),
-        required_capabilities=("loadSession",),
-        # One executable is both the AGENT CLI and the ACP implementation, so a
-        # generation that also claimed an adapter-side capability would be
-        # describing a runtime this contract does not implement.
-        forbidden_capabilities=("terminal",),
-        cli_slot="agent_cli",
-    ),
 )
 
-# Revision 1: the official Codex ACP adapter 1.1.7 over downstream Codex CLI
-# 0.145.0, admitted as a closed profile whose every value is a byte-copy of the
-# operator-frozen install/discovery/runtime manifests.
+# The one profile whose *ACP behavior itself* deviates, with cited evidence.
 #
-# Landlock is load-bearing, version-bound debt: the canonical
-# ``CODEX_CONFIG`` below pins ``use_legacy_landlock`` because the adapter's
-# default bwrap sandbox was disqualified at discovery — the command reached the
-# Codex sandbox without ACP permission mediation and failed with a bwrap
-# loopback ``RTM_NEWADDR`` EPERM on this host. Any adapter, downstream CLI,
-# Node, or ``CODEX_CONFIG`` change requires a full new install → discovery →
-# permission-canary cycle, a profile revision bump, and review; there is no
-# silent fallback.
-#
-# Operational consequence of the D11a project-config closure: Codex workspaces
-# must live under an ancestor chain free of ``.codex/config.toml``, because any
-# such layer is a configuration surface this profile did not freeze and is
-# refused at every spawn boundary.
-#
-# Revision 2 (PR-B): the downstream Codex CLI path/version/digest and the
-# ``CODEX_HOME`` credential-root value left these constants for the
-# operator-owned Binding. Source keeps exactly what C9 assigns to it — the
-# frozen Node interpreter and the ACP adapter entry — plus the frozen
-# ``CODEX_CONFIG``/mode/browser environment, which are compatibility semantics
-# rather than deployment facts.
-#
-# Revision 3 (F-RUNTIME-BINDING-002): the frozen adapter identity became the
-# complete package closure. ``CODEX_ADAPTER_ROOT`` is the npm install root that
-# ``CODEX_ADAPTER_ENTRY`` lives inside, and its tree digest covers every file
-# the entry can reach — including the hoisted ``node_modules`` this adapter's
-# own package directory does not contain. The digest is a byte-copy measurement
-# of the operator-installed 1.1.7 tree; it is source-frozen artifact identity,
-# not a deployment fact, exactly like the entry digest beside it.
-CODEX_ADAPTER_ROOT = f"{ARTIFACT_MATERIALIZATION_PREFIX}/adapters/codex-acp/1.1.7"
-CODEX_ADAPTER_ENTRY = (
-    f"{CODEX_ADAPTER_ROOT}/node_modules/@agentclientprotocol/codex-acp/dist/index.js"
-)
-
-CODEX_ACP_1_1_7 = AgentProfile(
-    profile_id="codex-acp-1.1.7",
-    revision=3,
-    executable_key="codex-acp",
-    # [node, --no-global-search-paths, entry]: the frozen option tokens are the
-    # head of argv, so the child actually receives them, and profile
-    # construction refuses any argv that drifts from the contract's prefix.
-    argv_template=(NODE_NO_GLOBAL_SEARCH_PATHS, CODEX_ADAPTER_ENTRY),
-    env_allowlist=(
-        "HOME",
-        "PATH",
-        "LANG",
-        "LC_ALL",
-        "TERM",
-        "XDG_CACHE_HOME",
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
-    ),
-    fixed_env=(
-        ("CODEX_CONFIG", '{"features":{"use_legacy_landlock":true}}'),
-        ("INITIAL_AGENT_MODE", "read-only"),
-        ("NO_BROWSER", "1"),
-    ),
-    credential_slots=("codex-home-auth",),
-    required_credential_refs=("codex-home-auth",),
-    model_selector_id="model",
-    effort_selector_id="reasoning_effort",
-    default_model="gpt-5.6-sol",
-    default_effort="max",
-    registered_models=("gpt-5.6-sol",),
-    allowed_efforts=("max",),
+# ``settingSources: []`` removes the adapter default so no ambient user, project
+# or local settings file can define the underlying SDK's permission rules or
+# tool surface; the tools preset pins the built-in tool set explicitly. That is
+# the rule-source half of the defense. The frozen ``mode`` selector, proven by
+# exact readback before any prompt, is the other half — the adapter resolves its
+# initial mode through its own settings manager, a surface the frozen metadata
+# does not govern, and auto-allows tool calls in process while that mode is
+# permissive. Neither half alone is sufficient, so both are frozen here.
+CLAUDE_AGENT_ACP_COMPAT_V1 = AcpCompatProfile(
+    profile_id="claude-agent-acp-compat-v1",
+    revision=1,
+    acp_protocol_version="1",
+    required_capabilities=("loadSession",),
+    forbidden_capabilities=(),
     requires_session_load=True,
-    config_schema={
-        "schema_version": 1,
-        "selectors": {
-            "model": {
-                "config_id": "model",
-                "type": "string",
-                "domain": ["gpt-5.6-sol"],
-            },
-            "effort": {
-                "config_id": "reasoning_effort",
-                "type": "string",
-                "domain": ["max"],
-            },
-        },
-    },
-    contract=AdapterContract(
-        launch_kind=LAUNCH_KIND_WRAPPED,
-        acp_agent_name="@agentclientprotocol/codex-acp",
-        acp_protocol_version="1",
-        acp_agent_version="1.1.7",
-        version_probe=VersionProbeRule(argv_suffix=("--version",)),
-        binding_slots=(
-            BindingSlot(
-                name="downstream_cli",
-                kind=SLOT_KIND_PACKAGE_TREE,
-                env_key="CODEX_PATH",
-            ),
-            BindingSlot(
-                name="codex_home",
-                kind=SLOT_KIND_CONFIG_ROOT,
-                env_key="CODEX_HOME",
-            ),
-        ),
-        required_capabilities=("loadSession",),
-        # Population awaits this adapter's own capability discovery: nothing is
-        # forbidden that an operator-run initialize exchange has not observed.
-        forbidden_capabilities=(),
-        wrapped_runtime=WrappedRuntimeArtifacts(
-            interpreter_path=str(_FROZEN_NODE),
-            interpreter_sha256=(
-                "e237a2839d0cbdc9a9a2adda1a184afc0f5b20306ffbe923af5686550472d8a8"
-            ),
-            adapter_entry_path=CODEX_ADAPTER_ENTRY,
-            adapter_entry_sha256=(
-                "0deb6b820dfed8804cd76b16a50210fe12202e5e339b5edaa23f6987f1742e0a"
-            ),
-            adapter_package_root=CODEX_ADAPTER_ROOT,
-            adapter_tree_sha256=(
-                "6e78f0ed56a4ec40939153cb7c1505c31b92283ca9035feb65a994c70445a83d"
-            ),
-            interpreter_argv_prefix=(NODE_NO_GLOBAL_SEARCH_PATHS,),
-        ),
-        cli_slot="downstream_cli",
-        credential_root_slot="codex_home",
-        project_config_relpath=".codex/config.toml",
-    ),
-)
-
-# Revision 1: the official Claude ACP adapter 0.61.0 over the operator-installed
-# downstream Claude CLI, admitted as a closed profile whose every value is a
-# byte-copy of the operator-frozen discovery manifest. Revision 3 re-registers
-# the same shape against adapter 0.63.0 (below).
-#
-# ACP Opus alias distinction: ``claude-opus-5[1m]`` is the *direct Claude CLI*
-# author selector and is deliberately absent from the registered domain. A live
-# ACP ``session/set_config_option(model)`` on this adapter reads back
-# ``opus[1m]``, so the CLI-side string could never satisfy exact readback.
-#
-# The downstream CLI is bound only through profile-owned ``CLAUDE_CODE_EXECUTABLE``
-# (the adapter's own resolution order checks that variable first and otherwise
-# falls back to a bundled/PATH-resolved CLI). This profile freezes no ARS-managed
-# credential root: the Claude CLI owns its own credential storage, which ARS
-# neither manages, stages, nor inspects — so admission requires exactly zero
-# caller credential references.
-CLAUDE_ADAPTER_ROOT = (
-    f"{ARTIFACT_MATERIALIZATION_PREFIX}/adapters/claude-agent-acp/0.63.0"
-)
-CLAUDE_ADAPTER_ENTRY = (
-    f"{CLAUDE_ADAPTER_ROOT}"
-    "/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js"
-)
-
-# Revision 2 (PR-B): the downstream Claude CLI path/version/digest left these
-# constants for the operator-owned Binding. ``CLAUDE_CODE_EXECUTABLE`` is still
-# the only binding key the adapter honours, but the *value* is now projected
-# from the contract-declared ``downstream_cli`` slot instead of being frozen
-# here — so the profile still forbids a PATH-resolved or bundled fallback CLI
-# while the deployment fact belongs to the operator.
-#
-# Revision 3: the registered adapter is 0.63.0. There is no 0.61.0 alias — the
-# stable ID moves outright, exactly as the OpenCode ID did. A fresh zero-prompt
-# ACP discovery against the installed 0.63.0 adapter (initialize → session/new
-# → set mode/model/effort with exact readback → session/load) observed
-# ``agentInfo`` ``@agentclientprotocol/claude-agent-acp`` 0.63.0, protocol 1,
-# ``loadSession`` advertised, and byte-identical ``mode``/``model``/``effort``
-# select domains, so every compatibility literal below is retained as observed
-# and only the version-bound ones move.
-#
-# ``adapter_entry_sha256`` deliberately does NOT change: ``dist/index.js`` is a
-# launcher whose bytes are identical in 0.61.0 and 0.63.0, while the siblings it
-# imports and the ``package.json`` it reads its version from are what moved. The
-# entry path was therefore the only artifact identity here that separated the
-# two adapter versions.
-#
-# Revision 4 (F-RUNTIME-BINDING-002) closes that gap rather than recording it:
-# ``adapter_tree_sha256`` is the digest of the whole install root, so the
-# 350 KB ``./acp-agent.js`` the 3 KB entry imports, the ``../package.json`` it
-# reads its version from, and the hoisted ``@anthropic-ai/claude-agent-sdk`` it
-# resolves by walking up to ``<install root>/node_modules`` are all frozen. Two
-# adapter versions can no longer share an artifact identity.
-CLAUDE_AGENT_ACP_0_63_0 = AgentProfile(
-    profile_id="claude-agent-acp-0.63.0",
-    revision=4,
-    executable_key="claude-agent-acp",
-    argv_template=(NODE_NO_GLOBAL_SEARCH_PATHS, CLAUDE_ADAPTER_ENTRY),
-    env_allowlist=(
-        "HOME",
-        "PATH",
-        "LANG",
-        "LC_ALL",
-        "TERM",
-        "XDG_CACHE_HOME",
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
-    ),
-    fixed_env=(("NO_BROWSER", "1"),),
-    credential_slots=(),
-    required_credential_refs=(),
-    model_selector_id="model",
-    effort_selector_id="effort",
-    default_model="opus[1m]",
-    default_effort="max",
-    registered_models=("claude-fable-5[1m]", "opus[1m]"),
-    allowed_efforts=("max",),
-    requires_session_load=True,
-    # The adapter resolves its INITIAL permission mode from ambient Claude
-    # settings through its own settings manager — a surface the frozen session
-    # metadata's ``settingSources: []`` does not govern — and auto-allows tool
-    # calls in-process while that mode is ``bypassPermissions``. The mode is
-    # therefore frozen as a config selector and proven by readback before any
-    # prompt, so the frozen grant is always the deciding authority.
     permission_mode_selector_id="mode",
     required_permission_mode="default",
-    # Frozen ACP session metadata sent on session/new AND session/load.
-    # ``settingSources: []`` removes the adapter default
-    # ``["user","project","local"]`` so no ambient user/project/local settings
-    # file can define the underlying SDK's permission rules or tool surface;
-    # the tools preset pins the built-in tool set explicitly. This is the
-    # rule-source half of the B4/B5 defense — the frozen ``mode`` selector is
-    # the other half, and neither alone is sufficient.
     session_meta=(
         '{"claudeCode":{"options":{"settingSources":[],'
         '"tools":{"preset":"claude_code","type":"preset"}}}}'
     ),
-    config_schema={
-        "schema_version": 1,
-        "selectors": {
-            "model": {
-                "config_id": "model",
-                "type": "string",
-                "domain": ["claude-fable-5[1m]", "opus[1m]"],
-            },
-            "effort": {
-                "config_id": "effort",
-                "type": "string",
-                "domain": ["max"],
-            },
-            "permission_mode": {
-                "config_id": "mode",
-                "type": "string",
-                "domain": ["default"],
-            },
-        },
-    },
-    contract=AdapterContract(
-        launch_kind=LAUNCH_KIND_WRAPPED,
-        acp_agent_name="@agentclientprotocol/claude-agent-acp",
-        acp_protocol_version="1",
-        acp_agent_version="0.63.0",
-        version_probe=VersionProbeRule(argv_suffix=("--version",)),
-        binding_slots=(
-            BindingSlot(
-                name="downstream_cli",
-                kind=SLOT_KIND_PACKAGE_TREE,
-                env_key="CLAUDE_CODE_EXECUTABLE",
-            ),
-        ),
-        required_capabilities=("loadSession",),
-        # Population awaits this adapter's own capability discovery.
-        forbidden_capabilities=(),
-        wrapped_runtime=WrappedRuntimeArtifacts(
-            interpreter_path=str(_FROZEN_NODE),
-            interpreter_sha256=(
-                "e237a2839d0cbdc9a9a2adda1a184afc0f5b20306ffbe923af5686550472d8a8"
-            ),
-            adapter_entry_path=CLAUDE_ADAPTER_ENTRY,
-            adapter_entry_sha256=(
-                "260aac90bf75f197b93640087c1de66441761d43c2784efa035fdcee60b5dacd"
-            ),
-            adapter_package_root=CLAUDE_ADAPTER_ROOT,
-            adapter_tree_sha256=(
-                "7c7958a24b96cc8510506e37b91e1ad37dcdef546bfcaaae025ffe9a1ba4ac2a"
-            ),
-            interpreter_argv_prefix=(NODE_NO_GLOBAL_SEARCH_PATHS,),
-        ),
-        cli_slot="downstream_cli",
-        # The Claude CLI owns its own credential storage, which ARS neither
-        # manages, stages, nor inspects — so no credential-root slot exists.
-        credential_root_slot=None,
-        project_config_relpath=None,
-    ),
 )
 
-# The versioned standard Native ACP profile: one source contract for every
-# standards-conforming direct-ACP agent, instantiated per operator-owned Agent
-# Registration rather than frozen agent by agent.
-#
-# It freezes ACP-v1 *conformance* and nothing else. What it does freeze is
-# shared by construction across conforming agents — launch kind, the accepted
-# Binding slot schema, the code-known env key set, ``loadSession`` as a
-# requirement, the real-session-load rule, the code-owned probe rule, and the
-# protocol major itself. What varies per agent — ACP name, argv tokens, selector
-# ids and their value domains, the capabilities to narrow, which mediation
-# binding applies, which credential slots exist — is exactly what the
-# registration supplies, always by selecting inside or narrowing a bound
-# declared here.
-#
-# ``-v1`` is load-bearing. The id carries the ACP protocol generation, profile
-# construction refuses any contract whose frozen protocol disagrees with it, and
-# a future ``standard-native-acp-v2`` is therefore a separate profile with its
-# own registrations, Bindings, and Sessions — never a revision of this one.
-#
-# ``standard-native-acp`` appears in neither ``_REGISTERED_EXECUTABLES`` nor
-# ``_REGISTERED_PERMISSION_ENV``: the executable can only arrive through the
-# ``agent_cli`` slot, and mediation can only arrive through a registration's
-# selection from ``_REGISTERED_MEDIATION_BINDINGS``.
-#
-# No real agent's identity, capability, or selector constant is frozen here.
-# Registering a real agent against this profile is an operator action — install
-# the artifact, run zero-prompt ACP discovery, run the mandatory denied-action
-# mediation canary, author the registration, validate and promote a generation —
-# and each of those is a separate decision this source change does not make.
-STANDARD_NATIVE_ACP_V1 = AgentProfile(
-    profile_id="standard-native-acp-v1",
-    revision=1,
-    executable_key="standard-native-acp",
-    argv_template=(),
-    env_allowlist=(
-        "HOME",
-        "PATH",
-        "LANG",
-        "LC_ALL",
-        "TERM",
-        "XDG_CACHE_HOME",
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
-    ),
-    credential_slots=(),
-    model_selector_id="",
-    effort_selector_id="",
-    default_model="",
-    default_effort="",
-    registered_models=(),
-    allowed_efforts=(),
-    requires_session_load=True,
-    config_schema={},
-    contract=AdapterContract(
-        launch_kind=LAUNCH_KIND_DIRECT,
-        # A placeholder ACP name would be asserted against a real
-        # ``initialize`` response and fail every Run, so the contract carries
-        # the profile's own identity and the registration supplies the name the
-        # agent actually reports.
-        acp_agent_name="standard-native-acp",
-        acp_protocol_version="1",
-        version_probe=VersionProbeRule(argv_suffix=("--version",)),
-        binding_slots=(
-            BindingSlot(
-                name="agent_cli",
-                kind=SLOT_KIND_NATIVE_BINARY,
-                provides_executable=True,
-            ),
-        ),
-        required_capabilities=("loadSession",),
-        # A floor, not a ceiling: a registration must forbid at least this and
-        # may forbid more. Empty here because forbidding a capability without
-        # that agent's own discovery evidence would be a claim about a runtime
-        # this contract has not observed.
-        forbidden_capabilities=(),
-        cli_slot="agent_cli",
-        credential_root_slot=None,
-        project_config_relpath=None,
-        requires_agent_registration=True,
-        registration_schema_version=1,
-    ),
-)
-
-DEFAULT_REGISTRY = ProfileRegistry(
-    (
-        OPENCODE_NATIVE_ACP,
-        CODEX_ACP_1_1_7,
-        CLAUDE_AGENT_ACP_0_63_0,
-        STANDARD_NATIVE_ACP_V1,
-    )
-)
+DEFAULT_REGISTRY = ProfileRegistry((STANDARD_NATIVE_ACP_V1, CLAUDE_AGENT_ACP_COMPAT_V1))

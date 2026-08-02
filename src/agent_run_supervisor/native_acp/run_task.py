@@ -33,6 +33,7 @@ from agent_run_supervisor.exit_classifier import _RETRYABLE_DEFAULT, AgentRunSta
 from agent_run_supervisor.managed_process import (
     ManagedExit,
     ManagedProcess,
+    ManagedProcessError,
     ManagedProcessLimits,
     spawn_managed_process,
 )
@@ -69,7 +70,7 @@ from agent_run_supervisor.session import (
 )
 
 from . import storage
-from .attestation import AttestationRefusal, attest_spawn_boundary
+from .agent_registration import AgentEntry
 from .client import NativeAcpClient
 from .config_fidelity import ConfigFidelityError, ConfigFidelityMachine
 from .driver import (
@@ -80,14 +81,19 @@ from .driver import (
 )
 from .event_writer import EventWriter, EventWriterOverflow
 from .events import NativeAcpEventNormalizer
+from .observation import (
+    InitializeObservation,
+    judge_initialize,
+    observation_from_record,
+)
 from .permissions import MediationEvent, PermissionBridge
 from .profile import DEFAULT_REGISTRY, ProfileRegistry
-from .runtime_binding import AdmittedRuntimeBinding
 from .spec import (
     AgentRunRequest,
-    EffectiveRunState,
+    ObservedRuntime,
     NativeSpecError,
     RunSpecAssembler,
+    resolve_run_environment,
     spec_hash,
 )
 
@@ -96,10 +102,6 @@ PROMPT_ACCEPTED_MARKER = "prompt-accepted"
 
 # The only thing an allowed-but-failed workspace read is ever allowed to say.
 FS_READ_FAILED = "FS_READ_FAILED"
-
-# Recorded-only expectation marker for a fact the contract deliberately does
-# not freeze, so the report never shows an empty expectation as a silent pass.
-_OBSERVED_ONLY = "observed-only"
 
 
 class NativeRunTaskError(RuntimeError):
@@ -366,7 +368,10 @@ class _RunContext:
     instance: Any = None
     driver: NativeAcpDriver | None = None
     machine: ConfigFidelityMachine | None = None
-    effective: EffectiveRunState = field(default_factory=EffectiveRunState)
+    effective: ObservedRuntime = field(default_factory=ObservedRuntime)
+    # The same Session's earlier ``initialize`` observation, when one exists.
+    # Read *only* to emit drift warnings: it can never change a verdict.
+    previous_observation: Any = None
     effective_written: bool = False
     dispatch_started: bool = False
     # Wire-order delivery ordinal of session/update callbacks (one per
@@ -418,7 +423,7 @@ class RunTask:
         retry_of_run_id: str | None = None,
         cwd: str | None = None,
         prepared_handle: RunHandle | None = None,
-        runtime_binding: AdmittedRuntimeBinding | None = None,
+        agent_entry: AgentEntry | None = None,
     ) -> None:
         if supervisor_root is not None:
             session_store = storage.native_session_store(supervisor_root)
@@ -481,10 +486,15 @@ class RunTask:
         self._submitted_at = submitted_at or _utc_now_iso()
         self._retry_of_run_id = retry_of_run_id
         self._cwd = cwd
-        # Admission already performed the single per-Run Binding read; this is
-        # its result carried as a value. RunTask never opens a Binding root,
-        # so spawn, finalization, and reconciliation have no read path at all.
-        self._runtime_binding = runtime_binding
+        # Admission already resolved this Run's agent against the immutable
+        # startup snapshot; this is that entry, carried as a value. RunTask
+        # never opens the registry, so spawn, finalization, and reconciliation
+        # have no read path at all.
+        if agent_entry is None:
+            raise NativeRunTaskError(
+                "RunTask requires the agent registry entry admission resolved"
+            )
+        self._agent_entry = agent_entry
 
     # -- public entry ------------------------------------------------------
 
@@ -557,62 +567,37 @@ class RunTask:
     # -- drive -------------------------------------------------------------
 
     async def _drive(self, ctx: _RunContext) -> None:
-        spec, launch, binding, instance = self._admit(ctx)
+        spec, launch, binding, instance, environment = self._admit(ctx)
         limits = spec.limits
 
-        # The final projected environment is resolved exactly once here and the
-        # very same mapping is both guarded and handed to the child, so the
-        # guard's literal set can never disagree with what the child received.
-        spawn_env = self._spawn_env(launch)
-        ctx.guard = RunTextGuard.from_environment(spawn_env)
+        # The final projected environment was resolved exactly once during
+        # admission, and the very same carrier is both guarded and handed to the
+        # child — so the guard's literal set can never disagree with what the
+        # child received, and no ambient re-read happens at spawn.
+        ctx.guard = RunTextGuard.from_environment(environment)
         ctx.log_binding = safe_logging.bind_run_guard(ctx.guard, run_id=self._run_id)
         ctx.final_message_acc.guard = ctx.guard
 
-        plan = self._bind_session(ctx, spec, binding, instance, launch)
-
-        # Identity-pinned profiles attest the spawn boundary here: after the
-        # session is bound and immediately before the child is created, so the
-        # artifacts, credential-root structure, and configuration surfaces are
-        # verified on both sides of the deterministic race window. Profiles
-        # without an expected runtime take no call and write no artifact.
-        interpreter_fd: int | None = None
-        if launch.expected_runtime is not None:
-            assert self._runtime_binding is not None
-            try:
-                attestation = attest_spawn_boundary(
-                    expected=launch.expected_runtime,
-                    launch=launch,
-                    fixed_env=dict(launch.fixed_env),
-                    effective_cwd=binding.effective_cwd,
-                    run_dir=ctx.handle.run_dir,
-                    ownership=self._runtime_binding.ownership,
-                )
-            except AttestationRefusal as refusal:
-                raise _PreDispatchFailure(refusal.message, refusal.code) from refusal
-            interpreter_fd = attestation.exec_fd
+        plan = self._bind_session(ctx, spec, binding, instance)
 
         try:
-            try:
-                ctx.proc = await spawn_managed_process(
-                    argv=list(launch.argv),
-                    cwd=Path(binding.effective_cwd),
-                    env=spawn_env,
-                    limits=ManagedProcessLimits(
-                        max_stderr_bytes=limits.max_stderr_bytes,
-                        cancel_grace_seconds=limits.cancel_grace_seconds,
-                    ),
-                    interpreter_fd=interpreter_fd,
-                )
-            except Exception as exc:
-                # A spawn failure is a known class with a stable code; the OS
-                # error text names the image path and errno detail and is never
-                # interpolated into a projectable reason.
-                raise _PreDispatchFailure("spawn failed", "SPAWN_FAILED") from exc
-        finally:
-            # The exec'd child inherited its own copy; the supervisor never
-            # keeps the pin, on success or failure.
-            if interpreter_fd is not None:
-                os.close(interpreter_fd)
+            ctx.proc = await spawn_managed_process(
+                argv=list(launch.argv),
+                cwd=Path(binding.effective_cwd),
+                env=environment,
+                limits=ManagedProcessLimits(
+                    max_stderr_bytes=limits.max_stderr_bytes,
+                    cancel_grace_seconds=limits.cancel_grace_seconds,
+                ),
+            )
+        except ManagedProcessError as exc:
+            # The exec failure ARS observed, classified. Read as an ordinary
+            # configuration error — never a security refusal — and carried as a
+            # stable code, because the OS error text names the declared image
+            # path and is never interpolated into a projectable reason.
+            raise _PreDispatchFailure("spawn failed", exc.code) from exc
+        except Exception as exc:
+            raise _PreDispatchFailure("spawn failed", "SPAWN_FAILED") from exc
         assert ctx.lock is not None and ctx.session_id is not None
         self._session_store.update_lock_holder(
             ctx.session_id,
@@ -622,6 +607,11 @@ class RunTask:
             reclaimable=False,
         )
         ctx.effective.process_identity = ctx.proc.identity
+        # Resolution facts, recorded with ``authoritative: false``. ARS performs
+        # no pre-flight resolution and no ownership, mode, ancestor, symlink, or
+        # digest check, so nothing here has anything to be compared to.
+        ctx.effective.declared_command = instance.command
+        ctx.effective.resolved_argv = tuple(launch.argv)
 
         # Architecture §8 native layout: the Run's event stream is events.jsonl.
         ctx.writer = EventWriter(
@@ -675,13 +665,27 @@ class RunTask:
         await self._dispatch(ctx, limits.turn_timeout_seconds)
 
     def _admit(self, ctx: _RunContext):
+        """Resolve, bind, project the environment once, then seal — in that order.
+
+        The environment is resolved here, before the Spec is sealed and before
+        the child exists, so the sealed launch snapshot describes exactly which
+        names and precedence were handed to exec with no window in which the
+        daemon's own environment could change in between.
+        """
         try:
             assembler = RunSpecAssembler(self._request)
-            profile = assembler.resolve_profile(self._registry)
+            instance = assembler.resolve_agent(
+                self._agent_entry, registry=self._registry
+            )
             binding = assembler.bind_workspace(
                 root=self._workspace_root, cwd=self._cwd
             )
-            launch = assembler.resolve_launch(runtime=self._runtime_binding)
+            environment = resolve_run_environment(
+                arsd_env=dict(os.environ),
+                profile=instance.profile,
+                entry=self._agent_entry,
+            )
+            launch = assembler.resolve_launch(environment=environment)
             spec = assembler.seal(
                 run_id=self._run_id,
                 submitted_at=self._submitted_at,
@@ -689,8 +693,6 @@ class RunTask:
             )
         except NativeSpecError as exc:
             raise _PreDispatchFailure(f"admission failed: {exc}", "ADMISSION") from exc
-        instance = assembler.instance
-        assert instance is not None  # resolve_launch always produces one
         spec_payload = spec.to_dict()
         spec_payload["spec_hash"] = spec_hash(spec)
         storage.write_once_json(ctx.handle.run_dir / "spec.json", spec_payload)
@@ -698,10 +700,10 @@ class RunTask:
         launch_payload["launch_spec_hash"] = launch.launch_hash()
         storage.write_once_json(ctx.handle.run_dir / "launch.json", launch_payload)
         self._spec = spec
-        return spec, launch, binding, instance
+        return spec, launch, binding, instance, environment
 
     def _bind_session(
-        self, ctx: _RunContext, spec, binding, instance, launch
+        self, ctx: _RunContext, spec, binding, instance
     ) -> SessionStartPlan:
         """Derive the closed start plan from the immutable reuse intent (B1).
 
@@ -711,30 +713,31 @@ class RunTask:
         request that cannot produce a ``LoadSessionPlan`` fails here, before
         the lease and before any spawn.
         """
-        # The Binding era this Run was sealed under (C11). Both are ``None``
-        # for a profile whose contract accepts no Binding, so such a Session
-        # keeps its exact pre-epoch shape and its exact reuse semantics.
-        provenance = launch.runtime_provenance
-        contract_hash = provenance.adapter_contract_hash if provenance else None
-        epoch = provenance.session_compatibility_epoch if provenance else None
+        # The operator's own continuity epoch, or ``None``. Nothing derives it:
+        # absent is not 1, and only an operator's registry edit changes it.
+        epoch = instance.session_epoch
         if spec.session.reuse == "reuse":
             plan: SessionStartPlan = self._plan_reuse_session(
-                ctx, spec, binding, instance, contract_hash, epoch
+                ctx, spec, binding, instance, epoch
             )
         else:
-            plan = self._plan_new_session(
-                ctx, spec, binding, instance, contract_hash, epoch
-            )
+            plan = self._plan_new_session(ctx, spec, binding, instance, epoch)
         ctx.lock = self._session_store.acquire_lock(
             plan.ar_session_id,
             spec.identity.owner,
             reclaimable=False,
             required_state=STATE_OPEN,
         )
+        # What this Session observed last time, loaded once, under the lease.
+        # Read-only and warning-only: it reaches nothing that decides admission,
+        # and a Session's first Run simply has none.
+        ctx.previous_observation = observation_from_record(
+            self._session_store.open_session(plan.ar_session_id)
+        )
         return plan
 
     def _plan_reuse_session(
-        self, ctx: _RunContext, spec, binding, instance, contract_hash, epoch
+        self, ctx: _RunContext, spec, binding, instance, epoch
     ) -> LoadSessionPlan:
         """Existing-only open, strict validation, then the load-time gate.
 
@@ -783,10 +786,8 @@ class RunTask:
                 owner=spec.identity.owner,
                 namespace=spec.identity.namespace,
                 for_load=True,
-                expected_contract_hash=contract_hash,
                 expected_epoch=epoch,
                 expected_agent_id=spec.agent.agent_id,
-                expected_agent_registration_hash=spec.agent.agent_registration_hash,
             )
         except SessionBindingError as exc:
             raise _PreDispatchFailure(
@@ -801,7 +802,7 @@ class RunTask:
         )
 
     def _plan_new_session(
-        self, ctx: _RunContext, spec, binding, instance, contract_hash, epoch
+        self, ctx: _RunContext, spec, binding, instance, epoch
     ) -> NewSessionPlan:
         """The only path allowed to create a record without an external ID."""
         session_id = f"{self._run_id}-ephemeral"
@@ -821,10 +822,8 @@ class RunTask:
                 workspace_hash=spec.workspace.workspace_hash,
                 effective_cwd=spec.workspace.cwd,
                 matched_root=spec.workspace.canonical_root,
-                adapter_contract_hash=contract_hash,
-                session_compatibility_epoch=epoch,
+                session_epoch=epoch,
                 agent_id=spec.agent.agent_id,
-                agent_registration_hash=spec.agent.agent_registration_hash,
             )
         else:
             # A record already reserved under this Run's own derived id (a
@@ -835,10 +834,8 @@ class RunTask:
                 workspace_result=binding,
                 owner=spec.identity.owner,
                 namespace=spec.identity.namespace,
-                expected_contract_hash=contract_hash,
                 expected_epoch=epoch,
                 expected_agent_id=spec.agent.agent_id,
-                expected_agent_registration_hash=spec.agent.agent_registration_hash,
             )
         return NewSessionPlan(ar_session_id=session_id)
 
@@ -852,7 +849,7 @@ class RunTask:
         # rebuilds its underlying query from the load request, so omitting it
         # there would silently restore ambient setting sources on every reused
         # Session. No caller value can reach this argument.
-        session_meta = ctx.profile.session_meta_payload()
+        session_meta = ctx.profile.session_meta_for("new")
         try:
             self._emit(ctx, {"type": "run_started", "method": "initialize"})
             await driver.open(ctx.proc)
@@ -864,7 +861,7 @@ class RunTask:
             ctx.effective.capabilities = summary.capabilities
             ctx.effective.load_session_advertised = summary.load_session_advertised
 
-            self._attest_initialize(ctx, ctx.instance, summary)
+            self._observe_initialize(ctx, ctx.instance, summary)
 
             # Disjoint arms over the closed union: one arm per plan type, no
             # default arm, no guard, and no conversion between the two. The
@@ -1015,114 +1012,64 @@ class RunTask:
             ctx.handle.run_dir / name, self._guarded_document(ctx, payload)
         )
 
-    def _attest_initialize(self, ctx: _RunContext, instance, summary) -> None:
-        """Post-initialize identity gate (D10c), before any session call.
+    def _observe_initialize(self, ctx: _RunContext, instance, summary) -> None:
+        """Record what ``initialize`` reported, then apply the contract checks.
 
-        Runs on first *and* reused Runs. The write-once artifact is persisted
-        before any refusal and strictly before ``session/new``/``session/load``
-        or any prompt, so a mismatch leaves durable observed-vs-expected
-        evidence and zero Turn. Sanitized by construction: names, versions, the
-        protocol integer, and capability flags only.
+        The write-once artifact is persisted before any refusal and strictly
+        before ``session/new``/``session/load`` or any prompt, so even a refused
+        Run leaves durable evidence and zero Turn.
 
-        ``agentInfo.version`` is asserted only where the contract froze it —
-        a wrapped adapter, whose entry digest the spawn boundary already
-        proves. For ``direct_acp`` it reports the *deployed* executable, so it
-        is recorded as an observation and never compared with a CLI
-        ``--version``: the two are independent facts. A registration never
-        supplies a version for the same reason: it freezes no artifact.
-
-        The expected values come from the instance, so the ACP name and the
-        forbidden-capability set are the agent's where an agent exists and the
-        profile's where one does not. The protocol version is contract-owned in
-        both cases — a registration cannot move the ACP major.
+        What changed at the reset: the agent's self-reported name and version
+        are **evidence**, not identity. Drift between two Runs of one Session is
+        recorded, may be emitted as a policy warning, and never refuses — which
+        is what makes an agent upgrade behind an unchanged registered command
+        cost no ARS action. The only refusals left here are checks against the
+        profile's declared contract inside this one Run.
         """
-        agent_info = summary.agent_info or {}
-        observed_name = str(agent_info.get("name", ""))
-        observed_version = str(agent_info.get("version", ""))
-        observed_protocol = str(summary.protocol_version)
-        observed_load = bool(summary.load_session_advertised)
-        advertised = summary.capabilities or {}
-        checks: list[dict[str, Any]] = [
-            {
-                "name": "agent_name",
-                "expected": instance.acp_agent_name,
-                "observed": observed_name,
-                "passed": observed_name == instance.acp_agent_name,
-            },
-            {
-                "name": "agent_version",
-                "expected": instance.acp_agent_version or _OBSERVED_ONLY,
-                "observed": observed_version,
-                "passed": (
-                    instance.acp_agent_version is None
-                    or observed_version == instance.acp_agent_version
-                ),
-            },
-            {
-                "name": "protocol_version",
-                "expected": instance.acp_protocol_version,
-                "observed": observed_protocol,
-                "passed": observed_protocol == instance.acp_protocol_version,
-            },
-            {
-                "name": "load_session_advertised",
-                "expected": "true",
-                "observed": "true" if observed_load else "false",
-                "passed": observed_load,
-            },
-        ]
-        for capability in instance.forbidden_capabilities:
-            present = bool(advertised.get(capability))
-            checks.append(
-                {
-                    "name": f"forbidden_capability:{capability}",
-                    "expected": "absent",
-                    "observed": "present" if present else "absent",
-                    "passed": not present,
-                }
-            )
-        # Identity is compared on the *raw* observation — guarding first would
-        # turn a value-colliding agent name into a different comparison — and
-        # only the durable projection crosses the guard.
-        self._write_guarded_once(
-            ctx,
-            "initialize_attestation.json",
-            {
-                "schema_version": 1,
-                "expected": {
-                    "agent_info_name": instance.acp_agent_name,
-                    "agent_info_version": instance.acp_agent_version,
-                    "protocol_version": instance.acp_protocol_version,
-                    "load_session_advertised": True,
-                    "forbidden_capabilities": list(instance.forbidden_capabilities),
-                },
-                "observed": {
-                    "agent_info_name": observed_name,
-                    "agent_info_version": observed_version,
-                    "protocol_version": observed_protocol,
-                    "load_session_advertised": observed_load,
-                },
-                "checks": checks,
-                "pass": all(check["passed"] for check in checks),
-            },
+        observed = InitializeObservation(
+            agent_info=summary.agent_info,
+            protocol_version=summary.protocol_version,
+            capabilities=summary.capabilities,
+            load_session_advertised=summary.load_session_advertised,
         )
-        identity_failures = [
-            check["name"]
-            for check in checks
-            if not check["passed"] and check["name"] != "load_session_advertised"
-        ]
-        if identity_failures:
+        verdict = judge_initialize(instance, observed, previous=ctx.previous_observation)
+        self._write_guarded_once(
+            ctx, "initialize_evidence.json", verdict.to_evidence()
+        )
+        for warning in verdict.warnings:
+            self._emit(ctx, dict(warning))
+        if verdict.refusal is not None:
             raise _PreDispatchFailure(
-                "initialize identity does not match the frozen contract: "
-                f"{', '.join(identity_failures)}",
-                "AGENT_IDENTITY_MISMATCH",
+                verdict.detail or verdict.refusal, verdict.refusal
             )
-        if not observed_load:
+        if instance.profile.requires_session_load and not summary.load_session_advertised:
+            # Session semantics are profile-frozen, so "requires a real
+            # session/load" is a declared contract term and its absence is a
+            # required capability being absent — one of the five, not a sixth.
             raise _PreDispatchFailure(
                 "agent does not advertise loadSession; the registered profile "
                 "requires it — escalate per G6",
-                "LOAD_SESSION_UNADVERTISED",
+                "CAPABILITY_MISSING",
             )
+        # Recorded only after the observation passed every contract check, so
+        # what a later Run compares against is an observation this Session
+        # actually accepted. Still evidence: nothing reads it to decide anything.
+        #
+        # Guarded on the way out, because this is the one sink whose lifetime
+        # exceeds the Run's. The self-report and the advertised capability keys
+        # are child-chosen strings that no contract check inspects, so the guard
+        # is the only thing standing between a projected environment value and
+        # ``session.json``.
+        assert ctx.guard is not None
+        name, version = observed.self_report()
+        self._session_store.commit_last_observation(
+            ctx.session_id,
+            agent_info_name=ctx.guard.safe_text(name),
+            agent_info_version=ctx.guard.safe_text(version),
+            advertised_capabilities=tuple(
+                ctx.guard.safe_text(capability) for capability in observed.advertised()
+            ),
+        )
 
     async def _rollback_after_partial_switch(self, ctx: _RunContext) -> None:
         self._emit(ctx, {"type": "config_rollback_started"})
@@ -1401,23 +1348,6 @@ class RunTask:
                 "updated_at": _utc_now_iso(),
             },
         )
-
-    def _spawn_env(self, launch) -> dict[str, str]:
-        # Credential/env values enter only here, at spawn, from the allowlist
-        # slot names — never through spec/launch serialization.
-        env = {
-            name: os.environ[name]
-            for name in launch.env_allowlist
-            if name in os.environ
-        }
-        # Registered permission-mediation binding: supervisor policy wins
-        # over any same-named allowlist passthrough.
-        env.update(dict(launch.permission_env))
-        # Profile-owned frozen environment last: it wins over everything, and
-        # its names are deliberately outside the allowlist, so no ambient value
-        # can reach the child under them.
-        env.update(dict(launch.fixed_env))
-        return env
 
     # -- finalization ------------------------------------------------------
 

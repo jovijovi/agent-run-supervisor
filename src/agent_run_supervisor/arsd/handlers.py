@@ -17,7 +17,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Iterator, Mapping
 
 from agent_run_supervisor import __version__ as PACKAGE_VERSION
 from agent_run_supervisor.event_store import EventStore, EventStoreError
-from agent_run_supervisor.native_acp import runtime_binding, storage
+from agent_run_supervisor.native_acp import agent_registry, storage
 from agent_run_supervisor.native_acp.profile import (
     DEFAULT_REGISTRY,
     ProfileRegistry,
@@ -131,14 +131,15 @@ def default_run_task_factory(
     supervisor_root: Path,
     *,
     registry: ProfileRegistry = DEFAULT_REGISTRY,
-    binding_root: Path | None = None,
-    binding_ownership: runtime_binding.TrustedOwnership | None = None,
+    agents: agent_registry.AgentRegistrySnapshot | None = None,
 ) -> RunTaskFactory:
     """Production factory: RunTask bound to supervisor-root native stores.
 
     The factory runs once per admitted Run, inside the admission lock and
-    before the Run is registered — so the single Binding read happens exactly
-    there, and the resolved generation is handed to ``RunTask`` as a value.
+    before the Run is registered. Agent resolution happens exactly here, against
+    the immutable startup snapshot, in memory — so the Run, spawn, finalization,
+    and reconciliation paths perform zero registry filesystem access, and the
+    resolved entry travels forward as a value.
     """
 
     root = Path(supervisor_root)
@@ -146,13 +147,7 @@ def default_run_task_factory(
     event_store = storage.native_event_store(root)
 
     def factory(*, command, run_id, prepared_handle, submitted_at):
-        profile = registry.get(command.request.profile_id)
-        admitted = admission.resolve_runtime_binding(
-            profile,
-            binding_root=binding_root,
-            ownership=binding_ownership,
-            agent_id=command.request.agent_id,
-        )
+        entry = admission.resolve_agent_entry(agents, command.request.agent_id)
         return RunTask(
             request=command.request,
             prompt_text=command.prompt_text,
@@ -165,7 +160,7 @@ def default_run_task_factory(
             retry_of_run_id=command.retry_of_run_id,
             cwd=command.cwd,
             prepared_handle=prepared_handle,
-            runtime_binding=admitted,
+            agent_entry=entry,
         )
 
     return factory
@@ -867,8 +862,7 @@ class ArsdHandlers:
         events_page_limit: int = DEFAULT_EVENTS_PAGE_LIMIT,
         supervisor_root: Path | None = None,
         profile_registry: ProfileRegistry = DEFAULT_REGISTRY,
-        binding_root: Path | None = None,
-        binding_ownership: runtime_binding.TrustedOwnership | None = None,
+        agents: agent_registry.AgentRegistrySnapshot | None = None,
     ) -> None:
         self._session_store = session_store
         self._event_store = event_store
@@ -881,10 +875,7 @@ class ArsdHandlers:
             self._factory = run_task_factory
         elif supervisor_root is not None:
             self._factory = default_run_task_factory(
-                supervisor_root,
-                registry=profile_registry,
-                binding_root=binding_root,
-                binding_ownership=binding_ownership,
+                supervisor_root, registry=profile_registry, agents=agents
             )
         else:
             raise ValueError("run_task_factory or supervisor_root is required")
@@ -937,6 +928,10 @@ class ArsdHandlers:
         return {
             "version": PACKAGE_VERSION,
             "api_version": protocol.ARSD_API_VERSION,
+            # Reported so a v1 caller can see the drain window it is inside
+            # without having to probe an operation to discover it.
+            "supported_api_versions": list(protocol.SUPPORTED_API_VERSIONS),
+            "v2_only_operations": sorted(protocol.V2_ONLY_OPERATIONS),
             "limits": {
                 "max_concurrent_runs": self.registry.max_concurrent_runs,
                 "max_frame_bytes": protocol.MAX_FRAME_BYTES,
@@ -1043,17 +1038,22 @@ class ArsdHandlers:
                     _LOGGER.exception(
                         "arsd: registration failure finalization failed for %s", run_id
                     )
-                # Existing error shapes only — the v1 wire gains no code. An
-                # unknown profile is a caller-visible request problem; a
-                # Binding refusal is a deployment fact the caller cannot fix,
-                # reported by its rule name and never with a path or a digest.
+                # Existing error shapes only — the wire gains no code. An unknown
+                # or malformed agent id is a caller-visible request problem; any
+                # other registry refusal is a deployment fact the caller cannot
+                # fix, reported by its rule name and never with a path, a value,
+                # or a file fragment.
                 if isinstance(exc, UnknownProfileError):
                     raise protocol.ProtocolError(
                         protocol.INVALID_REQUEST, "unknown profile id"
                     ) from None
-                if isinstance(exc, runtime_binding.BindingRefusal):
+                if isinstance(exc, agent_registry.RegistryRefusal):
+                    if exc.rule in ("AGENT_ID_INVALID", "AGENT_NOT_REGISTERED"):
+                        raise protocol.ProtocolError(
+                            protocol.INVALID_REQUEST, f"agent refused: {exc.rule}"
+                        ) from None
                     raise protocol.ProtocolError(
-                        protocol.INTERNAL, f"runtime binding refused: {exc.rule}"
+                        protocol.INTERNAL, f"agent registry refused: {exc.rule}"
                     ) from None
                 raise protocol.ProtocolError(
                     protocol.INTERNAL, "run registration failed"
@@ -1419,6 +1419,7 @@ class ArsdHandlers:
             "state": storage.to_native_state(record.state),
             "owner": record.owner,
             "namespace": record.namespace,
+            "agent_id": record.native_agent_id,
             "profile_id": record.native_profile_id,
             "updated_at": record.updated_at,
         }

@@ -45,7 +45,7 @@ def home_rooted_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # sink, in the same Run, from the same literal set.
     script["echo_env"] = "HOME"
     harness = Harness(tmp_path, monkeypatch, script)
-    harness.registry = ProfileRegistry((_test_profile(env_allowlist=ALLOWLIST),))
+    harness.registry = ProfileRegistry((_test_profile(base_allowlist=ALLOWLIST),))
     result = _run(harness.task())
     assert result.status is AgentRunStatus.COMPLETED
     return harness, home

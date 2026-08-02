@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext PRD"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-30
+last_validated_at: 2026-08-01
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/prd.md"
 ---
 # agent-run-supervisor vNext PRD
@@ -541,14 +541,17 @@ section records only the coarse position.
   reference is retained.
 - vNext Stage 0/1 (Native ACP core) and Stage 2 (`arsd` UDS ingress, ownership, reconciliation,
   service/cgroup containment) are implemented on `main` with their acceptance closed.
-- **Authority and source differ deliberately.** This PRD states the V4 target. Source on `main` still
-  implements the retired artifact/Binding architecture: four registered profiles, a Binding reader, a
+- **Authority and released source differ deliberately.** This PRD states the V4 target. Source on `main`
+  still implements the retired artifact/Binding architecture: four registered profiles, a Binding reader, a
   required Binding-root daemon flag, artifact digests, promotion, and attestation. The retired authority is
   preserved at `docs/archive/binding-era-2026-07/`; the board carries the exact authority-versus-source
   delta and the Stage 1→3 sequence that closes it.
-- Nothing in R13, R14, or R15 is implemented in source yet. No registry file format is read, no
-  environment-value guard exists, and reuse can still fall through to a new external Session on an absent
-  record — the defect Stage 1 closes.
+- R14 and R15 have source now, and it is **branch-local**. Stage 1 (fail-closed reuse, total
+  reconciliation) and the dynamic half of the environment-value guard are merged on `main`; the rest —
+  the registry reader, the value-blind launch snapshot, observed-evidence demotion, and `api_version` 2 —
+  is implemented and tested on the Stage 3 task branch and is **uncommitted, unmerged, unreleased, and
+  undeployed**. R13's registry file is therefore read by no released code, and authoring one against a
+  live deployment changes nothing and is not approved.
 - Release/publication is not done: the published wheel predates the reset. Production cutover with its
   one-time legacy-Session load refusal, and the lifetime of the legacy `v0.5.x` line, are open human
   decisions. Implementation status is never an approval for the next stage.

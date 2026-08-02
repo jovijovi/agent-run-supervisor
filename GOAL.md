@@ -189,11 +189,15 @@ gap is staged source work that this document does not authorize; the board carri
 sequence.
 
 On current `main`, Stage 0/1 Native ACP and Stage 2 `arsd` are merged, and the closed source registry
-still holds four profiles. Retiring the three per-agent profiles is approved as **policy** and is not
-approved as a source act: deleting them from source needs its own separate confirmation. Release and
-publication, production cutover, service restart, migration, `/opt` and Binding-root removal, Sachima
-integration, public ingress, and any Gateway/IM/live behavior each still require separate, explicit
-authorization, and no local acceptance transfers approval to the next change.
+still holds four profiles. Retiring the three per-agent profiles was approved as **policy** on 2026-07-30
+and, as the separate source act the standing rule always required, on **2026-08-01**. That second approval
+is narrow and has been exercised **locally only**: on the Stage 3 task branch the source registry holds
+exactly `standard-native-acp-v1` and `claude-agent-acp-compat-v1`, the three per-agent profiles are
+deleted rather than aliased or disabled, and the change is neither committed, merged, nor released — so
+`main` is unchanged and every released artifact still registers four profiles. Commit and push, PR,
+merge, release and publication, production cutover, service restart, migration, `/opt` and Binding-root
+removal, Sachima integration, public ingress, and any Gateway/IM/live behavior each still require
+separate, explicit authorization, and no local verification transfers approval to the next change.
 
 ## Non-goals
 

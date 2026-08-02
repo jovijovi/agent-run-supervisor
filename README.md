@@ -39,7 +39,7 @@
 ## Contents
 
 [What it is](#what-it-is) ·
-[Documented target vs. shipped code](#documented-target-vs-shipped-code) ·
+[Documented target vs. released code](#documented-target-vs-released-code) ·
 [How it works](#how-it-works) ·
 [Requirements](#requirements) ·
 [Install](#install) ·
@@ -81,22 +81,28 @@ starts*; you own the *software it starts*.
 
 ARS reports technical supervision facts only. The business verdict stays yours.
 
-## Documented target vs. shipped code
+## Documented target vs. released code
 
 > **Read this before following any command below.** This README documents the **agent-registry
 > boundary** — one operator-owned registry file, `--agents-file`, and the `agents` / `run inspect`
-> operator surface. That is the project's tracked architecture and the target of staged work.
+> operator surface. That is the project's tracked architecture.
 >
-> The **shipped `v0.5.x` line implements the earlier artifact/Binding architecture instead**: a
+> **It is implemented in source on a task branch and has not been released.** The registry reader, the
+> two-profile source registry, the value-blind launch snapshot, `api_version` 2, and the `agents` /
+> `run inspect` commands all exist in code and are covered by tests. Nothing is deployed: no PR is
+> merged, no release is cut, no service is installed or restarted, and no registry file is authored
+> against a live deployment. Every one of those remains a separate, explicit decision.
+>
+> The **released `v0.5.x` line implements the earlier artifact/Binding architecture instead**: a
 > different required daemon flag, an operator-owned Binding root with promoted generations, and frozen
 > artifact identity. That architecture is **retired as a target** and is therefore no longer documented
 > here. If you operate a `v0.5.x` deployment today, use that release's own notes in
 > [`CHANGELOG.md`](CHANGELOG.md) and the cold archive at
 > [`docs/archive/binding-era-2026-07/`](docs/archive/binding-era-2026-07/README.md); nothing in this
-> README describes how to operate it.
+> README describes how to operate it, and installing this branch would not upgrade it in place —
+> Sessions do not carry across the two lines, by design.
 >
-> Concretely: the registry file, the environment-value guard, and `api_version` 2 are **not runnable
-> yet**. The current gap and the sequence that closes it are on the board,
+> The exact position and the decisions still open are on the board,
 > [`docs/roadmap/current-status.md`](docs/roadmap/current-status.md). No documentation change here
 > deploys, restarts, or migrates anything.
 
@@ -204,7 +210,9 @@ pip install -e '.[dev,native]'
 Nothing in ARS launches an agent implicitly. `doctor`, `replay`, `--print-service-unit`, and
 `run inspect` are read-only with respect to ARS and operator state. `agents doctor` is the one
 diagnostic that *does* start an external child — and that child writes its own agent-owned state, which
-this document does not pretend otherwise about.
+this document does not pretend otherwise about. It is reaped on every path: `SIGTERM` to the group, a
+bounded wait, then `SIGKILL` and a final bounded wait, and a group that survives even that is reported
+as a failed probe rather than left running.
 
 ## Upgrade
 
@@ -337,9 +345,11 @@ agent later loads.
 
 **Your command is launched exactly as declared.** `argv[0]` is the declared string byte-for-byte; a bare
 name is located by ordinary PATH lookup over the child's projected `PATH`. So shims, symlink farms,
-package-relative resolution, and an agent's own self-update all keep working. There is no pre-flight
-resolution check: a failed exec is classified as `COMMAND_NOT_FOUND`, `COMMAND_NOT_EXECUTABLE`, or
-`SPAWN_FAILED`, and those read as ordinary configuration errors, not security refusals.
+package-relative resolution, and an agent's own self-update all keep working. Every `args` token reaches
+the child unchanged, including an empty one — `["--label", "", "--end"]` is three tokens, because argv
+goes to `exec` and never through a shell. There is no pre-flight resolution check: a failed exec is
+classified as `COMMAND_NOT_FOUND`, `COMMAND_NOT_EXECUTABLE`, or `SPAWN_FAILED`, and those read as
+ordinary configuration errors, not security refusals.
 
 **Read-once, and what it costs.** An **agent upgrade behind an unchanged registered command** — same
 PATH name, repointed shim, reinstalled symlink target, new version at the same absolute path — costs
@@ -352,7 +362,7 @@ The operator surface is a separate CLI:
 
 ```bash
 agent-run-supervisor agents validate --agents-file <path>
-agent-run-supervisor agents doctor   --agents-file <path> [--agent <agent-id>]
+agent-run-supervisor agents doctor   --agents-file <path> [--agent <agent-id>] [--no-probe]
 agent-run-supervisor run inspect     --run-dir <native-run-dir>
 ```
 

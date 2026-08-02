@@ -64,7 +64,14 @@ def _reject(code, fn, *args):
 
 
 def envelope(**overrides):
-    frame = {"api_version": 1, "op": "server_info", "request_id": "req-1"}
+    # The current wire version. The v1/v2 drain split — ``submit`` refused at
+    # v1 while the other seven are accepted — is owned by
+    # ``test_api_version_matrix.py``, so this module never has to encode it.
+    frame = {
+        "api_version": protocol.ARSD_API_VERSION,
+        "op": "server_info",
+        "request_id": "req-1",
+    }
     frame.update(overrides)
     return {key: value for key, value in frame.items() if value is not _ABSENT}
 
@@ -73,7 +80,7 @@ def valid_wire_request() -> dict:
     return {
         "owner": "hermes",
         "namespace": "hermes/doc-check",
-        "profile_id": "opencode-1.18.4",
+        "agent_id": "fake-agent",
         "session_reuse": "reuse",
         "ars_session_id": "sess-arsd-1",
         "expected_binding_hash": None,
@@ -98,7 +105,7 @@ def expected_request() -> AgentRunRequest:
     return AgentRunRequest(
         owner="hermes",
         namespace="hermes/doc-check",
-        profile_id="opencode-1.18.4",
+        agent_id="fake-agent",
         session_reuse="reuse",
         ars_session_id="sess-arsd-1",
         expected_binding_hash=None,
@@ -131,8 +138,8 @@ def valid_submit_payload() -> dict:
 
 
 def test_api_version_constants() -> None:
-    assert protocol.ARSD_API_VERSION == 1
-    assert protocol.SUPPORTED_API_VERSIONS == (1,)
+    assert protocol.ARSD_API_VERSION == 2
+    assert protocol.SUPPORTED_API_VERSIONS == (1, 2)
 
 
 def test_operation_set_is_closed() -> None:
@@ -226,7 +233,7 @@ def test_parse_request_echoes_request_id_and_payload() -> None:
     assert parsed.payload == {"a": 1}
 
 
-@pytest.mark.parametrize("version", [_ABSENT, 0, 2, -1, "1", None, True])
+@pytest.mark.parametrize("version", [_ABSENT, 0, 3, -1, "1", None, True])
 def test_missing_or_unknown_api_version_reports_supported_list(version) -> None:
     err = _reject(
         "UNSUPPORTED_API_VERSION",
@@ -349,7 +356,7 @@ def test_parse_submit_maps_field_for_field() -> None:
         mcp_snapshot_hashes=["sha256:" + "1" * 64],
         credential_refs=["slot-a"],
         limits=dict(custom_limits),
-        schema_version=1,
+        schema_version=2,
     )
     payload.update(cwd="/tmp/ws/sub", retry_of_run_id="run-prior")
 
@@ -380,7 +387,7 @@ def test_parse_submit_minimal_defaults() -> None:
 
     assert command.request == expected_request()
     assert command.request.limits == RunLimits()
-    assert command.request.schema_version == 1
+    assert command.request.schema_version == 2
     assert command.cwd is None
     assert command.retry_of_run_id is None
 
@@ -406,17 +413,19 @@ def test_parse_submit_schema_version_must_be_integer(version) -> None:
     _reject("INVALID_REQUEST", protocol.parse_submit, payload)
 
 
-def test_r4_b4_parse_submit_rejects_schema_version_2_before_admission() -> None:
+def test_r4_b4_parse_submit_rejects_a_foreign_schema_version_before_admission() -> None:
+    """A pre-reset frame is refused rather than reinterpreted under a shape it
+    was never sealed against."""
     payload = valid_submit_payload()
-    payload["request"]["schema_version"] = 2
+    payload["request"]["schema_version"] = 1
     _reject("INVALID_REQUEST", protocol.parse_submit, payload)
 
 
-def test_r4_b4_parse_submit_accepts_missing_schema_version_as_v1() -> None:
+def test_r4_b4_parse_submit_accepts_a_missing_schema_version_as_the_current_one() -> None:
     payload = valid_submit_payload()
     payload["request"].pop("schema_version", None)
     command = protocol.parse_submit(payload)
-    assert command.request.schema_version == 1
+    assert command.request.schema_version == 2
 
 
 @pytest.mark.parametrize("key", ["argv", "env", "executable", "config_json"])

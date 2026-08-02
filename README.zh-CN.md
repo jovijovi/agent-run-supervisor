@@ -75,17 +75,22 @@ ARS 只报告**技术监督事实**，业务结论归你的应用。
 
 > **在照抄下文任何命令之前先读这一段。** 本 README 描述的是 **agent 注册表边界**：一个由运维方拥有
 > 的注册表文件、`--agents-file`，以及 `agents` / `run inspect` 运维命令面。这是本项目当前被跟踪的
-> 架构，也是分阶段工作的目标。
+> 架构。
 >
-> 但**已发布的 `v0.5.x` 代码线实现的是更早的工件/Binding 架构**：另一个必填守护进程参数、一个由运维
+> **它已在一个任务分支上以源码实现，但尚未发布。** 注册表读取器、只含两个 profile 的源码注册表、
+> 值盲的 launch 快照、`api_version` 2，以及 `agents` / `run inspect` 命令都已存在于代码中并有测试
+> 覆盖。但没有任何东西被部署：没有合并的 PR，没有发布，没有安装或重启服务，也没有针对线上部署撰写
+> 注册表文件。上述每一项都仍是各自独立、必须显式作出的决定。
+>
+> **已发布的 `v0.5.x` 代码线实现的是更早的工件/Binding 架构**：另一个必填守护进程参数、一个由运维
 > 方拥有并需要晋级 generation 的 Binding root，以及被冻结的工件身份。该架构**作为目标已退役**，因此
 > 本文不再记录它的操作方式。如果你今天运维的是 `v0.5.x` 部署，请以该版本自己的发布说明
 > （[`CHANGELOG.md`](CHANGELOG.md)）和冷归档
 > [`docs/archive/binding-era-2026-07/`](docs/archive/binding-era-2026-07/README.md) 为准 —— 本 README
-> 不描述如何操作它。
+> 不描述如何操作它；直接安装本分支也**不会**原地升级它：按设计，Session 不跨这两条线继承。
 >
-> 具体地说：注册表文件、环境值防护，以及 `api_version` 2 **目前都还不可运行**。当前差距与收敛顺序记录
-> 在看板 [`docs/roadmap/current-status.md`](docs/roadmap/current-status.md)。这里的任何文档变更都不会
+> 确切位置与仍然开放的决定记录在看板
+> [`docs/roadmap/current-status.md`](docs/roadmap/current-status.md)。这里的任何文档变更都不会
 > 部署、重启或迁移任何东西。
 
 ## 工作原理
@@ -186,7 +191,9 @@ pip install -e '.[dev,native]'
 
 ARS 不会隐式启动任何 agent。`doctor`、`replay`、`--print-service-unit` 与 `run inspect` 对 ARS 与运维
 方状态而言都是只读的。`agents doctor` 是唯一**会**启动外部子进程的诊断命令 —— 而那个子进程会写它自己
-的、由 agent 拥有的状态，本文不对此含糊其辞。
+的、由 agent 拥有的状态，本文不对此含糊其辞。该子进程在每条路径上都会被回收：先向进程组发 `SIGTERM`
+并有界等待，再 `SIGKILL` 并做最后一次有界等待；若进程组连这样都活了下来，会被报成一次失败的探测，而
+不是被悄悄留在那里。
 
 ## 升级
 
@@ -309,9 +316,11 @@ v1 按定义就是 stdio。
 或摘要检查**。
 
 **你的命令按声明原样启动。** `argv[0]` 逐字节就是你声明的那个字符串；裸名字由子进程投影出的 `PATH`
-按普通查找定位。因此 shim、符号链接农场、按包相对解析，以及 agent 自己的自更新逻辑都照常可用。这里没有
-任何预检解析：exec 失败会被分类为 `COMMAND_NOT_FOUND`、`COMMAND_NOT_EXECUTABLE` 或 `SPAWN_FAILED`，
-它们读起来就是普通的配置错误，不是安全拒绝。
+按普通查找定位。因此 shim、符号链接农场、按包相对解析，以及 agent 自己的自更新逻辑都照常可用。`args`
+里的每一个 token 都会原样抵达子进程，**空字符串也算一个 token** —— `["--label", "", "--end"]` 就是三个
+token，因为 argv 直接交给 `exec`，从不经过 shell。这里没有任何预检解析：exec 失败会被分类为
+`COMMAND_NOT_FOUND`、`COMMAND_NOT_EXECUTABLE` 或 `SPAWN_FAILED`，它们读起来就是普通的配置错误，
+不是安全拒绝。
 
 **只读一次的代价。** **在同一条已注册命令背后升级 agent** —— 同一个 PATH 名字、重新指向的 shim、重装
 后的符号链接目标、同一绝对路径下的新版本 —— 代价是**零**：不用重启、不用重新验收，已有 Session 仍会通过
@@ -323,7 +332,7 @@ Session 失效**，因为没有任何 Session 身份字段派生自注册表字�
 
 ```bash
 agent-run-supervisor agents validate --agents-file <path>
-agent-run-supervisor agents doctor   --agents-file <path> [--agent <agent-id>]
+agent-run-supervisor agents doctor   --agents-file <path> [--agent <agent-id>] [--no-probe]
 agent-run-supervisor run inspect     --run-dir <native-run-dir>
 ```
 

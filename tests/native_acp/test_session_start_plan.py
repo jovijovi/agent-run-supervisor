@@ -29,12 +29,10 @@ from agent_run_supervisor.native_acp.driver import (  # noqa: E402
     NativeAcpDriver,
     NativeDriverError,
 )
+from agent_run_supervisor.native_acp.agent_registration import AgentEntry  # noqa: E402
 from agent_run_supervisor.native_acp.profile import (  # noqa: E402
-    LAUNCH_KIND_DIRECT,
-    AdapterContract,
-    AgentProfile,
+    AcpCompatProfile,
     ProfileRegistry,
-    VersionProbeRule,
 )
 from agent_run_supervisor.native_acp.run_task import (  # noqa: E402
     DISPATCH_STARTED_MARKER,
@@ -89,38 +87,35 @@ HAPPY_SCRIPT = {
 }
 
 
-def _profile(**overrides) -> AgentProfile:
+def _profile(**overrides) -> AcpCompatProfile:
     kwargs = dict(
-        profile_id="fake-agent-1.0",
+        profile_id="fake-agent-v1",
         revision=1,
-        executable_key="python-fake",
-        argv_template=(str(FAKE_AGENT_PATH),),
-        env_allowlist=("PATH", "HOME", "FAKE_AGENT_SCRIPT", "FAKE_AGENT_TRACE"),
-        credential_slots=(),
-        model_selector_id="model",
-        effort_selector_id="effort",
-        default_model="kimi-for-coding/k3",
-        default_effort="max",
-        registered_models=("kimi-for-coding/k3", "provider/base"),
-        allowed_efforts=("low", "medium", "high", "max"),
+        acp_protocol_version="1",
+        required_capabilities=(),
+        base_allowlist=("PATH", "HOME", "FAKE_AGENT_SCRIPT", "FAKE_AGENT_TRACE"),
         requires_session_load=True,
-        config_schema={"selectors": {"model": "string", "effort": "string"}},
-        contract=AdapterContract(
-            launch_kind=LAUNCH_KIND_DIRECT,
-            acp_agent_name="fake-acp-agent",
-            acp_protocol_version="1",
-            version_probe=VersionProbeRule(argv_suffix=("--version",)),
-        ),
     )
     kwargs.update(overrides)
-    return AgentProfile(**kwargs)
+    return AcpCompatProfile(**kwargs)
+
+
+def _entry(**overrides) -> AgentEntry:
+    kwargs = dict(
+        agent_id="fake-agent",
+        profile_id="fake-agent-v1",
+        command=sys.executable,
+        args=(str(FAKE_AGENT_PATH),),
+    )
+    kwargs.update(overrides)
+    return AgentEntry(**kwargs)
 
 
 def _request(**overrides) -> AgentRunRequest:
     kwargs = dict(
         owner="hermes",
         namespace="hermes/doc-check",
-        profile_id="fake-agent-1.0",
+        agent_id="fake-agent",
         session_reuse="reuse",
         ars_session_id="sess-plan-1",
         expected_binding_hash=None,
@@ -154,12 +149,10 @@ class Harness:
         self.workspace = tmp_path / "workspace"
         self.workspace.mkdir(exist_ok=True)
         self.trace = tmp_path / "fake-agent-trace.log"
-        monkeypatch.setitem(
-            profile_module._REGISTERED_EXECUTABLES, "python-fake", Path(sys.executable)
-        )
         monkeypatch.setenv("FAKE_AGENT_SCRIPT", json.dumps(script or HAPPY_SCRIPT))
         monkeypatch.setenv("FAKE_AGENT_TRACE", str(self.trace))
         self.registry = ProfileRegistry((_profile(),))
+        self.entry = _entry()
 
     def task(self, *, run_id: str = "run-plan-1", request=None, **overrides) -> RunTask:
         kwargs = dict(
@@ -168,6 +161,7 @@ class Harness:
             run_id=run_id,
             workspace_root=self.workspace,
             registry=self.registry,
+            agent_entry=self.entry,
             supervisor_root=self.root,
             submitted_at="2026-07-21T00:00:00+00:00",
         )
@@ -196,7 +190,8 @@ class Harness:
     ) -> Path:
         """Create the already-existing bound record a reuse Run requires."""
         assembler = RunSpecAssembler(request or _request())
-        profile = assembler.resolve_profile(self.registry)
+        instance = assembler.resolve_agent(self.entry, registry=self.registry)
+        profile = instance.profile
         binding = assembler.bind_workspace(root=self.workspace, cwd=None)
         store = self.session_store()
         storage.create_native_session(
@@ -210,6 +205,8 @@ class Harness:
             workspace_hash=binding.workspace_hash,
             effective_cwd=binding.effective_cwd,
             matched_root=binding.canonical_root,
+            agent_id=instance.agent_id,
+            session_epoch=instance.session_epoch,
         )
         if external_id is not None:
             storage.bind_agent_session(store, session_id, agent_session_id=external_id)

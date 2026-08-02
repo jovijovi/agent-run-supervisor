@@ -1,42 +1,35 @@
-"""Hermetic contract tests for the opt-in Codex socket acceptance harness.
+"""Hermetic contract tests for the opt-in real-agent acceptance harness.
 
-The acceptance module is skip-by-default and needs real credentials, the real
-adapter/CLI pair, and a controller-authorized boundary. Its *assertion logic*
-must not be: a gate whose conditions are tautological, whose cleanup runs only
-on the happy path, or whose case matrix silently drops a required variant would
-pass while proving nothing.
+The acceptance module is skip-by-default and needs a real installed agent, an
+operator-authored registry entry, and a controller-authorized boundary. Its
+*assertion logic* must not be: a gate whose conditions are tautological, whose
+case matrix silently drops a required variant, or whose evidence bundle can be
+complete while a leg never ran would pass while proving nothing.
 
 This suite loads that module and drives its pure helpers against **synthetic
-fixtures only** — no daemon, no spawn, no model call, no real credential root,
-no ``ARS_CODEX_SOCKET_ACCEPTANCE`` opt-in, and no reference to the production
-``CODEX_HOME``. Every credential-shaped byte here is a placeholder created by
-the test itself.
+fixtures only** — no daemon, no spawn, no model call, no opt-in, and no
+reference to any production home. Every credential-shaped byte here is a
+placeholder the test creates itself.
+
+It also pins the re-point: the harness must express its legs against a registry
+entry, and must not have grown a replacement for the retired artifact,
+interpreter, or credential-root layers under another name.
 """
 
 from __future__ import annotations
 
-import errno
-import hashlib
+import contextlib
 import importlib.util
-import os
-import stat
+import inspect
+import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-from agent_run_supervisor.exit_classifier import _RETRYABLE_DEFAULT, AgentRunStatus
-from agent_run_supervisor.native_acp import attestation as attestation_module
-from agent_run_supervisor.native_acp.run_task import (
-    FinalizationObservations,
-    finalize_run_state,
-)
-from agent_run_supervisor.native_acp.spec import RunLimits
+from agent_run_supervisor.native_acp.agent_registration import AgentEntry
 
-_ACCEPTANCE_PATH = (
-    Path(__file__).resolve().parent / "test_codex_socket_acceptance.py"
-)
+_ACCEPTANCE_PATH = Path(__file__).resolve().parent / "test_codex_socket_acceptance.py"
 
 
 def _load_acceptance():
@@ -44,10 +37,10 @@ def _load_acceptance():
 
     Loaded by path under its own name, so pytest's own import of the module
     (which the default skip then empties) is untouched. Registering it in
-    ``sys.modules`` first is required: ``dataclasses`` resolves a class's
-    module to interpret its annotations.
+    ``sys.modules`` first is required: ``dataclasses`` resolves a class's module
+    to interpret its annotations.
     """
-    name = "codex_socket_acceptance_contract_view"
+    name = "acp_socket_acceptance_contract_view"
     spec = importlib.util.spec_from_file_location(name, _ACCEPTANCE_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -58,715 +51,655 @@ def _load_acceptance():
 
 acceptance = _load_acceptance()
 
-SYNTHETIC_AUTH = acceptance.SYNTHETIC_AUTH_BYTES
+# Captured at import, before any test patches ``arsd_client.ArsdClient``. Reading
+# them lazily would read the *stand-in's* signature — which accepts anything —
+# and the contract check would silently become a tautology.
+_REAL_ARSD_CLIENT = acceptance.arsd_client.ArsdClient
+_REAL_INIT_SIGNATURE = inspect.signature(_REAL_ARSD_CLIENT.__init__)
+_REAL_SUBMIT_SIGNATURE = inspect.signature(_REAL_ARSD_CLIENT.submit)
+_REAL_RUN_EVENTS_SIGNATURE = inspect.signature(_REAL_ARSD_CLIENT.run_events)
+_REAL_RUN_STATUS_SIGNATURE = inspect.signature(_REAL_ARSD_CLIENT.run_status)
 
 
-# --- synthetic stand-ins -----------------------------------------------------
-
-
-def _synthetic_credential_root(tmp_path: Path) -> tuple[Path, Path]:
-    """A private 0700 root with placeholder bytes — never the real CODEX_HOME."""
-    root = tmp_path / "synthetic-real-root"
-    root.mkdir(mode=0o700)
-    os.chmod(root, 0o700)
-    auth = root / "auth.json"
-    auth.write_bytes(SYNTHETIC_AUTH)
-    os.chmod(auth, 0o600)
-    return root, auth
-
-
-def _synthetic_fixtures(tmp_path: Path) -> SimpleNamespace:
-    """The attribute surface ``_arrange_negative_case`` mutates, nothing more.
-
-    Deliberately not ``PrivateNegativeFixtures``: that builder copies the real
-    frozen Node out of the registered profile, which no hermetic test may
-    depend on.
-    """
-    base = tmp_path / "neg"
-    stage = base / "stage"
-    stage.mkdir(parents=True)
-    node = stage / "node"
-    node.write_bytes(b"#!/bin/false\n# synthetic node copy\n")
-    entry = stage / "codex-fake-agent.mjs"
-    entry.write_text("// synthetic codex-shaped fake agent\n", encoding="utf-8")
-    cli_target = stage / "codex-placeholder"
-    cli_target.write_bytes(b"#!/bin/false\n# synthetic placeholder cli\n")
-    cli = stage / "codex"
-    cli.symlink_to(cli_target)
-    cred_root = base / "synthetic-codex-home"
-    cred_root.mkdir(mode=0o700)
-    os.chmod(cred_root, 0o700)
-    auth = cred_root / "auth.json"
-    auth.write_bytes(SYNTHETIC_AUTH)
-    os.chmod(auth, 0o600)
-    workspace = base / "neg-workspace"
-    workspace.mkdir()
-    nested_cwd = workspace / "nested"
-    nested_cwd.mkdir()
-    return SimpleNamespace(
-        base=base,
-        node=node,
-        entry=entry,
-        cli=cli,
-        cli_target=cli_target,
-        cred_root=cred_root,
-        auth=auth,
-        workspace=workspace,
-        nested_cwd=nested_cwd,
+def _entry(**overrides) -> AgentEntry:
+    kwargs = dict(
+        agent_id="acceptance-agent",
+        profile_id="standard-native-acp-v1",
+        command="/opt/example/bin/some-acp-adapter",
+        env_overlay=(("SOME_AGENT_HOME", "/tmp/ephemeral-acceptance-home"),),
     )
+    kwargs.update(overrides)
+    return AgentEntry(**kwargs)
 
 
-def _fingerprint(path: Path) -> str:
-    try:
-        info = os.lstat(path)
-    except OSError:
-        return "absent"
-    if stat.S_ISLNK(info.st_mode):
-        return f"symlink:{os.readlink(path)}"
-    if stat.S_ISDIR(info.st_mode):
-        return f"dir:{oct(stat.S_IMODE(info.st_mode))}"
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
-    return f"file:{oct(stat.S_IMODE(info.st_mode))}:{digest}"
+# --- the opt-in gate stays opt-in --------------------------------------------
 
 
-def _surfaces(fixtures: SimpleNamespace) -> dict[str, str]:
-    layer = Path(".codex") / "config.toml"
-    return {
-        "node": _fingerprint(fixtures.node),
-        "entry": _fingerprint(fixtures.entry),
-        "cli": _fingerprint(fixtures.cli),
-        "cred_root": _fingerprint(fixtures.cred_root),
-        "auth": _fingerprint(fixtures.auth),
-        "root_config_toml": _fingerprint(fixtures.cred_root / "config.toml"),
-        "layer_at_cwd": _fingerprint(fixtures.nested_cwd / layer),
-        "layer_at_root": _fingerprint(fixtures.workspace / layer),
-        "layer_above_root": _fingerprint(fixtures.workspace.parent / layer),
-    }
+def test_the_gate_is_closed_by_default(monkeypatch):
+    monkeypatch.delenv(acceptance._GATE, raising=False)
+    assert acceptance._acceptance_ready() is False
 
 
-# --- B2: credential staging always cleans and always re-inventories ----------
+def test_the_gate_needs_every_declared_input(monkeypatch):
+    monkeypatch.setenv(acceptance._GATE, "1")
+    for name in acceptance._REQUIRED_ENV:
+        monkeypatch.setenv(name, "x")
+    assert acceptance._acceptance_ready() is True
+    for name in acceptance._REQUIRED_ENV:
+        monkeypatch.delenv(name)
+        assert acceptance._acceptance_ready() is False, f"{name} is not load-bearing"
+        monkeypatch.setenv(name, "x")
 
 
-def _inode_targeted(real, target: Path, *, close_first: bool = False):
-    """Fail exactly one syscall — the first one touching the staged inode.
-
-    One-shot on purpose: a transient staging fault must not also disable the
-    cleanup that has to run afterwards, or the test would prove the injection
-    rather than the guard.
-    """
-    fired = False
-
-    def fake(fd, *args, **kwargs):
-        nonlocal fired
-        if fired:
-            return real(fd, *args, **kwargs)
-        try:
-            info = os.fstat(fd)
-            wanted = target.stat()
-        except OSError:
-            return real(fd, *args, **kwargs)
-        if (info.st_dev, info.st_ino) == (wanted.st_dev, wanted.st_ino):
-            fired = True
-            if close_first:
-                real(fd)
-            raise OSError(errno.EIO, "injected staging failure")
-        return real(fd, *args, **kwargs)
-
-    return fake
+def test_the_gate_requires_the_agents_file_and_the_agent_id():
+    """After the reset a leg cannot be assembled from source constants at all."""
+    assert "ARS_ACP_ACCEPTANCE_AGENTS_FILE" in acceptance._REQUIRED_ENV
+    assert "ARS_ACP_ACCEPTANCE_AGENT_ID" in acceptance._REQUIRED_ENV
 
 
-@pytest.mark.parametrize("syscall", ["write", "fsync", "close"])
-def test_staging_failure_cleans_and_reinventories(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, syscall: str
-) -> None:
-    """A failure after the staged file exists must still clean *and* verify.
-
-    The staging call therefore has to sit inside the guarded region: leaving it
-    outside means a write/fsync/close failure keeps the copied credential bytes
-    on disk and skips the real-root identity check entirely.
-    """
-    real_root, real_auth = _synthetic_credential_root(tmp_path)
-    home = tmp_path / "positive-codex-home"
-    staged = home / "auth.json"
-    inventories: list[str] = []
-    real_inventory = acceptance._inventory_tree
-
-    def counting_inventory(root: Path):
-        inventories.append(str(root))
-        return real_inventory(root)
-
-    monkeypatch.setattr(acceptance, "_inventory_tree", counting_inventory)
-    monkeypatch.setattr(
-        os,
-        syscall,
-        _inode_targeted(getattr(os, syscall), staged, close_first=syscall == "close"),
+def test_the_gate_names_no_retired_input():
+    retired = (
+        "BINDING_ROOT",
+        "TRUSTED_UID",
+        "REAL_CREDENTIAL_ROOT",
+        "SERVICE_UID",
+        "GENERATION",
     )
-
-    with pytest.raises(OSError) as err:
-        with acceptance._credential_isolation(home, real_auth, real_root):
-            pytest.fail("the leg body must never run after a staging failure")
-    monkeypatch.undo()
-
-    assert err.value.errno == errno.EIO
-    assert not staged.exists(), "staged credential copy survived a staging failure"
-    assert not home.exists(), "ephemeral positive home survived a staging failure"
-    # Pre-inventory and post-inventory both ran on the failure path.
-    assert inventories == [str(real_root), str(real_root)]
+    for name in acceptance._REQUIRED_ENV:
+        for banned in retired:
+            assert banned not in name, f"{name} still asks for a retired input"
 
 
-def test_leg_failure_still_cleans_and_reinventories(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    real_root, real_auth = _synthetic_credential_root(tmp_path)
-    home = tmp_path / "positive-codex-home"
-    inventories: list[str] = []
-    real_inventory = acceptance._inventory_tree
-
-    def counting_inventory(root: Path):
-        inventories.append(str(root))
-        return real_inventory(root)
-
-    monkeypatch.setattr(acceptance, "_inventory_tree", counting_inventory)
-
-    with pytest.raises(RuntimeError, match="leg exploded"):
-        with acceptance._credential_isolation(home, real_auth, real_root):
-            assert (home / "auth.json").exists()
-            raise RuntimeError("leg exploded")
-
-    assert not (home / "auth.json").exists()
-    assert not home.exists()
-    assert inventories == [str(real_root), str(real_root)]
+def test_module_is_skipped_when_the_gate_is_shut():
+    assert acceptance.pytestmark.mark.name == "skipif"
 
 
-def test_clean_leg_stages_reads_and_removes_the_ephemeral_copy(
-    tmp_path: Path,
-) -> None:
-    real_root, real_auth = _synthetic_credential_root(tmp_path)
-    home = tmp_path / "positive-codex-home"
-
-    with acceptance._credential_isolation(home, real_auth, real_root):
-        staged = home / "auth.json"
-        assert staged.read_bytes() == SYNTHETIC_AUTH
-        assert stat.S_IMODE(staged.stat().st_mode) == 0o600
-        assert stat.S_IMODE(home.stat().st_mode) == 0o700
-
-    assert not home.exists()
+# --- the ephemeral-home invariant --------------------------------------------
 
 
-def test_cleanup_residue_is_reported_not_raised(tmp_path: Path) -> None:
-    home = tmp_path / "positive-codex-home"
-    home.mkdir(mode=0o700)
-    (home / "auth.json").write_bytes(SYNTHETIC_AUTH)
-    os.chmod(home / "auth.json", 0o600)
-
-    assert acceptance._teardown_credentials(home) == ()
-    assert not home.exists()
-    # A second teardown of an already-absent home is still clean.
-    assert acceptance._teardown_credentials(home) == ()
+def test_an_entry_without_an_overlay_home_is_refused():
+    """Real ``session/new``/``session/load`` persist state under the home."""
+    assert acceptance._ephemeral_home_declared(_entry(env_overlay=())) is False
 
 
-def test_surviving_staged_copy_raises_isolation_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    real_root, real_auth = _synthetic_credential_root(tmp_path)
-    home = tmp_path / "positive-codex-home"
-    monkeypatch.setattr(
-        acceptance, "_teardown_credentials", lambda _home: ("staged_credential_copy_survived",)
-    )
-
-    with pytest.raises(acceptance.CredentialIsolationError, match="cleanup residue"):
-        with acceptance._credential_isolation(home, real_auth, real_root):
-            pass
-    monkeypatch.undo()
-    acceptance._teardown_credentials(home)
-
-
-def test_real_root_drift_fails_even_when_the_leg_passed(
-    tmp_path: Path,
-) -> None:
-    real_root, real_auth = _synthetic_credential_root(tmp_path)
-    home = tmp_path / "positive-codex-home"
-
-    with pytest.raises(acceptance.CredentialIsolationError, match="real-root drift"):
-        with acceptance._credential_isolation(home, real_auth, real_root):
-            # Any drift in the observed root — here an added entry — fails the
-            # whole leg, even though the leg body itself succeeded.
-            (real_root / "unexpected-entry").write_text("x", encoding="utf-8")
-    assert not home.exists()
-
-
-def test_original_leg_exception_survives_as_the_isolation_error_context(
-    tmp_path: Path,
-) -> None:
-    real_root, real_auth = _synthetic_credential_root(tmp_path)
-    home = tmp_path / "positive-codex-home"
-
-    with pytest.raises(acceptance.CredentialIsolationError) as err:
-        with acceptance._credential_isolation(home, real_auth, real_root):
-            (real_root / "unexpected-entry").write_text("x", encoding="utf-8")
-            raise RuntimeError("the leg failed first")
-    assert isinstance(err.value.__context__, RuntimeError)
-    assert "the leg failed first" in str(err.value.__context__)
-
-
-@pytest.mark.parametrize("field", ["st_atime_ns", "st_mtime_ns", "st_ctime_ns"])
-def test_inventory_drift_names_the_field_but_never_the_entry(field: str) -> None:
-    pre = {"auth.json": {"st_atime_ns": 1, "st_mtime_ns": 2, "st_ctime_ns": 3}}
-    post = {"auth.json": {**pre["auth.json"], field: 99}}
-
-    drift = acceptance._inventory_drift(pre, post)
-    assert field in drift
-    assert "entries:1" in drift
-    assert not any("auth.json" in item for item in drift)
-    assert acceptance._inventory_drift(pre, pre) == ()
-
-
-def test_inventory_drift_detects_an_added_or_removed_entry() -> None:
-    pre = {"a": {"st_ino": 1}}
-    assert acceptance._inventory_drift(pre, {**pre, "b": {"st_ino": 2}})[0] == "entry_set"
-    assert acceptance._inventory_drift(pre, {})[0] == "entry_set"
-
-
-# --- B3: P2 continuity, current-turn separation, thread-state delta ----------
-
-
-def test_context_nonce_is_deterministic_and_non_secret() -> None:
-    first = acceptance._context_nonce("p2_continuity_and_b1_boundary", "abc123def456")
-    again = acceptance._context_nonce("p2_continuity_and_b1_boundary", "abc123def456")
-    other = acceptance._context_nonce("p2_continuity_and_b1_boundary", "999999999999")
-
-    assert first == again  # deterministic: a rerun asks for the same token
-    assert first != other  # bound to the gate target
-    assert first.startswith("ARS-CONTINUITY-")
-    # Derived only from public inputs, so it can never carry credential entropy.
-    assert SYNTHETIC_AUTH.decode() not in first
-    assert set(first) <= set("ABCDEF0123456789-ARSCONTINUITY")
-
-
-@pytest.mark.parametrize(
-    "message",
-    [
-        "",
-        "I do not recall any token.",
-        "the token was NONCE-TOKEN-1 I think",
-        "NONCE-TOKEN-1 NONCE-TOKEN-1",
-        "Run 1 said NONCE-TOKEN-1. NONCE-TOKEN-1",
-        "nonce-token-1",
-    ],
-)
-def test_exact_nonce_recall_rejects_everything_but_the_token(message: str) -> None:
-    with pytest.raises(AssertionError):
-        acceptance._assert_exact_nonce_recall(message, "NONCE-TOKEN-1")
-
-
-@pytest.mark.parametrize("message", ["NONCE-TOKEN-1", "NONCE-TOKEN-1\n", "  NONCE-TOKEN-1  "])
-def test_exact_nonce_recall_accepts_only_the_bare_token(message: str) -> None:
-    acceptance._assert_exact_nonce_recall(message, "NONCE-TOKEN-1")
-
-
-def test_exact_nonce_recall_refuses_an_empty_nonce() -> None:
-    with pytest.raises(AssertionError, match="non-empty"):
-        acceptance._assert_exact_nonce_recall("anything", "")
-
-
-def test_home_state_excludes_the_staged_credential_copy(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    (home / "sessions" / "2026").mkdir(parents=True)
-    (home / "auth.json").write_bytes(SYNTHETIC_AUTH)
-    (home / "sessions" / "2026" / "rollout.jsonl").write_text("x", encoding="utf-8")
-
-    state = acceptance._home_state(home)
-    assert "auth.json" not in state
-    assert "sessions/2026/rollout.jsonl" in state
-
-
-def test_new_thread_state_requires_a_real_delta(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    home.mkdir()
-    (home / "auth.json").write_bytes(SYNTHETIC_AUTH)
-
-    before = acceptance._home_state(home)
-    # The staged credential copy alone must not count as "the CLI persisted
-    # thread state": an `any(home.iterdir())` form is already true here.
-    assert any(home.iterdir())
-    with pytest.raises(AssertionError, match="no new CLI thread/rollout state"):
-        acceptance._assert_new_thread_state(before, acceptance._home_state(home))
-
-    (home / "history.jsonl").write_text("x", encoding="utf-8")
-    assert acceptance._assert_new_thread_state(before, acceptance._home_state(home)) == 1
-
-
-def _events(*, replay: tuple[int, ...] = (), current: tuple[int, ...] = ()) -> list[dict]:
-    events: list[dict] = [{"type": "session_load_requested"}]
-    events += [{"type": "agent_message_delta", "text_length": n} for n in replay]
-    events.append({"type": "session_prompt_sent"})
-    events += [{"type": "agent_message_delta", "text_length": n} for n in current]
-    return events
-
-
-def test_current_turn_message_path_measures_only_post_prompt_deltas() -> None:
-    events = _events(replay=(40, 10), current=(3, 4))
-
-    facts = acceptance._assert_current_turn_message_path(events, "1234567")
-    assert facts == {
-        "current_turn_message_length": 7,
-        "replayed_message_length": 50,
-    }
-
-
-def test_current_turn_message_path_rejects_replay_concatenation() -> None:
-    events = _events(replay=(50,), current=(7,))
-    # A final message that swallowed the replayed history is exactly the B1
-    # regression this measurement exists to catch.
-    with pytest.raises(AssertionError, match="replay or history leaked"):
-        acceptance._assert_current_turn_message_path(events, "x" * 57)
-
-
-def test_current_turn_message_path_requires_a_current_turn_message() -> None:
-    with pytest.raises(AssertionError, match="no current-Turn"):
-        acceptance._assert_current_turn_message_path(_events(replay=(5,)), "")
-
-
-def test_current_turn_message_path_requires_a_dispatched_prompt() -> None:
-    with pytest.raises(AssertionError, match="never dispatched"):
-        acceptance._assert_current_turn_message_path(
-            [{"type": "agent_message_delta", "text_length": 3}], "abc"
+def test_the_invoking_users_own_home_is_not_an_ephemeral_home(monkeypatch):
+    monkeypatch.setenv("HOME", "/home/operator")
+    assert (
+        acceptance._ephemeral_home_declared(
+            _entry(env_overlay=(("SOME_AGENT_HOME", "/home/operator"),))
         )
+        is False
+    )
+    assert (
+        acceptance._ephemeral_home_declared(
+            _entry(env_overlay=(("SOME_AGENT_HOME", "/tmp/leg-home"),))
+        )
+        is True
+    )
 
 
-def test_recall_prompt_asks_for_the_token_without_restating_it() -> None:
-    nonce = acceptance._context_nonce("p2_continuity_and_b1_boundary", "0" * 40)
-    assert nonce in acceptance._nonce_prompt(nonce)
-    # Run 2 must not be handed the answer it is being asked to recall.
-    assert nonce not in acceptance.RECALL_PROMPT
+def test_the_harness_never_authors_a_registry_file():
+    """An acceptance harness that writes the fixture tests the fixture."""
+    text = _ACCEPTANCE_PATH.read_text(encoding="utf-8")
+    for banned in ("write_registry", "write_text(", "registry_fixtures", "mkstemp"):
+        assert banned not in text, f"the harness authors registry state via {banned!r}"
 
 
-def test_only_the_exact_result_legs_carry_the_nonce_prompt() -> None:
-    nonce = acceptance._context_nonce("p1_exact_config_and_evidence", "0" * 40)
-    for leg in acceptance.POSITIVE_LEGS:
-        prompt = acceptance._positive_prompt(leg, nonce)
-        assert (nonce in prompt) is (leg in acceptance.NONCE_LEGS), leg
-    assert set(acceptance.NONCE_LEGS) < set(acceptance.POSITIVE_LEGS)
-    # The P4 sublegs need Turns that cannot self-terminate before the cancel or
-    # the post-dispatch timeout lands.
-    for leg in (acceptance.P4_CANCEL_LEG, acceptance.P4_TIMEOUT_LEG):
-        assert len(acceptance._positive_prompt(leg, nonce)) > 40, leg
-    assert acceptance._positive_prompt(
-        acceptance.P4_CANCEL_LEG, nonce
-    ) != acceptance._positive_prompt(acceptance.P4_TIMEOUT_LEG, nonce)
+def test_the_harness_reads_the_agents_file_through_the_production_reader():
+    text = _ACCEPTANCE_PATH.read_text(encoding="utf-8")
+    assert "agent_registry.load_agents_file" in text
+    assert "tomllib" not in text
 
 
-# --- B4: two P4 sublegs against the B2-fixed terminal table ------------------
+# --- the leg matrix ----------------------------------------------------------
 
 
-def test_p4_declares_both_sublegs_distinctly() -> None:
-    assert acceptance.P4_CANCEL_LEG != acceptance.P4_TIMEOUT_LEG
-    assert set(acceptance.P4_EXPECTED_OUTCOMES) == {
+def test_every_positive_leg_is_declared_exactly_once():
+    legs = acceptance.POSITIVE_LEGS
+    assert len(set(legs)) == len(legs)
+    assert set(legs) >= {
+        "p1_exact_config_and_evidence",
+        "p2_continuity_and_b1_boundary",
+        "p3_permission_denied_before_effect",
         acceptance.P4_CANCEL_LEG,
         acceptance.P4_TIMEOUT_LEG,
     }
-    assert acceptance.P4_CANCEL_LEG in acceptance.POSITIVE_LEGS
-    assert acceptance.P4_TIMEOUT_LEG in acceptance.POSITIVE_LEGS
-    # Distinct evidence entries: the two sublegs are separate parametrized legs.
-    assert len(set(acceptance.POSITIVE_LEGS)) == len(acceptance.POSITIVE_LEGS)
-    # Their expectations must differ, or one leg is proving the other's row.
-    cancel = acceptance.P4_EXPECTED_OUTCOMES[acceptance.P4_CANCEL_LEG]
-    timeout = acceptance.P4_EXPECTED_OUTCOMES[acceptance.P4_TIMEOUT_LEG]
-    assert cancel["detail_code"] != timeout["detail_code"]
 
 
-@pytest.mark.parametrize(
-    "leg, observations",
-    [
-        (
-            "p4_cancel_after_dispatch",
-            {"supervisor_cancelled": True},
-        ),
-        (
-            "p4_timeout_after_dispatch",
-            {"supervisor_timed_out": True},
-        ),
-    ],
-)
-def test_p4_expectations_are_the_production_terminal_table(
-    leg: str, observations: dict
-) -> None:
-    """The matrix is derived from `finalize_run_state`, not copied opinion.
-
-    Both sublegs end a *dispatched* Turn by supervisor force with no
-    trustworthy ACP terminal, which the B2-fixed table resolves to
-    unknown/quarantined/hard-non-retryable.
-    """
-    status, disposition = finalize_run_state(
-        FinalizationObservations(
-            dispatch_started=True,
-            escalated_kill_after_dispatch=True,
-            **observations,
-        )
-    )
-    expected = acceptance.P4_EXPECTED_OUTCOMES[leg]
-
-    assert status is AgentRunStatus.UNKNOWN
-    assert expected["status"] == status.value
-    assert expected["session_state"] == disposition
-    assert expected["retryable"] is _RETRYABLE_DEFAULT[status]
-    assert expected["retryable"] is False
+def test_the_real_agent_acp_legs_survived_the_reset():
+    """R5: deleting these would silently drop the only real-agent evidence."""
+    text = _ACCEPTANCE_PATH.read_text(encoding="utf-8")
+    assert "session/new" in text and "session/load" in text
+    assert "p3_permission_denied_before_effect" in acceptance.POSITIVE_LEGS
 
 
-@pytest.mark.parametrize(
-    "mutation",
-    [
-        {"status": "cancelled"},
-        {"status": "timed_out"},
-        {"status": "completed"},
-        {"detail_code": "TURN_TIMEOUT"},
-        {"detail_code": None},
-        {"retryable": True},
-    ],
-)
-def test_p4_outcome_assertion_rejects_any_drift(mutation: dict) -> None:
-    leg = acceptance.P4_CANCEL_LEG
-    result = {
-        "status": "unknown",
-        "detail_code": "SUPERVISOR_CANCELLED",
-        "retryable": False,
-    }
-    acceptance._assert_p4_outcome(leg, result)  # the exact row passes
-
-    with pytest.raises(AssertionError, match=f"P4 {leg}"):
-        acceptance._assert_p4_outcome(leg, {**result, **mutation})
+def test_p4_declares_both_sublegs_distinctly():
+    outcomes = acceptance.P4_EXPECTED_OUTCOMES
+    assert set(outcomes) == {acceptance.P4_CANCEL_LEG, acceptance.P4_TIMEOUT_LEG}
+    codes = {row["detail_code"] for row in outcomes.values()}
+    assert codes == {"SUPERVISOR_CANCELLED", "TURN_TIMEOUT"}
+    for row in outcomes.values():
+        # The fixed terminal-table row for a dispatched Turn with no
+        # trustworthy ACP terminal — never harness opinion.
+        assert row["status"] == "unknown"
+        assert row["retryable"] is False
+        assert row["session_state"] == "quarantined"
 
 
-def test_p4_timeout_limit_bounds_only_the_post_dispatch_turn() -> None:
-    limits = RunLimits(turn_timeout_seconds=acceptance.P4_TURN_TIMEOUT_SECONDS)
-
-    assert limits.turn_timeout_seconds == acceptance.P4_TURN_TIMEOUT_SECONDS
-    assert acceptance.P4_TURN_TIMEOUT_SECONDS > 0
-    # Admission, spawn, and the startup/config sequence keep their default
-    # budgets, so a timeout on this leg provably cannot fire before dispatch.
-    assert limits.startup_timeout_seconds == RunLimits().startup_timeout_seconds
-    assert acceptance.P4_TURN_TIMEOUT_SECONDS < limits.startup_timeout_seconds
+def test_the_timeout_bound_cannot_fire_before_dispatch():
+    assert 0 < acceptance.P4_TURN_TIMEOUT_SECONDS < acceptance.RUN_TIMEOUT_SECONDS
 
 
-def test_no_prompt_replay_rejects_a_second_dispatch(tmp_path: Path) -> None:
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    (run_dir / acceptance.DISPATCH_STARTED_MARKER).write_text(
-        '{"marker": "prompt-dispatch-started", "ordinal": 1}', encoding="utf-8"
-    )
-    single = _events(current=(4,))
-
-    acceptance._assert_no_prompt_replay(single, run_dir)
-
-    replayed = single + [{"type": "session_prompt_sent"}]
-    with pytest.raises(AssertionError, match="dispatched 2 times"):
-        acceptance._assert_no_prompt_replay(replayed, run_dir)
-    with pytest.raises(AssertionError, match="dispatched 0 times"):
-        acceptance._assert_no_prompt_replay([{"type": "run_started"}], run_dir)
-
-
-# --- B5: the complete N1–N9 variant matrix -----------------------------------
-
-
-def test_declared_cases_cover_every_required_variant_exactly_once() -> None:
-    declared = [case.case_id for case in acceptance.NEGATIVE_CASES]
-    required = [
-        case_id
-        for variants in acceptance.REQUIRED_NEGATIVE_VARIANTS.values()
-        for case_id in variants
-    ]
-
-    assert len(declared) == len(set(declared)), "duplicate negative case id"
-    missing = sorted(set(required) - set(declared))
-    extra = sorted(set(declared) - set(required))
-    assert not missing, f"required R8 variants not driven: {missing}"
-    assert not extra, f"cases declared outside the required matrix: {extra}"
-    assert sorted(acceptance.REQUIRED_NEGATIVE_VARIANTS) == [
-        f"n{index}" for index in range(1, 10)
-    ]
-
-
-def test_every_family_keeps_its_full_variant_count() -> None:
-    # The failure this pins: a family silently represented by one specimen.
-    by_family: dict[str, list[str]] = {}
+def test_every_negative_family_keeps_its_full_variant_count():
+    declared: dict[str, list[str]] = {}
     for case in acceptance.NEGATIVE_CASES:
-        by_family.setdefault(case.family, []).append(case.case_id)
-
-    for family, variants in acceptance.REQUIRED_NEGATIVE_VARIANTS.items():
-        assert sorted(by_family.get(family, [])) == sorted(variants), family
-    assert len(acceptance.NEGATIVE_CASES) == 18
+        declared.setdefault(case.family, []).append(case.case_id)
+    for family, members in acceptance.NEGATIVE_FAMILIES.items():
+        assert sorted(declared[family]) == sorted(members), family
 
 
-def test_case_stages_and_rows_agree_with_the_attestation_classes() -> None:
-    for case in acceptance.NEGATIVE_CASES:
-        if case.stage == "attestation":
-            assert case.failing_row, case.case_id
-            # The declared detail code is the row's own refusal class, taken
-            # from production rather than restated here.
-            assert (
-                attestation_module._CHECK_CLASSES[case.failing_row]
-                == case.detail_code
-            ), case.case_id
-        elif case.stage == "admission":
-            assert case.failing_row is None, case.case_id
-            assert case.detail_code == "ADMISSION", case.case_id
-        elif case.stage == "binding":
-            # The single per-Run Binding read refuses before the RunTask is
-            # even constructed, so the Run carries only the write-once
-            # registration-failure terminal — no spec, launch, or attestation.
-            assert case.failing_row is None, case.case_id
-            assert case.detail_code == "REGISTRATION_FAILED", case.case_id
-        else:
-            # Session-binding refusals leave `_bind_session` through the
-            # RunTask top-level guard, so they surface as RUN_EXCEPTION — not
-            # ADMISSION. Pinned end-to-end by
-            # tests/native_acp/test_run_task.py::
-            # test_codex_seeded_session_profile_hash_drift_refused_before_attestation
-            # and ::test_codex_quarantined_session_reuse_refused_before_attestation.
-            assert case.stage == "session", case.case_id
-            assert case.failing_row is None, case.case_id
-            assert case.detail_code == "RUN_EXCEPTION", case.case_id
+def test_negative_case_ids_are_unique():
+    ids = [case.case_id for case in acceptance.NEGATIVE_CASES]
+    assert len(set(ids)) == len(ids)
 
 
-def test_only_reuse_dependent_cases_are_seeded() -> None:
-    seeded = {case.case_id for case in acceptance.NEGATIVE_CASES if case.seeded}
-    assert seeded == {
-        "n7_project_config_inserted_between_runs",
-        "n9_seeded_session_profile_hash_drift",
-        "n9_quarantined_session_reuse",
+def test_every_negative_case_names_a_refusal_that_still_exists():
+    """A case whose code no longer exists would pass while proving nothing."""
+    from agent_run_supervisor.native_acp.observation import OBSERVATION_REFUSALS
+
+    live = set(OBSERVATION_REFUSALS) | {
+        "AGENT_NOT_REGISTERED",
+        "AGENT_ID_INVALID",
+        "SESSION_NOT_FOUND_FOR_REUSE",
+        "SESSION_RECORD_INVALID",
+        "SESSION_EXTERNAL_ID_MISSING",
+        "SESSION_BINDING_MISMATCH",
+        "COMMAND_NOT_FOUND",
+        "COMMAND_NOT_EXECUTABLE",
+        "SPAWN_FAILED",
     }
+    for case in acceptance.NEGATIVE_CASES:
+        assert case.detail_code in live, case.case_id
 
 
-_EXPECTED_SURFACES: dict[str, set[str]] = {
-    "n1_tampered_adapter_entry": {"entry"},
-    "n2_swapped_node_binary": {"node"},
-    "n3_retargeted_cli_symlink": {"cli"},
-    "n4_auth_json_symlink": {"auth"},
-    "n4_auth_json_mode_0644": {"auth"},
-    "n4_auth_json_removed": {"auth"},
-    "n5_credential_root_mode_0750": {"cred_root"},
-    "n5_credential_root_symlink": {"cred_root"},
-    "n6_credential_root_config_toml": {"root_config_toml"},
-    "n7_project_config_at_cwd": {"layer_at_cwd"},
-    "n7_project_config_at_workspace_root": {"layer_at_root"},
-    "n7_project_config_above_workspace_root": {"layer_above_root"},
-    "n7_project_config_inserted_between_runs": {"layer_at_root"},
-    "n8_credential_refs_missing": set(),
-    "n8_credential_refs_wrong": set(),
-    "n8_credential_refs_extra": set(),
-    "n9_seeded_session_profile_hash_drift": set(),
-    "n9_quarantined_session_reuse": set(),
+def test_the_retired_negative_families_are_gone():
+    """They went with the layer they tested; there is nothing left to test."""
+    text = _ACCEPTANCE_PATH.read_text(encoding="utf-8")
+    for banned in (
+        "RUNTIME_IDENTITY_MISMATCH",
+        "tampered_adapter_entry",
+        "swapped_node_binary",
+        "credential_root_mode",
+        "credential_root_symlink",
+        "credential_refs_missing",
+    ):
+        assert banned not in text, f"a retired family survives as {banned!r}"
+
+
+def test_the_harness_names_no_retired_module():
+    text = _ACCEPTANCE_PATH.read_text(encoding="utf-8")
+    for banned in ("runtime_binding", "BindingReader", "TrustedOwnership"):
+        assert banned not in text
+
+
+# --- evidence completeness ---------------------------------------------------
+
+
+def test_the_evidence_bundle_starts_empty():
+    """A bundle pre-seeded with a leg would be complete without the leg running."""
+    assert set(acceptance.EVIDENCE) == {"legs"}
+
+
+def test_a_leg_result_is_bound_to_the_reviewed_sha():
+    recorded: dict[str, object] = {}
+    acceptance.EVIDENCE["legs"] = recorded
+    acceptance._record("leg-x", {"commit_sha": "abc123"}, {"status": "completed"})
+    assert recorded["leg-x"] == {"status": "completed", "commit_sha": "abc123"}
+    acceptance.EVIDENCE["legs"] = {}
+
+
+def test_the_completeness_assertion_covers_every_declared_leg():
+    text = _ACCEPTANCE_PATH.read_text(encoding="utf-8")
+    assert "set(POSITIVE_LEGS) | {case.case_id for case in NEGATIVE_CASES}" in text
+
+
+def test_the_daemon_receives_the_snapshot_and_never_a_path():
+    """The registry is read once, by the daemon's own startup, and handed on."""
+    import inspect
+
+    signature = inspect.signature(acceptance.EphemeralDaemon.__init__)
+    assert "agents" in signature.parameters
+    assert "binding_root" not in signature.parameters
+    assert "agents_file" not in signature.parameters
+
+
+# --- the harness actually speaks the contracts it depends on ------------------
+#
+# Everything below drives the **real** leg driver against stand-ins that enforce
+# the real contracts: calls are bound through the genuine ``ArsdClient``
+# signatures and every submit payload is parsed by the genuine
+# ``protocol.parse_submit``. A harness that speaks a different contract fails
+# here exactly as it would against a live daemon — with no daemon, no spawn, no
+# credential read, and no model call.
+
+ACCEPTANCE_ENV = {
+    "ARS_ACP_ACCEPTANCE_SOCKET_DIR": "/tmp/acceptance-sockets",
+    "ARS_ACP_ACCEPTANCE_SUPERVISOR_ROOT": "/tmp/acceptance-root",
+    "ARS_ACP_ACCEPTANCE_WORKSPACE_PARENT": "/tmp/acceptance-ws",
+    "ARS_ACP_ACCEPTANCE_OWNER": "acceptance-owner",
+    "ARS_ACP_ACCEPTANCE_NAMESPACE": "acceptance/ns",
+    "ARS_ACP_ACCEPTANCE_CALLER_MAPPING": "1000:acceptance-principal:o:n",
+    "ARS_ACP_ACCEPTANCE_COMMIT_SHA": "0" * 40,
+    "ARS_ACP_ACCEPTANCE_AGENTS_FILE": "/tmp/acceptance-agents.toml",
+    "ARS_ACP_ACCEPTANCE_AGENT_ID": "acceptance-agent",
+    "ARS_ACP_ACCEPTANCE_MODEL": "provider/model",
+    "ARS_ACP_ACCEPTANCE_EFFORT": "high",
 }
 
 
-@pytest.mark.parametrize(
-    "case", acceptance.NEGATIVE_CASES, ids=lambda case: case.case_id
-)
-def test_arrangement_helper_tampers_exactly_one_declared_surface(
-    tmp_path: Path, case
-) -> None:
-    """Every declared variant is realized, and only its own surface moves."""
-    fixtures = _synthetic_fixtures(tmp_path)
-    before = _surfaces(fixtures)
-
-    overrides = acceptance._arrange_negative_case(case.case_id, fixtures)
-
-    after = _surfaces(fixtures)
-    changed = {key for key in before if before[key] != after[key]}
-    assert changed == _EXPECTED_SURFACES[case.case_id], case.case_id
-
-    if case.family == "n8":
-        refs = overrides["credential_refs"]
-        assert refs != ["codex-home-auth"], "an N8 variant must not match"
-    else:
-        assert "credential_refs" not in overrides
-    # Only the three positional N7 variants steer the effective cwd.
-    if case.case_id in {
-        "n7_project_config_at_cwd",
-        "n7_project_config_at_workspace_root",
-        "n7_project_config_above_workspace_root",
-    }:
-        assert overrides["cwd"] == str(fixtures.nested_cwd)
-    else:
-        assert "cwd" not in overrides
+@pytest.fixture()
+def acceptance_env(monkeypatch):
+    for name, value in ACCEPTANCE_ENV.items():
+        monkeypatch.setenv(name, value)
 
 
-def test_n4_variants_realize_distinct_structural_violations(tmp_path: Path) -> None:
-    symlink = _synthetic_fixtures(tmp_path / "symlink")
-    acceptance._arrange_negative_case("n4_auth_json_symlink", symlink)
-    assert symlink.auth.is_symlink()
+def _no_running_loop() -> bool:
+    """True when this call is *not* inside a running asyncio loop."""
+    import asyncio
 
-    mode = _synthetic_fixtures(tmp_path / "mode")
-    acceptance._arrange_negative_case("n4_auth_json_mode_0644", mode)
-    assert stat.S_IMODE(mode.auth.lstat().st_mode) == 0o644
-
-    removed = _synthetic_fixtures(tmp_path / "removed")
-    acceptance._arrange_negative_case("n4_auth_json_removed", removed)
-    assert not removed.auth.exists()
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return True
+    return False
 
 
-def test_n5_variants_realize_distinct_root_violations(tmp_path: Path) -> None:
-    mode = _synthetic_fixtures(tmp_path / "mode")
-    acceptance._arrange_negative_case("n5_credential_root_mode_0750", mode)
-    assert stat.S_IMODE(mode.cred_root.lstat().st_mode) == 0o750
-    assert not mode.cred_root.is_symlink()
+class _RecordingClient:
+    """Enforces the real ``ArsdClient`` contract and records what was asked.
 
-    swapped = _synthetic_fixtures(tmp_path / "swapped")
-    acceptance._arrange_negative_case("n5_credential_root_symlink", swapped)
-    assert swapped.cred_root.is_symlink()
+    Two properties are load-bearing. Every method binds through the genuine
+    signature, so a call shaped for a different contract raises the same
+    ``TypeError`` the real client raises. And every blocking call asserts it is
+    running with **no** asyncio loop in this thread: the real client is
+    synchronous, so driving it from inside the daemon's own coroutine would
+    block the loop that has to answer it.
+    """
+
+    instances: list["_RecordingClient"] = []
+
+    def __init__(self, socket_path, *, api_version=None) -> None:
+        _REAL_INIT_SIGNATURE.bind(self, socket_path, api_version=api_version)
+        self.socket_path = socket_path
+        self.calls: list[str] = []
+        self.submits: list[dict] = []
+        self.events: dict[str, list[dict]] = {}
+        self.terminals: dict[str, dict] = {}
+        self.sessions: dict[str, dict] = {}
+        self.status_error: Exception | None = None
+        self._run_seq = 0
+        _RecordingClient.instances.append(self)
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def connect(self) -> None:
+        self.calls.append("connect")
+
+    def close(self) -> None:
+        self.calls.append("close")
+
+    def __enter__(self) -> "_RecordingClient":
+        self.connect()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    # -- operations --------------------------------------------------------
+
+    def _guard(self, name: str) -> None:
+        assert _no_running_loop(), (
+            f"{name} is a blocking call and ran inside an asyncio loop; the "
+            "daemon it is talking to needs that loop to answer"
+        )
+        self.calls.append(name)
+
+    def submit(self, **kwargs) -> dict:
+        from agent_run_supervisor.arsd import protocol
+
+        # The real keyword-only contract: request_id + payload, nothing else.
+        bound = _REAL_SUBMIT_SIGNATURE.bind(self, **kwargs)
+        self._guard("submit")
+        payload = dict(bound.arguments["payload"])
+        # The real parser, so the envelope is proven rather than assumed.
+        command = protocol.parse_submit(payload)
+        self._run_seq += 1
+        run_id = f"run-{self._run_seq}"
+        self.submits.append(
+            {
+                "request_id": bound.arguments["request_id"],
+                "payload": payload,
+                "command": command,
+                "run_id": run_id,
+            }
+        )
+        return {"run_id": run_id, "accepted_at": "2026-08-02T00:00:00+00:00"}
+
+    def run_status(self, run_id: str, *, request_id: str | None = None) -> dict:
+        _REAL_RUN_STATUS_SIGNATURE.bind(self, run_id, request_id=request_id)
+        self._guard("run_status")
+        if self.status_error is not None:
+            raise self.status_error
+        result = self.terminals.get(run_id)
+        if result is None:
+            return {"run_id": run_id, "state": "accepted"}
+        return {"run_id": run_id, "result": result}
+
+    def run_events(self, run_id: str, **kwargs) -> dict:
+        _REAL_RUN_EVENTS_SIGNATURE.bind(self, run_id, **kwargs)
+        self._guard("run_events")
+        return {"events": list(self.events.get(run_id, ())), "exhausted": True}
+
+    def session_status(self, session_id: str, *, request_id: str | None = None) -> dict:
+        self._guard("session_status")
+        return self.sessions.get(session_id, {"session_id": session_id, "state": "open"})
+
+    def run_cancel(self, run_id: str, *, request_id: str | None = None) -> dict:
+        self._guard("run_cancel")
+        return {"run_id": run_id}
 
 
-def test_n8_variants_are_missing_wrong_and_extra(tmp_path: Path) -> None:
-    registered = ["codex-home-auth"]
-    seen = {}
-    for case_id in acceptance.REQUIRED_NEGATIVE_VARIANTS["n8"]:
-        fixtures = _synthetic_fixtures(tmp_path / case_id)
-        seen[case_id] = acceptance._arrange_negative_case(case_id, fixtures)[
-            "credential_refs"
-        ]
+class _StubDaemon:
+    """The daemon seam only: a real supervisor root, and no server at all."""
 
-    assert seen["n8_credential_refs_missing"] == []
-    assert seen["n8_credential_refs_wrong"] and (
-        seen["n8_credential_refs_wrong"] != registered
+    def __init__(self, supervisor_root: Path) -> None:
+        self.supervisor_root = supervisor_root
+        self.socket_path = supervisor_root / "stub.sock"
+        self.hosted_calls = 0
+
+    @staticmethod
+    def _cm(daemon):
+        import contextlib
+
+        @contextlib.contextmanager
+        def hosted(policy):
+            assert _no_running_loop(), "the daemon host must not nest inside a loop"
+            daemon.hosted_calls += 1
+            yield
+
+        return hosted
+
+    @contextlib.asynccontextmanager
+    async def serving(self, policy):
+        """Kept so the pre-repair control flow reaches its real defect.
+
+        Without it the driver would fail on this stub's shape instead of on the
+        contract under test, and the RED would prove nothing.
+        """
+        self.hosted_calls += 1
+        yield None
+
+
+def _stub_daemon(tmp_path: Path) -> _StubDaemon:
+    daemon = _StubDaemon(tmp_path / "root")
+    daemon.hosted = _StubDaemon._cm(daemon)
+    return daemon
+
+
+def _terminal(status: str = "completed", **fields) -> dict:
+    body = {
+        "status": status,
+        "detail_code": None,
+        "retryable": False,
+        "final_message": "",
+    }
+    body.update(fields)
+    return body
+
+
+@pytest.fixture()
+def recording_client(monkeypatch):
+    _RecordingClient.instances.clear()
+    monkeypatch.setattr(acceptance.arsd_client, "ArsdClient", _RecordingClient)
+    monkeypatch.setattr(acceptance, "POLL_INTERVAL", 0.0)
+    return _RecordingClient
+
+
+# --- G3-L3-01: the harness can actually submit -------------------------------
+
+
+def _prime_terminals(client_cls, *, count: int, status: str = "completed") -> None:
+    """Answer every run the driver is about to create, in order."""
+
+    def terminals_for(instance):
+        for index in range(1, count + 1):
+            instance.terminals[f"run-{index}"] = _terminal(status)
+
+    client_cls._prime = terminals_for
+
+
+def test_l3_01_a_positive_leg_submits_the_real_client_envelope(
+    tmp_path, acceptance_env, recording_client
+):
+    """RED before the repair: ``submit(**payload)`` cannot bind the real call.
+
+    ``_submit_payload`` returns the submit *payload* — ``request``,
+    ``prompt_text``, ``workspace_root``. ``ArsdClient.submit`` takes keyword-only
+    ``request_id`` and ``payload``. Splatting one into the other raises
+    ``TypeError`` before a single byte reaches the socket.
+    """
+    daemon = _stub_daemon(tmp_path)
+    original_init = _RecordingClient.__init__
+
+    def init(self, socket_path, *, api_version=None):
+        original_init(self, socket_path, api_version=api_version)
+        for index in range(1, 4):
+            self.terminals[f"run-{index}"] = _terminal("completed")
+
+    recording_client.__init__ = init
+
+    outcome = acceptance._drive_positive_leg(
+        daemon, "p1_exact_config_and_evidence", tmp_path / "ws"
     )
-    assert len(seen["n8_credential_refs_extra"]) > len(registered)
-    assert registered[0] in seen["n8_credential_refs_extra"]
+
+    client = _RecordingClient.instances[-1]
+    assert len(client.submits) == 1
+    submitted = client.submits[0]
+    assert submitted["request_id"], "every submit carries an explicit request id"
+    assert set(submitted["payload"]) <= {
+        "request",
+        "prompt_text",
+        "workspace_root",
+        "cwd",
+        "retry_of_run_id",
+    }
+    assert submitted["command"].request.session_reuse == "none"
+    assert outcome["status"] == "completed"
+    recording_client.__init__ = original_init
 
 
-def test_arrangement_helper_refuses_an_undeclared_case(tmp_path: Path) -> None:
-    fixtures = _synthetic_fixtures(tmp_path)
-    with pytest.raises(AssertionError, match="undeclared negative case"):
-        acceptance._arrange_negative_case("n4_something_invented", fixtures)
+def test_l3_01_the_client_connection_is_opened_and_closed(
+    tmp_path, acceptance_env, recording_client
+):
+    daemon = _stub_daemon(tmp_path)
+    original_init = _RecordingClient.__init__
 
+    def init(self, socket_path, *, api_version=None):
+        original_init(self, socket_path, api_version=api_version)
+        for index in range(1, 4):
+            self.terminals[f"run-{index}"] = _terminal("completed")
 
-# --- the opt-in module stays opt-in ------------------------------------------
-
-
-def test_acceptance_module_remains_skip_by_default(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("ARS_CODEX_SOCKET_ACCEPTANCE", raising=False)
-    assert acceptance._acceptance_ready() is False
-    assert acceptance.pytestmark.args[0] is True  # the skipif condition holds
-
-    monkeypatch.setenv("ARS_CODEX_SOCKET_ACCEPTANCE", "1")
-    # The gate needs every test-scoped input as well, never the flag alone.
-    for name in acceptance._REQUIRED_ENV:
-        monkeypatch.delenv(name, raising=False)
-    assert acceptance._acceptance_ready() is False
-
-
-def test_every_declared_leg_is_parametrized_by_the_module() -> None:
-    positive = next(
-        mark
-        for mark in acceptance.test_positive_legs.pytestmark
-        if mark.name == "parametrize"
+    recording_client.__init__ = init
+    acceptance._drive_positive_leg(
+        daemon, "p1_exact_config_and_evidence", tmp_path / "ws"
     )
-    negative = next(
-        mark
-        for mark in acceptance.test_negative_legs.pytestmark
-        if mark.name == "parametrize"
+    client = _RecordingClient.instances[-1]
+    assert client.calls[0] == "connect"
+    assert client.calls[-1] == "close"
+    assert daemon.hosted_calls == 1
+    recording_client.__init__ = original_init
+
+
+def test_l3_01_the_connection_is_closed_even_when_the_leg_raises(
+    tmp_path, acceptance_env, recording_client
+):
+    """A leg that blows up must not leave the caller connection open."""
+    daemon = _stub_daemon(tmp_path)
+    original_init = _RecordingClient.__init__
+
+    def init(self, socket_path, *, api_version=None):
+        original_init(self, socket_path, api_version=api_version)
+        self.status_error = RuntimeError("status exploded")
+
+    recording_client.__init__ = init
+    with pytest.raises(RuntimeError):
+        acceptance._drive_positive_leg(
+            daemon, "p1_exact_config_and_evidence", tmp_path / "ws"
+        )
+    client = _RecordingClient.instances[-1]
+    assert client.calls[-1] == "close"
+    recording_client.__init__ = original_init
+
+
+# --- G3-L3-02: p2 is two ordered Runs, or it is not continuity ---------------
+
+
+def _seed_first_run_session(daemon: _StubDaemon, run_id: str, workspace: Path) -> str:
+    """The record Run 1's own admission leaves behind, with its real external id."""
+    from agent_run_supervisor.native_acp import storage
+    from agent_run_supervisor.native_acp.spec import resolve_workspace_binding
+
+    workspace.mkdir(parents=True, exist_ok=True)
+    binding = resolve_workspace_binding(root=workspace)
+    store = storage.native_session_store(daemon.supervisor_root)
+    external = "external-acp-session-from-the-agent"
+    storage.create_native_session(
+        store,
+        session_id=f"{run_id}-ephemeral",
+        profile_id="standard-native-acp-v1",
+        profile_revision=1,
+        profile_hash="0" * 64,
+        owner=ACCEPTANCE_ENV["ARS_ACP_ACCEPTANCE_OWNER"],
+        namespace=ACCEPTANCE_ENV["ARS_ACP_ACCEPTANCE_NAMESPACE"],
+        workspace_hash=binding.workspace_hash,
+        effective_cwd=binding.effective_cwd,
+        matched_root=binding.canonical_root,
+        agent_id=ACCEPTANCE_ENV["ARS_ACP_ACCEPTANCE_AGENT_ID"],
+    )
+    storage.bind_agent_session(store, f"{run_id}-ephemeral", agent_session_id=external)
+    return external
+
+
+def _drive_p2(tmp_path, recording_client, *, second_run_events):
+    daemon = _stub_daemon(tmp_path)
+    workspace = tmp_path / "ws"
+    original_init = _RecordingClient.__init__
+
+    def init(self, socket_path, *, api_version=None):
+        original_init(self, socket_path, api_version=api_version)
+        self.terminals["run-1"] = _terminal("completed")
+        self.terminals["run-2"] = _terminal("completed")
+        self.events["run-1"] = [{"type": "session_new_requested"}]
+        self.events["run-2"] = list(second_run_events)
+
+    recording_client.__init__ = init
+    try:
+        _seed_first_run_session(daemon, "run-1", workspace)
+        outcome = acceptance._drive_positive_leg(
+            daemon, acceptance.P2_CONTINUITY_LEG, workspace
+        )
+    finally:
+        recording_client.__init__ = original_init
+    return daemon, _RecordingClient.instances[-1], outcome
+
+
+def test_l3_02_the_continuity_leg_drives_two_ordered_runs(
+    tmp_path, acceptance_env, recording_client
+):
+    """RED before the repair: p2 submits once and can only create a Session.
+
+    ``_submit_payload`` always emitted ``session_reuse: "none"`` with a null
+    ``ars_session_id``, so the leg could not reach ``session/load`` at all — the
+    one thing it exists to prove.
+    """
+    _daemon, client, _outcome = _drive_p2(
+        tmp_path,
+        recording_client,
+        second_run_events=[{"type": "session_load_requested"}],
     )
 
-    assert list(positive.args[1]) == list(acceptance.POSITIVE_LEGS)
-    assert list(negative.args[1]) == list(acceptance.NEGATIVE_CASES)
+    assert len(client.submits) == 2, "continuity needs two ordered Runs"
+    first, second = client.submits
+    assert first["command"].request.session_reuse == "none"
+    assert second["command"].request.session_reuse == "reuse"
+    # The second Run reuses the identity the *first* Run produced, not a
+    # constant the harness invented before either Run existed.
+    reused = second["command"].request.ars_session_id
+    assert reused and first["run_id"] in reused
+    assert first["request_id"] != second["request_id"]
+
+
+def test_l3_02_both_runs_are_awaited_to_terminal(
+    tmp_path, acceptance_env, recording_client
+):
+    _daemon, client, outcome = _drive_p2(
+        tmp_path,
+        recording_client,
+        second_run_events=[{"type": "session_load_requested"}],
+    )
+    assert client.calls.count("run_status") >= 2
+    assert outcome["status"] == "completed"
+    assert outcome["continuity"]["runs"] == 2
+
+
+def test_l3_02_the_second_run_must_actually_load_the_session(
+    tmp_path, acceptance_env, recording_client
+):
+    """Continuity is the observed ACP path, never the leg's name."""
+    _daemon, _client, outcome = _drive_p2(
+        tmp_path,
+        recording_client,
+        second_run_events=[{"type": "session_load_requested"}],
+    )
+    assert outcome["continuity"]["session_loaded"] is True
+    assert outcome["continuity"]["session_recreated"] is False
+
+
+def test_l3_02_a_second_run_that_recreates_the_session_fails_the_leg(
+    tmp_path, acceptance_env, recording_client
+):
+    """Silent re-creation is the exact failure this leg has to catch."""
+    with pytest.raises(AssertionError):
+        _drive_p2(
+            tmp_path,
+            recording_client,
+            second_run_events=[{"type": "session_new_requested"}],
+        )
+
+
+def test_l3_02_a_second_run_with_no_session_event_fails_the_leg(
+    tmp_path, acceptance_env, recording_client
+):
+    with pytest.raises(AssertionError):
+        _drive_p2(tmp_path, recording_client, second_run_events=[])
+
+
+def test_l3_02_the_continuity_evidence_is_recorded_structurally(
+    tmp_path, acceptance_env, recording_client
+):
+    """Recorded as checked facts, not as a leg name or a sentence."""
+    _daemon, _client, outcome = _drive_p2(
+        tmp_path,
+        recording_client,
+        second_run_events=[{"type": "session_load_requested"}],
+    )
+    continuity = outcome["continuity"]
+    assert set(continuity) == {
+        "runs",
+        "session_loaded",
+        "session_recreated",
+        "session_state",
+    }
+    assert all(isinstance(value, (int, bool, str)) for value in continuity.values())
+    # No external session id, no model text, no agent self-report.
+    serialized = json.dumps(outcome, sort_keys=True)
+    assert "external-acp-session-from-the-agent" not in serialized

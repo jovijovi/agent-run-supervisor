@@ -66,7 +66,7 @@ def valid_wire_request(**overrides) -> dict:
     request = {
         "owner": "hermes",
         "namespace": "hermes/doc-check",
-        "profile_id": "fake-agent-1.0",
+        "agent_id": "fake-agent",
         "session_reuse": "reuse",
         "ars_session_id": "sess-arsd-1",
         "expected_binding_hash": None,
@@ -379,7 +379,7 @@ _BEHAVIOR_MUTATIONS = [
     ("retry_of_run_id", {"retry_of_run_id": "run-" + "f" * 32}),
     ("owner", {"request": valid_wire_request(owner="hermes2")}),
     ("namespace", {"request": valid_wire_request(namespace="hermes/other")}),
-    ("profile_id", {"request": valid_wire_request(profile_id="fake-agent-2.0")}),
+    ("agent_id", {"request": valid_wire_request(agent_id="fake-agent-2")}),
     ("session_reuse", {"request": valid_wire_request(session_reuse="none")}),
     ("ars_session_id", {"request": valid_wire_request(ars_session_id="sess-arsd-2")}),
     (
@@ -818,7 +818,7 @@ def test_resolve_durable_rejects_symlinked_run_dir(tmp_path: Path) -> None:
                 "namespace": "hermes/doc-check",
                 "session_reuse": "reuse",
                 "ars_session_id": "sess-arsd-1",
-                "profile_id": "fake-agent-1.0",
+                "agent_id": "fake-agent",
                 "request_digest": digest.value,
                 "prompt_sha256": digest.prompt_sha256,
                 "prompt_bytes": digest.prompt_bytes,
@@ -916,7 +916,7 @@ def test_foreign_principal_binding_never_duplicate_matched(tmp_path: Path) -> No
             "namespace": "hermes/doc-check",
             "session_reuse": "reuse",
             "ars_session_id": "sess-arsd-1",
-            "profile_id": "fake-agent-1.0",
+            "agent_id": "fake-agent",
             "request_digest": digest.value,
             "prompt_sha256": digest.prompt_sha256,
             "prompt_bytes": digest.prompt_bytes,
@@ -1101,7 +1101,7 @@ EXPECTED_SUBMISSION_FIELDS = {
     "namespace",
     "session_reuse",
     "ars_session_id",
-    "profile_id",
+    "agent_id",
     "request_digest",
     "prompt_sha256",
     "prompt_bytes",
@@ -1134,7 +1134,7 @@ def test_submission_artifact_exact_fields_mode_and_no_secrets(tmp_path: Path) ->
             assert submission["namespace"] == "hermes/doc-check"
             assert submission["session_reuse"] == "reuse"
             assert submission["ars_session_id"] == "sess-arsd-1"
-            assert submission["profile_id"] == "fake-agent-1.0"
+            assert submission["agent_id"] == "fake-agent"
             digest = admission.compute_request_digest(protocol.parse_submit(payload))
             assert submission["request_digest"] == digest.value
             assert submission["prompt_sha256"] == digest.prompt_sha256
@@ -1193,41 +1193,27 @@ def test_production_default_factory_builds_runtask_on_native_stores(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pytest.importorskip("acp")
-    import sys
 
-    from agent_run_supervisor.native_acp import profile as profile_module
-    from agent_run_supervisor.native_acp.profile import AgentProfile, ProfileRegistry
+    from agent_run_supervisor.native_acp import agent_registry
+    from agent_run_supervisor.native_acp.profile import (
+        STANDARD_NATIVE_ACP_V1,
+        ProfileRegistry,
+    )
     from agent_run_supervisor.native_acp.run_task import NativeRunTaskError, RunTask
 
-    monkeypatch.setitem(
-        profile_module._REGISTERED_EXECUTABLES, "python-fake", Path(sys.executable)
-    )
-    registry = ProfileRegistry(
-        (
-            AgentProfile(
-                profile_id="fake-agent-1.0",
-                revision=1,
-                executable_key="python-fake",
-                argv_template=("agent.py",),
-                env_allowlist=("PATH",),
-                credential_slots=(),
-                model_selector_id="model",
-                effort_selector_id="effort",
-                default_model="kimi-for-coding/k3",
-                default_effort="max",
-                registered_models=("kimi-for-coding/k3",),
-                allowed_efforts=("low", "medium", "high", "max"),
-                requires_session_load=False,
-                config_schema={"selectors": {}},
-                contract=bindingless_contract(),
-            ),
-        )
+    from tests.native_acp import registry_fixtures as rfx
+
+    registry = ProfileRegistry((STANDARD_NATIVE_ACP_V1,))
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    agents = agent_registry.load_agents_file(
+        rfx.write_registry(conf, entries={"fake-agent": rfx.minimal_entry()})
     )
     root = tmp_path / "svroot"
     event_store = storage.native_event_store(root)
     run_id = derived("principal-a", "req-prod-1")
     handle = admission.prepare_run(event_store, run_id)
-    factory = handlers.default_run_task_factory(root, registry=registry)
+    factory = handlers.default_run_task_factory(root, registry=registry, agents=agents)
     task = factory(
         command=submit_command(),
         run_id=run_id,
@@ -1249,295 +1235,27 @@ def test_production_default_factory_builds_runtask_on_native_stores(
         )
 
 
-# --- Codex closed-profile admission (D11 credential-ref binding) -------------
+# --- Session-reuse refusals that survive the reset ---------------------------
 #
-# Fixture isolation: the Codex-shaped profile below points exclusively at
-# private temporary copies under ``tmp_path``. No installed adapter, frozen
-# Node, real CLI, or real credential root is referenced, and admission refuses
-# before any spawn, so nothing is ever executed by these tests.
-
-CODEX_CANONICAL_CONFIG = '{"features":{"use_legacy_landlock":true}}'
-
-
-def bindingless_contract(**overrides):
-    """A contract that accepts no operator Binding value at all."""
-    from agent_run_supervisor.native_acp.profile import (
-        LAUNCH_KIND_DIRECT,
-        AdapterContract,
-        VersionProbeRule,
-    )
-
-    kwargs = dict(
-        launch_kind=LAUNCH_KIND_DIRECT,
-        acp_agent_name="fake-acp-agent",
-        acp_protocol_version="1",
-        version_probe=VersionProbeRule(argv_suffix=("--version",)),
-    )
-    kwargs.update(overrides)
-    return AdapterContract(**kwargs)
+# The retired families went with their layer: credential-ref admission, the
+# artifact/attestation identity gate, and the per-agent closed profiles that
+# carried them no longer exist, so there is nothing left for those cases to be
+# about. What *is* still a refusal — a Session whose identity no longer matches
+# the Run's, and a quarantined Session — is kept and re-pointed onto the
+# reset's own identity model.
 
 
-def codex_admission_contract(tmp_path: Path, **overrides):
-    from agent_run_supervisor.native_acp.profile import (
-        LAUNCH_KIND_WRAPPED,
-        SLOT_KIND_CONFIG_ROOT,
-        SLOT_KIND_PACKAGE_TREE,
-        AdapterContract,
-        BindingSlot,
-        VersionProbeRule,
-        WrappedRuntimeArtifacts,
-    )
-
-    stage = tmp_path / "codex-stage"
-    stage.mkdir(exist_ok=True)
-    node = stage / "node"
-    node.write_bytes(b"# private node placeholder\n")
-    # The adapter is a package closure: the entry lives inside its install root.
-    adapter_root = stage / "adapter-pkg"
-    entry = adapter_root / "node_modules" / "@scope" / "adapter" / "dist" / "index.js"
-    entry.parent.mkdir(parents=True, exist_ok=True)
-    entry.write_bytes(b"// private adapter entry placeholder\n")
-    kwargs = dict(
-        launch_kind=LAUNCH_KIND_WRAPPED,
-        acp_agent_name="@agentclientprotocol/codex-acp",
-        acp_protocol_version="1",
-        acp_agent_version="1.1.7",
-        version_probe=VersionProbeRule(argv_suffix=("--version",)),
-        binding_slots=(
-            BindingSlot(
-                name="downstream_cli",
-                kind=SLOT_KIND_PACKAGE_TREE,
-                env_key="CODEX_PATH",
-            ),
-            BindingSlot(
-                name="codex_home", kind=SLOT_KIND_CONFIG_ROOT, env_key="CODEX_HOME"
-            ),
-        ),
-        wrapped_runtime=WrappedRuntimeArtifacts(
-            interpreter_path=str(node),
-            interpreter_sha256="0" * 64,
-            adapter_entry_path=str(entry),
-            adapter_entry_sha256="1" * 64,
-            adapter_package_root=str(adapter_root),
-            adapter_tree_sha256="2" * 64,
-            interpreter_argv_prefix=("--no-global-search-paths",),
-        ),
-        cli_slot="downstream_cli",
-        credential_root_slot="codex_home",
-        project_config_relpath=".codex/config.toml",
-    )
-    kwargs.update(overrides)
-    return AdapterContract(**kwargs)
-
-
-def codex_admission_profile(tmp_path: Path, **overrides):
-    from agent_run_supervisor.native_acp.profile import AgentProfile
-
-    contract = overrides.pop("contract", None) or codex_admission_contract(tmp_path)
-    entry = contract.wrapped_runtime.adapter_entry_path
-
-    kwargs = dict(
-        profile_id="codex-acp-admission-1.0",
-        revision=1,
-        executable_key="codex-acp-admission",
-        argv_template=("--no-global-search-paths", str(entry)),
-        env_allowlist=("HOME", "PATH"),
-        fixed_env=(
-            ("CODEX_CONFIG", CODEX_CANONICAL_CONFIG),
-            ("INITIAL_AGENT_MODE", "read-only"),
-            ("NO_BROWSER", "1"),
-        ),
-        credential_slots=("codex-home-auth",),
-        required_credential_refs=("codex-home-auth",),
-        model_selector_id="model",
-        effort_selector_id="reasoning_effort",
-        default_model="gpt-5.6-sol",
-        default_effort="max",
-        registered_models=("gpt-5.6-sol",),
-        allowed_efforts=("max",),
-        requires_session_load=True,
-        config_schema={
-            "schema_version": 1,
-            "selectors": {
-                "model": {
-                    "config_id": "model",
-                    "type": "string",
-                    "domain": ["gpt-5.6-sol"],
-                },
-                "effort": {
-                    "config_id": "reasoning_effort",
-                    "type": "string",
-                    "domain": ["max"],
-                },
-            },
-        },
-        contract=contract,
-    )
-    kwargs.update(overrides)
-    return AgentProfile(**kwargs)
-
-
-def codex_wire_request(**overrides) -> dict:
-    kwargs = dict(
-        profile_id="codex-acp-admission-1.0",
-        requested_model="gpt-5.6-sol",
-        requested_effort="max",
-        credential_refs=["codex-home-auth"],
-    )
-    kwargs.update(overrides)
-    return valid_wire_request(**kwargs)
-
-
-def codex_binding_root(tmp_path: Path, profile) -> Path:
-    """A private Binding generation matching whatever the contract declares."""
-    from tests.native_acp import binding_fixtures as bf
-
-    return bf.build_binding_root(tmp_path, profile, dirname="private-binding-root")
-
-
-@contextlib.asynccontextmanager
-async def codex_socket_daemon(tmp_path: Path, profile):
-    """In-process ephemeral daemon on a private socket (never production)."""
-    from tests.native_acp import binding_fixtures as bf
-
-    from agent_run_supervisor.native_acp.profile import ProfileRegistry
-
-    sock_dir = tmp_path / "sock"
-    sock_dir.mkdir(parents=True, exist_ok=True)
-    socket_path = sock_dir / "arsd-codex.sock"
-    root = tmp_path / "svroot-codex"
-    session_store = storage.native_session_store(root)
-    event_store = storage.native_event_store(root)
-    handler = handlers.ArsdHandlers(
-        session_store=session_store,
-        event_store=event_store,
-        supervisor_root=root,
-        profile_registry=ProfileRegistry((profile,)),
-        binding_root=codex_binding_root(tmp_path, profile),
-        binding_ownership=bf.ownership(),
-        cancel_wait_seconds=5.0,
-    )
-    srv = server.ArsdServer(
-        socket_path=socket_path,
-        policy=server.CallerPolicy({os.getuid(): principal_a()}),
-        handler=handler,
-    )
-    await srv.start()
-    try:
-        yield srv, handler, root
-    finally:
-        await handler.aclose()
-        await srv.shutdown()
-
-
-async def socket_roundtrip(socket_path: Path, frame: dict) -> dict:
-    reader, writer = await asyncio.open_unix_connection(str(socket_path))
-    try:
-        writer.write(protocol.encode_frame(frame))
-        await writer.drain()
-        line = await asyncio.wait_for(reader.readline(), 15)
-    finally:
-        writer.close()
-        with contextlib.suppress(Exception):
-            await writer.wait_closed()
-    return json.loads(line.decode("utf-8"))
-
-
-@pytest.mark.parametrize(
-    "credential_refs",
-    [
-        [],                                        # missing
-        ["kimi-for-coding"],                       # wrong
-        ["codex-home-auth", "kimi-for-coding"],    # extra
-        ["codex-home-auth", "codex-home-auth"],    # duplicated
-    ],
-)
-def test_codex_credential_ref_mismatch_refused_over_socket(
-    tmp_path: Path, credential_refs
-) -> None:
-    async def scenario() -> None:
-        profile = codex_admission_profile(tmp_path)
-        async with codex_socket_daemon(tmp_path, profile) as (srv, handler, root):
-            payload = submit_payload(
-                request=codex_wire_request(credential_refs=credential_refs),
-                workspace_root=str(tmp_path),
-            )
-            reply = await socket_roundtrip(
-                srv.socket_path,
-                {
-                    "api_version": 1,
-                    "op": "submit",
-                    "request_id": "req-codex-1",
-                    "payload": payload,
-                },
-            )
-            assert reply.get("error") is None, reply
-            run_id = reply["result"]["run_id"]
-            run_dir = Path(root) / "native-runs" / run_id
-            deadline = asyncio.get_event_loop().time() + 20
-            while asyncio.get_event_loop().time() < deadline:
-                if (run_dir / "result.json").exists():
-                    break
-                await asyncio.sleep(0.05)
-            result = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
-
-        assert result["status"] == "failed"
-        # Refused at admission: before workspace bind, before any
-        # credential-root access, before spawn.
-        assert result["detail_code"] == "ADMISSION"
-        assert not (run_dir / "launch.json").exists()
-        assert not (run_dir / "prompt-dispatch-started").exists()
-        assert not (run_dir / "attestation.json").exists()
-
-    run_async(scenario())
-
-
-@pytest.mark.parametrize(
-    "payload_overrides",
-    [
-        {"env": {"CODEX_CONFIG": '{"features":{"use_legacy_landlock":false}}'}},
-        {"fixed_env": [["CODEX_HOME", "/tmp/attacker-home"]]},
-        {"expected_runtime": {"node_path": "/tmp/attacker/node"}},
-        {"metadata": {"note": "injected"}},
-    ],
-)
-def test_codex_env_or_config_injection_payload_refused(payload_overrides) -> None:
-    # Op-level submit keys are closed by parse_submit.
-    payload = submit_payload(request=codex_wire_request(), **payload_overrides)
-    with pytest.raises(protocol.ProtocolError) as err:
-        protocol.parse_submit(payload)
-    assert err.value.code == protocol.INVALID_REQUEST
-
-
-@pytest.mark.parametrize(
-    "request_overrides",
-    [
-        {"fixed_env": [["CODEX_HOME", "/tmp/attacker-home"]]},
-        {"env_allowlist": ["LD_PRELOAD"]},
-        {"expected_runtime": {"cli_path": "/tmp/attacker/codex"}},
-        {"argv_template": ["/tmp/attacker/index.js"]},
-        {"executable_key": "codex-acp"},
-    ],
-)
-def test_codex_nested_request_injection_refused(request_overrides) -> None:
-    # Nested request keys are closed by _parse_request_object.
-    payload = submit_payload(request=codex_wire_request(**request_overrides))
-    with pytest.raises(protocol.ProtocolError) as err:
-        protocol.parse_submit(payload)
-    assert err.value.code == protocol.INVALID_REQUEST
-
-
-def test_profile_hash_drift_refuses_session_reuse(tmp_path: Path) -> None:
+def seeded_native_session(tmp_path: Path, session_id: str, *, agent_id="fake-agent"):
+    """One already-existing Session record, written through the production seam."""
+    from agent_run_supervisor.native_acp.profile import STANDARD_NATIVE_ACP_V1
     from agent_run_supervisor.native_acp.spec import resolve_workspace_binding
-    from agent_run_supervisor.session import SessionBindingError, validate_native_binding
 
-    profile = codex_admission_profile(tmp_path)
-    root = tmp_path / "svroot-drift"
-    session_store = storage.native_session_store(root)
+    profile = STANDARD_NATIVE_ACP_V1
+    session_store = storage.native_session_store(tmp_path / f"svroot-{session_id}")
     binding = resolve_workspace_binding(root=tmp_path)
-    record = storage.create_native_session(
+    storage.create_native_session(
         session_store,
-        session_id="sess-codex-drift",
+        session_id=session_id,
         profile_id=profile.profile_id,
         profile_revision=profile.revision,
         profile_hash=profile.profile_hash(),
@@ -1546,67 +1264,77 @@ def test_profile_hash_drift_refuses_session_reuse(tmp_path: Path) -> None:
         workspace_hash=binding.workspace_hash,
         effective_cwd=binding.effective_cwd,
         matched_root=binding.canonical_root,
+        agent_id=agent_id,
     )
-    # Unchanged registration still binds.
+    return session_store, binding, profile
+
+
+def test_profile_hash_drift_refuses_session_reuse(tmp_path: Path) -> None:
+    """A profile whose frozen ACP semantics changed no longer binds its Sessions."""
+    from agent_run_supervisor.native_acp.profile import AcpCompatProfile
+    from agent_run_supervisor.session import SessionBindingError, validate_native_binding
+
+    store, binding, profile = seeded_native_session(tmp_path, "sess-drift")
+    record = store.open_session("sess-drift")
+
     validate_native_binding(
         record,
         profile=profile,
         workspace_result=binding,
         owner="hermes",
         namespace="hermes/doc-check",
+        expected_agent_id="fake-agent",
     )
-    # CODEX_CONFIG changed without a revision bump: the profile hash drifts and
-    # reuse is refused before spawn.
-    drifted = dataclasses.replace(
-        profile,
-        fixed_env=tuple(
-            (name, '{"features":{"use_legacy_landlock":false}}'
-             if name == "CODEX_CONFIG" else value)
-            for name, value in profile.fixed_env
-        ),
+
+    # A frozen ACP semantic changed without a revision bump: the profile hash
+    # drifts and reuse is refused before spawn.
+    drifted = AcpCompatProfile(
+        profile_id=profile.profile_id,
+        revision=profile.revision,
+        acp_protocol_version=profile.acp_protocol_version,
+        required_capabilities=("loadSession", "fs"),
     )
     assert drifted.profile_hash() != profile.profile_hash()
-    with pytest.raises(SessionBindingError) as err:
+    with pytest.raises(SessionBindingError) as excinfo:
         validate_native_binding(
             record,
             profile=drifted,
             workspace_result=binding,
             owner="hermes",
             namespace="hermes/doc-check",
+            expected_agent_id="fake-agent",
         )
-    assert "profile_hash" in str(err.value)
+    assert "profile_hash" in str(excinfo.value)
 
 
-def test_quarantined_codex_session_reuse_refused(tmp_path: Path) -> None:
-    from agent_run_supervisor.native_acp.spec import resolve_workspace_binding
+def test_reuse_under_a_different_agent_is_refused(tmp_path: Path) -> None:
+    """A Session created under one agent is never loaded as another."""
+    from agent_run_supervisor.session import SessionBindingError, validate_native_binding
+
+    store, binding, profile = seeded_native_session(tmp_path, "sess-agent")
+    record = store.open_session("sess-agent")
+    with pytest.raises(SessionBindingError) as excinfo:
+        validate_native_binding(
+            record,
+            profile=profile,
+            workspace_result=binding,
+            owner="hermes",
+            namespace="hermes/doc-check",
+            expected_agent_id="some-other-agent",
+        )
+    assert "agent_id" in str(excinfo.value)
+
+
+def test_quarantined_session_reuse_refused(tmp_path: Path) -> None:
     from agent_run_supervisor.session import (
         SessionQuarantinedError,
         validate_native_binding,
     )
 
-    profile = codex_admission_profile(tmp_path)
-    root = tmp_path / "svroot-quarantine"
-    session_store = storage.native_session_store(root)
-    binding = resolve_workspace_binding(root=tmp_path)
-    storage.create_native_session(
-        session_store,
-        session_id="sess-codex-quarantined",
-        profile_id=profile.profile_id,
-        profile_revision=profile.revision,
-        profile_hash=profile.profile_hash(),
-        owner="hermes",
-        namespace="hermes/doc-check",
-        workspace_hash=binding.workspace_hash,
-        effective_cwd=binding.effective_cwd,
-        matched_root=binding.canonical_root,
-    )
-    session_store.write_quarantine_pending(
-        "sess-codex-quarantined", reason="test", run_id="run-x"
-    )
-    session_store.mark_quarantined(
-        "sess-codex-quarantined", reason="test", run_id="run-x"
-    )
-    record = session_store.open_session("sess-codex-quarantined")
+    store, binding, profile = seeded_native_session(tmp_path, "sess-quarantined")
+    store.write_quarantine_pending("sess-quarantined", reason="test", run_id="run-x")
+    store.mark_quarantined("sess-quarantined", reason="test", run_id="run-x")
+    record = store.open_session("sess-quarantined")
     with pytest.raises(SessionQuarantinedError):
         validate_native_binding(
             record,
@@ -1614,201 +1342,58 @@ def test_quarantined_codex_session_reuse_refused(tmp_path: Path) -> None:
             workspace_result=binding,
             owner="hermes",
             namespace="hermes/doc-check",
+            expected_agent_id="fake-agent",
         )
-
-
-# -- Claude closed-profile admission over the ingress path (B3) --------------
-
-
-def claude_admission_profile(tmp_path: Path, **overrides):
-    """A Claude-shaped identity-pinned profile over private placeholders.
-
-    No real adapter tree, frozen Node copy, CLI, or credential is opened.
-    """
-    from agent_run_supervisor.native_acp.profile import (
-        LAUNCH_KIND_WRAPPED,
-        SLOT_KIND_PACKAGE_TREE,
-        AdapterContract,
-        AgentProfile,
-        BindingSlot,
-        VersionProbeRule,
-        WrappedRuntimeArtifacts,
-    )
-
-    stage = tmp_path / "claude-stage"
-    stage.mkdir(exist_ok=True)
-    node = stage / "node"
-    node.write_bytes(b"# private node placeholder\n")
-    # The adapter is a package closure: the entry lives inside its install root.
-    adapter_root = stage / "adapter-pkg"
-    entry = adapter_root / "node_modules" / "@scope" / "adapter" / "dist" / "index.js"
-    entry.parent.mkdir(parents=True, exist_ok=True)
-    entry.write_bytes(b"// private adapter entry placeholder\n")
-
-    kwargs = dict(
-        profile_id="claude-agent-acp-admission-0.61.0",
-        revision=1,
-        executable_key="claude-agent-acp-admission",
-        argv_template=("--no-global-search-paths", str(entry)),
-        env_allowlist=("HOME", "PATH"),
-        fixed_env=(("NO_BROWSER", "1"),),
-        credential_slots=(),
-        required_credential_refs=(),
-        model_selector_id="model",
-        effort_selector_id="effort",
-        default_model="opus[1m]",
-        default_effort="max",
-        registered_models=("claude-fable-5[1m]", "opus[1m]"),
-        allowed_efforts=("max",),
-        requires_session_load=True,
-        permission_mode_selector_id="mode",
-        required_permission_mode="default",
-        session_meta=(
-            '{"claudeCode":{"options":{"settingSources":[],'
-            '"tools":{"preset":"claude_code","type":"preset"}}}}'
-        ),
-        config_schema={
-            "schema_version": 1,
-            "selectors": {
-                "model": {
-                    "config_id": "model",
-                    "type": "string",
-                    "domain": ["claude-fable-5[1m]", "opus[1m]"],
-                },
-                "effort": {"config_id": "effort", "type": "string", "domain": ["max"]},
-                "permission_mode": {
-                    "config_id": "mode",
-                    "type": "string",
-                    "domain": ["default"],
-                },
-            },
-        },
-        contract=AdapterContract(
-            launch_kind=LAUNCH_KIND_WRAPPED,
-            acp_agent_name="@agentclientprotocol/claude-agent-acp",
-            acp_protocol_version="1",
-            acp_agent_version="0.61.0",
-            version_probe=VersionProbeRule(argv_suffix=("--version",)),
-            binding_slots=(
-                BindingSlot(
-                    name="downstream_cli",
-                    kind=SLOT_KIND_PACKAGE_TREE,
-                    env_key="CLAUDE_CODE_EXECUTABLE",
-                ),
-            ),
-            wrapped_runtime=WrappedRuntimeArtifacts(
-                interpreter_path=str(node),
-                interpreter_sha256="0" * 64,
-                adapter_entry_path=str(entry),
-                adapter_entry_sha256="1" * 64,
-                adapter_package_root=str(adapter_root),
-                adapter_tree_sha256="2" * 64,
-                interpreter_argv_prefix=("--no-global-search-paths",),
-            ),
-            cli_slot="downstream_cli",
-        ),
-    )
-    kwargs.update(overrides)
-    return AgentProfile(**kwargs)
-
-
-def claude_wire_request(**overrides) -> dict:
-    kwargs = dict(
-        profile_id="claude-agent-acp-admission-0.61.0",
-        requested_model="opus[1m]",
-        requested_effort="max",
-        credential_refs=[],
-    )
-    kwargs.update(overrides)
-    return valid_wire_request(**kwargs)
 
 
 @pytest.mark.parametrize(
-    ("label", "overrides"),
+    "payload_overrides",
     [
-        ("credential reference", {"credential_refs": ["claude-home"]}),
-        # The direct Claude CLI author selector is not the ACP readback literal.
-        ("cli author selector", {"requested_model": "claude-opus-5[1m]"}),
-        ("out-of-domain effort", {"requested_effort": "high"}),
+        {"env": {"SOME_NAME": "some-value"}},
+        {"command": "some-agent"},
+        {"argv": ["acp"]},
+        {"transport": "stdio"},
     ],
 )
-def test_claude_closed_admission_refused_over_socket(
-    tmp_path: Path, label: str, overrides
+def test_wire_injection_of_a_runtime_selection_field_is_refused(
+    payload_overrides,
 ) -> None:
-    async def scenario() -> None:
-        profile = claude_admission_profile(tmp_path)
-        async with codex_socket_daemon(tmp_path, profile) as (srv, handler, root):
-            payload = submit_payload(
-                request=claude_wire_request(**overrides),
-                workspace_root=str(tmp_path),
-            )
-            reply = await socket_roundtrip(
-                srv.socket_path,
-                {
-                    "api_version": 1,
-                    "op": "submit",
-                    "request_id": "req-claude-1",
-                    "payload": payload,
-                },
-            )
-            assert reply.get("error") is None, reply
-            run_id = reply["result"]["run_id"]
-            run_dir = Path(root) / "native-runs" / run_id
-            deadline = asyncio.get_event_loop().time() + 20
-            while asyncio.get_event_loop().time() < deadline:
-                if (run_dir / "result.json").exists():
-                    break
-                await asyncio.sleep(0.05)
-            result = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
-
-        assert result["status"] == "failed", label
-        assert result["detail_code"] == "ADMISSION", label
-        # Refused before spawn: no attestation artifact, no launch attempt.
-        assert not (run_dir / "attestation.json").exists(), label
-        assert not (run_dir / "prompt-dispatch-started").exists(), label
-
-    asyncio.run(scenario())
-
-
-# --- G1.3: the digest is byte-identical for a pre-upgrade frame -------------
-#
-# Production is live. A digest that moved would convert legitimate pre-upgrade
-# retries into idempotency conflicts for no information gain, so exactly one
-# named field drops when it is ``None`` — never a blanket null-strip, which
-# would collapse the meaningful existing nulls in the opposite direction.
-
-# Measured at the pre-change baseline, so it is the byte-identity *target*
-# rather than a value copied out of whatever the change happened to produce.
-LEGACY_REQUEST_DIGEST = (
-    "sha256:56d24e8c3cc6e4c89e31ecdbaf1b9c96ebde3b68a57fb8977e63ddead4799376"
-)
-
-
-def test_g1_3_a_legacy_frame_with_no_agent_digests_byte_identically() -> None:
-    command = protocol.parse_submit(submit_payload())
-    assert "agent_id" not in submit_payload()["request"]
-    assert admission.compute_request_digest(command).value == LEGACY_REQUEST_DIGEST
-
-
-def test_g1_3_naming_an_agent_changes_the_digest() -> None:
-    legacy = admission.compute_request_digest(protocol.parse_submit(submit_payload()))
-    agentic = admission.compute_request_digest(
+    """A5: those are not fields on the request, so the refusal is structural."""
+    with pytest.raises(protocol.ProtocolError) as excinfo:
         protocol.parse_submit(
-            submit_payload(request=valid_wire_request(agent_id="fake-alpha"))
+            submit_payload(request=valid_wire_request(**payload_overrides))
+        )
+    assert excinfo.value.code == protocol.INVALID_REQUEST
+
+
+# --- the digest material moved, and the schema version moved with it ---------
+#
+# The pre-reset line kept one field out of the digest so a legacy frame would
+# hash byte-identically. That compatibility measure is gone: agent identity
+# replaced profile selection and the launch material became value-blind, so the
+# material genuinely changed — and saying so through the schema version is the
+# honest way to say it.
+
+
+def test_no_request_field_is_dropped_from_the_digest() -> None:
+    assert admission._DIGEST_OMIT_WHEN_NONE == ()
+
+
+def test_naming_a_different_agent_changes_the_digest() -> None:
+    baseline = admission.compute_request_digest(protocol.parse_submit(submit_payload()))
+    other = admission.compute_request_digest(
+        protocol.parse_submit(
+            submit_payload(request=valid_wire_request(agent_id="other-agent"))
         )
     )
-    assert agentic.value != legacy.value
-
-
-def test_g1_3_only_agent_id_is_dropped_when_null() -> None:
-    assert admission._DIGEST_OMIT_WHEN_NONE == ("agent_id",)
+    assert other.value != baseline.value
 
 
 @pytest.mark.parametrize(
     "field", ["ars_session_id", "expected_binding_hash", "cwd", "retry_of_run_id"]
 )
-def test_g1_3_every_other_null_valued_field_still_contributes(field: str) -> None:
-    """A blanket null-strip would make these four invisible; it is not one."""
+def test_every_null_valued_field_still_contributes(field: str) -> None:
+    """No blanket null-strip: these four stay meaningful when they are null."""
     null_frame = {"session_reuse": "none", "ars_session_id": None}
     baseline = submit_payload(request=valid_wire_request(**null_frame))
     if field in ("cwd", "retry_of_run_id"):
@@ -1824,26 +1409,26 @@ def test_g1_3_every_other_null_valued_field_still_contributes(field: str) -> Non
     ).value != admission.compute_request_digest(protocol.parse_submit(baseline)).value
 
 
-def test_g1_4_no_versioned_surface_moved() -> None:
-    """Production is live: none of these may change in this candidate."""
-    assert admission.DIGEST_SCHEMA_VERSION == 1
-    assert admission.SUBMISSION_SCHEMA_VERSION == 1
-    assert protocol.ARSD_API_VERSION == 1
-    assert protocol.SUPPORTED_API_VERSIONS == (1,)
+def test_every_versioned_surface_moved_together() -> None:
+    """The wire, the digest, the submission, and the Spec moved as one change."""
+    assert admission.DIGEST_SCHEMA_VERSION == 2
+    assert admission.SUBMISSION_SCHEMA_VERSION == 2
+    assert protocol.ARSD_API_VERSION == 2
+    assert protocol.SUPPORTED_API_VERSIONS == (1, 2)
     from agent_run_supervisor.native_acp.spec import SPEC_SCHEMA_VERSION
 
-    assert SPEC_SCHEMA_VERSION == 1
+    assert SPEC_SCHEMA_VERSION == 2
 
 
 def test_agent_id_is_not_a_forbidden_runtime_selection_field() -> None:
-    """It selects among operator-authored registrations, exactly as profile_id
-    selects among source-registered profiles — it names no path, executable,
-    argv, env, digest, or version, and the grammar makes it unable to."""
+    """It selects among operator-authored registry entries: it names no path,
+    executable, argv, env, digest, or version, and the grammar runs before the
+    lookup so it cannot."""
     assert "agent_id" not in admission.FORBIDDEN_RUNTIME_SELECTION_FIELDS
-    assert "profile_id" not in admission.FORBIDDEN_RUNTIME_SELECTION_FIELDS
+    assert "profile_id" in admission.FORBIDDEN_RUNTIME_SELECTION_FIELDS
 
 
-@pytest.mark.parametrize("value", [7, ["x"], {"a": 1}, True])
+@pytest.mark.parametrize("value", [7, ["x"], {"a": 1}, True, None])
 def test_a_non_string_agent_id_is_an_invalid_request_never_internal(value) -> None:
     with pytest.raises(protocol.ProtocolError) as excinfo:
         protocol.parse_submit(
@@ -1923,8 +1508,8 @@ def test_the_validator_accepts_the_writers_whole_value_domain() -> None:
 @pytest.mark.parametrize(
     "mutate",
     [
-        lambda p: p.pop("profile_id"),
-        lambda p: p.__setitem__("profile_id", ""),
+        lambda p: p.pop("agent_id"),
+        lambda p: p.__setitem__("agent_id", ""),
         lambda p: p.__setitem__("unknown_field", "accepted-but-not-produced"),
         lambda p: p.pop("prompt_bytes"),
         lambda p: p["peer"].__setitem__("euid", 0),
@@ -1933,8 +1518,8 @@ def test_the_validator_accepts_the_writers_whole_value_domain() -> None:
         lambda p: p.__setitem__("ars_session_id", ""),
     ],
     ids=[
-        "missing_profile_id",
-        "empty_profile_id",
+        "missing_agent_id",
+        "empty_agent_id",
         "unknown_field",
         "missing_field",
         "peer_extra_key",
@@ -1949,3 +1534,136 @@ def test_shape_drift_from_the_writers_output_is_refused(mutate) -> None:
     assert (
         admission.validate_submission_artifact(payload, run_id="run-strict-1") is None
     )
+
+
+# --- WP3.7: A13 / A5 — in-memory agent admission, zero registry I/O ----------
+
+
+def _registry_snapshot(tmp_path: Path):
+    from agent_run_supervisor.native_acp import agent_registry
+    from tests.native_acp import registry_fixtures as fx
+
+    path = fx.write_registry(
+        tmp_path,
+        entries={
+            "agent-alpha": fx.full_entry(),
+            "agent-beta": fx.minimal_entry(command="other-agent"),
+        },
+    )
+    return agent_registry.load_agents_file(path), path
+
+
+def test_snapshot_resolution_returns_the_operator_entry(tmp_path: Path) -> None:
+    snapshot, _ = _registry_snapshot(tmp_path)
+    entry = admission.resolve_agent_entry(snapshot, "agent-alpha")
+    assert entry.agent_id == "agent-alpha"
+    assert entry.command == "/opt/example/bin/some-agent"
+
+
+def test_snapshot_resolution_refuses_an_unregistered_agent(tmp_path: Path) -> None:
+    from agent_run_supervisor.native_acp import agent_registry
+
+    snapshot, _ = _registry_snapshot(tmp_path)
+    with pytest.raises(agent_registry.RegistryRefusal) as excinfo:
+        admission.resolve_agent_entry(snapshot, "agent-gamma")
+    assert excinfo.value.rule == "AGENT_NOT_REGISTERED"
+
+
+def test_snapshot_resolution_applies_the_grammar_before_the_lookup(
+    tmp_path: Path,
+) -> None:
+    """A5: ``agent_id`` passes its grammar before it can select anything."""
+    from agent_run_supervisor.native_acp import agent_registry
+
+    snapshot, _ = _registry_snapshot(tmp_path)
+    for hostile in ("../escape", "Agent-Alpha", "a" * 65, "", "a/b"):
+        with pytest.raises(agent_registry.RegistryRefusal) as excinfo:
+            admission.resolve_agent_entry(snapshot, hostile)
+        assert excinfo.value.rule == "AGENT_ID_INVALID"
+
+
+def test_snapshot_resolution_without_a_snapshot_fails_closed() -> None:
+    from agent_run_supervisor.native_acp import agent_registry
+
+    with pytest.raises(agent_registry.RegistryRefusal) as excinfo:
+        admission.resolve_agent_entry(None, "agent-alpha")
+    assert excinfo.value.rule == "REGISTRY_ABSENT"
+
+
+def test_snapshot_resolution_performs_zero_filesystem_access(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A13: no registry open on the Run path, ever — not even one."""
+    snapshot, _ = _registry_snapshot(tmp_path)
+
+    def refuse(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("agent admission touched the filesystem")
+
+    for name in ("open", "stat", "lstat", "listdir", "scandir", "readlink"):
+        monkeypatch.setattr(os, name, refuse)
+    for _ in range(5):
+        assert admission.resolve_agent_entry(snapshot, "agent-beta").command == (
+            "other-agent"
+        )
+
+
+def test_a_mid_serve_registry_edit_has_no_effect_until_restart(tmp_path: Path) -> None:
+    """The snapshot is the authority; the file on disk is not consulted again."""
+    from agent_run_supervisor.native_acp import agent_registry
+    from tests.native_acp import registry_fixtures as fx
+
+    snapshot, path = _registry_snapshot(tmp_path)
+    path.write_text(
+        fx.registry_text(entries={"agent-alpha": fx.minimal_entry(command="rewritten")}),
+        encoding="utf-8",
+    )
+    assert admission.resolve_agent_entry(snapshot, "agent-alpha").command == (
+        "/opt/example/bin/some-agent"
+    )
+    assert "agent-beta" in snapshot.ids()
+    # A restart is what picks the edit up, and only a restart.
+    restarted = agent_registry.load_agents_file(path)
+    assert restarted.get("agent-alpha").command == "rewritten"
+    assert "agent-beta" not in restarted.ids()
+
+
+def test_admission_module_has_no_registry_reader(tmp_path: Path) -> None:
+    import inspect
+
+    text = inspect.getsource(admission)
+    assert "load_agents_file" not in text
+    assert "tomllib" not in text
+    assert "resolve_runtime_binding" not in text
+    assert "binding_root" not in text
+
+
+# --- WP3.7: the digest and the submission are value-blind --------------------
+
+
+def test_forbidden_runtime_selection_fields_are_absent_from_the_request() -> None:
+    from agent_run_supervisor.native_acp.spec import AgentRunRequest
+
+    fields = {field.name for field in dataclasses.fields(AgentRunRequest)}
+    for forbidden in admission.FORBIDDEN_RUNTIME_SELECTION_FIELDS:
+        assert forbidden not in fields, f"request grew {forbidden!r}"
+
+
+def test_digest_material_carries_no_forbidden_selection_field() -> None:
+    command = submit_command()
+    digest = admission.compute_request_digest(command)
+    material = json.dumps(dataclasses.asdict(command.request), sort_keys=True)
+    for forbidden in admission.FORBIDDEN_RUNTIME_SELECTION_FIELDS:
+        assert f'"{forbidden}"' not in material
+    assert digest.value.startswith("sha256:")
+
+
+def test_digest_schema_version_moved_with_the_material() -> None:
+    assert admission.DIGEST_SCHEMA_VERSION == 2
+    assert admission.SUBMISSION_SCHEMA_VERSION == 2
+
+
+def test_submission_records_the_agent_not_a_profile() -> None:
+    payload = _written_submission()
+    assert "agent_id" in payload
+    assert "profile_id" not in payload
+    assert admission.validate_submission_artifact(payload, run_id="run-strict-1")

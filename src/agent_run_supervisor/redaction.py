@@ -326,12 +326,20 @@ class RunTextGuard:
         self.counters = GuardCounters()
 
     @classmethod
-    def from_environment(cls, env: Mapping[str, str]) -> "RunTextGuard":
+    def from_environment(cls, env: Any) -> "RunTextGuard":
         """Build the guard from the final per-Run environment after precedence.
+
+        Accepts the ephemeral ``ResolvedEnvironment`` carrier — the same object
+        the spawn seam receives, so the guard's literal set can never disagree
+        with what the child was handed — or a plain mapping for the direct
+        test/dev path.
 
         Empty strings contribute no bytes: an empty literal would match at
         every position and turn every sink into a withholding marker.
         """
+        sensitive = getattr(env, "sensitive_values", None)
+        if callable(sensitive):
+            return cls(sensitive())
         return cls(env.values())
 
     # -- introspection that is safe by construction ------------------------

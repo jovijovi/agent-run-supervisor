@@ -1,100 +1,69 @@
-"""The operator-owned Agent Registration value and its bounded grammars.
+"""The operator-owned agent registry **entry** and its bounded grammars.
 
-Layer 1b of the runtime-authority split. A registration says which agent an
-already-registered, source-closed profile is being instantiated as: its ACP
-name, its argv tokens, its selector ids and value domains, the capabilities it
-narrows, which source-registered mediation binding it selects, and which
-credential slots it declares.
-
-Everything it may say either **selects inside** or **narrows** something the
-source contract already declared. It can supply no executable, path, digest,
-version, env key, launch kind, protocol version, or capability *requirement* —
-those are not fields here, so the refusal is structural rather than filtered.
+Layer 2 of the four-way boundary: which command is that agent, *here*. An entry
+carries the command and its argv, the environment names and literals the
+operator declares, a mediation *selection*, selector-id hints, a capability
+narrowing, and an optional continuity epoch. It declares no capability
+requirement, protocol version, mediation pair, digest, path expectation,
+version, or transport — those are not fields, so the refusal is structural
+rather than filtered.
 
 This module is **pure**. It performs no filesystem query, opens nothing, and
-resolves no path, mirroring the :mod:`agent_run_supervisor.arsd.operand`
-precedent: a grammar that decides on text alone cannot be raced, redirected, or
-made to disagree with what a later reader sees. The single reader of a Binding
-root stays :mod:`agent_run_supervisor.native_acp.runtime_binding`, which calls
-into here with bytes it has already decoded.
+resolves no path: a grammar that decides on text alone cannot be raced,
+redirected, or made to disagree with what a later reader sees. The single
+reader of the registry file is
+:mod:`agent_run_supervisor.native_acp.agent_registry`, which calls in here with
+values it has already decoded.
 
-``agent_registration_hash`` covers the whole payload **except** ``provenance``,
-so re-recording a receipt does not retire an agent's Sessions while any
-compatibility-bearing edit does.
+Nothing here computes, stores, or reports a hash of anything. The entry is not
+an identity to be frozen: an agent upgrade behind an unchanged registered
+command must cost no ARS action at all, and a fingerprint-as-gate is exactly
+the failure mode the reset removes.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from .profile import (
-    AgentProfile,
-    ProfileValidationError,
-    VersionProbeRule,
-    is_registered_mediation_binding,
+REGISTRY_SCHEMA_VERSION = 1
+
+# The complete, closed field set of one entry. Required first, then optional.
+REQUIRED_ENTRY_FIELDS = ("profile", "command")
+OPTIONAL_ENTRY_FIELDS = (
+    "args",
+    "mediation",
+    "env_passthrough",
+    "env_overlay",
+    "model_selector",
+    "effort_selector",
+    "forbidden_capabilities",
+    "session_epoch",
 )
+ENTRY_FIELDS = REQUIRED_ENTRY_FIELDS + OPTIONAL_ENTRY_FIELDS
 
-REGISTRATION_SCHEMA_VERSION = 1
+AGENT_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+SELECTOR_ID_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
+CAPABILITY_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
 
-REGISTRATION_FIELDS = (
-    "schema_version",
-    "agent_id",
-    "contract_identity",
-    "acp",
-    "launch",
-    "config",
-    "credentials",
-    "provenance",
-)
-_CONTRACT_IDENTITY_FIELDS = ("profile_id", "profile_revision", "adapter_contract_hash")
-_ACP_FIELDS = ("agent_name", "forbidden_capabilities")
-_LAUNCH_FIELDS = ("argv_tokens", "version_probe_argv_suffix", "permission_binding_id")
-_CONFIG_FIELDS = (
-    "model_selector_id",
-    "effort_selector_id",
-    "registered_models",
-    "allowed_efforts",
-    "default_model",
-    "default_effort",
-)
-_CREDENTIAL_FIELDS = ("slots", "required_refs")
-_PROVENANCE_FIELDS = (
-    "created_at",
-    "accepted_by",
-    "accepted_at",
-    "acceptance_receipt",
-    "discovery_receipt",
-    "permission_canary_receipt",
-)
-_RECEIPT_FIELDS = ("ref", "sha256")
-
-# An argv token is structurally incapable of being a path or a shell fragment:
-# no separator, no ``..`` run, no ``=``, no whitespace, no NUL, ASCII only.
-_ARGV_TOKEN_RE = re.compile(r"^(--?[A-Za-z0-9][A-Za-z0-9-]*|[A-Za-z0-9][A-Za-z0-9._-]*)$")
-_ARGV_TOKEN_MIN = 1
-_ARGV_TOKEN_MAX = 4
-_ARGV_TOKEN_CHARS_MAX = 32
-
-_SELECTOR_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
-
-_DOMAIN_MAX = 32
-_DOMAIN_VALUE_CHARS_MAX = 128
-_CREDENTIAL_SLOTS_MAX = 8
-_CREDENTIAL_ID_CHARS_MAX = 128
-_TEXT_MAX = 256
-_CAPABILITY_MAX = 32
-_ACP_NAME_MAX = 128
+MAX_COMMAND_BYTES = 4096
+MAX_ARGS = 32
+MAX_ARG_BYTES = 1024
+MAX_ENV_PASSTHROUGH = 32
+MAX_ENV_NAME_CHARS = 128
+MAX_ENV_OVERLAY = 32
+MAX_ENV_OVERLAY_VALUE_BYTES = 4096
+MAX_FORBIDDEN_CAPABILITIES = 16
 
 
-class AgentRegistrationError(Exception):
-    """Fail-closed registration refusal; ``rule`` names the failing rule.
+class RegistryRefusal(Exception):
+    """Fail-closed registry refusal; ``rule`` names the failing rule.
 
-    The message carries the rule and structural facts only — never file bytes,
-    credential material, or provenance text.
+    The message carries the rule, a field path, and at most an environment
+    *name*. It never carries an overlay value, a raw file fragment, or any text
+    the operator's own data chose.
     """
 
     def __init__(self, *, rule: str, message: str) -> None:
@@ -103,447 +72,338 @@ class AgentRegistrationError(Exception):
         self.message = message
 
 
-def _refuse(rule: str, message: str) -> AgentRegistrationError:
-    return AgentRegistrationError(
-        rule=rule, message=f"agent registration refused [{rule}]: {message}"
-    )
+def refuse(rule: str, message: str) -> RegistryRefusal:
+    return RegistryRefusal(rule=rule, message=f"agent registry refused [{rule}]: {message}")
 
 
 @dataclass(frozen=True)
-class AgentRegistration:
-    """One operator-authored agent, projected into immutable typed values.
+class AgentEntry:
+    """One operator-authored agent, projected into immutable typed values."""
 
-    Every field here is either a value the source contract's bounds admit or a
-    narrowing of one. ``provenance`` is recorded and reported; it is never an
-    authorization input and never decides admissibility.
-    """
-
-    schema_version: int
     agent_id: str
     profile_id: str
-    profile_revision: int
-    adapter_contract_hash: str
-    acp_agent_name: str
-    forbidden_capabilities: tuple[str, ...]
-    argv_tokens: tuple[str, ...]
-    version_probe: VersionProbeRule
-    permission_binding_id: str | None
-    model_selector_id: str
-    effort_selector_id: str
-    registered_models: tuple[str, ...]
-    allowed_efforts: tuple[str, ...]
-    default_model: str
-    default_effort: str
-    credential_slots: tuple[str, ...]
-    required_credential_refs: tuple[str, ...] | None
-    provenance: Mapping[str, Any]
-    registration_hash: str
+    command: str
+    args: tuple[str, ...] = ()
+    mediation_id: str | None = None
+    env_passthrough: tuple[str, ...] = ()
+    env_overlay: tuple[tuple[str, str], ...] = field(default=())
+    model_selector_id: str | None = None
+    effort_selector_id: str | None = None
+    forbidden_capabilities: tuple[str, ...] = ()
+    session_epoch: int | None = None
 
-    def contract_identity(self) -> dict[str, Any]:
-        """The identity a Binding generation for this agent must re-declare."""
-        return {
-            "profile_id": self.profile_id,
-            "profile_revision": self.profile_revision,
-            "adapter_contract_hash": self.adapter_contract_hash,
-            "agent_id": self.agent_id,
-            "agent_registration_hash": self.registration_hash,
-        }
+    def argv(self) -> tuple[str, ...]:
+        """The exact argv handed to exec: ``argv[0]`` is the declared command.
+
+        Byte-for-byte, exactly as a shell would pass it. A bare name stays a
+        bare name; the image is located by ``execvp``-style lookup over the
+        child's projected ``PATH``.
+        """
+        return (self.command, *self.args)
 
 
-# -- canonical hashing --------------------------------------------------------
+# -- primitive validators -----------------------------------------------------
 
 
-def _canonical_json(payload: Any) -> str:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+def _is_plain_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
-def registration_hash(payload: Mapping[str, Any]) -> str:
-    """Hash the registration over everything except ``provenance``.
+def _byte_length(value: str) -> int:
+    return len(value.encode("utf-8", "surrogatepass"))
 
-    Provenance is deliberately outside: re-recording an acceptance, discovery,
-    or canary receipt is bookkeeping, and making it retire every Session under
-    the agent would push operators toward *not* recording receipts. Every
-    compatibility-bearing field is inside, so a real edit does retire them.
+
+def validate_agent_id(value: Any, *, rule: str = "AGENT_ID_INVALID") -> str:
+    """The one ``agent_id`` grammar, shared by the parse and by admission."""
+    if not isinstance(value, str) or AGENT_ID_RE.fullmatch(value) is None:
+        raise refuse(rule, "agent id must match [a-z0-9][a-z0-9._-]{0,63}")
+    return value
+
+
+def _validate_command(agent_id: str, value: Any) -> str:
+    where = f"agents.{agent_id}.command"
+    if not isinstance(value, str) or not value:
+        raise refuse("ENTRY_COMMAND_INVALID", f"{where} must be a non-empty string")
+    if _byte_length(value) > MAX_COMMAND_BYTES:
+        raise refuse(
+            "ENTRY_COMMAND_INVALID", f"{where} exceeds {MAX_COMMAND_BYTES} bytes"
+        )
+    if "\x00" in value:
+        raise refuse("ENTRY_COMMAND_INVALID", f"{where} carries a NUL byte")
+    if value.startswith("/"):
+        return value
+    if "/" in value:
+        raise refuse(
+            "ENTRY_COMMAND_INVALID",
+            f"{where} must be absolute or a single basename with no path separator",
+        )
+    return value
+
+
+def _validate_args(agent_id: str, value: Any) -> tuple[str, ...]:
+    """The declared argv tail: bounded by count, bytes, and NUL. Nothing else.
+
+    An **empty token is valid**. ``argv`` is handed to ``exec`` directly and
+    never to a shell, so ``""`` is an ordinary token — it is how an operator
+    passes an empty positional to a CLI that distinguishes "absent" from
+    "present and empty". Refusing it invented a rule the registry contract does
+    not state, and the alternative failure mode is worse than a refusal: silently
+    dropping the token would hand the child a different argv than the one
+    declared, which is the one thing command semantics promise never happens.
+
+    ``argv[0]`` is a separate question and keeps its own non-empty rule: it is
+    the image to locate, not a token to pass.
     """
-    material = {key: value for key, value in payload.items() if key != "provenance"}
-    return hashlib.sha256(_canonical_json(material).encode("utf-8")).hexdigest()
+    where = f"agents.{agent_id}.args"
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise refuse("ENTRY_ARG_TOKEN_INVALID", f"{where} must be an array of strings")
+    if len(value) > MAX_ARGS:
+        raise refuse("ENTRY_ARG_TOKEN_INVALID", f"{where} exceeds {MAX_ARGS} tokens")
+    for index, token in enumerate(value):
+        position = f"{where}[{index}]"
+        if _byte_length(token) > MAX_ARG_BYTES:
+            raise refuse(
+                "ENTRY_ARG_TOKEN_INVALID", f"{position} exceeds {MAX_ARG_BYTES} bytes"
+            )
+        if "\x00" in token:
+            raise refuse("ENTRY_ARG_TOKEN_INVALID", f"{position} carries a NUL byte")
+    return tuple(value)
 
 
-# -- shape helpers ------------------------------------------------------------
-
-
-def _require_object(value: Any, *, rule: str, surface: str) -> Mapping[str, Any]:
-    if not isinstance(value, dict):
-        raise _refuse(rule, f"{surface} must be a JSON object")
-    return value
-
-
-def _require_exact_fields(
-    payload: Mapping[str, Any],
-    fields: tuple[str, ...],
-    *,
-    unknown_rule: str,
-    missing_rule: str,
-    surface: str,
-) -> None:
-    unknown = sorted(set(payload) - set(fields))
-    if unknown:
-        raise _refuse(unknown_rule, f"{surface} carries unknown field(s): {unknown}")
-    missing = sorted(set(fields) - set(payload))
-    if missing:
-        raise _refuse(missing_rule, f"{surface} omits {missing}")
-
-
-def _require_text(value: Any, *, rule: str, surface: str, maximum: int = _TEXT_MAX) -> str:
-    if (
-        not isinstance(value, str)
-        or not value
-        or len(value) > maximum
-        or not all(ch.isprintable() for ch in value)
-    ):
-        raise _refuse(rule, f"{surface} must be a short printable string")
-    return value
-
-
-def _is_sha256(value: Any) -> bool:
+def is_env_name(value: Any) -> bool:
+    """One environment name, by this registry's own grammar and length bound."""
     return (
         isinstance(value, str)
-        and len(value) == 64
-        and all(ch in "0123456789abcdef" for ch in value)
+        and 0 < len(value) <= MAX_ENV_NAME_CHARS
+        and ENV_NAME_RE.fullmatch(value) is not None
     )
 
 
-def _require_string_list(value: Any, *, rule: str, surface: str) -> list[str]:
-    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-        raise _refuse(rule, f"{surface} must be an array of strings")
-    return list(value)
+def is_env_passthrough_domain(value: Any) -> bool:
+    """A whole ``env_passthrough`` name list, exactly as the parser admits one.
 
+    Three facts, stated once: every name grammar-valid, no name repeated, and at
+    most :data:`MAX_ENV_PASSTHROUGH` of them. Two directions need this same
+    answer — the parser, to admit an operator's file, and the launch-record
+    reader, to recognise a projection its own writer could have produced — and a
+    reader that answered it differently would accept a document no writer can
+    emit. So the decision has one implementation and both sides call it.
 
-# -- the bounded grammars -----------------------------------------------------
-
-
-def _parse_argv_tokens(value: Any) -> tuple[str, ...]:
-    """Tokens that cannot express a path, a redirection, or an assignment."""
-    tokens = _require_string_list(value, rule="ARGV_TOKEN_UNSAFE", surface="argv_tokens")
-    if not (_ARGV_TOKEN_MIN <= len(tokens) <= _ARGV_TOKEN_MAX):
-        raise _refuse(
-            "ARGV_TOKEN_UNSAFE",
-            f"argv_tokens must hold {_ARGV_TOKEN_MIN}..{_ARGV_TOKEN_MAX} tokens",
-        )
-    if len(set(tokens)) != len(tokens):
-        raise _refuse("ARGV_TOKEN_UNSAFE", "duplicate argv token")
-    for token in tokens:
-        if not (1 <= len(token) <= _ARGV_TOKEN_CHARS_MAX):
-            raise _refuse("ARGV_TOKEN_UNSAFE", "argv token length is out of range")
-        if not token.isascii() or _ARGV_TOKEN_RE.fullmatch(token) is None:
-            raise _refuse("ARGV_TOKEN_UNSAFE", "argv token is not a bounded ASCII token")
-        if ".." in token:
-            raise _refuse("ARGV_TOKEN_UNSAFE", "argv token carries a traversal run")
-    return tuple(tokens)
-
-
-def _parse_version_probe(value: Any, contract_rule: VersionProbeRule) -> VersionProbeRule:
-    """Only the fixed argv suffix is registration-selected; the rest is code-owned.
-
-    The suffix is validated by ``VersionProbeRule`` itself rather than by a
-    second copy of its rules here — the parser, the timeout, and the output
-    bound stay exactly as the contract froze them.
+    The bound is an ARS schema bound, not an OS or ACP limit; it lives at
+    :data:`MAX_ENV_PASSTHROUGH` and is not restated anywhere else.
     """
-    suffix = _require_string_list(
-        value, rule="VERSION_PROBE_UNSAFE", surface="version_probe_argv_suffix"
-    )
-    try:
-        return VersionProbeRule(
-            argv_suffix=tuple(suffix),
-            parser_id=contract_rule.parser_id,
-            timeout_seconds=contract_rule.timeout_seconds,
-            max_output_bytes=contract_rule.max_output_bytes,
+    if not isinstance(value, (list, tuple)):
+        return False
+    if len(value) > MAX_ENV_PASSTHROUGH:
+        return False
+    if not all(is_env_name(name) for name in value):
+        return False
+    return len(set(value)) == len(value)
+
+
+def _validate_env_name(where: str, name: Any) -> str:
+    if not isinstance(name, str) or not name:
+        raise refuse("ENTRY_ENV_KEY_INVALID", f"{where} name must be a non-empty string")
+    if not is_env_name(name):
+        raise refuse(
+            "ENTRY_ENV_KEY_INVALID",
+            f"{where} name {name!r} must match [A-Za-z_][A-Za-z0-9_]*",
         )
-    except ProfileValidationError as exc:
-        raise _refuse("VERSION_PROBE_UNSAFE", str(exc)) from None
+    return name
 
 
-def _parse_selector_id(value: Any, surface: str) -> str:
-    if not isinstance(value, str) or _SELECTOR_ID_RE.fullmatch(value) is None:
-        raise _refuse("SELECTOR_ID_UNSAFE", f"{surface} is not a bounded selector id")
+def _validate_env_passthrough(agent_id: str, value: Any) -> tuple[str, ...]:
+    """Admit the list through the shared domain; walk it only to explain a refusal.
+
+    The accept decision is :func:`is_env_passthrough_domain` and nothing else,
+    so the parser cannot admit a list the launch reader would reject. The walk
+    below runs only when that decision was already *no*, and exists purely to
+    name which of the three rules failed and where — an operator needs that, and
+    a boolean cannot say it.
+    """
+    where = f"agents.{agent_id}.env_passthrough"
+    if not isinstance(value, list):
+        raise refuse("ENTRY_ENV_KEY_INVALID", f"{where} must be an array of names")
+    if is_env_passthrough_domain(value):
+        return tuple(value)
+    if len(value) > MAX_ENV_PASSTHROUGH:
+        raise refuse(
+            "ENTRY_ENV_KEY_INVALID", f"{where} exceeds {MAX_ENV_PASSTHROUGH} names"
+        )
+    names: list[str] = []
+    for name in value:
+        validated = _validate_env_name(where, name)
+        if validated in names:
+            raise refuse("ENTRY_ENV_KEY_INVALID", f"{where} repeats {validated}")
+        names.append(validated)
+    # Unreachable while the walk covers every rule the predicate applies. Kept
+    # because falling through would silently return a list the reader refuses.
+    raise refuse("ENTRY_ENV_KEY_INVALID", f"{where} is not an accepted name list")
+
+
+def _validate_env_overlay(agent_id: str, value: Any) -> tuple[tuple[str, str], ...]:
+    where = f"agents.{agent_id}.env_overlay"
+    if not isinstance(value, dict):
+        raise refuse("ENTRY_ENV_KEY_INVALID", f"{where} must be a table of name = value")
+    if len(value) > MAX_ENV_OVERLAY:
+        raise refuse("ENTRY_ENV_KEY_INVALID", f"{where} exceeds {MAX_ENV_OVERLAY} pairs")
+    pairs: list[tuple[str, str]] = []
+    for name, literal in value.items():
+        validated = _validate_env_name(where, name)
+        # The value is judged, never quoted: reporting it would hand the
+        # operator's own literal back through a refusal message.
+        if not isinstance(literal, str):
+            raise refuse(
+                "ENTRY_ENV_VALUE_INVALID", f"{where}.{validated} must be a string"
+            )
+        if _byte_length(literal) > MAX_ENV_OVERLAY_VALUE_BYTES:
+            raise refuse(
+                "ENTRY_ENV_VALUE_INVALID",
+                f"{where}.{validated} exceeds {MAX_ENV_OVERLAY_VALUE_BYTES} bytes",
+            )
+        if not all(ch.isprintable() for ch in literal):
+            raise refuse(
+                "ENTRY_ENV_VALUE_INVALID",
+                f"{where}.{validated} contains non-printable characters",
+            )
+        pairs.append((validated, literal))
+    return tuple(pairs)
+
+
+def _validate_selector(agent_id: str, key: str, value: Any) -> str:
+    where = f"agents.{agent_id}.{key}"
+    if not isinstance(value, str) or SELECTOR_ID_RE.fullmatch(value) is None:
+        raise refuse(
+            "ENTRY_SELECTOR_INVALID",
+            f"{where} must be a selector id, never a value domain",
+        )
     return value
 
 
-def _parse_domain(value: Any, surface: str) -> tuple[str, ...]:
-    entries = _require_string_list(
-        value, rule="SELECTOR_DOMAIN_UNSAFE", surface=surface
-    )
-    if not (1 <= len(entries) <= _DOMAIN_MAX):
-        raise _refuse("SELECTOR_DOMAIN_UNSAFE", f"{surface} must hold 1..{_DOMAIN_MAX} entries")
-    if len(set(entries)) != len(entries):
-        raise _refuse("SELECTOR_DOMAIN_UNSAFE", f"{surface} carries a duplicate entry")
-    for entry in entries:
-        if (
-            not entry
-            or len(entry) > _DOMAIN_VALUE_CHARS_MAX
-            or not all(ch.isprintable() for ch in entry)
-        ):
-            raise _refuse("SELECTOR_DOMAIN_UNSAFE", f"{surface} entry is out of range")
-    return tuple(entries)
-
-
-def _parse_capabilities(value: Any, profile: AgentProfile) -> tuple[str, ...]:
-    """A registration raises the source floor; it can never lower it."""
-    entries = _require_string_list(
-        value, rule="CAPABILITY_UNSAFE", surface="forbidden_capabilities"
-    )
-    if len(entries) > _CAPABILITY_MAX:
-        raise _refuse("CAPABILITY_UNSAFE", "forbidden_capabilities exceeds its bound")
-    if len(set(entries)) != len(entries):
-        raise _refuse("CAPABILITY_UNSAFE", "duplicate forbidden capability")
-    for entry in entries:
-        _require_text(entry, rule="CAPABILITY_UNSAFE", surface="forbidden capability")
-    declared = set(entries)
-    floor = set(profile.contract.forbidden_capabilities)
-    if not floor <= declared:
-        raise _refuse(
-            "CAPABILITY_FLOOR_LOWERED",
-            f"registration drops source-forbidden capabilities {sorted(floor - declared)}",
+def _validate_forbidden_capabilities(agent_id: str, value: Any) -> tuple[str, ...]:
+    where = f"agents.{agent_id}.forbidden_capabilities"
+    if not isinstance(value, list):
+        raise refuse("ENTRY_CAPABILITY_INVALID", f"{where} must be an array of names")
+    if len(value) > MAX_FORBIDDEN_CAPABILITIES:
+        raise refuse(
+            "ENTRY_CAPABILITY_INVALID",
+            f"{where} exceeds {MAX_FORBIDDEN_CAPABILITIES} names",
         )
-    overlap = declared & set(profile.contract.required_capabilities)
-    if overlap:
-        raise _refuse(
-            "CAPABILITY_CONFLICT",
-            f"capability declared both required and forbidden: {sorted(overlap)}",
-        )
-    return tuple(sorted(declared))
+    names: list[str] = []
+    for name in value:
+        if not isinstance(name, str) or CAPABILITY_RE.fullmatch(name) is None:
+            raise refuse("ENTRY_CAPABILITY_INVALID", f"{where} carries an unbounded name")
+        if name not in names:
+            names.append(name)
+    return tuple(sorted(names))
 
 
-def _parse_credentials(payload: Mapping[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...] | None]:
-    _require_exact_fields(
-        payload,
-        _CREDENTIAL_FIELDS,
-        unknown_rule="UNKNOWN_REGISTRATION_FIELD",
-        missing_rule="REGISTRATION_FIELD_MISSING",
-        surface="credentials",
-    )
-    slots = _require_string_list(
-        payload["slots"], rule="CREDENTIAL_REFS_UNSAFE", surface="credentials.slots"
-    )
-    if len(slots) > _CREDENTIAL_SLOTS_MAX:
-        raise _refuse("CREDENTIAL_REFS_UNSAFE", "credentials.slots exceeds its bound")
-    if len(set(slots)) != len(slots):
-        raise _refuse("CREDENTIAL_REFS_UNSAFE", "duplicate credential slot")
-    for slot in slots:
-        _require_text(
-            slot,
-            rule="CREDENTIAL_REFS_UNSAFE",
-            surface="credential slot",
-            maximum=_CREDENTIAL_ID_CHARS_MAX,
-        )
-    raw_refs = payload["required_refs"]
-    if raw_refs is None:
-        return tuple(slots), None
-    refs = _require_string_list(
-        raw_refs, rule="CREDENTIAL_REFS_UNSAFE", surface="credentials.required_refs"
-    )
-    if not set(refs) <= set(slots):
-        raise _refuse(
-            "CREDENTIAL_REFS_UNSAFE",
-            "credentials.required_refs is not a subset of the declared slots",
-        )
-    return tuple(slots), tuple(refs)
+def _validate_session_epoch(agent_id: str, value: Any) -> int:
+    where = f"agents.{agent_id}.session_epoch"
+    if not _is_plain_int(value) or value <= 0:
+        raise refuse("ENTRY_SESSION_EPOCH_INVALID", f"{where} must be a positive integer")
+    return value
 
 
-def _require_provenance(payload: Any) -> Mapping[str, Any]:
-    """Shape-validated, recorded, and never consulted — C4 verbatim.
+# -- the entry parser ---------------------------------------------------------
 
-    Requiring the record to be well formed and refusing to let it decide
-    anything are two separate rules, and both hold: a flawless provenance block
-    rescues no unsafe argv token, no lowered capability floor, and no mismatched
-    contract identity.
+
+def parse_entry(
+    payload: Any,
+    *,
+    agent_id: str,
+    known_profile_ids: frozenset[str],
+    known_mediation_ids: frozenset[str],
+) -> AgentEntry:
+    """Project one decoded entry table, or refuse by a stable rule.
+
+    ``known_profile_ids`` and ``known_mediation_ids`` are handed in rather than
+    imported so this module stays a pure grammar with no opinion about which
+    profiles source happens to register today.
     """
-    provenance = _require_object(
-        payload, rule="PROVENANCE_FIELD_TYPE", surface="provenance"
+    validate_agent_id(agent_id)
+    if not isinstance(payload, dict):
+        raise refuse("REGISTRY_PARSE", f"agents.{agent_id} must be a table")
+    unknown = sorted(key for key in payload if key not in ENTRY_FIELDS)
+    if unknown:
+        raise refuse(
+            "REGISTRY_UNKNOWN_KEY",
+            f"agents.{agent_id} carries unknown key(s): {unknown}",
+        )
+    missing = [name for name in REQUIRED_ENTRY_FIELDS if name not in payload]
+    if missing:
+        raise refuse("ENTRY_FIELD_MISSING", f"agents.{agent_id} omits {missing}")
+
+    profile_id = payload["profile"]
+    if not isinstance(profile_id, str) or profile_id not in known_profile_ids:
+        raise refuse(
+            "ENTRY_UNKNOWN_PROFILE",
+            f"agents.{agent_id}.profile does not name a source-registered profile",
+        )
+
+    mediation_id = payload.get("mediation")
+    if mediation_id is not None:
+        if not isinstance(mediation_id, str) or mediation_id not in known_mediation_ids:
+            raise refuse(
+                "ENTRY_UNKNOWN_MEDIATION_ID",
+                f"agents.{agent_id}.mediation does not name a source-owned binding",
+            )
+
+    return AgentEntry(
+        agent_id=agent_id,
+        profile_id=profile_id,
+        command=_validate_command(agent_id, payload["command"]),
+        args=_validate_args(agent_id, payload.get("args", [])),
+        mediation_id=mediation_id,
+        env_passthrough=_validate_env_passthrough(
+            agent_id, payload.get("env_passthrough", [])
+        ),
+        env_overlay=_validate_env_overlay(agent_id, payload.get("env_overlay", {})),
+        model_selector_id=(
+            None
+            if "model_selector" not in payload
+            else _validate_selector(agent_id, "model_selector", payload["model_selector"])
+        ),
+        effort_selector_id=(
+            None
+            if "effort_selector" not in payload
+            else _validate_selector(
+                agent_id, "effort_selector", payload["effort_selector"]
+            )
+        ),
+        forbidden_capabilities=_validate_forbidden_capabilities(
+            agent_id, payload.get("forbidden_capabilities", [])
+        ),
+        session_epoch=(
+            None
+            if "session_epoch" not in payload
+            else _validate_session_epoch(agent_id, payload["session_epoch"])
+        ),
     )
-    _require_exact_fields(
-        provenance,
-        _PROVENANCE_FIELDS,
-        unknown_rule="UNKNOWN_REGISTRATION_FIELD",
-        missing_rule="PROVENANCE_FIELD_MISSING",
-        surface="provenance",
-    )
-    for key in ("created_at", "accepted_by", "accepted_at"):
-        _require_text(
-            provenance[key], rule="PROVENANCE_FIELD_TYPE", surface=f"provenance {key}"
-        )
-    for key in ("acceptance_receipt", "discovery_receipt", "permission_canary_receipt"):
-        receipt = _require_object(
-            provenance[key], rule="PROVENANCE_FIELD_TYPE", surface=key
-        )
-        _require_exact_fields(
-            receipt,
-            _RECEIPT_FIELDS,
-            unknown_rule="UNKNOWN_REGISTRATION_FIELD",
-            missing_rule="PROVENANCE_FIELD_MISSING",
-            surface=key,
-        )
-        _require_text(
-            receipt["ref"], rule="PROVENANCE_FIELD_TYPE", surface=f"{key} ref"
-        )
-        if not _is_sha256(receipt["sha256"]):
-            raise _refuse("PROVENANCE_FIELD_TYPE", f"{key} sha256 is not a digest")
-    return dict(provenance)
 
 
-# -- the parser ---------------------------------------------------------------
+def declared_environment_names(entry: AgentEntry) -> tuple[str, ...]:
+    """Every environment name this entry names, in either declaration."""
+    return (*entry.env_passthrough, *(name for name, _ in entry.env_overlay))
 
 
-def parse_registration(
-    payload: Mapping[str, Any], *, profile: AgentProfile, expected_agent_id: str
-) -> AgentRegistration:
-    """Project one decoded registration payload, or refuse by a stable rule.
+def entry_projection(entry: AgentEntry) -> Mapping[str, Any]:
+    """Value-blind projection for operator reporting.
 
-    ``expected_agent_id`` is the component the caller already descended into, so
-    the registration must re-declare it as an explicit machine field: path
-    separation alone would let a directory rename silently re-label an agent.
+    Overlay **names** appear; overlay values never do. There is no digest of
+    anything here, and no field a Session identity could be derived from beyond
+    the operator's own ``session_epoch``.
     """
-    body = _require_object(
-        payload, rule="UNKNOWN_REGISTRATION_FIELD", surface="registration"
-    )
-    _require_exact_fields(
-        body,
-        REGISTRATION_FIELDS,
-        unknown_rule="UNKNOWN_REGISTRATION_FIELD",
-        missing_rule="REGISTRATION_FIELD_MISSING",
-        surface="registration",
-    )
-    contract = profile.contract
-    if body["schema_version"] != REGISTRATION_SCHEMA_VERSION or (
-        contract.registration_schema_version != REGISTRATION_SCHEMA_VERSION
-    ):
-        raise _refuse(
-            "REGISTRATION_SCHEMA_VERSION",
-            "registration schema_version is not the one this contract accepts",
-        )
-    if body["agent_id"] != expected_agent_id:
-        raise _refuse(
-            "REGISTRATION_AGENT_MISMATCH",
-            "registration declares a different agent than the one resolving it",
-        )
-
-    identity = _require_object(
-        body["contract_identity"],
-        rule="REGISTRATION_CONTRACT_MISMATCH",
-        surface="contract_identity",
-    )
-    _require_exact_fields(
-        identity,
-        _CONTRACT_IDENTITY_FIELDS,
-        unknown_rule="UNKNOWN_REGISTRATION_FIELD",
-        missing_rule="REGISTRATION_FIELD_MISSING",
-        surface="contract_identity",
-    )
-    live = {
-        "profile_id": profile.profile_id,
-        "profile_revision": profile.revision,
-        "adapter_contract_hash": profile.adapter_contract_hash(),
+    return {
+        "agent_id": entry.agent_id,
+        "profile": entry.profile_id,
+        "command": entry.command,
+        "args": list(entry.args),
+        "mediation": entry.mediation_id,
+        "env_passthrough": list(entry.env_passthrough),
+        "env_overlay_names": [name for name, _ in entry.env_overlay],
+        "model_selector": entry.model_selector_id,
+        "effort_selector": entry.effort_selector_id,
+        "forbidden_capabilities": list(entry.forbidden_capabilities),
+        "session_epoch": entry.session_epoch,
     }
-    if dict(identity) != live:
-        # A contract revision therefore retires every registration accepted
-        # under the old hash, closed — exactly as it retires a generation.
-        raise _refuse(
-            "REGISTRATION_CONTRACT_MISMATCH",
-            "registration was accepted under a different contract identity",
-        )
-
-    acp = _require_object(body["acp"], rule="UNKNOWN_REGISTRATION_FIELD", surface="acp")
-    _require_exact_fields(
-        acp,
-        _ACP_FIELDS,
-        unknown_rule="UNKNOWN_REGISTRATION_FIELD",
-        missing_rule="REGISTRATION_FIELD_MISSING",
-        surface="acp",
-    )
-    agent_name = _require_text(
-        acp["agent_name"], rule="ACP_NAME_UNSAFE", surface="acp.agent_name",
-        maximum=_ACP_NAME_MAX,
-    )
-    forbidden = _parse_capabilities(acp["forbidden_capabilities"], profile)
-
-    launch = _require_object(
-        body["launch"], rule="UNKNOWN_REGISTRATION_FIELD", surface="launch"
-    )
-    _require_exact_fields(
-        launch,
-        _LAUNCH_FIELDS,
-        unknown_rule="UNKNOWN_REGISTRATION_FIELD",
-        missing_rule="REGISTRATION_FIELD_MISSING",
-        surface="launch",
-    )
-    argv_tokens = _parse_argv_tokens(launch["argv_tokens"])
-    probe = _parse_version_probe(launch["version_probe_argv_suffix"], contract.version_probe)
-    binding_id = launch["permission_binding_id"]
-    if binding_id is not None and not is_registered_mediation_binding(binding_id):
-        raise _refuse(
-            "UNKNOWN_PERMISSION_BINDING",
-            "registration selects a mediation binding that source does not own",
-        )
-
-    config = _require_object(
-        body["config"], rule="UNKNOWN_REGISTRATION_FIELD", surface="config"
-    )
-    _require_exact_fields(
-        config,
-        _CONFIG_FIELDS,
-        unknown_rule="UNKNOWN_REGISTRATION_FIELD",
-        missing_rule="REGISTRATION_FIELD_MISSING",
-        surface="config",
-    )
-    model_selector = _parse_selector_id(
-        config["model_selector_id"], "config.model_selector_id"
-    )
-    effort_selector = _parse_selector_id(
-        config["effort_selector_id"], "config.effort_selector_id"
-    )
-    if model_selector == effort_selector:
-        raise _refuse("SELECTOR_ID_UNSAFE", "the two selector ids must be distinct")
-    models = _parse_domain(config["registered_models"], "config.registered_models")
-    efforts = _parse_domain(config["allowed_efforts"], "config.allowed_efforts")
-    default_model = config["default_model"]
-    default_effort = config["default_effort"]
-    if default_model not in models:
-        raise _refuse(
-            "SELECTOR_DEFAULT_UNSAFE", "default_model is outside registered_models"
-        )
-    if default_effort not in efforts:
-        raise _refuse(
-            "SELECTOR_DEFAULT_UNSAFE", "default_effort is outside allowed_efforts"
-        )
-
-    slots, required_refs = _parse_credentials(
-        _require_object(
-            body["credentials"],
-            rule="UNKNOWN_REGISTRATION_FIELD",
-            surface="credentials",
-        )
-    )
-    provenance = _require_provenance(body["provenance"])
-
-    return AgentRegistration(
-        schema_version=REGISTRATION_SCHEMA_VERSION,
-        agent_id=expected_agent_id,
-        profile_id=profile.profile_id,
-        profile_revision=profile.revision,
-        adapter_contract_hash=live["adapter_contract_hash"],
-        acp_agent_name=agent_name,
-        forbidden_capabilities=forbidden,
-        argv_tokens=argv_tokens,
-        version_probe=probe,
-        permission_binding_id=binding_id,
-        model_selector_id=model_selector,
-        effort_selector_id=effort_selector,
-        registered_models=models,
-        allowed_efforts=efforts,
-        default_model=default_model,
-        default_effort=default_effort,
-        credential_slots=slots,
-        required_credential_refs=required_refs,
-        provenance=provenance,
-        registration_hash=registration_hash(body),
-    )

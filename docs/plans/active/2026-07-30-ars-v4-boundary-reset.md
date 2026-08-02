@@ -5,7 +5,8 @@ revision: 2
 created_at: 2026-07-30
 implementation_authorized: true
 implementation_authorized_at: 2026-07-30
-profile_retirement_approved: false
+profile_retirement_approved: true
+profile_retirement_approved_at: 2026-08-01
 production_authorized: false
 plan_kind: proposed-implementation-plan
 requires_decision_1_option: "a"
@@ -21,14 +22,14 @@ review_verdict: PASS (disclosed one-time independence waiver; not transferable)
 plan_review_source: .cache/ars-v4-implementation-plan/review-attempt-1/review.md
 plan_review_sha256: 91035c153e6acacb34c44d43e34cee3732db56ea84410560c71190289adecb64
 authority_status: "V4 is reviewed but NOT tracked repository authority at plan authoring time"
-human_decisions_open: [profile-retirement, cutover-and-legacy-session-load-refusal, legacy-line-lifetime]
+human_decisions_open: [cutover-and-legacy-session-load-refusal, legacy-line-lifetime]
 ---
 
 # ARS V4 External AGENT Boundary Reset — proposed implementation plan
 
 This plan turns the reviewed V4 architecture closure into an executable engineering sequence. It implements V4 exactly. It invents no architecture, opens no new scope, and authorizes nothing.
 
-**Frontmatter semantics, stated once so no field can be read as an authorization.** `status: proposed` → `active` records only that this is the board-linked planning artifact; it authorizes no source, test, documentation, Git, GitHub, or runtime work. `implementation_authorized` stayed `false` until a **distinct explicit source-implementation approval** was recorded after the Stage 0 gate merged (§3 Gate B, §11 row 7); that approval was recorded on 2026-07-30 and the flag is now `true` as a statement of fact about Stages 1–3 **local source work only**. `profile_retirement_approved` stays `false` until the separate execution confirmation of §11 row 8. `production_authorized` stays `false` throughout; nothing in this plan can change it.
+**Frontmatter semantics, stated once so no field can be read as an authorization.** `status: proposed` → `active` records only that this is the board-linked planning artifact; it authorizes no source, test, documentation, Git, GitHub, or runtime work. `implementation_authorized` stayed `false` until a **distinct explicit source-implementation approval** was recorded after the Stage 0 gate merged (§3 Gate B, §11 row 7); that approval was recorded on 2026-07-30 and the flag is now `true` as a statement of fact about Stages 1–3 **local source work only**. `profile_retirement_approved` stayed `false` until the separate execution confirmation of §11 row 8; the decision owner recorded that confirmation on 2026-08-01, so the flag is now `true` as a statement of fact about **that source act alone**. `production_authorized` stays `false` throughout; nothing in this plan can change it.
 
 > **Activation record — 2026-07-30.** This plan is now the board-linked planning artifact
 > (`status: active`), and Stage 0 is executing on branch `docs/v4-authority-reset` as a
@@ -45,14 +46,40 @@ This plan turns the reviewed V4 architecture closure into an executable engineer
 > **Source-implementation record (DoR-8) — 2026-07-30, after the G0 merge.** Stage 0 merged as PR #99;
 > `docs/roadmap/current-status.md` links this plan and states the Stage 1→3 delta, so DoR-4…DoR-7 are
 > satisfied. The decision owner then recorded the distinct source-implementation approval of **§11 row 7**
-> — "批准开发 S1 ～ S3" — dated after that merge, and, separately, **§11 row 4** per-stage commit/push
-> ("开发过程中，根据实际情况提交、推送代码"), exercised by the controller only after a stage candidate has
-> passed its verification, independent review, and acceptance gates. `implementation_authorized` is
-> therefore `true`. This record covers **local source, test, and status work for Stages 1–3 only**, taken
-> serially at their stage gates. It does **not** approve **§11 rows 5 and 6** (PR creation, merge), row 8
-> (profile-retirement execution at WP3.3), or any release, deployment, configuration write, service
-> restart, migration/cutover, real-agent canary, or production action; those rows stand unapproved exactly
-> as written below.
+> — "批准开发 S1 ～ S3" — dated after that merge. `implementation_authorized` is therefore `true`. This
+> record covers **local source, test, and status work for Stages 1–3 only**, taken serially at their stage
+> gates.
+>
+> **§11 row 4 (commit and push) is separate and is not taken for the Stage 3 candidate.** The controller
+> authorization in force for this candidate is local source, test, and status work only: it stays in the
+> worktree, uncommitted, and each of commit, push, PR, and merge remains its own later decision. It does **not** approve **§11 rows 5 and 6** (PR creation, merge), row 8
+> (profile-retirement execution at WP3.3, since recorded separately on 2026-08-01 — see the record
+> below), or any release, deployment, configuration write, service restart, migration/cutover, real-agent
+> canary, or production action; those rows stand unapproved exactly as written below.
+
+> **Profile-retirement execution record (§11 row 8) — 2026-08-01.** The decision owner recorded the
+> second of the two decisions `docs/roadmap/non-approvals.md` always required: not merely introducing a
+> retirement capability, but *using* one. Stage 3 was then executed locally, WP3.1–WP3.12, on branch
+> `feat/v4-boundary-reset`. V4 retires profiles by **deleting** them: no alias, redirect, disable flag,
+> default-`False` field, unused rule constant, or marker was added, and a test asserts that none exists.
+> `profile_retirement_approved` is therefore `true` as a statement of fact about that source act.
+>
+> This record covers **local source, test, and documentation work only**. Rows 5 and 6 (PR creation,
+> merge) and rows 9–17 stand unapproved exactly as written below: nothing here is a release, a
+> deployment, a configuration write, a service restart, a migration or cutover, a real-agent canary, or
+> any production action, and no local acceptance transfers approval to the next change.
+
+> **Threat-model ruling — 2026-08-02, settled.** The approved environment-value invariant governs what
+> ARS **writes**: production writers must not persist an environment value. It is not a tamper-resistance
+> claim over artifacts already written. Hardening `run inspect` against an actor who can arbitrarily
+> rewrite a top-level field of an ARS-owned reset `launch.json` is **out of scope for Stage 3** — such an
+> actor already holds the Run root. `launch_payload_shape_is_exact`, `_classify_launch_schema`,
+> `_inspect_reset_record`, `_inspect_legacy_record`, and `_recompute_launch_hash` therefore stay as they
+> are, no top-level launch-field closed-domain validation is added, and tamper resistance is not
+> broadened. Recorded so the finding is not reopened as a blocker; see
+> [`docs/roadmap/non-approvals.md`](../../roadmap/non-approvals.md) § Threat-model scope. The **`env`
+> block's** closed-domain check is a different rule and stands: it decides whether a document is a
+> value-blind production projection at all.
 
 ---
 
@@ -326,7 +353,7 @@ Command convention: `uv run pytest -q …` is canonical (it matches `scripts/ver
 
 **Dependencies.** Gate B complete: G0 merged (DoR-4…DoR-7) **and** DoR-8 recorded afterwards. Architecture-neutral otherwise: touches no registry, no profile, no schema version, no hash material, no wire version.
 
-**New human approval required before this stage: YES** — DoR-8, the distinct source-implementation approval (§11 row 7). This is the first stage that edits source; neither plan activation nor the G0 merge authorized it. **Recorded 2026-07-30 after the G0 merge**, together with §11 row 4 (per-stage commit/push after verification, review, and acceptance). PR and merge remain separate, unapproved decisions on top of it.
+**New human approval required before this stage: YES** — DoR-8, the distinct source-implementation approval (§11 row 7). This is the first stage that edits source; neither plan activation nor the G0 merge authorized it. **Recorded 2026-07-30 after the G0 merge.** It covers local source, test, and status work; §11 row 4 (commit/push), PR, and merge remain separate, unapproved decisions on top of it.
 
 **Paths likely to change**
 
@@ -413,7 +440,7 @@ Invariants that must hold structurally, not by convention:
 
 **Dependencies.** Stage 1 merged. Semantically independent of Stage 1; ordered after it so `client.py` is already at target shape.
 
-**New human approval required before this stage: NO** new decision — covered by DoR-8 (§11 row 7), which spans Stages 1–3 local source work. Commit/push, PR, and merge remain separate approvals.
+**New human approval required before this stage: NO** new decision — covered by DoR-8 (§11 row 7), which spans Stages 1–3 local source work. Commit/push (row 4), PR, and merge remain separate approvals, and none of them is taken for this candidate.
 
 **Paths likely to change**
 
@@ -796,11 +823,11 @@ Every row is a separate, narrow, non-transitive decision. **Approval of any row 
 | 1 | **Plan activation** — sets `status: proposed` → `active` and updates the board link, and **nothing else**. Authorized no source, test, documentation, Git, GitHub, or runtime action | **approved 2026-07-30** | decision owner (DoR-2); requires row 2 |
 | 2 | **Decision 1 — profile-retirement policy.** Must be recorded as option **(a)**. Recording (b) or (c) withdraws this plan (§2.3) | **approved 2026-07-30** as option (a) — policy only | decision owner (DoR-1); blocks all of Stage 0 |
 | 3 | **Stage 0 documentation-work execution** (branch `docs/v4-authority-reset`, WP0.1–WP0.5, both READMEs included) | **approved 2026-07-30**; executed and merged | decision owner (DoR-3); requires rows 1 + 2 |
-| 4 | **Commit and push**, per branch, every gate | **approved 2026-07-30**, per stage, and only after that stage candidate passes verification, independent review, and acceptance | controller; one branch = one task; carries no PR or merge authority |
+| 4 | **Commit and push**, per branch, every gate | **not approved for the Stage 3 candidate.** The current controller authorization for this candidate is **local source, test, and status work only**: the work stays in the worktree, uncommitted, until the controller decides otherwise | controller; one branch = one task; carries no PR or merge authority |
 | 5 | **PR creation**, per gate | **not approved** | controller |
 | 6 | **Merge**, per gate | **not approved** | controller; green CI + independent review |
 | 7 | **Source implementation** (Stages 1–3 local work on task branches) — a **distinct explicit approval**, recordable only **after** G0 merges, flipping `implementation_authorized` to `true`. Not implied by rows 1, 2, 3, or 6 | **approved 2026-07-30**, dated after the G0 merge; local Stages 1–3 source/test/status work only, serial at the stage gates | decision owner (DoR-8); mirrors `docs/roadmap/non-approvals.md:52` |
-| 8 | **Profile-retirement execution in source** (deleting three registered profiles, WP3.3) | **not approved** | separate explicit confirmation on top of rows 2 and 7; `non-approvals.md`'s two-decisions rule |
+| 8 | **Profile-retirement execution in source** (deleting three registered profiles, WP3.3) | **approved 2026-08-01**; executed locally — `profile.py` now registers exactly `standard-native-acp-v1` and `claude-agent-acp-compat-v1`, and the three per-agent profiles are deleted rather than aliased, redirected, or disabled | separate explicit confirmation on top of rows 2 and 7; `non-approvals.md`'s two-decisions rule. Approval of this row transfers to no other row |
 | 9 | **Version bump, tag, GitHub Release, PyPI, CHANGELOG release section** | **not approved** | separate release decision |
 | 10 | **Deployment / configuration write** (registry file authoring, caller mappings, unit re-render) | **not approved** | operator |
 | 11 | **Service restart** (`arsd`) | **not approved** | operator; requires draining in-flight Runs |
@@ -847,10 +874,10 @@ Every row is a separate, narrow, non-transitive decision. **Approval of any row 
 
 ## Authorization boundary
 
-**This plan authorizes only what §11 records as approved.** The plan text itself approves nothing: authority comes from the recorded rows. As of 2026-07-30 those are rows 1, 2, 3 (Stage 0), 4 (per-stage commit/push after verification, review, and acceptance), and 7 (local Stages 1–3 source implementation). Every other row stands unapproved, so this plan still performs and approves no PR, merge, or tag, no dependency or lockfile change, no service install/enable/restart, no deployment, configuration write, migration, or cutover, no release or publication, no `/opt`, Binding-root, or artifact-tree action, no registration change, no credential access or management, no profile retirement, and no other production action.
+**This plan authorizes only what §11 records as approved.** The plan text itself approves nothing: authority comes from the recorded rows. Those are rows 1, 2, 3 (Stage 0) and 7 (local Stages 1–3 source implementation), recorded 2026-07-30; and row 8 (profile-retirement execution in source), recorded 2026-08-01. **Row 4 (commit and push) is not among them for the Stage 3 candidate**: the current controller authorization is local source, test, and status work only, so the candidate stays uncommitted in the worktree. Every other row stands unapproved, so this plan still performs and approves no commit, push, PR, merge, or tag, no dependency or lockfile change, no service install/enable/restart, no deployment, configuration write, migration, or cutover, no release or publication, no `/opt`, Binding-root, or artifact-tree action, no registration change, no credential access or management, and no other production action.
 
-**Activation is not implementation authorization.** Setting `status: active` recorded only that this is the board-linked planning artifact. Source and test work additionally required the distinct approval of §11 row 7 (DoR-8), recordable only after the Stage 0 gate merged — recorded 2026-07-30 after that merge. Deleting the three registered profiles still additionally requires §11 row 8; and PR/merge, release, deployment/config, service restart, migration/cutover, `/opt` and Binding-root deletion, the real-agent canary, and every production action each remain separate, non-transitive, unapproved decisions.
+**Activation is not implementation authorization.** Setting `status: active` recorded only that this is the board-linked planning artifact. Source and test work additionally required the distinct approval of §11 row 7 (DoR-8), recordable only after the Stage 0 gate merged — recorded 2026-07-30 after that merge. Deleting the three registered profiles additionally required §11 row 8, recorded 2026-08-01. PR/merge, release, deployment/config, service restart, migration/cutover, `/opt` and Binding-root deletion, the real-agent canary, and every production action each remain separate, non-transitive, unapproved decisions, and none of them is implied by the merged or unmerged state of this source work.
 
-**This plan is conditional on V4 §15 decision 1 option (a).** An approval recording option (b) or (c) does not make it Ready and does not satisfy Stage 0 readiness — it withdraws this plan and requires a different, explicitly approved plan. The other two human decisions remain open and untaken: **production cutover with its one-time legacy-Session load refusal**, and **legacy-line lifetime**. `profile_retirement_approved: false` and `production_authorized: false` in this plan's frontmatter are statements of fact, not placeholders, and `implementation_authorized: true` is likewise a statement of fact about §11 row 7 alone.
+**This plan is conditional on V4 §15 decision 1 option (a).** An approval recording option (b) or (c) does not make it Ready and does not satisfy Stage 0 readiness — it withdraws this plan and requires a different, explicitly approved plan. Two human decisions remain open and untaken: **production cutover with its one-time legacy-Session load refusal**, and **legacy-line lifetime**. `production_authorized: false` in this plan's frontmatter is a statement of fact, not a placeholder; `implementation_authorized: true` is likewise a statement of fact about §11 row 7 alone, and `profile_retirement_approved: true` about §11 row 8 alone — the source act, executed locally and neither merged nor released.
 
-Baseline `79f30aeb255e6507afd001ef2a4bf190f54e42a3` (`v0.5.3`) remains clean `main`. The V4 design, the V4 review, and this plan's independent review were read only, from Git-ignored paths, and were not modified or copied into any tracked file. Production `v0.5.3` and the live `/opt` and Binding trees remain untouched migration source. Nothing in this session modified any file, Git state, branch, worktree, service, runtime, Binding or artifact tree, registration, credential, or production surface.
+Baseline `79f30aeb255e6507afd001ef2a4bf190f54e42a3` (`v0.5.3`) remains clean `main`. The V4 design, the V4 review, and this plan's independent review were read only, from Git-ignored paths, and were not modified or copied into any tracked file. Production `v0.5.3` and the live `/opt` and Binding trees remain untouched migration source. Nothing in the session that **authored** this plan modified any file, Git state, branch, worktree, service, runtime, Binding or artifact tree, registration, credential, or production surface. The Stage 1–3 implementation sessions changed tracked source, tests, and docs under rows 4 and 7 (and row 8 for WP3.3) — and nothing outside the repository: no service, runtime, Binding or artifact tree, registration, credential, or production surface was touched by any of them either.

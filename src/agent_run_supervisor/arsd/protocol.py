@@ -15,8 +15,11 @@ from typing import Any, Mapping
 
 from ..native_acp.spec import AgentRunRequest, InputRef, NativeSpecError, RunLimits
 
-ARSD_API_VERSION = 1
-SUPPORTED_API_VERSIONS = (ARSD_API_VERSION,)
+ARSD_API_VERSION = 2
+# Both versions are served during the drain window. v1 is not a compatibility
+# shim: it is the *same* wire for seven of eight operations, and the eighth is
+# the only one whose payload shape actually moved.
+SUPPORTED_API_VERSIONS = (1, 2)
 
 MAX_FRAME_BYTES = 1_048_576
 MAX_PROMPT_BYTES = 262_144
@@ -87,6 +90,17 @@ OPERATIONS_V1 = frozenset(
     }
 )
 
+# The operations whose payload shape moved at ``api_version`` 2, and therefore
+# the only ones a v1 caller may not use. ``submit`` moved because the request
+# drops ``profile_id`` and requires ``agent_id``; nothing else on the wire
+# changed, so refusing the other seven would break an in-flight caller for no
+# information gain.
+#
+# This is the *whole* rule. Judging it per operation — rather than on the
+# envelope — is what makes the drain window exist at all.
+V2_ONLY_OPERATIONS = frozenset({"submit"})
+MIN_API_VERSION_FOR_V2_ONLY = 2
+
 _ENVELOPE_KEYS = frozenset({"api_version", "op", "request_id", "payload"})
 _SUBMIT_KEYS = frozenset(
     {"request", "prompt_text", "workspace_root", "cwd", "retry_of_run_id"}
@@ -101,9 +115,7 @@ _REQUIRED_REQUEST_FIELDS = tuple(
     if field.default is dataclasses.MISSING
     and field.default_factory is dataclasses.MISSING
 )
-_NULLABLE_REQUEST_FIELDS = frozenset(
-    {"ars_session_id", "expected_binding_hash", "agent_id"}
-)
+_NULLABLE_REQUEST_FIELDS = frozenset({"ars_session_id", "expected_binding_hash"})
 _STRING_TUPLE_REQUEST_FIELDS = frozenset(
     {"grant_capabilities", "mcp_snapshot_hashes", "credential_refs"}
 )
@@ -129,6 +141,7 @@ class ParsedRequest:
     op: str
     request_id: str
     payload: dict[str, Any]
+    api_version: int = ARSD_API_VERSION
 
 
 @dataclasses.dataclass(frozen=True)
@@ -247,7 +260,22 @@ def decode_frame(data: bytes | bytearray | memoryview | str) -> dict[str, Any]:
     return payload
 
 
+def _unsupported_version_error() -> ProtocolError:
+    supported = ", ".join(str(version) for version in SUPPORTED_API_VERSIONS)
+    return ProtocolError(
+        UNSUPPORTED_API_VERSION, f"unsupported api_version; supported: {supported}"
+    )
+
+
 def parse_request(frame: Mapping[str, Any]) -> ParsedRequest:
+    """Validate one request envelope and decide the version **per operation**.
+
+    Order matters and is the contract. The envelope's job is to establish that
+    the declared version is one this server serves at all; deciding whether
+    *this operation* is available at *that* version needs the operation, so it
+    happens after the op is resolved. A version verdict on the envelope alone
+    would refuse a v1 caller outright and there would be no drain window.
+    """
     if not isinstance(frame, Mapping):
         raise ProtocolError(MALFORMED_FRAME, "request frame must be a JSON object")
     api_version = frame.get("api_version")
@@ -256,10 +284,7 @@ def parse_request(frame: Mapping[str, Any]) -> ParsedRequest:
         or not isinstance(api_version, int)
         or api_version not in SUPPORTED_API_VERSIONS
     ):
-        supported = ", ".join(str(version) for version in SUPPORTED_API_VERSIONS)
-        raise ProtocolError(
-            UNSUPPORTED_API_VERSION, f"unsupported api_version; supported: {supported}"
-        )
+        raise _unsupported_version_error()
     request_id = _validated_request_id(frame.get("request_id"))
     if request_id is None:
         raise _invalid(
@@ -268,11 +293,16 @@ def parse_request(frame: Mapping[str, Any]) -> ParsedRequest:
     _require_closed_keys(frame, _ENVELOPE_KEYS, "envelope")
     op = frame.get("op")
     if not isinstance(op, str) or op not in OPERATIONS_V1:
-        raise ProtocolError(UNKNOWN_OP, "unknown v1 op")
+        raise ProtocolError(UNKNOWN_OP, "unknown op")
+    # Per-operation dispatch: the one rule, applied where the operation is known.
+    if op in V2_ONLY_OPERATIONS and api_version < MIN_API_VERSION_FOR_V2_ONLY:
+        raise _unsupported_version_error()
     payload = frame.get("payload", {})
     if not isinstance(payload, dict):
         raise _invalid("payload must be a JSON object")
-    return ParsedRequest(op=op, request_id=request_id, payload=payload)
+    return ParsedRequest(
+        op=op, request_id=request_id, payload=payload, api_version=api_version
+    )
 
 
 def build_result(request_id: str, result: Mapping[str, Any]) -> dict[str, Any]:

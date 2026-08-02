@@ -1,43 +1,56 @@
-"""Admission data model: freeze order and immutable Run identity (PRD R1).
+"""Admission data model: freeze order, immutable Run identity, sealed launch.
 
-``AgentRunRequest`` (validated wire input) → resolve the closed profile →
-bind the workspace → materialize ``ResolvedLaunchSpec`` → seal the immutable
-``AgentRunSpec``/``spec_hash``. ``EffectiveRunState`` holds observations only
-and never writes back into Profile or Spec. Credential *values* never enter
-this module — only slot names and references.
+``AgentRunRequest`` (validated wire input) → resolve the registry entry and its
+source profile → bind the workspace → resolve the environment **exactly once** →
+materialize the value-blind ``LaunchSnapshot`` → seal the immutable
+``AgentRunSpec``/``spec_hash``.
+
+Two environment types carry the value boundary and never merge.
+:class:`ResolvedEnvironment` is the ephemeral, non-serializable carrier of the
+final projected values; it is accepted only by the process-spawn seam and by
+``RunTextGuard.from_environment``. :class:`EnvProjection` is the separate
+durable, value-blind shape that reaches ``launch.json``: per name, the name, its
+source class, its precedence layer, and its redaction status, plus a resolved
+count, the mediation id, and the operator-declared names that were absent from
+the daemon's environment. No value, value digest, keyed digest, length, prefix,
+suffix, equality token, or matcher table is ever hash input.
+
+``EffectiveRunState``/``ObservedRuntime`` hold observations only and never write
+back into a profile, a registry entry, or a Spec. Credential *values* never
+enter this module — only caller-supplied references.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
-import dataclasses
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from agent_run_supervisor.process_liveness import ProcessIdentity
 from agent_run_supervisor.role import PERMISSION_KINDS
 
-from .attestation import ArtifactClosure, SealedRuntimeIdentity
+from .agent_registration import AgentEntry, validate_agent_id
 from .profile import (
-    LAUNCH_KIND_DIRECT,
-    LAUNCH_KIND_WRAPPED,
-    SLOT_KIND_NATIVE_BINARY,
+    AcpCompatProfile,
     AgentInstance,
-    AgentProfile,
     ProfileRegistry,
-    resolve_registered_executable,
+    mediation_pairs,
 )
-from .runtime_binding import AdmittedRuntimeBinding
 
-SPEC_SCHEMA_VERSION = 1
+# The digest material genuinely changed: environment values left the launch
+# snapshot, artifact identity is gone, and agent identity replaced profile
+# selection. A pre-reset frame is therefore refused rather than silently
+# re-interpreted under a shape it was never sealed against.
+SPEC_SCHEMA_VERSION = 2
+LAUNCH_SCHEMA_VERSION = 2
 
-_CWD_TOKEN = "<effective_cwd>"
 _REUSE_MODES = ("none", "reuse")
 _MAX_FIELD_LENGTH = 512
 
-# Finite operational ceilings for sealed RunLimits (Codex-review R2 / B4).
+# Finite operational ceilings for sealed RunLimits.
 LIMIT_STARTUP_TIMEOUT_SECONDS_MAX = 3600.0
 LIMIT_TURN_TIMEOUT_SECONDS_MAX = 86400.0
 LIMIT_CANCEL_GRACE_SECONDS_MAX = 300.0
@@ -46,6 +59,20 @@ LIMIT_MAX_EVENT_BYTES_MAX = 1024 * 1024
 LIMIT_MAX_EVENTS_MAX = 1_000_000
 LIMIT_MAX_EVENT_BYTES_MIN = 256
 LIMIT_EVENT_BUDGET_BYTES = 1024 * 1024 * 1024
+
+# The four environment layers, in application order. Layer 4 is applied last,
+# always, as defense in depth: a defect in the parse-time collision check cannot
+# silently let configuration shadow a source-owned mediation pair.
+ENV_SOURCE_BASE = "base"
+ENV_SOURCE_PASSTHROUGH = "passthrough"
+ENV_SOURCE_OVERLAY = "overlay"
+ENV_SOURCE_MEDIATION = "mediation"
+ENV_PRECEDENCE = {
+    ENV_SOURCE_BASE: 1,
+    ENV_SOURCE_PASSTHROUGH: 2,
+    ENV_SOURCE_OVERLAY: 3,
+    ENV_SOURCE_MEDIATION: 4,
+}
 
 
 class NativeSpecError(ValueError):
@@ -57,7 +84,7 @@ class SpecValidationError(NativeSpecError):
 
 
 class SpecFreezeOrderError(NativeSpecError):
-    """The R1 freeze order was violated (seal before resolve, etc.)."""
+    """The freeze order was violated (seal before resolve, etc.)."""
 
 
 class SpecSealedError(NativeSpecError):
@@ -83,15 +110,6 @@ def _require_text(value: str, name: str, *, max_length: int = _MAX_FIELD_LENGTH)
     _require(
         all(ch.isprintable() for ch in value),
         f"{name} contains non-printable characters",
-    )
-
-
-def _is_finite_number(value: Any) -> bool:
-    return (
-        not isinstance(value, bool)
-        and isinstance(value, (int, float))
-        and value == value
-        and value not in (float("inf"), float("-inf"))
     )
 
 
@@ -175,14 +193,25 @@ class RunLimits:
 
 @dataclass(frozen=True)
 class AgentRunRequest:
-    """Versioned wire input. Never carries shell text, argv, env, executable
-    paths, or credential values — those surfaces do not exist here."""
+    """Versioned wire input.
+
+    It never carries shell text, argv, environment keys or values, executable
+    paths, or credential values — those surfaces do not exist here, so the
+    refusal is structural rather than filtered. ``agent_id`` names an
+    operator-registered agent and is the only registry-facing value that crosses
+    the wire; its grammar belongs to exactly one place
+    (:func:`~.agent_registration.validate_agent_id`), so a second copy of the
+    rules cannot drift.
+    """
 
     owner: str
     namespace: str
-    profile_id: str
+    agent_id: str
     session_reuse: str
     ars_session_id: str | None
+    # Carried unchanged and deliberately undisposed: whether this field keeps a
+    # role after the reset is an explicit decision, not something to settle
+    # inside a diff that was moving digest material for another reason.
     expected_binding_hash: str | None
     input_refs: tuple[InputRef, ...]
     requested_model: str
@@ -197,15 +226,6 @@ class AgentRunRequest:
     evidence_policy_hash: str
     recovery_policy_hash: str
     schema_version: int = SPEC_SCHEMA_VERSION
-    # Which registered agent of a registration-scoped profile this Run targets.
-    # ``None`` for the three legacy profiles, whose contracts are frozen agent
-    # by agent in source and therefore have no agent to name.
-    #
-    # Only the *type* is judged here. The value grammar belongs to exactly one
-    # place — ``runtime_binding.agent_component`` — because that is the function
-    # standing between this text and a path component, and a second copy of the
-    # rules would be a second thing to keep in agreement.
-    agent_id: str | None = None
 
     def __post_init__(self) -> None:
         _require(
@@ -216,7 +236,7 @@ class AgentRunRequest:
         )
         _require_text(self.owner, "owner")
         _require_text(self.namespace, "namespace")
-        _require_text(self.profile_id, "profile_id")
+        _require(type(self.agent_id) is str, "agent_id must be a string")
         _require(
             self.session_reuse in _REUSE_MODES,
             f"session_reuse must be one of {_REUSE_MODES}",
@@ -241,10 +261,6 @@ class AgentRunRequest:
         _require_text(self.evidence_policy_hash, "evidence_policy_hash")
         _require_text(self.recovery_policy_hash, "recovery_policy_hash")
         _require(isinstance(self.limits, RunLimits), "limits must be RunLimits")
-        _require(
-            self.agent_id is None or type(self.agent_id) is str,
-            "agent_id must be a string or null",
-        )
 
 
 @dataclass(frozen=True)
@@ -255,7 +271,14 @@ class WorkspaceBinding:
 
 
 def resolve_workspace_binding(*, root: Path, cwd: str | None = None) -> WorkspaceBinding:
-    """Validate and bind the Run workspace (binding-config hash, not content)."""
+    """Validate and bind the Run workspace (binding-config hash, not content).
+
+    The canonical root and the effective cwd stay complete literals here and
+    stay hash-covered, even when the workspace lives under ``$HOME``. They are
+    independently derived authority facts, not environment-value flow, and
+    guarding them would break workspace binding, reconciliation attribution, and
+    audit.
+    """
     canonical_root = Path(root).expanduser().resolve()
     _require(canonical_root.is_dir(), f"workspace root {canonical_root} is not a directory")
     effective = Path(cwd).expanduser().resolve() if cwd else canonical_root
@@ -275,110 +298,280 @@ def resolve_workspace_binding(*, root: Path, cwd: str | None = None) -> Workspac
     )
 
 
-@dataclass(frozen=True)
-class RuntimeProvenance:
-    """Which Binding generation this Run resolved, and under which contract.
+# ---------------------------------------------------------------------------
+# Environment: one resolution, two types
+# ---------------------------------------------------------------------------
 
-    Reported, never re-consulted: once sealed, nothing on the Run path reads
-    the Binding root again, so a promotion can never re-point work that is
-    already sealed. The acceptance receipt travels for reporting only and is
-    never an authorization input.
+
+def environment_layers(
+    *,
+    arsd_env: Mapping[str, str],
+    base_names: Iterable[str],
+    entry: AgentEntry,
+) -> tuple[tuple[str, str, str, int], ...]:
+    """Compose the four layers and report the **winning** one per name.
+
+    Order is base → pass-through → overlay → mediation, and a later layer wins.
+    ``precedence`` is the winning layer, not a history: what a Run records is
+    which authority actually supplied the value the child received.
+
+    Layers 1 and 2 take names from the daemon's own environment *only when
+    present*, so an absent name contributes nothing rather than an invented
+    empty string. A name that is present but empty is a real declaration and is
+    projected as it stands.
     """
+    resolved: dict[str, tuple[str, str, int]] = {}
 
-    adapter_contract_hash: str
-    launch_kind: str
-    generation_id: str
-    manifest_sha256: str
-    generation_hash: str
-    slot_set_hash: str
-    slot_hashes: tuple[tuple[str, str], ...]
-    session_compatibility_epoch: int
-    acceptance_receipt_ref: str | None = None
-    acceptance_receipt_sha256: str | None = None
+    def place(name: str, value: str, source: str) -> None:
+        resolved[name] = (value, source, ENV_PRECEDENCE[source])
+
+    for name in base_names:
+        if name in arsd_env:
+            place(name, arsd_env[name], ENV_SOURCE_BASE)
+    for name in entry.env_passthrough:
+        if name in arsd_env:
+            place(name, arsd_env[name], ENV_SOURCE_PASSTHROUGH)
+    for name, literal in entry.env_overlay:
+        place(name, literal, ENV_SOURCE_OVERLAY)
+    # Applied last, always.
+    for name, literal in mediation_pairs(entry.mediation_id):
+        place(name, literal, ENV_SOURCE_MEDIATION)
+    return tuple(
+        (name, resolved[name][0], resolved[name][1], resolved[name][2])
+        for name in sorted(resolved)
+    )
+
+
+def declared_absent_names(
+    *, arsd_env: Mapping[str, str], entry: AgentEntry
+) -> tuple[str, ...]:
+    """Operator-declared pass-through names the daemon's environment did not hold.
+
+    Recorded because "you declared it and it was not there" is the diagnosis an
+    operator needs, and it is a **name**, so recording it discloses nothing.
+    """
+    return tuple(name for name in entry.env_passthrough if name not in arsd_env)
+
+
+# The one categorical redaction marker the writer emits, named once so the
+# emitter and the schema check cannot drift into two spellings of it.
+ENV_REDACTION_MARKER = "all-values-withheld"
+
+
+@dataclass(frozen=True)
+class EnvName:
+    """One durable, value-blind environment record."""
+
+    name: str
+    source: str
+    precedence: int
+    redacted: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "adapter_contract_hash": self.adapter_contract_hash,
-            "launch_kind": self.launch_kind,
-            "generation_id": self.generation_id,
-            "manifest_sha256": self.manifest_sha256,
-            "generation_hash": self.generation_hash,
-            "slot_set_hash": self.slot_set_hash,
-            "slot_hashes": [list(pair) for pair in self.slot_hashes],
-            "session_compatibility_epoch": self.session_compatibility_epoch,
-            "acceptance_receipt_ref": self.acceptance_receipt_ref,
-            "acceptance_receipt_sha256": self.acceptance_receipt_sha256,
+            "name": self.name,
+            "source": self.source,
+            "precedence": self.precedence,
+            "redacted": self.redacted,
         }
 
 
 @dataclass(frozen=True)
-class ResolvedLaunchSpec:
-    """Controlled launch material: fixed argv, slot names only, stdio.
+class EnvProjection:
+    """The durable environment evidence: names, classes, precedence — nothing else.
 
-    ``permission_env`` carries the registered agent-side permission mediation
-    binding (name/value pairs injected at spawn): supervisor policy resolved
-    from the closed profile registry, never caller input and never a
-    credential value — serialized here as durable launch evidence.
-
-    ``fixed_env`` is the profile's frozen launch environment *plus* the values
-    projected into the code-known env keys the contract's Binding slots
-    declared. ``expected_runtime`` is the per-Run sealed runtime identity and
-    ``runtime_provenance`` records which Binding generation produced it, so
-    both are durable in ``launch.json`` before the spawn-boundary attestation
-    can fail. Nothing is hashed here: resolution never opens an attested
-    artifact — the digests it carries are the ones the Binding read already
-    verified.
+    Mediation values are withheld exactly like every other value: the mediation
+    id is durable, and no Run record repeats its source-owned pairs.
     """
 
-    executable: str
+    resolved_count: int
+    names: tuple[EnvName, ...]
+    declared_absent: tuple[str, ...] = ()
+    mediation_id: str | None = None
+    values_persisted: bool = False
+    redaction: str = ENV_REDACTION_MARKER
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "values_persisted": self.values_persisted,
+            "redaction": self.redaction,
+            "resolved_count": self.resolved_count,
+            "mediation_id": self.mediation_id,
+            "names": [item.to_dict() for item in self.names],
+            "declared_absent": list(self.declared_absent),
+        }
+
+
+class ResolvedEnvironment:
+    """The ephemeral per-Run value carrier. Never durable, never serializable.
+
+    It exists from the moment the environment is resolved until the child has
+    been spawned and the Run's last sink has been served. Two consumers are
+    allowed: the process-spawn seam, through :attr:`exec_mapping`, and
+    ``RunTextGuard.from_environment``, through :meth:`sensitive_values`.
+
+    Everything that could turn a value into a record is refused rather than
+    merely avoided: there is no ``to_dict``, no mapping protocol, no
+    serialization hook, and no value-derived equality or hash. ``repr`` and
+    ``str`` name the count and nothing else, so an interpolated carrier in a log
+    line or an exception message discloses nothing.
+    """
+
+    __slots__ = ("_values", "_projection")
+
+    def __init__(
+        self,
+        layers: Iterable[tuple[str, str, str, int]],
+        *,
+        mediation_id: str | None = None,
+        declared_absent: Iterable[str] = (),
+    ) -> None:
+        values: dict[str, str] = {}
+        names: list[EnvName] = []
+        for name, value, source, precedence in layers:
+            values[name] = value
+            names.append(EnvName(name=name, source=source, precedence=precedence))
+        self._values = values
+        self._projection = EnvProjection(
+            resolved_count=len(values),
+            names=tuple(names),
+            declared_absent=tuple(declared_absent),
+            mediation_id=mediation_id,
+        )
+
+    @property
+    def exec_mapping(self) -> dict[str, str]:
+        """A fresh copy for exec. The carrier never hands out its own mapping."""
+        return dict(self._values)
+
+    def sensitive_values(self) -> tuple[str, ...]:
+        """Every final projected value, for the guard's literal set alone."""
+        return tuple(self._values.values())
+
+    def value_blind_projection(self) -> EnvProjection:
+        return self._projection
+
+    def __repr__(self) -> str:
+        return f"<ResolvedEnvironment names={len(self._values)} values=withheld>"
+
+    __str__ = __repr__
+
+    def __reduce__(self):
+        raise TypeError("ResolvedEnvironment is not serializable")
+
+
+def resolve_environment(
+    *,
+    arsd_env: Mapping[str, str],
+    base_names: Iterable[str],
+    passthrough_names: Iterable[str],
+    overlay: Iterable[tuple[str, str]],
+    mediation: Iterable[tuple[str, str]],
+    mediation_id: str | None = None,
+) -> ResolvedEnvironment:
+    """Resolve the four layers exactly once, in memory, before sealing and spawn.
+
+    The layer inputs are passed explicitly so this function has no opinion about
+    where they came from and cannot re-read anything.
+    """
+    resolved: dict[str, tuple[str, str, int]] = {}
+
+    def place(name: str, value: str, source: str) -> None:
+        resolved[name] = (value, source, ENV_PRECEDENCE[source])
+
+    passthrough = tuple(passthrough_names)
+    for name in base_names:
+        if name in arsd_env:
+            place(name, arsd_env[name], ENV_SOURCE_BASE)
+    for name in passthrough:
+        if name in arsd_env:
+            place(name, arsd_env[name], ENV_SOURCE_PASSTHROUGH)
+    for name, literal in overlay:
+        place(name, literal, ENV_SOURCE_OVERLAY)
+    for name, literal in mediation:
+        place(name, literal, ENV_SOURCE_MEDIATION)
+    layers = tuple(
+        (name, resolved[name][0], resolved[name][1], resolved[name][2])
+        for name in sorted(resolved)
+    )
+    return ResolvedEnvironment(
+        layers,
+        mediation_id=mediation_id,
+        declared_absent=tuple(name for name in passthrough if name not in arsd_env),
+    )
+
+
+def resolve_run_environment(
+    *, arsd_env: Mapping[str, str], profile: AcpCompatProfile, entry: AgentEntry
+) -> ResolvedEnvironment:
+    """The one-call composition the Run path uses. One resolution, one snapshot."""
+    return resolve_environment(
+        arsd_env=arsd_env,
+        base_names=profile.base_allowlist,
+        passthrough_names=entry.env_passthrough,
+        overlay=entry.env_overlay,
+        mediation=mediation_pairs(entry.mediation_id),
+        mediation_id=entry.mediation_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# The sealed launch snapshot
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LaunchSnapshot:
+    """Exactly what was handed to exec, recorded value-blind.
+
+    ``command`` is the operator's declared string byte-for-byte and ``argv[0]``
+    equals it. There is no ``executable`` field: the image is located by
+    ``execvp``-style lookup over the child's projected ``PATH``, and where the
+    kernel found it is an observation, never a sealed fact.
+    """
+
+    command: str
     argv: tuple[str, ...]
-    env_allowlist: tuple[str, ...]
-    credential_refs: tuple[str, ...]
     profile_id: str
     profile_revision: int
     profile_hash: str
-    config_schema_hash: str
-    permission_env: tuple[tuple[str, str], ...] = ()
-    transport: str = "stdio"
-    fixed_env: tuple[tuple[str, str], ...] = ()
-    expected_runtime: SealedRuntimeIdentity | None = None
-    runtime_provenance: RuntimeProvenance | None = None
-    # Canonical JSON text of the profile's frozen ACP session metadata, mirrored
-    # so the exact ``_meta`` this Run will send is durable evidence before any
-    # session call. Never caller input.
+    agent_id: str
+    env: EnvProjection
+    mediation_id: str | None = None
+    model_selector_id: str = "model"
+    effort_selector_id: str = "effort"
+    forbidden_capabilities: tuple[str, ...] = ()
+    credential_refs: tuple[str, ...] = ()
+    session_epoch: int | None = None
     session_meta: str | None = None
-    # The agent this launch was materialized for, omit-when-None. argv and
-    # ``permission_env`` are already visible above as themselves, so nothing
-    # else about the registration is projected here.
-    agent_id: str | None = None
-    agent_registration_hash: str | None = None
+    schema_version: int = LAUNCH_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        _require(bool(self.argv), "launch argv must be non-empty")
+        _require(
+            self.argv[0] == self.command,
+            "argv[0] must be the declared command string, byte for byte",
+        )
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "executable": self.executable,
+            "schema_version": self.schema_version,
+            "command": self.command,
             "argv": list(self.argv),
-            "env_allowlist": list(self.env_allowlist),
-            "credential_refs": list(self.credential_refs),
             "profile_id": self.profile_id,
             "profile_revision": self.profile_revision,
             "profile_hash": self.profile_hash,
-            "config_schema_hash": self.config_schema_hash,
-            "permission_env": [list(pair) for pair in self.permission_env],
-            "transport": self.transport,
+            "agent_id": self.agent_id,
+            "env": self.env.to_dict(),
+            "mediation_id": self.mediation_id,
+            "model_selector_id": self.model_selector_id,
+            "effort_selector_id": self.effort_selector_id,
+            "forbidden_capabilities": list(self.forbidden_capabilities),
+            "credential_refs": list(self.credential_refs),
+            "session_epoch": self.session_epoch,
         }
-        # Omit-when-empty/None: a profile that owns no such surface serializes
-        # exactly as it did before the surface was expressible.
-        if self.fixed_env:
-            payload["fixed_env"] = [list(pair) for pair in self.fixed_env]
-        if self.expected_runtime is not None:
-            payload["expected_runtime"] = self.expected_runtime.to_dict()
-        if self.runtime_provenance is not None:
-            payload["runtime_provenance"] = self.runtime_provenance.to_dict()
         if self.session_meta is not None:
             payload["session_meta"] = json.loads(self.session_meta)
-        if self.agent_id is not None:
-            payload["agent_id"] = self.agent_id
-            payload["agent_registration_hash"] = self.agent_registration_hash
         return payload
 
     def launch_hash(self) -> str:
@@ -400,23 +593,14 @@ class SpecSession:
 
 @dataclass(frozen=True)
 class SpecAgent:
+    """Which agent, under which source profile, at which operator epoch."""
+
+    agent_id: str
     profile_id: str
     profile_revision: int
     profile_snapshot_ref: str
     profile_hash: str
-    config_schema_hash: str
-    # Requested and resolved agent identity, side by side with the requested
-    # ``profile_id`` and the resolved ``profile_hash`` that already live here.
-    #
-    # This is the *requested* record, so it is where a reader that has only
-    # ``spec.json`` — crash reconciliation, run authorization, an audit asking
-    # which Runs targeted which agent — can still answer who the agent was.
-    # Both are omit-when-None, and their absence is a total function of
-    # ``profile_id`` in the same record: identity is present here if and only if
-    # that profile requires a registration, so "written before the field
-    # existed" and "written after, agent unknown" can never be confused.
-    agent_id: str | None = None
-    agent_registration_hash: str | None = None
+    session_epoch: int | None
 
 
 @dataclass(frozen=True)
@@ -469,15 +653,7 @@ class AgentRunSpec:
     retry_of_run_id: str | None
 
     def to_dict(self) -> dict[str, Any]:
-        """Every field, minus exactly the declared omit-when-None set.
-
-        This was ``asdict`` until agent identity arrived, and ``asdict`` was
-        silently guaranteeing "every field is in the hash". A hand-written
-        projection could quietly drop a field later, so the guarantee is
-        restored as a structural test instead: it walks ``dataclasses.fields``
-        over this class and every nested spec dataclass and asserts each field
-        appears here except ``SPEC_OMIT_WHEN_NONE``.
-        """
+        """Every field, minus exactly the declared omit-when-None set."""
         payload = asdict(self)
         for qualified in SPEC_OMIT_WHEN_NONE:
             section, field_name = qualified.split(".")
@@ -496,11 +672,12 @@ class AgentRunSpec:
                 reuse="none", ars_session_id=None, expected_binding_hash=None
             ),
             agent=SpecAgent(
-                profile_id="golden-profile-1.0",
+                agent_id="golden-agent",
+                profile_id="golden-profile-v1",
                 profile_revision=1,
-                profile_snapshot_ref="registry:golden-profile-1.0@r1",
+                profile_snapshot_ref="registry:golden-profile-v1@r1",
                 profile_hash="0" * 64,
-                config_schema_hash="1" * 64,
+                session_epoch=None,
             ),
             execution_grant=SpecGrant(
                 grant_ref="grant:golden",
@@ -525,31 +702,10 @@ class AgentRunSpec:
             retry_of_run_id=None,
         )
 
-    @staticmethod
-    def for_agent_golden_fixture() -> "AgentRunSpec":
-        """The agent-scoped spec shape, pinned in its own right.
-
-        The legacy golden proves the old shape did not move; this one keeps the
-        new shape from floating free, so a later canonicalization change has to
-        break a test rather than silently re-hash every agent-scoped Run.
-        """
-        legacy = AgentRunSpec.for_golden_fixture()
-        return dataclasses.replace(
-            legacy,
-            agent=dataclasses.replace(
-                legacy.agent,
-                profile_id="golden-standard-native-acp-v1",
-                profile_snapshot_ref="registry:golden-standard-native-acp-v1@r1",
-                agent_id="golden-agent",
-                agent_registration_hash="9" * 64,
-            ),
-        )
-
 
 # The complete, closed set of spec fields that leave the projection when they
-# are ``None`` — qualified by section so the rule names one field of one block
-# rather than a bare name that could match somewhere else later.
-SPEC_OMIT_WHEN_NONE = ("agent.agent_id", "agent.agent_registration_hash")
+# are ``None`` — qualified by section so the rule names one field of one block.
+SPEC_OMIT_WHEN_NONE = ("agent.session_epoch",)
 
 # Generated Run identity/lineage fields excluded from the requested-fact hash:
 # authenticated owner/namespace stay inside it (changing either changes it).
@@ -561,10 +717,9 @@ def spec_hash_of_payload(payload: Mapping[str, Any]) -> str:
 
     The single canonical rule: exclude exactly the generated Run identity and
     lineage fields, then hash the canonical JSON of what remains. Both the
-    production writer below and any reader verifying a durable ``spec.json``
-    call *this* function, so a verifier can never drift into a subtly
-    different digest. ``spec_hash`` itself is excluded because it is the field
-    being verified, not an input to itself.
+    production writer and any reader verifying a durable ``spec.json`` call
+    *this* function, so a verifier can never drift into a subtly different
+    digest.
     """
     material = {
         key: value
@@ -581,25 +736,18 @@ def spec_hash(spec: AgentRunSpec) -> str:
 def launch_hash_of_payload(payload: Mapping[str, Any]) -> str:
     """The launch seal of an already-projected launch document.
 
-    Excludes exactly one field — the seal itself, which the writer appends to
-    the projection after computing it — and hashes the canonical JSON of the
-    rest. :meth:`ResolvedLaunchSpec.launch_hash` is the same computation over
-    the same projection, so a durable ``launch.json`` can be re-sealed by a
-    reader without duplicating the rule.
+    Excludes exactly one field — the seal itself, which the writer appends after
+    computing it — and hashes the canonical JSON of the rest.
     """
-    material = {
-        key: value for key, value in payload.items() if key != "launch_spec_hash"
-    }
+    material = {key: value for key, value in payload.items() if key != "launch_spec_hash"}
     return _sha256_hex(_canonical_json(material))
 
 
 def _dataclass_projection_keys(model: type) -> set[str]:
-    """The key set ``to_dict``/``asdict`` produces for one spec dataclass."""
     return {f.name for f in dataclasses.fields(model)}
 
 
 def _spec_block_models() -> dict[str, type]:
-    """Every nested Spec block, taken from the production dataclass itself."""
     return {
         "identity": RunIdentity,
         "session": SpecSession,
@@ -617,8 +765,6 @@ def spec_payload_shape_is_exact(payload: Any) -> bool:
 
     Key sets are derived from the production dataclasses rather than restated,
     so a field added to the Spec cannot silently become an unknown key here.
-    Unknown, missing, or wrongly shaped blocks are all rejected: a durable Spec
-    is either exactly what the writer sealed or it is not evidence.
     """
     if not isinstance(payload, dict):
         return False
@@ -632,19 +778,12 @@ def spec_payload_shape_is_exact(payload: Any) -> bool:
             return False
         expected = _dataclass_projection_keys(model)
         if name == "agent":
-            # The omit-when-None pair is present together or absent together.
             present = set(block)
             if present not in (expected, expected - omitted):
                 return False
             continue
         if set(block) != expected:
             return False
-    # Accepted as list *or* tuple: the in-memory projection carries the tuple
-    # the dataclass holds, and a JSON round trip turns it into a list. Both are
-    # the same production projection. The collection is zero-or-more — neither
-    # the request nor the wire parser requires an input ref, and ``seal`` copies
-    # whatever the request carried — so an empty one is a production projection
-    # too, while every element present must still be an exact ``InputRef``.
     input_refs = payload.get("input_refs")
     if not isinstance(input_refs, (list, tuple)):
         return False
@@ -655,56 +794,166 @@ def spec_payload_shape_is_exact(payload: Any) -> bool:
     return True
 
 
-def launch_payload_shape_is_exact(payload: Any) -> bool:
-    """Does this document carry exactly a production launch projection?
-
-    ``ResolvedLaunchSpec.to_dict`` omits several fields when the profile owns
-    no such surface, so the accepted key set is the required core plus any
-    subset of the optional ones — and nothing else.
-    """
-    if not isinstance(payload, dict):
-        return False
-    required = {
-        "executable",
+# The launch document's closed key set, derived from the production dataclass
+# plus the seal the writer appends. A value-bearing key such as ``fixed_env`` or
+# ``permission_env`` is therefore not merely absent by habit: it is rejected by
+# a schema-level allowlist, so it cannot be reintroduced by an additive edit.
+LAUNCH_REQUIRED_FIELDS = frozenset(
+    {
+        "schema_version",
+        "command",
         "argv",
-        "env_allowlist",
-        "credential_refs",
         "profile_id",
         "profile_revision",
         "profile_hash",
-        "config_schema_hash",
-        "permission_env",
-        "transport",
+        "agent_id",
+        "env",
+        "mediation_id",
+        "model_selector_id",
+        "effort_selector_id",
+        "forbidden_capabilities",
+        "credential_refs",
+        "session_epoch",
         "launch_spec_hash",
     }
-    optional = {
-        "fixed_env",
-        "expected_runtime",
-        "runtime_provenance",
-        "session_meta",
-        "agent_id",
-        "agent_registration_hash",
+)
+LAUNCH_OPTIONAL_FIELDS = frozenset({"session_meta"})
+ENV_PROJECTION_FIELDS = frozenset(
+    {
+        "values_persisted",
+        "redaction",
+        "resolved_count",
+        "mediation_id",
+        "names",
+        "declared_absent",
     }
-    present = set(payload)
-    if not required <= present or not present <= (required | optional):
+)
+ENV_NAME_FIELDS = frozenset({"name", "source", "precedence", "redacted"})
+
+
+def launch_payload_shape_is_exact(payload: Any) -> bool:
+    """Does this document carry exactly a production launch projection?"""
+    if not isinstance(payload, dict):
         return False
-    if not isinstance(payload.get("executable"), str) or not payload["executable"]:
+    present = set(payload)
+    if not LAUNCH_REQUIRED_FIELDS <= present:
+        return False
+    if not present <= (LAUNCH_REQUIRED_FIELDS | LAUNCH_OPTIONAL_FIELDS):
+        return False
+    if payload.get("schema_version") != LAUNCH_SCHEMA_VERSION:
+        return False
+    command = payload.get("command")
+    if not isinstance(command, str) or not command:
         return False
     argv = payload.get("argv")
     if not isinstance(argv, (list, tuple)) or not argv:
         return False
     if not all(isinstance(token, str) for token in argv):
         return False
-    if not isinstance(payload.get("profile_id"), str) or not payload["profile_id"]:
+    if argv[0] != command:
+        return False
+    if not isinstance(payload.get("agent_id"), str) or not payload["agent_id"]:
         return False
     if not isinstance(payload.get("launch_spec_hash"), str):
         return False
-    return True
+    return env_projection_shape_is_exact(payload.get("env"))
+
+
+def _is_exact_int(value: Any) -> bool:
+    """An ``int`` and not a ``bool``. ``isinstance(True, int)`` is ``True``."""
+    return type(value) is int
+
+
+def _is_env_name(value: Any) -> bool:
+    """The registry's own name grammar, asked of the registry."""
+    from agent_run_supervisor.native_acp.agent_registration import is_env_name
+
+    return is_env_name(value)
+
+
+def _env_name_entry_is_exact(item: Any) -> bool:
+    if not isinstance(item, dict) or set(item) != ENV_NAME_FIELDS:
+        return False
+    if not _is_env_name(item.get("name")):
+        return False
+    source = item.get("source")
+    if source not in ENV_PRECEDENCE:
+        return False
+    # ``precedence`` is not a free integer: the writer derives it from ``source``
+    # through one table, so a record whose pair disagrees was not written here.
+    if not _is_exact_int(item.get("precedence")):
+        return False
+    if item["precedence"] != ENV_PRECEDENCE[source]:
+        return False
+    # The writer has no path that emits ``False``; every projected value is
+    # withheld, so an entry claiming otherwise is describing a different schema.
+    return item.get("redacted") is True
+
+
+def env_projection_shape_is_exact(payload: Any) -> bool:
+    """The environment block is a production ``EnvProjection`` or it is not.
+
+    Key sets are the cheap half of this question and the half that does not
+    matter. A hybrid keeps every reset key and puts a value-bearing literal in a
+    field nothing looked at — ``redaction``, a name's ``source``, the mediation
+    id, a ``declared_absent`` entry — and the reset path is precisely the one
+    that recomputes and publishes a digest over the whole record.
+
+    So every field is checked against the **closed domain the writer emits**:
+    two categorical constants, a bounded count that agrees with ``names``, the
+    registered mediation ids, the environment-name grammar, and the exact
+    ``source``/``precedence`` relation. Anything else is a value-bearing record
+    and goes to the withholding path. This is not compatibility acceptance:
+    there is one producer, and it is :meth:`EnvProjection.to_dict`.
+    """
+    from agent_run_supervisor.native_acp.agent_registration import (
+        is_env_passthrough_domain,
+    )
+    from agent_run_supervisor.native_acp.profile import MEDIATION_BINDING_IDS
+
+    if not isinstance(payload, dict) or set(payload) != ENV_PROJECTION_FIELDS:
+        return False
+    if payload.get("values_persisted") is not False:
+        return False
+    if payload.get("redaction") != ENV_REDACTION_MARKER:
+        return False
+
+    mediation_id = payload.get("mediation_id")
+    if mediation_id is not None and mediation_id not in MEDIATION_BINDING_IDS:
+        return False
+
+    names = payload.get("names")
+    if not isinstance(names, (list, tuple)):
+        return False
+    if not all(_env_name_entry_is_exact(item) for item in names):
+        return False
+    # ``environment_layers`` resolves into a dict and emits ``sorted(resolved)``,
+    # so the writer's names are unique and ascending by construction.
+    projected = [item["name"] for item in names]
+    if projected != sorted(set(projected)):
+        return False
+
+    count = payload.get("resolved_count")
+    if not _is_exact_int(count) or count < 0 or count != len(projected):
+        return False
+
+    # ``declared_absent`` is derived from exactly one thing: the entry's own
+    # ``env_passthrough``, filtered to the names the daemon's environment did not
+    # hold. A subset of a list the parser admitted is bounded, unique, and
+    # grammar-valid by that same rule — so the reader asks the registry's own
+    # domain predicate rather than re-deriving a weaker version of it. Grammar
+    # alone let a repeated name, or thirty-three of them, reach the digest.
+    return is_env_passthrough_domain(payload.get("declared_absent"))
+
+
+# ---------------------------------------------------------------------------
+# Observations
+# ---------------------------------------------------------------------------
 
 
 @dataclass
 class EffectiveRunState:
-    """Observed effective state only; never rewrites Profile or Spec."""
+    """Observed effective state only; never rewrites a profile, entry, or Spec."""
 
     process_identity: ProcessIdentity | None = None
     agent_info: dict[str, Any] | None = None
@@ -732,98 +981,45 @@ class EffectiveRunState:
         }
 
 
-def seal_runtime_identity(
-    profile: AgentProfile, runtime: AdmittedRuntimeBinding | None
-) -> SealedRuntimeIdentity | None:
-    """Combine the source contract half with the Binding's deployment half."""
-    contract = profile.contract
-    if runtime is None or contract.cli_slot is None:
-        return None
-    slot = runtime.resolved.slot(contract.cli_slot)
-    descriptor = slot.descriptor
-    if slot.kind == SLOT_KIND_NATIVE_BINARY:
-        closure = ArtifactClosure(
-            kind=slot.kind,
-            path=str(descriptor["path"]),
-            sha256=str(descriptor["sha256"]),
-            version=str(descriptor["version"]),
-            interpreter_path=descriptor["interpreter"],
-            interpreter_sha256=descriptor["interpreter_sha256"],
-        )
-    else:
-        closure = ArtifactClosure(
-            kind=slot.kind,
-            path=str(descriptor["launcher_path"]),
-            sha256=str(descriptor["launcher_sha256"]),
-            version=str(descriptor["version"]),
-            package_root=str(descriptor["package_root"]),
-            tree_sha256=str(descriptor["tree_sha256"]),
-            interpreter_path=str(descriptor["interpreter_path"]),
-            interpreter_sha256=str(descriptor["interpreter_sha256"]),
-        )
-    credential_root_path = None
-    if contract.credential_root_slot is not None:
-        credential_root_path = str(
-            runtime.resolved.slot(contract.credential_root_slot).descriptor["path"]
-        )
-    wrapped = contract.wrapped_runtime
-    return SealedRuntimeIdentity(
-        launch_kind=contract.launch_kind,
-        agent_info_name=contract.acp_agent_name,
-        agent_info_version=contract.acp_agent_version,
-        protocol_version=contract.acp_protocol_version,
-        cli=closure,
-        cli_path_env=contract.slot(contract.cli_slot).env_key,
-        node_path=wrapped.interpreter_path if wrapped else None,
-        node_sha256=wrapped.interpreter_sha256 if wrapped else None,
-        adapter_entry_path=wrapped.adapter_entry_path if wrapped else None,
-        adapter_entry_sha256=wrapped.adapter_entry_sha256 if wrapped else None,
-        adapter_package_root=wrapped.adapter_package_root if wrapped else None,
-        adapter_tree_sha256=wrapped.adapter_tree_sha256 if wrapped else None,
-        interpreter_argv_prefix=(
-            wrapped.interpreter_argv_prefix if wrapped else ()
-        ),
-        credential_root_env=(
-            contract.slot(contract.credential_root_slot).env_key
-            if contract.credential_root_slot is not None
-            else None
-        ),
-        credential_root_path=credential_root_path,
-        project_config_relpath=contract.project_config_relpath,
-    )
+@dataclass
+class ObservedRuntime(EffectiveRunState):
+    """What was resolved and observed — recorded, never a gate.
+
+    ``authoritative`` is a fixed ``False`` and there is no way to set it: no
+    code path compares any field here against a source constant, a prior Run, a
+    Session record, or a registry value to decide admission or reuse.
+    """
+
+    declared_command: str | None = None
+    resolved_argv: tuple[str, ...] = ()
+    path_lookup_hit: str | None = None
+    mapped_image: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = super().to_dict()
+        payload["observed_runtime"] = {
+            "authoritative": False,
+            "declared_command": self.declared_command,
+            "resolved_argv": list(self.resolved_argv),
+            "path_lookup_hit": self.path_lookup_hit,
+            "mapped_image": self.mapped_image,
+        }
+        return payload
 
 
-def seal_runtime_provenance(
-    profile: AgentProfile, runtime: AdmittedRuntimeBinding | None
-) -> RuntimeProvenance | None:
-    if runtime is None:
-        return None
-    resolved = runtime.resolved
-    return RuntimeProvenance(
-        adapter_contract_hash=profile.adapter_contract_hash(),
-        launch_kind=profile.contract.launch_kind,
-        generation_id=resolved.generation_id,
-        manifest_sha256=resolved.manifest_sha256,
-        generation_hash=resolved.generation_hash,
-        slot_set_hash=resolved.slot_set_hash,
-        slot_hashes=tuple(
-            (name, slot.slot_hash) for name, slot in sorted(resolved.slots.items())
-        ),
-        session_compatibility_epoch=resolved.session_compatibility_epoch,
-        acceptance_receipt_ref=resolved.acceptance_receipt_ref,
-        acceptance_receipt_sha256=resolved.acceptance_receipt_sha256,
-    )
+# ---------------------------------------------------------------------------
+# The assembler
+# ---------------------------------------------------------------------------
 
 
 class RunSpecAssembler:
-    """Enforces the R1 freeze order for one Run admission."""
+    """Enforces the freeze order for one Run admission."""
 
     def __init__(self, request: AgentRunRequest) -> None:
         self._request = request
-        self._profile: AgentProfile | None = None
-        self._binding: WorkspaceBinding | None = None
-        self._launch: ResolvedLaunchSpec | None = None
         self._instance: AgentInstance | None = None
+        self._binding: WorkspaceBinding | None = None
+        self._launch: LaunchSnapshot | None = None
         self._sealed = False
 
     @property
@@ -832,158 +1028,60 @@ class RunSpecAssembler:
 
     @property
     def instance(self) -> AgentInstance | None:
-        """The profile/registration pair this admission resolved, once launched."""
         return self._instance
 
-    def resolve_profile(self, registry: ProfileRegistry) -> AgentProfile:
-        profile = registry.get(self._request.profile_id)
-        self._require_agent_scope(profile)
-        if not profile.contract.requires_agent_registration:
-            # A source-frozen profile owns its own domains, so they are checked
-            # at exactly the moment they always were. A registration-scoped
-            # profile has no domains here to check against — its are read from
-            # the operator's registration, so the same three checks run in
-            # ``resolve_launch`` the instant that data exists (§5.5).
-            self._validate_config_domains(AgentInstance(profile, None))
-        self._profile = profile
-        return profile
+    @property
+    def profile(self) -> AcpCompatProfile | None:
+        return None if self._instance is None else self._instance.profile
 
-    def _require_agent_scope(self, profile: AgentProfile) -> None:
-        """The requested-side half of the agent biconditional, before sealing.
+    def resolve_agent(
+        self, entry: AgentEntry, *, registry: ProfileRegistry
+    ) -> AgentInstance:
+        """Pair the operator entry with its source profile. Zero filesystem access.
 
-        The Binding reader has its own symmetric gate for the same fact; this
-        one exists so the invariant holds on *every* admission path, including
-        the direct ars-core test/dev path that never opens a Binding root.
+        The entry has already been read once, at daemon startup, into an
+        immutable snapshot; nothing here re-opens anything.
         """
-        agent_id = self._request.agent_id
-        if profile.contract.requires_agent_registration and agent_id is None:
+        validate_agent_id(self._request.agent_id)
+        if entry.agent_id != self._request.agent_id:
             raise SpecValidationError(
-                f"AGENT_ID_REQUIRED: profile {profile.profile_id} runs only as a "
-                "registered agent; the request names none"
+                "resolved registry entry names a different agent than the request"
             )
-        if not profile.contract.requires_agent_registration and agent_id is not None:
-            raise SpecValidationError(
-                f"AGENT_ID_FORBIDDEN: profile {profile.profile_id} is frozen in "
-                "source and admits no agent selection"
-            )
-
-    def _validate_config_domains(self, instance: AgentInstance) -> None:
-        """Model, effort, and credential refs against whatever owns them.
-
-        The instance answers, so this reads identically for a source-frozen
-        profile and for an operator-registered agent — the domains differ, the
-        rule does not.
-        """
-        request = self._request
-        profile_id = instance.profile.profile_id
-        _require(
-            request.requested_model in instance.registered_models,
-            f"model {request.requested_model!r} is outside the registered "
-            f"closed set {instance.registered_models} for {profile_id}",
-        )
-        _require(
-            request.requested_effort in instance.allowed_efforts,
-            f"effort {request.requested_effort!r} is outside the registered "
-            f"domain {instance.allowed_efforts} for {profile_id}",
-        )
-        required_refs = instance.required_credential_refs
-        if required_refs is not None:
-            # Exact match: missing, wrong, extra, or duplicated references are
-            # refused here — before any credential-root access and before spawn.
-            _require(
-                tuple(request.credential_refs) == tuple(required_refs),
-                f"credential_refs {tuple(request.credential_refs)!r} do not "
-                f"exactly match the required credential_refs "
-                f"{tuple(required_refs)!r} for {profile_id}",
-            )
+        instance = AgentInstance(registry.get(entry.profile_id), entry)
+        self._instance = instance
+        return instance
 
     def bind_workspace(self, *, root: Path, cwd: str | None = None) -> WorkspaceBinding:
         self._binding = resolve_workspace_binding(root=root, cwd=cwd)
         return self._binding
 
-    def resolve_launch(
-        self, *, runtime: AdmittedRuntimeBinding | None = None
-    ) -> ResolvedLaunchSpec:
-        """Materialize the controlled launch, projecting accepted slots only.
-
-        ``runtime`` is the Binding generation admission already read exactly
-        once. A profile whose contract declares slots cannot launch without it:
-        the deployment facts simply are not in source any more, and inventing a
-        default would be the silent fallback R13 forbids.
-        """
-        if self._profile is None or self._binding is None:
+    def resolve_launch(self, *, environment: ResolvedEnvironment) -> LaunchSnapshot:
+        """Materialize the value-blind launch snapshot from the one resolution."""
+        if self._instance is None or self._binding is None:
             raise SpecFreezeOrderError(
-                "resolve_launch requires a resolved profile and a bound workspace"
+                "resolve_launch requires a resolved agent and a bound workspace"
             )
-        profile = self._profile
-        contract = profile.contract
-        if contract.requires_binding and runtime is None:
+        if not isinstance(environment, ResolvedEnvironment):
             raise SpecValidationError(
-                f"profile {profile.profile_id} requires a resolved Runtime Binding"
+                "resolve_launch accepts only a ResolvedEnvironment, resolved once"
             )
-        if runtime is not None and not contract.requires_binding:
-            raise SpecValidationError(
-                f"profile {profile.profile_id} accepts no Runtime Binding slot"
-            )
-
-        registration = None if runtime is None else runtime.registration
-        if contract.requires_agent_registration and registration is None:
-            raise SpecValidationError(
-                f"profile {profile.profile_id} requires an admitted Agent Registration"
-            )
-        instance = AgentInstance(profile, registration)
-        if contract.requires_agent_registration:
-            # The registration's domains exist now, so the checks a source-frozen
-            # profile ran at ``resolve_profile`` run here — still before the
-            # launch is materialized and long before spawn.
-            self._validate_config_domains(instance)
-            if registration.agent_id != self._request.agent_id:
-                raise SpecValidationError(
-                    "admitted registration names a different agent than the request"
-                )
-
-        fixed_env = list(profile.fixed_env)
-        executable_slot = contract.executable_slot()
-        if executable_slot is not None and runtime is not None:
-            executable = str(runtime.resolved.slot(executable_slot.name).descriptor["path"])
-        else:
-            executable = str(resolve_registered_executable(profile.executable_key))
-        if runtime is not None:
-            for slot in contract.binding_slots:
-                if slot.env_key is None:
-                    continue
-                descriptor = runtime.resolved.slot(slot.name).descriptor
-                value = descriptor.get("launcher_path") or descriptor.get("path")
-                fixed_env.append((slot.env_key, str(value)))
-
-        argv: list[str] = [executable]
-        for token in instance.argv_tokens:
-            if token == _CWD_TOKEN:
-                argv.append(self._binding.effective_cwd)
-            elif "<" in token or ">" in token:
-                raise SpecValidationError(
-                    f"unregistered argv template token {token!r}"
-                )
-            else:
-                argv.append(token)
-        self._launch = ResolvedLaunchSpec(
-            executable=executable,
-            argv=tuple(argv),
-            env_allowlist=profile.env_allowlist,
-            credential_refs=instance.credential_slots,
-            profile_id=profile.profile_id,
-            profile_revision=profile.revision,
-            profile_hash=profile.profile_hash(),
-            config_schema_hash=profile.config_schema_hash(),
-            permission_env=instance.permission_env,
-            fixed_env=tuple(fixed_env),
-            expected_runtime=seal_runtime_identity(profile, runtime),
-            runtime_provenance=seal_runtime_provenance(profile, runtime),
-            session_meta=profile.session_meta,
+        instance = self._instance
+        self._launch = LaunchSnapshot(
+            command=instance.command,
+            argv=instance.argv,
+            profile_id=instance.profile.profile_id,
+            profile_revision=instance.profile.revision,
+            profile_hash=instance.profile.profile_hash(),
             agent_id=instance.agent_id,
-            agent_registration_hash=instance.agent_registration_hash,
+            env=environment.value_blind_projection(),
+            mediation_id=instance.mediation_id,
+            model_selector_id=instance.model_selector_id,
+            effort_selector_id=instance.effort_selector_id,
+            forbidden_capabilities=instance.forbidden_capabilities,
+            credential_refs=self._request.credential_refs,
+            session_epoch=instance.session_epoch,
+            session_meta=instance.profile.session_meta,
         )
-        self._instance = instance
         return self._launch
 
     def seal(
@@ -995,13 +1093,14 @@ class RunSpecAssembler:
     ) -> AgentRunSpec:
         if self._sealed:
             raise SpecSealedError("this admission was already sealed")
-        if self._profile is None or self._binding is None or self._launch is None:
+        if self._instance is None or self._binding is None or self._launch is None:
             raise SpecFreezeOrderError(
-                "seal requires resolved profile, bound workspace, and resolved launch"
+                "seal requires a resolved agent, bound workspace, and resolved launch"
             )
         _require_text(run_id, "run_id")
         _require_text(submitted_at, "submitted_at")
         request = self._request
+        instance = self._instance
         spec = AgentRunSpec(
             schema_version=request.schema_version,
             identity=RunIdentity(owner=request.owner, namespace=request.namespace),
@@ -1011,13 +1110,12 @@ class RunSpecAssembler:
                 expected_binding_hash=request.expected_binding_hash,
             ),
             agent=SpecAgent(
-                profile_id=self._profile.profile_id,
-                profile_revision=self._profile.revision,
-                profile_snapshot_ref=self._profile.snapshot_ref(),
-                profile_hash=self._profile.profile_hash(),
-                config_schema_hash=self._profile.config_schema_hash(),
-                agent_id=self._launch.agent_id,
-                agent_registration_hash=self._launch.agent_registration_hash,
+                agent_id=instance.agent_id,
+                profile_id=instance.profile.profile_id,
+                profile_revision=instance.profile.revision,
+                profile_snapshot_ref=instance.profile.snapshot_ref(),
+                profile_hash=instance.profile.profile_hash(),
+                session_epoch=instance.session_epoch,
             ),
             execution_grant=SpecGrant(
                 grant_ref=request.grant_ref,

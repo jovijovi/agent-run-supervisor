@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext Technical Solution"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-30
+last_validated_at: 2026-08-01
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/technical-solution.md"
 ---
 # agent-run-supervisor vNext Technical Solution
@@ -21,14 +21,18 @@ fallback, or session store: no module below owes it compatibility, removing it i
 work this document does not perform, and it survives here only as a bounded differential/comparison-test
 reference.
 
-**Authority and source differ right now, deliberately.** Every module disposition below is the *target*.
-Source on `main` still carries the retired Binding line: `native_acp/runtime_binding.py` as the only reader
-of a Binding root, `native_acp/attestation.py` at the spawn boundary, four registered profiles, artifact
-digests and package closures, promotion, and a required Binding-root daemon flag. The retired module design
-is preserved under
-[`docs/archive/binding-era-2026-07/`](../archive/binding-era-2026-07/architecture-3.1-3.3.md). The board
-carries the delta; this document grants no approval, and neither the authority alignment nor any later gate
-authorizes the next one.
+**Authority and released source differ right now, deliberately.** Every module disposition below is the
+*target*. Source on `main` still carries the retired Binding line: `native_acp/runtime_binding.py` as the
+only reader of a Binding root, `native_acp/attestation.py` at the spawn boundary, four registered profiles,
+artifact digests and package closures, promotion, and a required Binding-root daemon flag. The retired
+module design is preserved under
+[`docs/archive/binding-era-2026-07/`](../archive/binding-era-2026-07/architecture-3.1-3.3.md).
+
+The Stage 3 candidate implements this target — both files above are deleted, the registry reader and the
+value-blind launch snapshot exist, and the suite is green — **on a task branch that is uncommitted,
+unmerged, unreleased, and undeployed**. So "target" still means target for anyone reading `main` or
+operating a deployment. The board carries the delta; this document grants no approval, and neither the
+authority alignment, nor a green local verification, nor any later gate authorizes the next one.
 
 ## 1. Package shape
 

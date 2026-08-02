@@ -1,1258 +1,379 @@
-"""C4: closed, code-registered profile registry and the first OpenCode profile."""
+"""The source-owned ACP compatibility profile registry, after the V4 reset.
+
+A profile freezes **ACP protocol and compatibility semantics only**: the
+protocol major, required capabilities, a forbidden-capability floor, session
+semantics including required real ``session/load``, selector-id conventions, the
+base environment allowlist, permission-mediation semantics, and — only where
+cited ACP-level evidence requires it — frozen ACP session metadata and a
+required permission-mode selector.
+
+It contains no path, version, digest, model literal, agent name, value domain,
+launch kind, artifact identity, or deployment fact. Every AGENT is instead one
+operator-owned registry entry.
+
+Exactly two profiles are registered. The three per-agent profiles
+(``opencode-native-acp``, ``codex-acp-1.1.7``, ``claude-agent-acp-0.63.0``) are
+retired by deletion — not by an alias, a redirect, a disable flag, or any other
+mechanism capable of retiring one.
+"""
 
 from __future__ import annotations
 
+import ast
+import dataclasses
+import json
+import re
+from pathlib import Path
+
 import pytest
 
+from agent_run_supervisor.native_acp import profile as profile_mod
+from agent_run_supervisor.native_acp.agent_registration import AgentEntry
 from agent_run_supervisor.native_acp.profile import (
+    CLAUDE_AGENT_ACP_COMPAT_V1,
     DEFAULT_REGISTRY,
-    OPENCODE_NATIVE_ACP,
-    AgentProfile,
-    ProfileRegistry,
+    RESERVED_MEDIATION_KEYS,
+    STANDARD_NATIVE_ACP_V1,
+    AcpCompatProfile,
+    AgentInstance,
+    ProfileValidationError,
     UnknownProfileError,
-    resolve_registered_executable,
+)
+
+SOURCE = (
+    Path(__file__).resolve().parents[2]
+    / "src"
+    / "agent_run_supervisor"
+    / "native_acp"
+    / "profile.py"
+)
+
+RETIRED_PROFILE_IDS = (
+    "opencode-native-acp",
+    "opencode-1.18.4",
+    "codex-acp-1.1.7",
+    "claude-agent-acp-0.63.0",
+    "claude-agent-acp-0.61.0",
 )
 
 
-def test_registry_is_a_closed_set() -> None:
-    assert DEFAULT_REGISTRY.get("opencode-native-acp") is OPENCODE_NATIVE_ACP
+def entry(**overrides):
+    body = {
+        "agent_id": "a-1",
+        "profile_id": STANDARD_NATIVE_ACP_V1.profile_id,
+        "command": "some-agent",
+    }
+    body.update(overrides)
+    return AgentEntry(**body)
+
+
+# -- WP3.3: exactly two registered profiles ---------------------------------
+
+
+def test_registry_holds_exactly_two_profiles():
+    assert DEFAULT_REGISTRY.ids() == (
+        "claude-agent-acp-compat-v1",
+        "standard-native-acp-v1",
+    )
+
+
+def test_registry_is_a_closed_set():
+    assert DEFAULT_REGISTRY.get("standard-native-acp-v1") is STANDARD_NATIVE_ACP_V1
+    assert DEFAULT_REGISTRY.get("claude-agent-acp-compat-v1") is CLAUDE_AGENT_ACP_COMPAT_V1
     with pytest.raises(UnknownProfileError):
         DEFAULT_REGISTRY.get("mystery-agent-9.9")
 
 
-def test_the_retired_opencode_id_is_an_unknown_profile_with_no_alias() -> None:
-    # C15: the stable ID replaces ``opencode-1.18.4`` outright. There is no
-    # compatibility alias, so the old ID is refused like any unknown profile.
+@pytest.mark.parametrize("retired", RETIRED_PROFILE_IDS)
+def test_retired_profile_ids_are_simply_unknown(retired):
+    """Deleted, not aliased: the old id is an unknown profile and is refused."""
     with pytest.raises(UnknownProfileError):
-        DEFAULT_REGISTRY.get("opencode-1.18.4")
-    assert "opencode-1.18.4" not in DEFAULT_REGISTRY.ids()
+        DEFAULT_REGISTRY.get(retired)
+    assert retired not in DEFAULT_REGISTRY.ids()
 
 
-def test_opencode_profile_literals_are_pinned() -> None:
-    profile = OPENCODE_NATIVE_ACP
-    assert profile.profile_id == "opencode-native-acp"
-    assert profile.revision >= 1
-    assert profile.argv_template == ("acp",)  # fixed subcommand, no passthrough
-    assert profile.model_selector_id == "model"
-    assert profile.effort_selector_id == "effort"
-    assert profile.default_model == "kimi-for-coding/k3"
-    assert profile.default_effort == "max"
-    assert "max" in profile.allowed_efforts
-    assert profile.requires_session_load is True
-    assert profile.credential_slots == ("kimi-for-coding",)
+@pytest.mark.parametrize("retired", RETIRED_PROFILE_IDS)
+def test_retired_profile_ids_appear_nowhere_in_source(retired):
+    assert retired not in SOURCE.read_text(encoding="utf-8")
 
 
-def test_opencode_registration_matches_the_discovery_evidence() -> None:
-    """C15 + the discovery prerequisite: constants are byte-copies of evidence.
+def test_no_retirement_mechanism_was_introduced():
+    """V4 retires profiles by deleting them, never by adding a way to disable one.
 
-    The operator-run zero-prompt ACP discovery observed agentInfo OpenCode
-    1.18.5, protocol 1, ``loadSession`` advertised, selectors model/effort, and
-    — only after the exact model was set to kimi-for-coding/k3 — the
-    model-dependent effort domain low|high|max. ``deepseek/deepseek-v4-pro``
-    was registered under the retired 1.18.4 evidence and is deliberately not
-    carried over: this discovery does not prove its effort domain.
+    A field defaulting to ``False``, an unused rule constant, or a marker would
+    each be the mechanism ``non-approvals.md`` treats as its own decision.
     """
-    profile = OPENCODE_NATIVE_ACP
-    assert profile.revision == 3
-    assert profile.registered_models == ("kimi-for-coding/k3",)
-    assert profile.allowed_efforts == ("low", "high", "max")
-    assert profile.snapshot_ref() == "registry:opencode-native-acp@r3"
-    assert profile.contract.acp_agent_name == "OpenCode"
-    assert profile.contract.acp_protocol_version == "1"
-    assert profile.contract.required_capabilities == ("loadSession",)
-    # agentInfo.version is never asserted equal to the CLI --version: no
-    # version constant is frozen in this profile at all.
-    assert "1.18.5" not in str(profile.snapshot())
+    text = SOURCE.read_text(encoding="utf-8").lower()
+    for banned in ("deprecat", "retire", "disabl", "alias", "redirect", "superseded"):
+        assert banned not in text, f"profile source names {banned!r}"
+    fields = {field.name for field in dataclasses.fields(AcpCompatProfile)}
+    assert not fields & {"deprecated", "enabled", "active", "alias_of"}
 
 
-def test_profile_hash_and_snapshot_are_deterministic() -> None:
-    first = OPENCODE_NATIVE_ACP.profile_hash()
-    second = OPENCODE_NATIVE_ACP.profile_hash()
-    assert first == second
-    assert len(first) == 64
-    snapshot = OPENCODE_NATIVE_ACP.snapshot()
-    assert snapshot["profile_id"] == "opencode-native-acp"
-    assert snapshot["registered_models"] == ["kimi-for-coding/k3"]
-    assert OPENCODE_NATIVE_ACP.snapshot_ref() == "registry:opencode-native-acp@r3"
-    assert len(OPENCODE_NATIVE_ACP.config_schema_hash()) == 64
+# -- A4: no deployment facts survive in source ------------------------------
 
 
-def test_direct_acp_executable_is_a_binding_fact_not_a_source_constant(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The one OpenCode executable is both the AGENT CLI and the ACP
-    # implementation, so its path is a deployment fact the Binding supplies —
-    # the installation mapping no longer carries it, and no env/PATH override
-    # can reintroduce one.
-    monkeypatch.setenv("PATH", "/tmp/adversarial-bin")
-    monkeypatch.setenv("OPENCODE_BIN", "/tmp/adversarial-bin/opencode")
-    with pytest.raises(UnknownProfileError):
-        resolve_registered_executable(OPENCODE_NATIVE_ACP.executable_key)
-    with pytest.raises(UnknownProfileError):
-        resolve_registered_executable("unregistered-agent")
-    assert OPENCODE_NATIVE_ACP.contract.executable_slot().name == "agent_cli"
+def test_profile_source_carries_no_deployment_fact():
+    text = SOURCE.read_text(encoding="utf-8")
+    assert "/opt/" not in text
+    assert "node_modules" not in text
+    assert "ARTIFACT_MATERIALIZATION_PREFIX" not in text
+    assert not re.search(r"\b[0-9a-f]{64}\b", text), "a digest survives in profile source"
+    assert not re.search(r"\b\d+\.\d+\.\d+\b", text), "a version survives in source"
 
 
-def test_profile_rejects_unknown_construction_surface() -> None:
-    # No command/argv/env/JSON passthrough fields exist on the profile.
-    with pytest.raises(TypeError):
-        AgentProfile(  # type: ignore[call-arg]
-            profile_id="x",
-            revision=1,
-            executable_key="opencode",
-            argv_template=("acp",),
-            env_allowlist=(),
-            credential_slots=(),
-            model_selector_id="model",
-            effort_selector_id="effort",
-            default_model="a/b",
-            default_effort="max",
-            registered_models=("a/b",),
-            allowed_efforts=("max",),
-            requires_session_load=True,
-            config_schema={},
-            contract=OPENCODE_NATIVE_ACP.contract,
-            extra_argv=("--danger",),
-        )
-
-
-def test_profile_requires_an_adapter_contract() -> None:
-    # A profile without its source-frozen contract has no accepted Binding
-    # shape, no launch kind, and no probe rule: it cannot be registered.
-    with pytest.raises(TypeError):
-        AgentProfile(  # type: ignore[call-arg]
-            profile_id="x",
-            revision=1,
-            executable_key="opencode",
-            argv_template=("acp",),
-            env_allowlist=(),
-            credential_slots=(),
-            model_selector_id="model",
-            effort_selector_id="effort",
-            default_model="a/b",
-            default_effort="max",
-            registered_models=("a/b",),
-            allowed_efforts=("max",),
-            requires_session_load=True,
-            config_schema={},
-        )
-
-
-def test_registry_refuses_duplicate_ids() -> None:
-    with pytest.raises(ValueError):
-        ProfileRegistry((OPENCODE_NATIVE_ACP, OPENCODE_NATIVE_ACP))
-
-
-def test_opencode_permission_mediation_env_is_registered() -> None:
-    # A4-S2 repair: the registered OpenCode launch binding must force the
-    # privileged tool families (edit/bash/webfetch) through client-mediated
-    # session/request_permission — OpenCode's default build agent otherwise
-    # auto-allows in-process writes with zero mediation.
-    from agent_run_supervisor.native_acp.profile import (
-        resolve_registered_permission_env,
-    )
-
-    pairs = resolve_registered_permission_env(OPENCODE_NATIVE_ACP.executable_key)
-    assert pairs == (
-        ("OPENCODE_PERMISSION", '{"bash":"ask","edit":"ask","webfetch":"ask"}'),
-    )
-    # Unregistered executables carry no binding (nothing invented).
-    assert resolve_registered_permission_env("unregistered-agent") == ()
-
-
-# -- Codex closed-profile admission (D2/D3/D9/D11) ---------------------------
-
-# The Phase 3 materialization location, not the discovery/measurement install:
-# every ancestor of a service-home path is service-UID-owned, which C5 can never
-# accept. Nothing here creates or installs anything under /opt.
-FROZEN_NODE_PATH = "/opt/agent-run-supervisor/artifacts/node/v24.14.0/bin/node"
-FROZEN_NODE_SHA256 = (
-    "e237a2839d0cbdc9a9a2adda1a184afc0f5b20306ffbe923af5686550472d8a8"
-)
-FROZEN_ADAPTER_ROOT = "/opt/agent-run-supervisor/artifacts/adapters/codex-acp/1.1.7"
-FROZEN_ADAPTER_ENTRY = (
-    f"{FROZEN_ADAPTER_ROOT}/node_modules/@agentclientprotocol/codex-acp/dist/index.js"
-)
-FROZEN_ADAPTER_ENTRY_SHA256 = (
-    "0deb6b820dfed8804cd76b16a50210fe12202e5e339b5edaa23f6987f1742e0a"
-)
-# Measured over the operator-installed 1.1.7 tree: the install root Node walks
-# up to, not the adapter package directory, because every dependency is hoisted
-# into <install root>/node_modules.
-FROZEN_ADAPTER_TREE_SHA256 = (
-    "6e78f0ed56a4ec40939153cb7c1505c31b92283ca9035feb65a994c70445a83d"
-)
-FROZEN_CODEX_CONFIG = '{"features":{"use_legacy_landlock":true}}'
-
-# Goldens re-captured for the PR-B contract/Binding split. Every registered
-# profile's revision bumped because its frozen contract changed shape, so the
-# pre-PR-B pins are legitimately dead; these hold the new shape stable.
-OPENCODE_PROFILE_HASH_GOLDEN = (
-    "ac42ed6b8e67c919cd5fc56304e3b08d9bf745dcd8967441c97fb5947d95d844"
-)
-OPENCODE_CONFIG_SCHEMA_HASH_GOLDEN = (
-    "5cbb40748af2b4ebf2ab900e9cdad5a750b6ab1b53d65758d4732314d9facc22"
-)
-OPENCODE_CONTRACT_HASH_GOLDEN = (
-    "55b4c5255959fc209a64be155841a16bf836e7fea9b6864753c22a6ed3080807"
-)
-
-
-def test_codex_profile_snapshot_golden() -> None:
-    """Source keeps compatibility semantics; deployment facts left for R13.
-
-    ``CODEX_CONFIG`` pins Landlock because the adapter's default bwrap sandbox
-    was disqualified at discovery (FAIL: the command reached the Codex sandbox
-    without ACP permission mediation and failed with a bwrap loopback
-    RTM_NEWADDR EPERM on this host). It is load-bearing, version-bound debt:
-    any adapter/CLI/Node/CODEX_CONFIG change requires a full new
-    install → discovery → permission-canary cycle and a profile revision bump.
-
-    The downstream Codex CLI path/version/digest and the ``CODEX_HOME`` value
-    are no longer here at all: they are contract-declared Binding slots.
-    """
-    from agent_run_supervisor.native_acp.profile import CODEX_ACP_1_1_7
-
-    profile = CODEX_ACP_1_1_7
-    assert profile.profile_id == "codex-acp-1.1.7"
-    assert profile.revision == 3
-    assert profile.executable_key == "codex-acp"
-    assert profile.argv_template == (
-        "--no-global-search-paths",
-        FROZEN_ADAPTER_ENTRY,
-    )
-    assert profile.model_selector_id == "model"
-    assert profile.effort_selector_id == "reasoning_effort"
-    assert profile.default_model == "gpt-5.6-sol"
-    assert profile.default_effort == "max"
-    assert profile.registered_models == ("gpt-5.6-sol",)
-    assert profile.allowed_efforts == ("max",)
-    assert profile.requires_session_load is True
-    assert profile.credential_slots == ("codex-home-auth",)
-    assert profile.required_credential_refs == ("codex-home-auth",)
-
-    # fixed_env in exact manifest order: tuple order is hash-significant.
-    assert profile.fixed_env == (
-        ("CODEX_CONFIG", FROZEN_CODEX_CONFIG),
-        ("INITIAL_AGENT_MODE", "read-only"),
-        ("NO_BROWSER", "1"),
-    )
-    contract = profile.contract
-    assert contract.wrapped_runtime.interpreter_path == FROZEN_NODE_PATH
-    assert contract.wrapped_runtime.interpreter_sha256 == FROZEN_NODE_SHA256
-    assert contract.wrapped_runtime.adapter_entry_path == FROZEN_ADAPTER_ENTRY
-    assert contract.wrapped_runtime.adapter_entry_sha256 == FROZEN_ADAPTER_ENTRY_SHA256
-    assert contract.acp_agent_name == "@agentclientprotocol/codex-acp"
-    assert contract.acp_protocol_version == "1"
-    assert [slot.to_dict() for slot in contract.binding_slots] == [
-        {
-            "name": "downstream_cli",
-            "kind": "package_tree",
-            "env_key": "CODEX_PATH",
-            "provides_executable": False,
-            "descriptor_fields": [
-                "package_root",
-                "tree_sha256",
-                "launcher_path",
-                "launcher_sha256",
-                "interpreter_path",
-                "interpreter_sha256",
-                "version",
-            ],
-        },
-        {
-            "name": "codex_home",
-            "kind": "config_root",
-            "env_key": "CODEX_HOME",
-            "provides_executable": False,
-            "descriptor_fields": ["path"],
-        },
-    ]
-    assert contract.credential_root_slot == "codex_home"
-    assert contract.project_config_relpath == ".codex/config.toml"
-
-    snapshot = profile.snapshot()
-    assert snapshot["fixed_env"] == [
-        ["CODEX_CONFIG", FROZEN_CODEX_CONFIG],
-        ["INITIAL_AGENT_MODE", "read-only"],
-        ["NO_BROWSER", "1"],
-    ]
-    assert snapshot["required_credential_refs"] == ["codex-home-auth"]
-    assert "expected_runtime" not in snapshot
-    assert snapshot["config_schema"] == {
-        "schema_version": 1,
-        "selectors": {
-            "model": {
-                "config_id": "model",
-                "type": "string",
-                "domain": ["gpt-5.6-sol"],
-            },
-            "effort": {
-                "config_id": "reasoning_effort",
-                "type": "string",
-                "domain": ["max"],
-            },
-        },
-    }
-    assert DEFAULT_REGISTRY.get("codex-acp-1.1.7") is CODEX_ACP_1_1_7
-    assert DEFAULT_REGISTRY.ids() == (
-        "claude-agent-acp-0.63.0",
-        "codex-acp-1.1.7",
-        "opencode-native-acp",
-        "standard-native-acp-v1",
-    )
-
-
-def _codex_like(**overrides) -> AgentProfile:
-    from agent_run_supervisor.native_acp.profile import CODEX_ACP_1_1_7
-    import dataclasses
-
-    return dataclasses.replace(CODEX_ACP_1_1_7, **overrides)
-
-
-def test_codex_fixed_env_validation_rules() -> None:
-    base = (("CODEX_CONFIG", FROZEN_CODEX_CONFIG),)
-    cases = {
-        "duplicate key": base + (("CODEX_CONFIG", FROZEN_CODEX_CONFIG),),
-        "non-allowlisted name": base + (("LD_PRELOAD", "/tmp/evil.so"),),
-        "oversized value": (("CODEX_CONFIG", "{" + "x" * 4096 + "}"),),
-        "non-printable value": base + (("NO_BROWSER", "1\n"),),
-        "non-canonical CODEX_CONFIG": (
-            ("CODEX_CONFIG", '{"features": {"use_legacy_landlock": true}}'),
-        ),
-        "non-object CODEX_CONFIG": (("CODEX_CONFIG", '["not-an-object"]'),),
-        "unparsable CODEX_CONFIG": (("CODEX_CONFIG", "not json"),),
-        "invalid INITIAL_AGENT_MODE": base + (("INITIAL_AGENT_MODE", "yolo"),),
-    }
-    for label, fixed_env in cases.items():
-        with pytest.raises(ValueError):
-            _codex_like(fixed_env=fixed_env)
-        assert label  # keeps the failing case identifiable
-
-    # The exact manifest tuple stays valid.
-    _codex_like()
-
-
-def test_a_binding_filled_env_key_may_never_also_be_a_source_constant() -> None:
-    """C2: one launch variable, one authority.
-
-    Freezing ``CODEX_PATH`` or ``CODEX_HOME`` in ``fixed_env`` would shadow the
-    contract-declared Binding slot with a source constant that silently wins.
-    """
-    for key, value in (
-        ("CODEX_PATH", "/opt/frozen/codex"),
-        ("CODEX_HOME", "/opt/frozen/codex-home"),
+def test_profile_source_has_no_artifact_or_binding_vocabulary():
+    text = SOURCE.read_text(encoding="utf-8")
+    for banned in (
+        "BindingSlot",
+        "WrappedRuntimeArtifacts",
+        "SLOT_DESCRIPTOR_FIELDS",
+        "_REGISTERED_EXECUTABLES",
+        "launch_kind",
+        "interpreter",
+        "tree_sha256",
+        "adapter_entry_sha256",
+        "slot_hash",
+        "version_probe",
+        "attestation",
+        "promote",
+        "binding_root",
     ):
-        with pytest.raises(ValueError):
-            _codex_like(fixed_env=(("CODEX_CONFIG", FROZEN_CODEX_CONFIG), (key, value)))
+        assert banned not in text, f"profile source still carries {banned!r}"
 
 
-def test_codex_fixed_env_allowed_modes_accepted() -> None:
-    for mode in ("read-only", "agent", "agent-full-access"):
-        profile = _codex_like(
-            fixed_env=(
-                ("CODEX_CONFIG", FROZEN_CODEX_CONFIG),
-                ("INITIAL_AGENT_MODE", mode),
-            ),
-        )
-        assert dict(profile.fixed_env)["INITIAL_AGENT_MODE"] == mode
+def test_profiles_declare_no_value_domain():
+    for profile_id in DEFAULT_REGISTRY.ids():
+        profile = DEFAULT_REGISTRY.get(profile_id)
+        for banned in (
+            "registered_models",
+            "allowed_efforts",
+            "default_model",
+            "default_effort",
+            "config_schema",
+            "executable_key",
+            "argv_template",
+            "fixed_env",
+            "credential_slots",
+            "contract",
+        ):
+            assert not hasattr(profile, banned), f"{profile_id} still declares {banned}"
 
 
-def test_opencode_snapshot_carries_no_deployment_fact() -> None:
-    snapshot = OPENCODE_NATIVE_ACP.snapshot()
-    assert "fixed_env" not in snapshot
-    assert "expected_runtime" not in snapshot
-    assert "required_credential_refs" not in snapshot
-    assert sorted(snapshot) == [
-        "allowed_efforts",
-        "argv_template",
-        "config_schema",
-        "credential_slots",
-        "default_effort",
-        "default_model",
-        "effort_selector_id",
-        "env_allowlist",
-        "executable_key",
-        "model_selector_id",
-        "profile_id",
-        "registered_models",
-        "requires_session_load",
-        "revision",
-    ]
-    assert OPENCODE_NATIVE_ACP.profile_hash() == OPENCODE_PROFILE_HASH_GOLDEN
-    assert OPENCODE_NATIVE_ACP.config_schema_hash() == OPENCODE_CONFIG_SCHEMA_HASH_GOLDEN
-    assert OPENCODE_NATIVE_ACP.adapter_contract_hash() == OPENCODE_CONTRACT_HASH_GOLDEN
-    assert OPENCODE_NATIVE_ACP.fixed_env == ()
-    assert OPENCODE_NATIVE_ACP.required_credential_refs is None
+# -- what a profile does freeze ---------------------------------------------
 
 
-def test_codex_executable_resolves_to_frozen_node_never_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from agent_run_supervisor.native_acp.profile import CODEX_ACP_1_1_7
-
-    resolved = resolve_registered_executable(CODEX_ACP_1_1_7.executable_key)
-    assert str(resolved) == FROZEN_NODE_PATH
-    # The process image is the frozen Node; resolution never consults PATH.
-    monkeypatch.setenv("PATH", "/tmp/adversarial-bin")
-    monkeypatch.setenv("NODE", "/tmp/adversarial-bin/node")
-    monkeypatch.setenv("CODEX_ACP_BIN", "/tmp/adversarial-bin/codex-acp")
-    assert resolve_registered_executable(CODEX_ACP_1_1_7.executable_key) == resolved
-    assert resolved.is_absolute()
-    # The .bin/codex-acp shim is install evidence only; it is never executed.
-    assert "node_modules/.bin" not in str(resolved)
-
-
-def test_codex_carries_no_opencode_permission_binding() -> None:
-    from agent_run_supervisor.native_acp.profile import (
-        CODEX_ACP_1_1_7,
-        resolve_registered_permission_env,
-    )
-
-    # _REGISTERED_PERMISSION_ENV stays OpenCode-only.
-    assert resolve_registered_permission_env(CODEX_ACP_1_1_7.executable_key) == ()
-
-
-# -- Claude closed-profile admission (B3) ------------------------------------
-
-FROZEN_CLAUDE_ROOT = (
-    "/opt/agent-run-supervisor/artifacts/adapters/claude-agent-acp/0.63.0"
-)
-FROZEN_CLAUDE_ENTRY = (
-    f"{FROZEN_CLAUDE_ROOT}"
-    "/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js"
-)
-FROZEN_CLAUDE_TREE_SHA256 = (
-    "7c7958a24b96cc8510506e37b91e1ad37dcdef546bfcaaae025ffe9a1ba4ac2a"
-)
-# Unchanged across 0.61.0 -> 0.63.0: ``dist/index.js`` is a launcher that
-# imports its siblings, and only those siblings plus ``package.json`` moved.
-# See ``test_claude_adapter_entry_digest_does_not_discriminate_the_version``.
-FROZEN_CLAUDE_ENTRY_SHA256 = (
-    "260aac90bf75f197b93640087c1de66441761d43c2784efa035fdcee60b5dacd"
-)
-# Goldens re-captured for the F-RUNTIME-BINDING-002 package closure: the frozen
-# wrapped artifact identity gained ``adapter_package_root`` and
-# ``adapter_tree_sha256``, so both wrapped contracts are new acceptance inputs
-# and both revisions moved (Codex r2 -> r3, Claude r3 -> r4). The config-schema
-# hashes are unchanged: selectors are compatibility semantics and no closure
-# fact reaches them.
-CODEX_PROFILE_HASH_GOLDEN = (
-    "3e2ccb90b7baadddc18c46bdd56066e6c14760df4adac5a5addfa3a3b3ae5ba2"
-)
-CODEX_CONFIG_SCHEMA_HASH_GOLDEN = (
-    "a86d084c818a7ca3be0a5298dda46800fc3977826e8007e3db74bea7f2b8829a"
-)
-CODEX_CONTRACT_HASH_GOLDEN = (
-    "73b3dda64ace8f3df4e5f52976f969cd67c0f7e423b7932e5b3513bbbe19e005"
-)
-# The retired pre-closure revision-2 Codex contract hash, kept for the same
-# reason as the Claude one below: a generation accepted against an entry-only
-# artifact identity must fail closed, not be reinterpreted by this contract.
-CODEX_CONTRACT_HASH_RETIRED_ENTRY_ONLY_R2 = (
-    "36b85cd59f12ffdb431bdd7989beaaa11f5c7272a895b7ad4060cb00d1c8fa89"
-)
-# The retired 0.61.0 revision-2 contract hash. Kept only so the 0.63.0 source
-# contract must prove it is a *different* acceptance input: a Binding
-# generation accepted under the old hash has to fail closed rather than be
-# reinterpreted by this contract (PRD R13).
-CLAUDE_CONTRACT_HASH_RETIRED_0_61_0_R2 = (
-    "0e62e4cbba144fc5954502e5b66222fc11891d1d566816e372b596ec88a1a38b"
-)
-# The retired 0.63.0 revision-3 contract hash: the same adapter version, frozen
-# by its entry file alone before the package closure landed.
-CLAUDE_CONTRACT_HASH_RETIRED_ENTRY_ONLY_R3 = (
-    "0c822c665dd2df52924a0dbabfdf976e554bf1f774c1b089a60951c5548f4e18"
-)
-CLAUDE_CONTRACT_HASH_GOLDEN = (
-    "00a25e4dcfb13aeeb3b507cefac39a94cf74d967b71c434c78cd24895fba715e"
-)
-
-
-def test_claude_profile_snapshot_golden() -> None:
-    """Every registered value is a byte-copy of the frozen discovery manifest.
-
-    The manifest is the zero-prompt ACP discovery run against the installed
-    ``@agentclientprotocol/claude-agent-acp`` 0.63.0: ``agentInfo`` reports
-    name ``@agentclientprotocol/claude-agent-acp`` version ``0.63.0``,
-    ``protocolVersion`` 1, ``loadSession`` advertised, and the ``mode`` /
-    ``model`` / ``effort`` select domains that this profile registers.
-
-    The ACP model domain is exactly ``claude-fable-5[1m]`` and ``opus[1m]``.
-    ``claude-opus-5[1m]`` is the *direct Claude CLI* author selector and is
-    deliberately NOT registered: a live ACP set/readback on this adapter
-    returns ``opus[1m]``, so the CLI-side string could never pass exact
-    readback.
-    """
-    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_63_0
-
-    profile = CLAUDE_AGENT_ACP_0_63_0
-    assert profile.profile_id == "claude-agent-acp-0.63.0"
-    assert profile.revision == 4
-    assert profile.executable_key == "claude-agent-acp"
-    assert profile.argv_template == (
-        "--no-global-search-paths",
-        FROZEN_CLAUDE_ENTRY,
-    )
-    assert profile.model_selector_id == "model"
-    assert profile.effort_selector_id == "effort"
-    assert profile.registered_models == ("claude-fable-5[1m]", "opus[1m]")
-    assert profile.default_model == "opus[1m]"
-    assert profile.allowed_efforts == ("max",)
-    assert profile.default_effort == "max"
+def test_standard_profile_freezes_acp_conformance_only():
+    profile = STANDARD_NATIVE_ACP_V1
+    assert profile.profile_id == "standard-native-acp-v1"
+    assert profile.acp_protocol_version == "1"
+    assert profile.required_capabilities == ("loadSession",)
     assert profile.requires_session_load is True
-    # Closed admission: the Claude CLI owns its own credential storage, which
-    # ARS neither manages nor stages, so exactly zero caller references admit.
-    assert profile.credential_slots == ()
-    assert profile.required_credential_refs == ()
-
-    # The downstream CLI is still bound only through ``CLAUDE_CODE_EXECUTABLE``
-    # — a missing binding would silently switch the adapter to a PATH-resolved
-    # or bundled fallback CLI — but the *value* is now a Binding slot, so the
-    # source constant is gone and only the key remains code-known.
-    assert profile.fixed_env == (("NO_BROWSER", "1"),)
-    contract = profile.contract
-    assert contract.launch_kind == "wrapped_acp"
-    assert contract.wrapped_runtime.interpreter_path == FROZEN_NODE_PATH
-    assert contract.wrapped_runtime.interpreter_sha256 == FROZEN_NODE_SHA256
-    assert contract.wrapped_runtime.adapter_entry_path == FROZEN_CLAUDE_ENTRY
-    assert contract.wrapped_runtime.adapter_entry_sha256 == FROZEN_CLAUDE_ENTRY_SHA256
-    assert contract.acp_agent_name == "@agentclientprotocol/claude-agent-acp"
-    # The ACP-reported adapter identity, byte-copied from the initialize
-    # exchange. It is not the downstream Claude CLI's own ``--version``, and no
-    # code path asserts the two are equal (PRD R12).
-    assert contract.acp_agent_version == "0.63.0"
-    assert contract.acp_protocol_version == "1"
-    assert contract.required_capabilities == ("loadSession",)
-    assert [slot.to_dict() for slot in contract.binding_slots] == [
-        {
-            "name": "downstream_cli",
-            "kind": "package_tree",
-            "env_key": "CLAUDE_CODE_EXECUTABLE",
-            "provides_executable": False,
-            "descriptor_fields": [
-                "package_root",
-                "tree_sha256",
-                "launcher_path",
-                "launcher_sha256",
-                "interpreter_path",
-                "interpreter_sha256",
-                "version",
-            ],
-        }
-    ]
-    # The Claude CLI owns its own credential storage: no ARS-managed root.
-    assert contract.credential_root_slot is None
-    assert contract.project_config_relpath is None
-
-    snapshot = profile.snapshot()
-    assert snapshot["fixed_env"] == [["NO_BROWSER", "1"]]
-    assert snapshot["required_credential_refs"] == []
-    assert "expected_runtime" not in snapshot
-    assert len(profile.profile_hash()) == 64
-    assert profile.adapter_contract_hash() == CLAUDE_CONTRACT_HASH_GOLDEN
-    assert profile.snapshot_ref() == "registry:claude-agent-acp-0.63.0@r4"
+    assert profile.permission_mode_selector_id is None
+    assert profile.required_permission_mode is None
+    assert profile.session_meta is None
 
 
-def test_the_registry_presents_only_the_0_63_0_claude_source_contract() -> None:
-    """No 0.61.0 alias survives: one registered Claude contract, not two.
-
-    Written against the registry rather than the module symbol so the failure
-    is the registered contract itself, not an import error.
-    """
-    assert DEFAULT_REGISTRY.ids() == (
-        "claude-agent-acp-0.63.0",
-        "codex-acp-1.1.7",
-        "opencode-native-acp",
-        "standard-native-acp-v1",
-    )
-    with pytest.raises(UnknownProfileError):
-        DEFAULT_REGISTRY.get("claude-agent-acp-0.61.0")
-
-    profile = DEFAULT_REGISTRY.get("claude-agent-acp-0.63.0")
-    assert profile.revision == 4
-    assert profile.contract.acp_agent_version == "0.63.0"
-    assert "/claude-agent-acp/0.63.0/" in (
-        profile.contract.wrapped_runtime.adapter_entry_path
-    )
-    # A new source-contract revision is a new acceptance input, so a Binding
-    # generation accepted under the retired 0.61.0 contract fails closed.
-    assert (
-        profile.adapter_contract_hash() != CLAUDE_CONTRACT_HASH_RETIRED_0_61_0_R2
-    )
-
-
-def test_claude_adapter_entry_digest_still_does_not_discriminate_the_version() -> None:
-    """The frozen entry digest is unchanged by the 0.61.0 -> 0.63.0 move.
-
-    ``dist/index.js`` is a launcher that imports ``./acp-agent.js`` and reads
-    its version from ``../package.json``; those siblings changed and the
-    launcher bytes did not. The entry digest therefore still proves nothing
-    about which adapter version will run — which is why it is no longer the
-    artifact identity this contract relies on.
-    """
-    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_63_0
-
-    wrapped = CLAUDE_AGENT_ACP_0_63_0.contract.wrapped_runtime
-    assert wrapped.adapter_entry_sha256 == FROZEN_CLAUDE_ENTRY_SHA256
-    assert wrapped.adapter_entry_path == FROZEN_CLAUDE_ENTRY
-
-
-def test_the_package_closure_discriminates_what_the_entry_digest_cannot() -> None:
-    """F-RUNTIME-BINDING-002: the closure, not the launcher, is the identity.
-
-    The tree digest covers ``./acp-agent.js``, ``../package.json``, and every
-    hoisted dependency, so two adapter versions sharing a launcher byte for
-    byte no longer share an artifact identity — and the contract hash that
-    accepts a Binding generation moves with them.
-    """
-    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_63_0
-
-    profile = CLAUDE_AGENT_ACP_0_63_0
-    wrapped = profile.contract.wrapped_runtime
-    assert wrapped.adapter_package_root == FROZEN_CLAUDE_ROOT
-    assert wrapped.adapter_tree_sha256 == FROZEN_CLAUDE_TREE_SHA256
-    assert wrapped.adapter_tree_sha256 != wrapped.adapter_entry_sha256
-    # Closing the gap is itself a new acceptance input: a generation accepted
-    # against the entry-only revision-3 contract fails closed here.
-    assert profile.adapter_contract_hash() == CLAUDE_CONTRACT_HASH_GOLDEN
-    assert profile.adapter_contract_hash() != CLAUDE_CONTRACT_HASH_RETIRED_ENTRY_ONLY_R3
-
-
-def test_the_codex_package_closure_retires_the_entry_only_contract() -> None:
-    from agent_run_supervisor.native_acp.profile import CODEX_ACP_1_1_7
-
-    profile = CODEX_ACP_1_1_7
-    wrapped = profile.contract.wrapped_runtime
-    assert wrapped.adapter_package_root == FROZEN_ADAPTER_ROOT
-    assert wrapped.adapter_tree_sha256 == FROZEN_ADAPTER_TREE_SHA256
-    assert profile.revision == 3
-    assert profile.snapshot_ref() == "registry:codex-acp-1.1.7@r3"
-    assert profile.adapter_contract_hash() == CODEX_CONTRACT_HASH_GOLDEN
-    assert profile.adapter_contract_hash() != CODEX_CONTRACT_HASH_RETIRED_ENTRY_ONLY_R2
-
-
-def test_claude_profile_is_registered_alongside_the_existing_rows() -> None:
-    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_63_0
-
-    assert DEFAULT_REGISTRY.get("claude-agent-acp-0.63.0") is CLAUDE_AGENT_ACP_0_63_0
-    assert DEFAULT_REGISTRY.ids() == (
-        "claude-agent-acp-0.63.0",
-        "codex-acp-1.1.7",
-        "opencode-native-acp",
-        "standard-native-acp-v1",
-    )
-
-
-def test_claude_executable_resolves_to_the_frozen_node_never_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_63_0
-
-    resolved = resolve_registered_executable(CLAUDE_AGENT_ACP_0_63_0.executable_key)
-    assert str(resolved) == FROZEN_NODE_PATH
-    # The adapter entry is an ESM script with a `#!/usr/bin/env node` shebang:
-    # the process image must be the frozen Node, never an env-resolved one.
-    monkeypatch.setenv("PATH", "/tmp/adversarial-bin")
-    monkeypatch.setenv("NODE", "/tmp/adversarial-bin/node")
-    monkeypatch.setenv("CLAUDE_CODE_EXECUTABLE", "/tmp/adversarial-bin/claude")
-    assert (
-        resolve_registered_executable(CLAUDE_AGENT_ACP_0_63_0.executable_key)
-        == resolved
-    )
-    assert "node_modules/.bin" not in str(resolved)
-
-
-def test_claude_carries_no_opencode_permission_binding() -> None:
-    from agent_run_supervisor.native_acp.profile import (
-        CLAUDE_AGENT_ACP_0_63_0,
-        resolve_registered_permission_env,
-    )
-
-    assert resolve_registered_permission_env(
-        CLAUDE_AGENT_ACP_0_63_0.executable_key
-    ) == ()
-
-
-def _claude_like(**overrides) -> AgentProfile:
-    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_63_0
-    import dataclasses
-
-    return dataclasses.replace(CLAUDE_AGENT_ACP_0_63_0, **overrides)
-
-
-def test_claude_binding_key_may_not_be_frozen_as_a_source_constant() -> None:
-    # The contract declares ``CLAUDE_CODE_EXECUTABLE`` as the key its Binding
-    # slot fills; freezing the same key here would shadow the operator fact.
-    with pytest.raises(ValueError):
-        _claude_like(
-            fixed_env=(
-                ("CLAUDE_CODE_EXECUTABLE", "/opt/frozen/claude"),
-                ("NO_BROWSER", "1"),
-            )
-        )
-    _claude_like()
-
-
-def test_codex_profile_golden_after_the_binding_split() -> None:
-    from agent_run_supervisor.native_acp.profile import CODEX_ACP_1_1_7
-
-    snapshot = CODEX_ACP_1_1_7.snapshot()
-    assert "expected_runtime" not in snapshot
-    assert CODEX_ACP_1_1_7.profile_hash() == CODEX_PROFILE_HASH_GOLDEN
-    assert CODEX_ACP_1_1_7.config_schema_hash() == CODEX_CONFIG_SCHEMA_HASH_GOLDEN
-    assert CODEX_ACP_1_1_7.adapter_contract_hash() == CODEX_CONTRACT_HASH_GOLDEN
-
-
-# -- B4: profile-frozen permission mode --------------------------------------
-
-
-def test_claude_profile_freezes_the_default_permission_mode() -> None:
-    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_63_0
-
-    profile = CLAUDE_AGENT_ACP_0_63_0
+def test_compat_profile_keeps_its_cited_acp_deviation():
+    """The one evidenced ACP-semantic deviation survives as a compat profile."""
+    profile = CLAUDE_AGENT_ACP_COMPAT_V1
+    assert profile.profile_id == "claude-agent-acp-compat-v1"
+    assert profile.acp_protocol_version == "1"
     assert profile.permission_mode_selector_id == "mode"
     assert profile.required_permission_mode == "default"
-    assert profile.config_schema["selectors"]["permission_mode"] == {
-        "config_id": "mode",
-        "type": "string",
-        "domain": ["default"],
-    }
-    snapshot = profile.snapshot()
-    assert snapshot["permission_mode_selector_id"] == "mode"
-    assert snapshot["required_permission_mode"] == "default"
-
-
-def test_permission_mode_binding_must_be_declared_as_a_pair() -> None:
-    for overrides in (
-        {"permission_mode_selector_id": "mode", "required_permission_mode": None},
-        {"permission_mode_selector_id": None, "required_permission_mode": "default"},
-    ):
-        with pytest.raises(ValueError):
-            _claude_like(**overrides)
-
-
-def test_legacy_profiles_declare_no_permission_mode_and_omit_it() -> None:
-    from agent_run_supervisor.native_acp.profile import CODEX_ACP_1_1_7
-
-    for profile in (OPENCODE_NATIVE_ACP, CODEX_ACP_1_1_7):
-        assert profile.permission_mode_selector_id is None
-        assert profile.required_permission_mode is None
-        snapshot = profile.snapshot()
-        assert "permission_mode_selector_id" not in snapshot
-        assert "required_permission_mode" not in snapshot
-    assert OPENCODE_NATIVE_ACP.profile_hash() == OPENCODE_PROFILE_HASH_GOLDEN
-    assert CODEX_ACP_1_1_7.profile_hash() == CODEX_PROFILE_HASH_GOLDEN
-
-
-# -- B5: profile-owned frozen session metadata -------------------------------
-
-FROZEN_CLAUDE_SESSION_META = (
-    '{"claudeCode":{"options":{"settingSources":[],'
-    '"tools":{"preset":"claude_code","type":"preset"}}}}'
-)
-
-
-def test_claude_profile_freezes_the_exact_session_metadata() -> None:
-    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_63_0
-
-    profile = CLAUDE_AGENT_ACP_0_63_0
-    assert profile.session_meta == FROZEN_CLAUDE_SESSION_META
-    payload = profile.session_meta_payload()
-    assert payload == {
+    assert profile.session_meta_payload() == {
         "claudeCode": {
             "options": {
                 "settingSources": [],
-                "tools": {"type": "preset", "preset": "claude_code"},
+                "tools": {"preset": "claude_code", "type": "preset"},
             }
         }
     }
-    # Hash-bound: the metadata is part of the profile snapshot.
-    snapshot = profile.snapshot()
-    assert snapshot["session_meta"] == payload
 
 
-def test_session_metadata_payload_is_a_fresh_deep_copy_each_call() -> None:
-    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_63_0
+def test_compat_session_meta_is_sent_on_both_session_calls():
+    """One frozen ``_meta``, so a reused Session cannot restore ambient settings."""
+    profile = CLAUDE_AGENT_ACP_COMPAT_V1
+    assert profile.session_meta_for("new") == profile.session_meta_for("load")
+    assert profile.session_meta_for("new") == profile.session_meta_payload()
+    assert STANDARD_NATIVE_ACP_V1.session_meta_for("new") is None
 
-    first = CLAUDE_AGENT_ACP_0_63_0.session_meta_payload()
+
+def test_session_meta_payload_is_a_fresh_deep_copy():
+    first = CLAUDE_AGENT_ACP_COMPAT_V1.session_meta_payload()
     first["claudeCode"]["options"]["settingSources"].append("user")
-    second = CLAUDE_AGENT_ACP_0_63_0.session_meta_payload()
-    assert second["claudeCode"]["options"]["settingSources"] == []
-    assert first is not second
+    again = CLAUDE_AGENT_ACP_COMPAT_V1.session_meta_payload()
+    assert again["claudeCode"]["options"]["settingSources"] == []
 
 
-def test_session_metadata_must_be_canonical_json_object_text() -> None:
-    cases = {
-        "unparsable": "not json",
-        "non-object": '["settingSources"]',
-        "non-canonical spacing": '{"claudeCode": {"options": {}}}',
-        "non-canonical key order": '{"b":1,"a":2}',
-        "empty": "",
-    }
-    for label, value in cases.items():
-        with pytest.raises(ValueError):
-            _claude_like(session_meta=value)
-        assert label
-
-
-def test_session_metadata_hash_binding_is_immutable_and_canonical() -> None:
-    import dataclasses
-
-    from agent_run_supervisor.native_acp.profile import CLAUDE_AGENT_ACP_0_63_0
-
-    baseline = CLAUDE_AGENT_ACP_0_63_0.profile_hash()
-    assert CLAUDE_AGENT_ACP_0_63_0.profile_hash() == baseline
-    # A different frozen metadata is a different profile identity.
-    other = dataclasses.replace(
-        CLAUDE_AGENT_ACP_0_63_0,
-        session_meta='{"claudeCode":{"options":{"settingSources":["user"]}}}',
-    )
-    assert other.profile_hash() != baseline
-    # The frozen dataclass cannot be mutated in place.
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        CLAUDE_AGENT_ACP_0_63_0.session_meta = "{}"  # type: ignore[misc]
-
-
-def test_legacy_profiles_carry_no_session_metadata() -> None:
-    from agent_run_supervisor.native_acp.profile import CODEX_ACP_1_1_7
-
-    for profile in (OPENCODE_NATIVE_ACP, CODEX_ACP_1_1_7):
-        assert profile.session_meta is None
-        assert profile.session_meta_payload() is None
-        assert "session_meta" not in profile.snapshot()
-    assert OPENCODE_NATIVE_ACP.profile_hash() == OPENCODE_PROFILE_HASH_GOLDEN
-    assert CODEX_ACP_1_1_7.profile_hash() == CODEX_PROFILE_HASH_GOLDEN
-
-
-# ---------------------------------------------------------------------------
-# F-RUNTIME-BINDING-002 — the wrapped adapter's complete package closure
-# ---------------------------------------------------------------------------
-
-CLOSURE_ROOT = "/opt/ars/adapters/example-acp/1.0.0"
-CLOSURE_ENTRY = f"{CLOSURE_ROOT}/node_modules/@scope/example-acp/dist/index.js"
-
-
-def _wrapped_artifacts(**overrides):
-    from agent_run_supervisor.native_acp.profile import WrappedRuntimeArtifacts
-
-    values = {
-        "interpreter_path": "/opt/ars/adapters/node/v24.14.0/bin/node",
-        "interpreter_sha256": "a" * 64,
-        "adapter_entry_path": CLOSURE_ENTRY,
-        "adapter_entry_sha256": "b" * 64,
-        "adapter_package_root": CLOSURE_ROOT,
-        "adapter_tree_sha256": "c" * 64,
-        # Every wrapped contract must close its interpreter's out-of-closure
-        # search; the closure legs below vary one field at a time around it.
-        "interpreter_argv_prefix": ("--no-global-search-paths",),
-    }
-    values.update(overrides)
-    return WrappedRuntimeArtifacts(**values)
-
-
-def test_path_within_root_judges_components_not_string_prefixes() -> None:
-    from agent_run_supervisor.native_acp.profile import path_within_root
-
-    assert path_within_root("/pkg", "/pkg/dist/index.js") is True
-    # The prefix trap: "/pkg" is a text prefix of "/pkg-evil" and not a parent.
-    assert path_within_root("/pkg", "/pkg-evil/dist/index.js") is False
-    # A root is not its own member, and neither operand may be relative or
-    # carry a parent reference the walk could unwind.
-    assert path_within_root("/pkg", "/pkg") is False
-    assert path_within_root("/pkg", "/pkg/../pkg-evil/x") is False
-    assert path_within_root("pkg", "pkg/x") is False
-
-
-def test_wrapped_artifacts_require_a_declared_package_closure() -> None:
-    """A launcher digest alone never freezes the sibling code it loads."""
-    from agent_run_supervisor.native_acp.profile import ProfileValidationError
-
-    with pytest.raises(ProfileValidationError, match="package"):
-        _wrapped_artifacts(adapter_package_root=None)
-    with pytest.raises(ProfileValidationError, match="tree"):
-        _wrapped_artifacts(adapter_tree_sha256=None)
-
-
-def test_wrapped_artifacts_require_a_sha256_tree_digest() -> None:
-    from agent_run_supervisor.native_acp.profile import ProfileValidationError
-
+def test_versioned_id_refuses_a_contract_whose_frozen_major_disagrees():
     with pytest.raises(ProfileValidationError):
-        _wrapped_artifacts(adapter_tree_sha256="not-a-digest")
+        AcpCompatProfile(
+            profile_id="standard-native-acp-v1", revision=1, acp_protocol_version="2"
+        )
+    # An unversioned id carries no generation claim and is left alone.
+    AcpCompatProfile(profile_id="unversioned", revision=1, acp_protocol_version="2")
 
 
-def test_wrapped_artifacts_require_an_absolute_package_root() -> None:
-    from agent_run_supervisor.native_acp.profile import ProfileValidationError
-
+def test_permission_mode_pair_is_declared_together():
     with pytest.raises(ProfileValidationError):
-        _wrapped_artifacts(adapter_package_root="relative/root")
-
-
-def test_wrapped_artifacts_refuse_an_entry_outside_the_closure_root() -> None:
-    from agent_run_supervisor.native_acp.profile import ProfileValidationError
-
-    with pytest.raises(ProfileValidationError, match="inside"):
-        _wrapped_artifacts(
-            adapter_entry_path="/opt/ars/adapters/other/dist/index.js"
+        AcpCompatProfile(
+            profile_id="p-v1",
+            revision=1,
+            acp_protocol_version="1",
+            permission_mode_selector_id="mode",
         )
-
-
-def test_wrapped_artifacts_refuse_a_prefix_sibling_closure_root() -> None:
-    """`/pkg-evil` shares a string prefix with `/pkg` and is not inside it."""
-    from agent_run_supervisor.native_acp.profile import ProfileValidationError
-
-    with pytest.raises(ProfileValidationError, match="inside"):
-        _wrapped_artifacts(
-            adapter_package_root="/opt/ars/adapters/example-acp/1.0.0",
-            adapter_entry_path="/opt/ars/adapters/example-acp/1.0.0-evil/dist/index.js",
-        )
-
-
-def test_wrapped_artifacts_refuse_the_root_as_its_own_entry() -> None:
-    from agent_run_supervisor.native_acp.profile import ProfileValidationError
-
-    with pytest.raises(ProfileValidationError, match="inside"):
-        _wrapped_artifacts(adapter_entry_path=CLOSURE_ROOT)
-
-
-def test_wrapped_artifacts_serialize_the_whole_closure() -> None:
-    payload = _wrapped_artifacts().to_dict()
-    assert payload["adapter_package_root"] == CLOSURE_ROOT
-    assert payload["adapter_tree_sha256"] == "c" * 64
-
-
-def test_adapter_contract_hash_covers_the_package_closure() -> None:
-    """A sibling change moves the tree digest, so it must move the contract
-    hash — otherwise a Binding accepted under the old closure stays valid."""
-    import dataclasses
-
-    from agent_run_supervisor.native_acp.profile import CODEX_ACP_1_1_7
-
-    baseline = CODEX_ACP_1_1_7.adapter_contract_hash()
-    drifted_tree = dataclasses.replace(
-        CODEX_ACP_1_1_7,
-        contract=dataclasses.replace(
-            CODEX_ACP_1_1_7.contract,
-            wrapped_runtime=dataclasses.replace(
-                CODEX_ACP_1_1_7.contract.wrapped_runtime,
-                adapter_tree_sha256="d" * 64,
-            ),
-        ),
-    )
-    assert drifted_tree.adapter_contract_hash() != baseline
-
-
-def test_registered_wrapped_profiles_freeze_a_complete_package_closure() -> None:
-    """Both registered wrapped adapters close over their install root, and the
-    frozen entry lives inside it."""
-    from agent_run_supervisor.native_acp.profile import (
-        CLAUDE_AGENT_ACP_0_63_0,
-        CODEX_ACP_1_1_7,
-        path_within_root,
-    )
-
-    for profile in (CODEX_ACP_1_1_7, CLAUDE_AGENT_ACP_0_63_0):
-        wrapped = profile.contract.wrapped_runtime
-        assert wrapped.adapter_package_root is not None
-        assert len(wrapped.adapter_tree_sha256) == 64
-        assert path_within_root(
-            wrapped.adapter_package_root, wrapped.adapter_entry_path
-        )
-        # The closure root is the npm *install* root, not the package directory:
-        # the adapter's dependencies are hoisted into <install root>/node_modules,
-        # which Node reaches by walking up from the entry.
-        assert wrapped.adapter_entry_path.startswith(
-            f"{wrapped.adapter_package_root}/node_modules/"
-        )
-
-
-def test_wrapped_profiles_admit_no_node_path_environment_key() -> None:
-    """NODE_PATH would add a module-resolution root outside the frozen closure.
-
-    It is closed by construction: the env allowlist is a closed set and the
-    profile-frozen environment names only code-known keys.
-    """
-    from agent_run_supervisor.native_acp.profile import (
-        CLAUDE_AGENT_ACP_0_63_0,
-        CODEX_ACP_1_1_7,
-    )
-
-    for profile in (CODEX_ACP_1_1_7, CLAUDE_AGENT_ACP_0_63_0):
-        assert "NODE_PATH" not in profile.env_allowlist
-        assert "NODE_PATH" not in {name for name, _ in profile.fixed_env}
-        assert "NODE_PATH" not in {
-            slot.env_key for slot in profile.contract.binding_slots
-        }
-
-
-# ---------------------------------------------------------------------------
-# Phase 2 repair — the frozen interpreter argv prefix and the materialization
-# prefix for source-frozen artifact paths
-# ---------------------------------------------------------------------------
-
-
-def test_wrapped_artifacts_require_a_frozen_interpreter_argv_prefix() -> None:
-    """An interpreter that can still resolve code outside the closure has not
-    been closed; the contract must freeze the option tokens that close it."""
-    from agent_run_supervisor.native_acp.profile import ProfileValidationError
-
-    with pytest.raises(ProfileValidationError, match="interpreter_argv_prefix"):
-        _wrapped_artifacts(interpreter_argv_prefix=())
-
-
-def test_wrapped_artifacts_refuse_a_non_option_token_in_the_prefix() -> None:
-    """The prefix is closed interpreter options, never a path or passthrough."""
-    from agent_run_supervisor.native_acp.profile import ProfileValidationError
-
     with pytest.raises(ProfileValidationError):
-        _wrapped_artifacts(interpreter_argv_prefix=("/etc/passwd",))
+        AcpCompatProfile(
+            profile_id="p-v1",
+            revision=1,
+            acp_protocol_version="1",
+            required_permission_mode="default",
+        )
+
+
+def test_session_meta_must_be_canonical_json_text():
     with pytest.raises(ProfileValidationError):
-        _wrapped_artifacts(interpreter_argv_prefix=("",))
-    # One token carrying two flags would render as a passing report row while
-    # the child received something the contract never froze.
-    with pytest.raises(ProfileValidationError):
-        _wrapped_artifacts(
-            interpreter_argv_prefix=("--no-global-search-paths --allow-anything",)
+        AcpCompatProfile(
+            profile_id="p-v1",
+            revision=1,
+            acp_protocol_version="1",
+            session_meta='{"b": 1, "a": 2}',
         )
-
-
-def test_the_frozen_node_interpreter_must_disable_global_search_paths() -> None:
-    """Node's CommonJS global folders ($HOME/.node_modules,
-    $HOME/.node_libraries, <prefix>/lib/node) are searched outside any package
-    root, so a closure over the install root is incomplete without the flag.
-    Code-enforced, not merely asserted by a test, so it cannot drift."""
-    from agent_run_supervisor.native_acp.profile import (
-        NODE_NO_GLOBAL_SEARCH_PATHS,
-        ProfileValidationError,
-        _FROZEN_NODE,
-    )
-
-    assert NODE_NO_GLOBAL_SEARCH_PATHS == "--no-global-search-paths"
-    with pytest.raises(ProfileValidationError, match="global"):
-        _wrapped_artifacts(
-            interpreter_path=str(_FROZEN_NODE),
-            interpreter_argv_prefix=("--frozen-intrinsics",),
-        )
-
-
-def test_profile_argv_must_start_with_the_declared_interpreter_prefix() -> None:
-    """No drift: the contract declares the prefix and the profile's argv is
-    checked against it, so an argv missing the flag cannot be registered."""
-    from agent_run_supervisor.native_acp.profile import (
-        CODEX_ACP_1_1_7,
-        ProfileValidationError,
-    )
-    import dataclasses
-
-    wrapped = CODEX_ACP_1_1_7.contract.wrapped_runtime
-    with pytest.raises(ProfileValidationError, match="interpreter_argv_prefix"):
-        dataclasses.replace(
-            CODEX_ACP_1_1_7, argv_template=(wrapped.adapter_entry_path,)
-        )
-
-
-def test_profile_argv_must_carry_the_adapter_entry_after_the_prefix() -> None:
-    from agent_run_supervisor.native_acp.profile import (
-        CODEX_ACP_1_1_7,
-        NODE_NO_GLOBAL_SEARCH_PATHS,
-        ProfileValidationError,
-    )
-    import dataclasses
-
-    with pytest.raises(ProfileValidationError, match="adapter entry"):
-        dataclasses.replace(
-            CODEX_ACP_1_1_7,
-            argv_template=(NODE_NO_GLOBAL_SEARCH_PATHS, "/opt/elsewhere/index.js"),
-        )
-    # A token wedged between the prefix and the entry is the same failure.
-    with pytest.raises(ProfileValidationError, match="adapter entry"):
-        dataclasses.replace(
-            CODEX_ACP_1_1_7,
-            argv_template=(
-                NODE_NO_GLOBAL_SEARCH_PATHS,
-                "--experimental-vm-modules",
-                CODEX_ACP_1_1_7.contract.wrapped_runtime.adapter_entry_path,
-            ),
-        )
-
-
-def test_both_registered_wrapped_profiles_freeze_the_node_prefix() -> None:
-    from agent_run_supervisor.native_acp.profile import (
-        CLAUDE_AGENT_ACP_0_63_0,
-        CODEX_ACP_1_1_7,
-        NODE_NO_GLOBAL_SEARCH_PATHS,
-    )
-
-    for profile in (CODEX_ACP_1_1_7, CLAUDE_AGENT_ACP_0_63_0):
-        wrapped = profile.contract.wrapped_runtime
-        assert wrapped.interpreter_argv_prefix == (NODE_NO_GLOBAL_SEARCH_PATHS,)
-        assert profile.argv_template == (
-            NODE_NO_GLOBAL_SEARCH_PATHS,
-            wrapped.adapter_entry_path,
-        )
-        assert profile.contract.to_dict()["wrapped_runtime"][
-            "interpreter_argv_prefix"
-        ] == [NODE_NO_GLOBAL_SEARCH_PATHS]
-
-
-def test_direct_acp_carries_no_interpreter_prefix() -> None:
-    assert OPENCODE_NATIVE_ACP.contract.wrapped_runtime is None
-    assert OPENCODE_NATIVE_ACP.argv_template == ("acp",)
-    assert "interpreter_argv_prefix" not in str(OPENCODE_NATIVE_ACP.contract.to_dict())
-
-
-def test_adapter_contract_hash_covers_the_interpreter_argv_prefix() -> None:
-    import dataclasses
-
-    from agent_run_supervisor.native_acp.profile import CODEX_ACP_1_1_7
-
-    baseline = CODEX_ACP_1_1_7.adapter_contract_hash()
-    drifted = dataclasses.replace(
-        CODEX_ACP_1_1_7,
-        argv_template=(
-            "--no-global-search-paths",
-            "--frozen-intrinsics",
-            CODEX_ACP_1_1_7.contract.wrapped_runtime.adapter_entry_path,
-        ),
-        contract=dataclasses.replace(
-            CODEX_ACP_1_1_7.contract,
-            wrapped_runtime=dataclasses.replace(
-                CODEX_ACP_1_1_7.contract.wrapped_runtime,
-                interpreter_argv_prefix=(
-                    "--no-global-search-paths",
-                    "--frozen-intrinsics",
-                ),
-            ),
-        ),
-    )
-    assert drifted.adapter_contract_hash() != baseline
-
-
-def test_source_frozen_runtime_paths_use_the_materialization_prefix() -> None:
-    """Phase 3 materializes a root-owned artifact root. A path under the service
-    home can never satisfy the C5 ownership rule, because its ancestors are
-    owned by the service UID and only Phase 3 can place a root-owned tree."""
-    from agent_run_supervisor.native_acp.profile import (
-        ARTIFACT_MATERIALIZATION_PREFIX,
-        CLAUDE_AGENT_ACP_0_63_0,
-        CODEX_ACP_1_1_7,
-        path_within_root,
-    )
-
-    assert ARTIFACT_MATERIALIZATION_PREFIX == "/opt/agent-run-supervisor/artifacts"
-    for profile in (CODEX_ACP_1_1_7, CLAUDE_AGENT_ACP_0_63_0):
-        wrapped = profile.contract.wrapped_runtime
-        for path in (
-            wrapped.interpreter_path,
-            wrapped.adapter_package_root,
-            wrapped.adapter_entry_path,
-        ):
-            assert path_within_root(ARTIFACT_MATERIALIZATION_PREFIX, path), path
-
-
-def test_no_source_frozen_runtime_path_lives_under_the_service_home() -> None:
-    from agent_run_supervisor.native_acp import profile as profile_module
-    from agent_run_supervisor.native_acp.profile import (
-        CLAUDE_AGENT_ACP_0_63_0,
-        CODEX_ACP_1_1_7,
-    )
-
-    surfaces = [str(path) for path in profile_module._REGISTERED_EXECUTABLES.values()]
-    for profile in (CODEX_ACP_1_1_7, CLAUDE_AGENT_ACP_0_63_0):
-        wrapped = profile.contract.wrapped_runtime
-        surfaces += [
-            wrapped.interpreter_path,
-            wrapped.adapter_entry_path,
-            wrapped.adapter_package_root,
-            *profile.argv_template,
-        ]
-    for surface in surfaces:
-        assert "/home/" not in surface, surface
-
-
-def test_registered_node_paths_pin_the_exact_materialized_locations() -> None:
-    from agent_run_supervisor.native_acp.profile import (
-        CLAUDE_AGENT_ACP_0_63_0,
-        CODEX_ACP_1_1_7,
-        _FROZEN_NODE,
-    )
-
-    assert str(_FROZEN_NODE) == (
-        "/opt/agent-run-supervisor/artifacts/node/v24.14.0/bin/node"
-    )
-    assert CODEX_ACP_1_1_7.contract.wrapped_runtime.adapter_package_root == (
-        "/opt/agent-run-supervisor/artifacts/adapters/codex-acp/1.1.7"
-    )
-    assert CLAUDE_AGENT_ACP_0_63_0.contract.wrapped_runtime.adapter_package_root == (
-        "/opt/agent-run-supervisor/artifacts/adapters/claude-agent-acp/0.63.0"
+    AcpCompatProfile(
+        profile_id="p-v1",
+        revision=1,
+        acp_protocol_version="1",
+        session_meta=json.dumps({"a": 2, "b": 1}, sort_keys=True, separators=(",", ":")),
     )
 
 
-# -- G0/G1.1: non-retirement and zero hash movement --------------------------
-#
-# Blocker 1 is a test, not a promise. These pin both halves: the mechanism
-# capable of retiring a live profile does not exist, and the three live
-# profiles' identity hashes did not move when the fourth was registered.
-
-FROZEN_LIVE_IDENTITY_HASHES = {
-    "opencode-native-acp": (
-        "ac42ed6b8e67c919cd5fc56304e3b08d9bf745dcd8967441c97fb5947d95d844",
-        "55b4c5255959fc209a64be155841a16bf836e7fea9b6864753c22a6ed3080807",
-    ),
-    "codex-acp-1.1.7": (
-        "3e2ccb90b7baadddc18c46bdd56066e6c14760df4adac5a5addfa3a3b3ae5ba2",
-        "73b3dda64ace8f3df4e5f52976f969cd67c0f7e423b7932e5b3513bbbe19e005",
-    ),
-    "claude-agent-acp-0.63.0": (
-        "ca720d9b9c40757e4a269e961812679420fa20998422cbd96667d2ef03f06a3d",
-        "00a25e4dcfb13aeeb3b507cefac39a94cf74d967b71c434c78cd24895fba715e",
-    ),
-}
+def test_profile_hash_covers_the_frozen_semantics():
+    baseline = STANDARD_NATIVE_ACP_V1.profile_hash()
+    assert len(baseline) == 64
+    assert baseline != CLAUDE_AGENT_ACP_COMPAT_V1.profile_hash()
+    assert STANDARD_NATIVE_ACP_V1.snapshot_ref() == "registry:standard-native-acp-v1@r1"
 
 
-def test_the_three_live_profiles_keep_their_exact_identity_hashes() -> None:
-    """G1.1: any drift here fails every promoted generation on the next Run."""
-    for profile_id, (profile_hash, contract_hash) in FROZEN_LIVE_IDENTITY_HASHES.items():
-        profile = DEFAULT_REGISTRY.get(profile_id)
-        assert profile.profile_hash() == profile_hash, profile_id
-        assert profile.adapter_contract_hash() == contract_hash, profile_id
+def test_base_allowlist_covers_the_interactive_essentials():
+    base = set(profile_mod.base_env_allowlist(STANDARD_NATIVE_ACP_V1))
+    for name in ("HOME", "PATH", "USER", "LOGNAME", "SHELL", "LANG", "TZ", "TERM"):
+        assert name in base
+    for name in ("XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"):
+        assert name in base
+    for name in ("http_proxy", "https_proxy", "no_proxy", "HTTPS_PROXY", "NO_PROXY"):
+        assert name in base
+    for name in ("SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE"):
+        assert name in base
 
 
-def test_opencode_stays_registered_resolvable_and_admissible() -> None:
-    profile = DEFAULT_REGISTRY.get("opencode-native-acp")
-    assert profile is OPENCODE_NATIVE_ACP
-    assert profile.revision == 3
-    assert profile.contract.requires_agent_registration is False
-
-
-def test_no_profile_field_can_express_retirement() -> None:
-    """G0: not a field defaulting to False, not a marker, not a dormant flag."""
-    import dataclasses
-
-    from agent_run_supervisor.native_acp.profile import AdapterContract
-
-    banned = {"retired", "deprecated", "disabled", "sunset", "withdrawn"}
-    for cls in (AgentProfile, AdapterContract):
-        names = {field.name for field in dataclasses.fields(cls)}
-        assert not (names & banned), f"{cls.__name__} carries {sorted(names & banned)}"
-
-
-def test_no_source_rule_constant_can_refuse_a_registered_profile_by_identity() -> None:
-    """G0: ``PROFILE_RETIRED`` and its cousins exist nowhere in shipped source."""
-    from pathlib import Path
-
-    src = Path(__file__).resolve().parents[2] / "src" / "agent_run_supervisor"
-    banned = ("PROFILE_RETIRED", "PROFILE_DEPRECATED", "PROFILE_DISABLED")
-    offenders = [
-        f"{path.relative_to(src)}:{token}"
-        for path in sorted(src.rglob("*.py"))
-        for token in banned
-        if token in path.read_text(encoding="utf-8")
-    ]
-    assert not offenders, offenders
-
-
-def test_every_registered_profile_admits_on_identity_alone() -> None:
-    """A registered id is always resolvable; nothing refuses it for being itself."""
+def test_ssh_auth_sock_is_deliberately_not_in_the_base_set():
+    """Forwarding it is a real authority transfer and must be an explicit opt-in."""
     for profile_id in DEFAULT_REGISTRY.ids():
-        assert DEFAULT_REGISTRY.get(profile_id).profile_id == profile_id
+        base = profile_mod.base_env_allowlist(DEFAULT_REGISTRY.get(profile_id))
+        assert "SSH_AUTH_SOCK" not in base
+
+
+# -- AgentInstance: one profile plus one operator entry ---------------------
+
+
+def test_instance_pairs_a_profile_with_a_registry_entry():
+    instance = AgentInstance(STANDARD_NATIVE_ACP_V1, entry())
+    assert instance.agent_id == "a-1"
+    assert instance.command == "some-agent"
+    assert instance.argv == ("some-agent",)
+    assert instance.permission_env == ()
+    assert instance.session_epoch is None
+
+
+def test_instance_requires_an_entry():
+    with pytest.raises(ProfileValidationError):
+        AgentInstance(STANDARD_NATIVE_ACP_V1, None)
+
+
+def test_instance_refuses_an_entry_for_a_different_profile():
+    with pytest.raises(ProfileValidationError):
+        AgentInstance(CLAUDE_AGENT_ACP_COMPAT_V1, entry())
+
+
+def test_instance_argv_preserves_the_declared_command_byte_for_byte():
+    instance = AgentInstance(
+        STANDARD_NATIVE_ACP_V1, entry(command="some-agent", args=("acp", "--stdio"))
+    )
+    assert instance.argv == ("some-agent", "acp", "--stdio")
+    assert instance.argv[0] == instance.command
+
+
+def test_instance_selector_hints_fall_back_to_the_profile_convention():
+    default = AgentInstance(STANDARD_NATIVE_ACP_V1, entry())
+    assert default.model_selector_id == STANDARD_NATIVE_ACP_V1.model_selector_id
+    assert default.effort_selector_id == STANDARD_NATIVE_ACP_V1.effort_selector_id
+    hinted = AgentInstance(
+        STANDARD_NATIVE_ACP_V1,
+        entry(model_selector_id="model", effort_selector_id="reasoning_effort"),
+    )
+    assert hinted.effort_selector_id == "reasoning_effort"
+
+
+def test_instance_forbidden_capabilities_are_a_superset_of_the_profile_floor():
+    instance = AgentInstance(
+        STANDARD_NATIVE_ACP_V1, entry(forbidden_capabilities=("terminal",))
+    )
+    assert set(STANDARD_NATIVE_ACP_V1.forbidden_capabilities) <= set(
+        instance.forbidden_capabilities
+    )
+    assert "terminal" in instance.forbidden_capabilities
+
+
+def test_instance_mediation_comes_from_the_source_table_only():
+    selected = AgentInstance(
+        STANDARD_NATIVE_ACP_V1, entry(mediation_id="ask-privileged-tool-families-v1")
+    )
+    assert (
+        selected.permission_env
+        == profile_mod.MEDIATION_BINDINGS["ask-privileged-tool-families-v1"]
+    )
+    assert AgentInstance(STANDARD_NATIVE_ACP_V1, entry()).permission_env == ()
+
+
+def test_instance_exposes_no_agent_name_or_version_expectation():
+    instance = AgentInstance(STANDARD_NATIVE_ACP_V1, entry())
+    for banned in ("acp_agent_name", "acp_agent_version", "version_probe"):
+        assert not hasattr(instance, banned)
+
+
+# -- mediation authority ----------------------------------------------------
+
+
+def test_reserved_mediation_keys_are_global_and_disjoint_from_every_base_set():
+    assert RESERVED_MEDIATION_KEYS
+    for profile_id in DEFAULT_REGISTRY.ids():
+        base = set(profile_mod.base_env_allowlist(DEFAULT_REGISTRY.get(profile_id)))
+        assert base.isdisjoint(RESERVED_MEDIATION_KEYS)
+
+
+def test_mediation_pairs_refuses_an_unregistered_id():
+    with pytest.raises(UnknownProfileError):
+        profile_mod.mediation_pairs("invent-your-own-v1")
+    assert profile_mod.mediation_pairs(None) == ()
+
+
+# -- structural -------------------------------------------------------------
+
+
+def test_profile_module_performs_no_filesystem_access():
+    tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+    imported = {
+        alias.name.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    imported |= {
+        node.module.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    assert "os" not in imported
+    assert "pathlib" not in imported
+    assert "subprocess" not in imported

@@ -35,6 +35,7 @@ from agent_run_supervisor.mcp_config import (
     resolve_mcp_config,
 )
 from agent_run_supervisor.policy import policy_hash
+from agent_run_supervisor.redaction import SafeText
 from agent_run_supervisor.role import (
     DEFAULT_SESSION_LEASE_SECONDS,
     AgentRoleSpec,
@@ -163,18 +164,29 @@ class SessionRecord:
     last_effective_effort: str | None = None
     quarantine_reason: str | None = None
     quarantined_by_run_id: str | None = None
-    # PR-B R13: the adapter contract hash and the session compatibility epoch
-    # in force when this Session was created. Additive and omit-when-unset, so
-    # pre-epoch records keep their exact serialized shape; reuse of a record
-    # whose epoch does not match the Run's fails closed before `session/load`.
+    # The registered agent this Session belongs to. Reuse under a different
+    # agent fails closed before the lease and before ``session/load``.
+    native_agent_id: str | None = None
+    # The **operator's** continuity epoch, copied from the registry entry that
+    # admitted the creating Run. Nothing derives, increments, or infers it, and
+    # absent is not 1 — so adding the field for the first time cuts continuity,
+    # which is the same deliberate act as a bump.
+    native_session_epoch: int | None = None
+    # The last ``initialize`` observation of this Session, recorded so the next
+    # Run can *report* drift. Deliberately not identity: nothing compares these
+    # to admit, refuse, or reuse, and a Run whose agent reports something new
+    # binds exactly as before. They exist because "the agent changed under an
+    # unchanged registered command" is worth telling an operator and worth
+    # nothing as a gate.
+    native_last_agent_info_name: str | None = None
+    native_last_agent_info_version: str | None = None
+    native_last_advertised_capabilities: list[str] | None = None
+    # Retired ARS-derived identity fields of the Binding line. They are still
+    # *read* so a pre-reset record stays owner-scoped status/list/close-readable
+    # — but a record carrying any of them is refused for ``session/load``,
+    # because the identity it was created under no longer exists here.
     native_adapter_contract_hash: str | None = None
     session_compatibility_epoch: int | None = None
-    # The registered agent this Session belongs to, for a registration-scoped
-    # profile. Additive and omit-when-unset like everything above, so a record
-    # created before agents existed keeps its exact serialized shape. Reuse
-    # under a different agent — or a compatibility-bearing registration edit —
-    # fails closed before the lease and before ``session/load``.
-    native_agent_id: str | None = None
     native_agent_registration_hash: str | None = None
 
 
@@ -297,10 +309,8 @@ class SessionStore:
         workspace_hash: str,
         effective_cwd: str,
         matched_root: str | None,
-        adapter_contract_hash: str | None = None,
-        session_compatibility_epoch: int | None = None,
         agent_id: str | None = None,
-        agent_registration_hash: str | None = None,
+        session_epoch: int | None = None,
         now: _dt.datetime | None = None,
     ) -> SessionRecord:
         """Create a Native session record — the only Native creation API.
@@ -331,10 +341,8 @@ class SessionStore:
             native_profile_id=profile_id,
             native_profile_revision=profile_revision,
             native_profile_hash=profile_hash,
-            native_adapter_contract_hash=adapter_contract_hash,
-            session_compatibility_epoch=session_compatibility_epoch,
             native_agent_id=agent_id,
-            native_agent_registration_hash=agent_registration_hash,
+            native_session_epoch=session_epoch,
             agent_session_id=None,
             owner=owner,
             namespace=namespace,
@@ -506,6 +514,74 @@ class SessionStore:
                 record,
                 last_effective_model=model,
                 last_effective_effort=effort,
+                updated_at=moment,
+            )
+            atomic_write_json(session_dir / SESSION_JSON, _record_to_dict(updated))
+            return updated
+
+    def commit_last_observation(
+        self,
+        session_id: str,
+        *,
+        agent_info_name: SafeText,
+        agent_info_version: SafeText,
+        advertised_capabilities: tuple[SafeText, ...],
+        now: _dt.datetime | None = None,
+    ) -> SessionRecord:
+        """Record the ``initialize`` observation this Session last accepted.
+
+        Evidence, never identity. It is written only after the observation has
+        already passed the contract checks, and it is read only to decide
+        whether the *next* Run should emit a drift warning — nothing compares it
+        to admit, refuse, or reuse anything, and no epoch is derived from it.
+
+        Every field here is **child-controlled free text**: ``agentInfo`` is
+        whatever the agent chose to say about itself, and the advertised
+        capability *keys* are whatever it chose to advertise. ``judge_initialize``
+        deliberately gates neither — a self-report is evidence, so there is
+        nothing to check it against — which is exactly why this seam cannot
+        accept a bare ``str``. An agent that echoes a projected environment value
+        back through either one would otherwise have ARS write that value into
+        ``session.json``, where it outlives the Run, the guard, and the process.
+
+        The parameter type is the boundary, the same one
+        :func:`~agent_run_supervisor.native_acp.storage.write_run_text` uses:
+        ``SafeText`` is minted only by ``RunTextGuard``, so "guarded" is a fact
+        about the value rather than a claim about the call site. Drift detection
+        survives it: the guard replaces a matched literal with a fixed token, so
+        two Runs that report the same thing still compare equal.
+        """
+        for label, candidate in (
+            ("agent_info_name", agent_info_name),
+            ("agent_info_version", agent_info_version),
+            *(("advertised_capability", item) for item in advertised_capabilities),
+        ):
+            if type(candidate) is not SafeText:
+                raise TypeError(
+                    f"native session observation {label} requires a "
+                    "guard-produced SafeText projection, not an unguarded str"
+                )
+        session_dir = self._require_session_dir(session_id)
+        with _session_lock_guard(session_dir):
+            record = _record_from_dict(_read_json(session_dir / SESSION_JSON))
+            if record.state == STATE_QUARANTINED:
+                raise SessionQuarantinedError(
+                    f"session {session_id!r} is quarantined; observations are "
+                    "not committed",
+                )
+            if record.state != STATE_OPEN:
+                raise SessionClosedError(
+                    f"session {session_id!r} is {record.state!r}; observation "
+                    "commits require an open session",
+                )
+            moment = _ensure_aware(now or _utc_now()).isoformat()
+            updated = replace(
+                record,
+                native_last_agent_info_name=agent_info_name.text,
+                native_last_agent_info_version=agent_info_version.text,
+                native_last_advertised_capabilities=[
+                    item.text for item in advertised_capabilities
+                ],
                 updated_at=moment,
             )
             atomic_write_json(session_dir / SESSION_JSON, _record_to_dict(updated))
@@ -956,7 +1032,24 @@ _NATIVE_FIELDS = (
     "session_compatibility_epoch",
     "native_agent_id",
     "native_agent_registration_hash",
+    "native_session_epoch",
+    "native_last_agent_info_name",
+    "native_last_agent_info_version",
+    "native_last_advertised_capabilities",
 )
+
+# The retired ARS-derived identity fields, named once so the reader, the
+# refusal, and any audit all mean the same three things. A record carrying any
+# of them was created under an identity model this runtime deliberately deleted.
+LEGACY_SESSION_IDENTITY_FIELDS = (
+    "native_adapter_contract_hash",
+    "session_compatibility_epoch",
+    "native_agent_registration_hash",
+)
+
+# The stable code a legacy-identity record is refused with. It names the class
+# of record and nothing about its contents.
+LEGACY_SESSION_IDENTITY = "LEGACY_SESSION_IDENTITY"
 
 
 def _record_to_dict(record: SessionRecord) -> dict[str, Any]:
@@ -1118,37 +1211,35 @@ def validate_native_binding(
     owner: str,
     namespace: str,
     for_load: bool = False,
-    expected_contract_hash: str | None = None,
     expected_epoch: int | None = None,
     expected_agent_id: str | None = None,
-    expected_agent_registration_hash: str | None = None,
 ) -> None:
     """Fail closed unless ``record`` still matches the native Run's identity.
 
-    Hard-fails on profile (id/revision/hash), workspace-binding-hash, owner,
-    or namespace mismatch, and on a quarantined record. Model/effort
-    differences are **not** a mismatch — a new Run's frozen Spec is the
-    legitimate switching input. On the ``session/load`` path
-    (``for_load=True``) the committed external ``agent_session_id`` must be
+    Identity is exactly: ``agent_id``, profile identity (id/revision/hash),
+    owner, namespace, ``workspace_hash``, and the operator's optional
+    ``session_epoch``. Hard-fails on any mismatch and on a quarantined record.
+    Model/effort differences are **not** a mismatch — a new Run's frozen Spec is
+    the legitimate switching input. On the ``session/load`` path
+    (``for_load=True``) the committed external ``agent_session_id`` must also be
     present. ``profile`` needs ``profile_id``/``revision``/``profile_hash``
     (attribute or zero-arg callable); ``workspace_result`` needs
-    ``workspace_hash``. The legacy role-based :meth:`SessionStore.validate_binding`
-    is untouched.
+    ``workspace_hash``. The legacy role-based
+    :meth:`SessionStore.validate_binding` is untouched.
 
-    C11 adds the Binding era to that identity: the record's
-    ``adapter_contract_hash`` and ``session_compatibility_epoch`` must equal
-    the Run's exactly. Equality is symmetric on purpose — a record that has an
-    epoch is refused by a Run that has none, so a runtime that cannot enforce
-    the epoch never silently loads a Binding-era Session. An epoch is an
-    identity, not an ordering: lower and higher are both refused.
+    Epoch equality is **symmetric**, on purpose: a record that has an epoch is
+    refused by a Run that has none, and a Run that has one is refused by a
+    record that has none. An epoch is an identity, not an ordering — lower and
+    higher are both refused — and that symmetry is what makes rollback
+    fail-closed in both directions, with no shim and no alias.
 
-    Agent identity joins that era on the same terms: the record's ``agent_id``
-    and ``agent_registration_hash`` must equal the Run's exactly, and equality
-    is symmetric for the same reason — an agent-bearing record is refused by a
-    runtime that has none, so a Session created under one agent is never loaded
-    as another. Because the registration hash excludes provenance, re-recording
-    a receipt does not retire a Session while any compatibility-bearing edit
-    does.
+    Nothing here derives an epoch. It arrives from the operator's registry entry
+    or it is absent, and absent is not 1.
+
+    A record carrying any retired ARS-derived identity field is refused outright
+    with a stable code. Those Sessions remain owner-scoped
+    ``status``/``list``/``close``-readable; only binding to a Run is refused,
+    because the identity they were created under no longer exists here.
 
     Called before the lease is acquired and long before ``session/load``, and
     there is no ``session/new`` fallback on any reuse path.
@@ -1161,6 +1252,18 @@ def validate_native_binding(
     if record.session_kind != SESSION_KIND_NATIVE:
         raise SessionBindingError(
             f"session {record.session_id!r} is not a native record",
+        )
+    legacy = [
+        name
+        for name in LEGACY_SESSION_IDENTITY_FIELDS
+        if getattr(record, name, None) is not None
+    ]
+    if legacy:
+        # The field *names* are the evidence; their values never are.
+        raise SessionBindingError(
+            f"native session {record.session_id!r} refused "
+            f"[{LEGACY_SESSION_IDENTITY}]: it carries retired identity "
+            f"field(s) {', '.join(legacy)}",
         )
     mismatches: list[str] = []
     if record.native_profile_id != getattr(profile, "profile_id", None):
@@ -1175,14 +1278,10 @@ def validate_native_binding(
         mismatches.append("owner")
     if record.namespace != namespace:
         mismatches.append("namespace")
-    if record.native_adapter_contract_hash != expected_contract_hash:
-        mismatches.append("adapter_contract_hash")
-    if record.session_compatibility_epoch != expected_epoch:
-        mismatches.append("session_compatibility_epoch")
     if record.native_agent_id != expected_agent_id:
         mismatches.append("agent_id")
-    if record.native_agent_registration_hash != expected_agent_registration_hash:
-        mismatches.append("agent_registration_hash")
+    if record.native_session_epoch != expected_epoch:
+        mismatches.append("session_epoch")
     if for_load and record.agent_session_id is None:
         mismatches.append("agent_session_id_missing")
     if mismatches:

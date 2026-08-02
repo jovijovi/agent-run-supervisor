@@ -56,8 +56,9 @@ ALLOWLIST = (
     SENTINEL_NAME_B,
 )
 
-# Stage 2 guards dynamic sinks; the structured launch snapshot is Stage 3.
-TREE_SCAN_EXCLUDED = {"launch.json"}
+# Stage 3 made the launch snapshot structurally value-blind, so it is no longer
+# excluded: it is now one more file the whole-tree sentinel scan must clear.
+TREE_SCAN_EXCLUDED: set[str] = set()
 
 SRC_ROOT = Path(__file__).resolve().parents[2] / "src" / "agent_run_supervisor"
 
@@ -75,7 +76,9 @@ def _harness(
     else:
         monkeypatch.delenv(SENTINEL_NAME_B, raising=False)
     harness = Harness(tmp_path, monkeypatch, script)
-    harness.registry = ProfileRegistry((_test_profile(env_allowlist=ALLOWLIST),))
+    # The sentinel names reach the child through the profile's layer-1 base
+    # allowlist, exactly as an ordinary interactive essential would.
+    harness.registry = ProfileRegistry((_test_profile(base_allowlist=ALLOWLIST),))
     return harness
 
 
@@ -297,10 +300,14 @@ def test_effective_and_initialize_evidence_are_guarded(
     assert result.status is AgentRunStatus.COMPLETED
     effective = json.loads((harness.run_dir() / "effective.json").read_text())
     assert effective["agent_info"]["version"] == ENV_VALUE_REPLACEMENT
-    attestation = json.loads(
-        (harness.run_dir() / "initialize_attestation.json").read_text()
+    # The identity gate became recorded evidence at the reset, but the guard
+    # boundary did not move: the child-authored self-report still crosses it
+    # before it becomes durable.
+    evidence = json.loads(
+        (harness.run_dir() / "initialize_evidence.json").read_text()
     )
-    assert attestation["observed"]["agent_info_version"] == ENV_VALUE_REPLACEMENT
+    assert evidence["authoritative"] is False
+    assert evidence["observed"]["agent_info"]["version"] == ENV_VALUE_REPLACEMENT
     _assert_no_sentinel(harness.run_dir(), sentinel)
 
 

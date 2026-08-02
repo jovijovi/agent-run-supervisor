@@ -56,8 +56,9 @@ def seed_session(store, *, session_id: str, owner="hermes", namespace="hermes/do
     return storage.create_native_session(
         store,
         session_id=session_id,
-        profile_id="fake-agent-1.0",
+        profile_id="fake-agent-v1",
         profile_revision=1,
+        agent_id="fake-agent",
         profile_hash="a" * 64,
         owner=owner,
         namespace=namespace,
@@ -229,46 +230,28 @@ def test_session_lease_remains_authoritative_for_real_runtask(
     pytest.importorskip("acp")
     import sys
 
-    from agent_run_supervisor.native_acp import profile as profile_module
+    from agent_run_supervisor.native_acp.agent_registration import AgentEntry
     from agent_run_supervisor.native_acp.profile import (
-        LAUNCH_KIND_DIRECT,
-        AdapterContract,
-        AgentProfile,
+        AcpCompatProfile,
         ProfileRegistry,
-        VersionProbeRule,
     )
     from agent_run_supervisor.native_acp.run_task import RunTask
     from agent_run_supervisor.arsd.protocol import parse_submit
 
-    monkeypatch.setitem(
-        profile_module._REGISTERED_EXECUTABLES, "python-fake", Path(sys.executable)
+    profile = AcpCompatProfile(
+        profile_id="fake-agent-v1",
+        revision=1,
+        acp_protocol_version="1",
+        required_capabilities=(),
+        base_allowlist=("PATH",),
+        requires_session_load=False,
     )
-    registry = ProfileRegistry(
-        (
-            AgentProfile(
-                profile_id="fake-agent-1.0",
-                revision=1,
-                executable_key="python-fake",
-                argv_template=("agent.py",),
-                env_allowlist=("PATH",),
-                credential_slots=(),
-                model_selector_id="model",
-                effort_selector_id="effort",
-                default_model="kimi-for-coding/k3",
-                default_effort="max",
-                registered_models=("kimi-for-coding/k3",),
-                allowed_efforts=("low", "medium", "high", "max"),
-                requires_session_load=False,
-                config_schema={"selectors": {}},
-                # Wholly source-frozen: no operator Binding value is accepted.
-                contract=AdapterContract(
-                    launch_kind=LAUNCH_KIND_DIRECT,
-                    acp_agent_name="fake-acp-agent",
-                    acp_protocol_version="1",
-                    version_probe=VersionProbeRule(argv_suffix=("--version",)),
-                ),
-            ),
-        )
+    registry = ProfileRegistry((profile,))
+    entry = AgentEntry(
+        agent_id="fake-agent",
+        profile_id="fake-agent-v1",
+        command=sys.executable,
+        args=("agent.py",),
     )
     root = tmp_path / "svroot"
     workspace = tmp_path / "ws"
@@ -308,6 +291,7 @@ def test_session_lease_remains_authoritative_for_real_runtask(
             session_store=session_store,
             event_store=event_store,
             prepared_handle=handle,
+            agent_entry=entry,
             cwd=command.cwd,
             retry_of_run_id=command.retry_of_run_id,
         )
@@ -867,7 +851,7 @@ def test_authorize_run_rejects_symlinked_run_dir(tmp_path: Path) -> None:
                 "namespace": "hermes/doc-check",
                 "session_reuse": "reuse",
                 "ars_session_id": "sess-arsd-1",
-                "profile_id": "fake-agent-1.0",
+                "agent_id": "fake-agent",
                 "request_digest": digest.value,
                 "prompt_sha256": digest.prompt_sha256,
                 "prompt_bytes": digest.prompt_bytes,

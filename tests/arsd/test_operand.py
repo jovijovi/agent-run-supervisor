@@ -22,12 +22,12 @@ import pytest
 from agent_run_supervisor.arsd import operand
 
 from tests.arsd.test_service_unit import (
-    _LYING_BINDING_ROOT_KINDS,
-    _lying_binding_root,
+    _LYING_AGENTS_FILE_KINDS,
+    _lying_agents_file,
 )
 
 # Never created; only its spelling is used.
-BINDING_ROOT = "/opt/ars-runtime-binding-root-that-does-not-exist"
+AGENTS_FILE = "/etc/agent-run-supervisor/agents.toml"
 
 _EXACT_PATH_TYPE = type(Path(os.sep))
 
@@ -71,7 +71,7 @@ def test_a_pure_path_is_not_the_concrete_path_type() -> None:
         )
 
 
-@pytest.mark.parametrize("kind", _LYING_BINDING_ROOT_KINDS)
+@pytest.mark.parametrize("kind", _LYING_AGENTS_FILE_KINDS)
 def test_rejected_operands_are_never_touched(kind: str) -> None:
     """No hook runs on a refused operand: not text, repr, truth, equality, or iteration.
 
@@ -79,14 +79,14 @@ def test_rejected_operands_are_never_touched(kind: str) -> None:
     that a membership test or a subclass check would admit; the ``PathLike``
     object offers every remaining hook a gate might reach for.
     """
-    hostile, probes = _lying_binding_root(kind, "/tmp/ars-daemon-owned/sv")
+    hostile, probes = _lying_agents_file(kind, "/tmp/ars-daemon-owned/sv")
     with pytest.raises(operand.OperandError):
         operand.admit_exact_text(hostile, label="supervisor root", allow_path=True)
     assert probes == []
 
-    hostile, probes = _lying_binding_root(kind, "/tmp/ars-daemon-owned/sv")
+    hostile, probes = _lying_agents_file(kind, "/tmp/ars-daemon-owned/sv")
     with pytest.raises(operand.OperandError):
-        operand.capture_binding_root(hostile)
+        operand.capture_agents_file(hostile)
     assert probes == []
 
 
@@ -96,7 +96,7 @@ def test_rejected_operands_are_never_touched(kind: str) -> None:
 def test_an_exact_str_is_returned_without_any_read() -> None:
     """An exact ``str`` already *is* the text; re-reading it could only weaken it."""
     text = "/opt/ars-binding"
-    admitted = operand.admit_exact_text(text, label="binding root", allow_path=True)
+    admitted = operand.admit_exact_text(text, label="agents file", allow_path=True)
     assert admitted is text
 
 
@@ -112,7 +112,7 @@ def test_an_exact_path_is_read_exactly_once(monkeypatch: pytest.MonkeyPatch) -> 
         return real_str(self)
 
     monkeypatch.setattr(PurePath, "__str__", counting)
-    text = operand.admit_exact_text(target, label="binding root", allow_path=True)
+    text = operand.admit_exact_text(target, label="agents file", allow_path=True)
     monkeypatch.undo()
 
     assert reads == ["__str__"]
@@ -120,11 +120,11 @@ def test_an_exact_path_is_read_exactly_once(monkeypatch: pytest.MonkeyPatch) -> 
     assert text == "/opt/ars-binding"
 
 
-def test_capture_binding_root_reads_an_exact_path_exactly_once(
+def test_capture_agents_file_reads_an_exact_path_exactly_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The shape rules run against the frozen text, never against the operand."""
-    target = Path(BINDING_ROOT)
+    target = Path(AGENTS_FILE)
     reads: list[str] = []
     real_str = PurePath.__str__
 
@@ -134,12 +134,12 @@ def test_capture_binding_root_reads_an_exact_path_exactly_once(
         return real_str(self)
 
     monkeypatch.setattr(PurePath, "__str__", counting)
-    text = operand.capture_binding_root(target)
+    text = operand.capture_agents_file(target)
     monkeypatch.undo()
 
     assert reads == ["__str__"]
     assert type(text) is str
-    assert text == BINDING_ROOT
+    assert text == AGENTS_FILE
 
 
 def test_a_non_exact_read_result_is_refused_not_coerced() -> None:
@@ -166,8 +166,8 @@ def test_a_non_exact_read_result_is_refused_not_coerced() -> None:
 
     assert type(node) is operand.EXACT_PATH_TYPE
     with pytest.raises(operand.OperandError) as err:
-        operand.admit_exact_text(node, label="binding root", allow_path=True)
-    assert str(err.value) == "binding root did not read back as a plain str"
+        operand.admit_exact_text(node, label="agents file", allow_path=True)
+    assert str(err.value) == "agents file did not read back as a plain str"
 
 
 # --- the shape rules live in the capture, not in the admission --------------
@@ -176,7 +176,7 @@ def test_a_non_exact_read_result_is_refused_not_coerced() -> None:
 def test_admit_exact_text_applies_no_shape_rules() -> None:
     """Blank and control-bearing text are admissible *as text*.
 
-    Keeping non-empty/control-free/absolute in ``capture_binding_root`` alone is
+    Keeping non-empty/control-free/absolute in ``capture_agents_file`` alone is
     what keeps an empty ``supervisor_root`` reporting ``"absolute"`` at the
     daemon rather than acquiring a new message here.
     """
@@ -192,43 +192,43 @@ def test_admit_exact_text_applies_no_shape_rules() -> None:
 @pytest.mark.parametrize(
     ("value", "message"),
     [
-        ("", "binding root must be a non-empty absolute path"),
-        ("   ", "binding root must be a non-empty absolute path"),
-        ("/opt/b\nExecStartPre=/bin/evil", "binding root contains control characters"),
-        ("/opt/b\x7f", "binding root contains control characters"),
-        ("relative/b", "binding root must be an absolute path"),
-        ("~/b", "binding root must be an absolute path"),
+        ("", "agents file must be a non-empty absolute path"),
+        ("   ", "agents file must be a non-empty absolute path"),
+        ("/opt/b\nExecStartPre=/bin/evil", "agents file contains control characters"),
+        ("/opt/b\x7f", "agents file contains control characters"),
+        ("relative/b", "agents file must be an absolute path"),
+        ("~/b", "agents file must be an absolute path"),
     ],
 )
-def test_capture_binding_root_shape_messages_are_fixed(
+def test_capture_agents_file_shape_messages_are_fixed(
     value: str, message: str
 ) -> None:
     """Byte-identical to the texts this boundary has always reported."""
     with pytest.raises(operand.OperandError) as err:
-        operand.capture_binding_root(value)
+        operand.capture_agents_file(value)
     assert str(err.value) == message
 
 
 def test_refusal_texts_quote_no_spelling_of_the_operand() -> None:
     """Reporting the operand would print back text its own code chose."""
     secret = "/opt/ars-operator-secret-layout"
-    hostile, _probes = _lying_binding_root("pathlike_object", secret)
+    hostile, _probes = _lying_agents_file("pathlike_object", secret)
     with pytest.raises(operand.OperandError) as err:
-        operand.capture_binding_root(hostile)
+        operand.capture_agents_file(hostile)
     problem = str(err.value)
-    assert problem == "binding root must be a plain str or Path"
+    assert problem == "agents file must be a plain str or Path"
     assert secret not in problem
-    assert BINDING_ROOT not in problem
+    assert AGENTS_FILE not in problem
 
 
-def test_capture_binding_root_accepts_and_freezes_operator_spelling() -> None:
+def test_capture_agents_file_accepts_and_freezes_operator_spelling() -> None:
     """Frozen exact ``str``, and the operator's spelling survives unrewritten."""
     for text in ("/opt/x/", "/srv//x", "/opt/ars-binding"):
-        captured = operand.capture_binding_root(text)
+        captured = operand.capture_agents_file(text)
         assert type(captured) is str
         assert captured == text
     # A concrete path operand still yields plain text, not another path.
-    captured = operand.capture_binding_root(Path(BINDING_ROOT))
+    captured = operand.capture_agents_file(Path(AGENTS_FILE))
     assert type(captured) is str
 
 

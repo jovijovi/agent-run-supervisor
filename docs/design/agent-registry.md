@@ -2,7 +2,7 @@
 title: "ARS agent registry — the operator contract"
 status: active
 created_at: 2026-07-30
-last_validated_at: 2026-07-30
+last_validated_at: 2026-08-01
 ---
 # ARS agent registry — the operator contract
 
@@ -10,11 +10,12 @@ This is the one document an operator needs in order to tell ARS which commands a
 normative contract for the registry file, its grammar and bounds, its refusal rules, the environment it
 projects into a child, and the restart semantics that follow from reading it exactly once.
 
-**Status.** This is the settled target of the V4 boundary reset. It is **not implemented in source yet**:
-`main` still runs the retired artifact/Binding line. The board
-([`docs/roadmap/current-status.md`](../roadmap/current-status.md)) carries the authority-versus-source delta.
-Nothing here authorizes writing a registry file against a live deployment, restarting a service, or cutting
-any caller over.
+**Status.** This is the settled target of the V4 boundary reset, and it is **implemented in source on
+branch `feat/v4-boundary-reset`** — not merged, not released. `main` and every released artifact still
+run the retired artifact/Binding line. The board
+([`docs/roadmap/current-status.md`](../roadmap/current-status.md)) carries the exact position. Nothing
+here authorizes writing a registry file against a live deployment, restarting a service, or cutting any
+caller over; each of those remains a separate operator decision.
 
 Every example below uses **placeholders**. A placeholder is never a supported version, a registered value
 domain, or an acceptance target.
@@ -130,7 +131,7 @@ Strict parse, all fail-closed, each refusal naming a stable rule.
 | `agent_id` (table key) | matches `[a-z0-9][a-z0-9._-]{0,63}` |
 | `profile` | names a source-registered profile |
 | `command` | non-empty, ≤ 4096 bytes, no NUL; either absolute, or a single basename with **no path separator** |
-| `args` | ≤ 32 tokens, each ≤ 1024 bytes, no NUL; **passed as an argv list, never through a shell** |
+| `args` | ≤ 32 tokens, each ≤ 1024 bytes, no NUL; **passed as an argv list, never through a shell**, so an empty token `""` is a valid token and is passed through unchanged |
 | `mediation` | names a source-registered mediation id |
 | `env_passthrough` | ≤ 32 names, each matching `[A-Za-z_][A-Za-z0-9_]*` |
 | `env_overlay` | ≤ 32 pairs; values ≤ 4096 printable bytes |
@@ -145,6 +146,10 @@ a Run.
 
 - `argv[0]` is the **declared `command` string, byte-for-byte**. A bare name stays a bare name, exactly as a
   shell would pass it.
+- Every declared token reaches `exec` unchanged, including an **empty** one. `args = ["--label", "", "--end"]`
+  is three tokens, not two: nothing coalesces, drops, or rewrites a token, because doing so would hand the
+  child a different command than the one declared. `command` itself is separate and stays non-empty — it is
+  the image to locate, not a token to pass.
 - The exec image is located by ordinary `execvp`-style lookup over the **child's** projected `PATH` for a bare
   name, and by the declared absolute path otherwise. There is no `executable=` override, no descriptor-based
   image, and no realpath.
@@ -162,10 +167,15 @@ a Run.
 
 | Class | Codes |
 |---|---|
-| unavailable / unreadable / unsafe mode | `REGISTRY_ABSENT`, `REGISTRY_UNSAFE_MODE`, `REGISTRY_NOT_REGULAR_FILE` |
+| unavailable / unreadable / unsafe mode | `REGISTRY_ABSENT`, `REGISTRY_UNREADABLE`, `REGISTRY_UNSAFE_MODE`, `REGISTRY_NOT_REGULAR_FILE` |
 | malformed | `REGISTRY_PARSE`, `REGISTRY_UNKNOWN_KEY`, `REGISTRY_SCHEMA_VERSION`, `REGISTRY_TOO_LARGE` |
-| entry defects | `ENTRY_UNKNOWN_PROFILE`, `ENTRY_COMMAND_INVALID`, `ENTRY_ARG_TOKEN_INVALID`, `ENTRY_ENV_KEY_INVALID`, `ENTRY_UNKNOWN_MEDIATION_ID`, `ENTRY_SESSION_EPOCH_INVALID` |
+| entry defects | `AGENT_ID_INVALID`, `ENTRY_FIELD_MISSING`, `ENTRY_UNKNOWN_PROFILE`, `ENTRY_COMMAND_INVALID`, `ENTRY_ARG_TOKEN_INVALID`, `ENTRY_ENV_KEY_INVALID`, `ENTRY_ENV_VALUE_INVALID`, `ENTRY_SELECTOR_INVALID`, `ENTRY_CAPABILITY_INVALID`, `ENTRY_UNKNOWN_MEDIATION_ID`, `ENTRY_SESSION_EPOCH_INVALID` |
 | mediation authority | `MEDIATION_KEY_COLLISION` |
+
+`AGENT_ID_INVALID` is deliberately the same rule at both layers: the table key is judged by exactly the
+grammar that judges a caller's `agent_id` at admission (§6.2), so the two can never drift. An overlay
+*value* that breaks its bounds is `ENTRY_ENV_VALUE_INVALID` rather than `ENTRY_ENV_KEY_INVALID` — the
+distinction matters because the refusal names the environment **name** and never the value.
 
 The **whole file** is refused. It is never partially honored, never cached from a previous start, and never
 repaired. Refusals name the failing rule and, where operator-facing, a field path or an environment **name** —
@@ -295,6 +305,13 @@ be emitted as a policy-warning event — never a refusal. A self-report is not a
 a substituted agent can report any name it likes, and an operator-declared expected name would refuse Runs
 for cosmetic vendor renames.
 
+Recording drift across Runs means one observation outlives its Run, in the Session record. That is the one
+observation sink whose lifetime exceeds the guard's, and the self-report and the advertised capability
+*names* are child-chosen strings no contract check inspects — so what is stored is the **guard-produced**
+projection, not the raw text. An agent that echoes a projected environment value back through `agentInfo`
+or a capability key cannot seed that value into `session.json`, and drift is still detected: the guard
+replaces a matched literal with a fixed token, so two Runs reporting the same thing still compare equal.
+
 **The complete set of observation-based refusals** is: protocol major mismatch, a required capability absent,
 a forbidden capability present, an inexact or coerced configuration readback, and — on a compatibility profile
 — a required permission mode not proven by readback. Those are checks against a declared contract inside one
@@ -338,15 +355,15 @@ and a source class.
 
 ```bash
 agent-run-supervisor agents validate --agents-file <path>
-agent-run-supervisor agents doctor   --agents-file <path> [--agent <agent-id>]
+agent-run-supervisor agents doctor   --agents-file <path> [--agent <agent-id>] [--no-probe]
 agent-run-supervisor run inspect     --run-dir <native-run-dir>
 ```
 
 | Command | What it does | Side effects |
 |---|---|---|
 | `agents validate` | parses the file, checks shape and bounds, and applies the **identical** mediation-collision check the daemon applies at startup | none. It prints only entry ids, counts, environment **names**, source classes, and rule outcomes — never a normalized overlay or mediation value |
-| `agents doctor` | zero-prompt ACP `initialize` per named agent, plus the projected environment **name** report and an optional version probe | **starts an external child**, which writes its own AGENT-owned state. "Read-only" refers to ARS and operator state, and never claims otherwise about the child |
-| `run inspect` | per-Run evidence. For a reset-schema record it recomputes the value-blind launch hash and reports guarded, allowlisted evidence | none. For a pre-reset record it classifies the schema first, withholds environment fields, raw documents, seal material, and free-form text, and never recomputes a hash over value-bearing material |
+| `agents doctor` | the projected environment **name** report and the declared launch per named agent, plus a zero-prompt ACP `initialize`. `--no-probe` reports the projection only and starts nothing | without `--no-probe` it **starts an external child**, which writes its own AGENT-owned state. "Read-only" refers to ARS and operator state, and never claims otherwise about the child. The child is reaped on every path: close, `SIGTERM` to the group, a bounded wait, then `SIGKILL` and a final bounded wait. A group that survives all of that is reported as a failed probe rather than left behind quietly |
+| `run inspect` | per-Run evidence. For a reset-schema record it recomputes the value-blind launch hash and reports guarded, allowlisted evidence | none. For a pre-reset record it classifies the schema first and withholds **every** field the record itself supplied — environment fields, raw documents, seal material, free-form text, and the profile identity, which looks structural but is untrusted bytes in a document ARS did not write. It never recomputes a hash over value-bearing material |
 
 There is **no** `promote`, `rollback`, or `--force`, no command that installs an artifact, edits a service
 unit, restarts the daemon, escalates privilege, or contacts a provider.

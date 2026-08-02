@@ -49,8 +49,9 @@ RECONCILE_MODULE = (
 )
 
 NATIVE_SESSION_KWARGS = dict(
-    profile_id="fake-agent-1.0",
+    profile_id="fake-agent-v1",
     profile_revision=1,
+    agent_id="fake-agent",
     profile_hash="a" * 64,
     owner="hermes",
     namespace="hermes/doc-check",
@@ -82,7 +83,7 @@ def valid_wire_request(**overrides) -> dict:
     request = {
         "owner": "hermes",
         "namespace": "hermes/doc-check",
-        "profile_id": "fake-agent-1.0",
+        "agent_id": "fake-agent",
         "session_reuse": "reuse",
         "ars_session_id": "sess-reuse-1",
         "expected_binding_hash": None,
@@ -206,7 +207,7 @@ def _seed_submission(
         "namespace": "hermes/doc-check",
         "session_reuse": session_reuse,
         "ars_session_id": ars_session_id,
-        "profile_id": "fake-agent-1.0",
+        "agent_id": "fake-agent",
         "request_digest": digest.value,
         "prompt_sha256": digest.prompt_sha256,
         "prompt_bytes": digest.prompt_bytes,
@@ -1947,7 +1948,7 @@ def test_row8_launch_whose_hash_disagrees_with_its_spec_is_corrupt(
     rf.write_document(
         run_dir / "launch.json",
         state="valid",
-        payload=rf.launch_payload(executable="/usr/bin/false"),
+        payload=rf.launch_payload(command="/usr/bin/false"),
     )
     rf.build_session(sessions, state="matching_open", session_id="sess-row8h")
 
@@ -2222,13 +2223,13 @@ def test_launch_unknown_field_is_corrupt(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "mutate",
     [
-        lambda p: p.pop("profile_id"),
+        lambda p: p.pop("agent_id"),
         lambda p: p.__setitem__("unknown_field", "planted"),
-        lambda p: p.__setitem__("profile_id", ""),
+        lambda p: p.__setitem__("agent_id", ""),
         lambda p: p["peer"].__setitem__("extra", 1),
         lambda p: p["peer"].pop("gid"),
     ],
-    ids=["missing_profile_id", "unknown_field", "empty_profile_id", "peer_extra", "peer_missing"],
+    ids=["missing_agent_id", "unknown_field", "empty_agent_id", "peer_extra", "peer_missing"],
 )
 def test_submission_shape_drift_is_corrupt_and_unattributable(
     tmp_path: Path, mutate
@@ -2459,7 +2460,7 @@ def test_no_replay_call_trace_over_every_converging_row(
     is replaced by a tripwire, and a root exercising each converging row is
     reconciled end to end.
     """
-    from agent_run_supervisor.native_acp import runtime_binding
+    from agent_run_supervisor.native_acp import agent_registry
     from agent_run_supervisor.native_acp.driver import NativeAcpDriver
     from agent_run_supervisor.session import SessionStore
 
@@ -2525,8 +2526,8 @@ def test_no_replay_call_trace_over_every_converging_row(
         (SessionStore, "mark_closed"),
         (storage, "create_native_session"),
         (storage, "bind_agent_session"),
-        (runtime_binding, "BindingReader"),
-        (admission, "resolve_runtime_binding"),
+        (agent_registry, "load_agents_file"),
+        (admission, "resolve_agent_entry"),
         (NativeAcpDriver, "open"),
         (NativeAcpDriver, "initialize"),
         (NativeAcpDriver, "new_session"),
@@ -2586,13 +2587,16 @@ def test_no_replay_leaves_every_seeded_lock_byte_identical(tmp_path: Path) -> No
     assert (session_dir / LOCK_JSON).read_bytes() == lock_bytes
 
 
-# Never created and never queried: the daemon only needs a configured operand
-# whose component chain cannot intersect the supervisor root or the socket.
-UNQUERIED_BINDING_ROOT = "/opt/ars-runtime-binding-root-that-does-not-exist"
-
-
 def _daemon_kwargs(tmp_path: Path, root: Path, *, stop: asyncio.Event | None = None):
-    binding_root = UNQUERIED_BINDING_ROOT
+    # A real, minimal agents file: the registry is parsed once at startup,
+    # before reconciliation, so it has to exist. It lives in its own
+    # directory so it cannot contain, or be contained by, a daemon-owned
+    # surface.
+    from tests.native_acp import registry_fixtures as rfx
+
+    conf = tmp_path / "conf"
+    conf.mkdir(exist_ok=True)
+    agents_file = rfx.write_registry(conf)
     socket_dir = tmp_path / "run"
     socket_dir.mkdir(exist_ok=True)
     principal = server.Principal(
@@ -2603,7 +2607,7 @@ def _daemon_kwargs(tmp_path: Path, root: Path, *, stop: asyncio.Event | None = N
         "socket_path": socket_dir / "arsd.sock",
         "supervisor_root": root,
         "policy": server.CallerPolicy({os.getuid(): principal}),
-        "binding_root": binding_root,
+        "agents_file": str(agents_file),
         "run_task_factory": SpyFactory(),
         "install_signals": False,
         "stop_event": stop,
@@ -3068,7 +3072,7 @@ def _submission_payload(**overrides) -> dict[str, Any]:
         "namespace": "hermes/doc-check",
         "session_reuse": "reuse",
         "ars_session_id": "sess-reuse-1",
-        "profile_id": "fake-agent-1.0",
+        "agent_id": "fake-agent",
         "request_digest": "sha256:" + "a" * 64,
         "prompt_sha256": "b" * 64,
         "prompt_bytes": 17,
