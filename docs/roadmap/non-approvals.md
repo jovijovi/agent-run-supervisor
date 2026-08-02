@@ -2,16 +2,16 @@
 title: "ARS vNext Current Explicit Non-Approvals"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-01
+last_validated_at: 2026-08-02
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/non-approvals.md"
 ---
 # ARS vNext Current Explicit Non-Approvals
 
-Stage 0/1 and Stage 2 A1–A5 are implemented on `main`, operator-held local socket-path acceptance passed,
-and the tracked authority chain has moved to the V4 external-AGENT boundary reset. None of that approves
-further work: authority alignment plus local acceptance is not source implementation, not publication, not
-deployment approval, not Sachima integration, not public ingress, and not a reusable or transitive approval
-for the next change. This document does not approve:
+Stage 0/1, Stage 2 A1–A5, and the V4 external-AGENT boundary reset are merged on `main`, operator-held
+local socket-path acceptance passed, and package metadata is prepared as `0.6.0`. None of that approves
+further work: merged source plus a prepared version number is not publication, not deployment approval, not
+Sachima integration, not public ingress, and not a reusable or transitive approval for the next change.
+This document does not approve:
 
 - any source expansion or repair beyond the currently authorized task scope, including source,
   test, script, dependency, lockfile, `pyproject.toml`, or CI/workflow changes;
@@ -24,8 +24,11 @@ for the next change. This document does not approve:
   changes beyond the already-enabled local user service;
 - follow-on source work and Git/GitHub side effects, including commits, pushes, PR creation,
   merge, or other GitHub mutation, without separate operator authorization;
-- version bump, release metadata, release tag, GitHub Release, PyPI publication, or CHANGELOG
-  release-section work;
+- any release **act**: a release tag, a GitHub Release, or a PyPI publication. The local `0.6.0` version
+  metadata and CHANGELOG preparation in this repository **is** authorized and is already done; that
+  authorization covers exactly the version literals, the lockfile version, and the CHANGELOG section, and
+  it approves no tag, publication, deployment, restart, or cutover. Any *further* version bump or release
+  metadata change is again unapproved;
 - Sachima `ArsdBackend`/UDS integration, supervisor pin changes, Gateway/IM/Feishu behavior, delivery, automatic replies, or live/default-on wiring;
 - public ingress, TCP/root service, distributed scheduling, multi-tenant control plane, participant UI, `@all`, or agent-to-agent auto-routing;
 - arbitrary executable/command/argv/env/JSON/config/credential passthrough **from the wire**;
@@ -37,10 +40,9 @@ for the next change. This document does not approve:
 
 ## The V4 boundary reset adds no approval
 
-The reset's Stage 3 source now exists on branch `feat/v4-boundary-reset`, and that changes nothing here:
-local source is not a merge, a release, a deployment, or an enablement, and the tracked authority
-describing a capability is never evidence that the capability is reachable in production. This document
-specifically does not approve:
+The reset is merged on `main`, and that changes nothing here: a merge is not a release, a deployment, or an
+enablement, and source implementing a capability is never evidence that the capability is reachable in
+production. This document specifically does not approve:
 
 - **artifact installation or hosting** of any kind — no ARS-owned artifact prefix, package closure, tree
   digest, frozen interpreter identity, materialization, or relocation, and no re-owning of a path;
@@ -95,21 +97,17 @@ a value-blind production projection at all, which is what selects the digest pat
   chain that replaced it.
 - **Decided (2026-08-01): deleting the three registered per-agent profiles from source.** Introducing a
   retirement capability and using one were always two separate decisions; this is the second, taken in
-  writing, and it is narrow. It authorized exactly one source act, executed locally on branch
-  `feat/v4-boundary-reset`: the source registry now holds exactly `standard-native-acp-v1` and
-  `claude-agent-acp-compat-v1`. V4 retires profiles by **deleting** them — no alias, redirect, disable
-  flag, field defaulting to `False`, unused rule constant, or marker was added, and a test asserts that no
-  such mechanism exists. It authorized nothing else, and it is neither merged nor released.
-- **Decided (2026-07-30, after the authority alignment merged): local source implementation of V4 Stages
-  1–3.** It authorizes local source, test, and status work on task branches, taken serially at the stage
-  gates — and stops there: the Stage 3 candidate stays in its worktree, uncommitted. It authorizes nothing
-  else: **commit, push, PR creation, merge, release,
-  deployment, service restart, migration/cutover, the real-agent canary, and production changes all remain
-  separately unapproved.** Recording Decision 1, activating a plan, merging the authority alignment, and
-  the narrow source-retirement approval above still do not imply any of those, and a green local
-  verification transfers approval to none of them.
+  writing, and it is narrow. It authorized exactly one source act, now merged: the source registry holds
+  exactly `standard-native-acp-v1` and `claude-agent-acp-compat-v1`. V4 retires profiles by **deleting**
+  them — no alias, redirect, disable flag, field defaulting to `False`, unused rule constant, or marker was
+  added, and a test asserts that no such mechanism exists. It authorized nothing else.
+- **Decided (2026-07-30, after the authority alignment merged): source implementation of V4 Stages 1–3.**
+  Those stages are merged under their own serial gates, and that exhausts the approval. It authorized
+  nothing else: **release, publication, deployment, service restart, migration/cutover, the real-agent
+  canary, and production changes all remain separately unapproved**, and a green verification transfers
+  approval to none of them.
 - **Not approved: production cutover** (Decision 2, including the one-time legacy-Session load refusal) or
-  any decision about the **legacy `v0.5.x` line lifetime** (Decision 3). Both remain open.
+  any decision about the **legacy `0.5.x` line lifetime** (Decision 3). Both remain open.
 - **Not approved: touching the retired deployment.** The `/opt` artifact trees, the Binding roots, their
   promoted generations, and every historical Run and Session byte are untouched migration source. The reset
   stops referencing them; it deletes, migrates, re-hashes, and rewrites nothing, and their removal is a
@@ -117,9 +115,9 @@ a value-blind production projection at all, which is what selects the digest pat
 - **Not approved: a per-agent canary shortcut.** The mandatory denied-action mediation canary stays required
   per registered agent before that agent's use, and a registry entry's existence is not evidence that it ran.
 
-The standing rule is unchanged and this reset depends on it: **an active plan is not approval to land
-source, to publish, to deploy, or to run a real provider.** Activating a plan records only that it is the
-board-linked planning artifact.
+The standing rule is unchanged: **an active plan is not approval to land source, to publish, to deploy, or
+to run a real provider.** Activating a plan records only that it is the board-linked planning artifact. No
+plan is active right now, and an archived plan authorizes strictly less than an active one — nothing.
 
 The legacy v0.1.7 acpx path holds no product, runtime, or compatibility authority, and while its code exists
 it may receive separately approved compatibility/security maintenance. Such maintenance does not reopen its

@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext PRD"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-01
+last_validated_at: 2026-08-02
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/prd.md"
 ---
 # agent-run-supervisor vNext PRD
@@ -391,8 +391,15 @@ security refusal.
 name, repointed shim, reinstalled symlink target, new version at the same absolute path — needs no restart
 and no ARS action at all, and an existing Session still reuses through a real `session/load`. A *registry
 edit* needs a daemon restart, which means draining in-flight Runs first. That restart is a service action,
-not a promotion: no measurement, no manifest, no acceptance receipt, no re-canary, and no Session
-invalidation, because no Session identity field derives from registry bytes.
+not a promotion: no measurement, no manifest, no acceptance receipt, and no re-canary.
+
+**A restart is not a continuity cut, and an identity change is.** No Session identity field derives from
+registry bytes, mtimes, digests, command paths, or observed runtime facts, so an *identity-preserving*
+edit — `command`, `args`, environment declarations, `mediation`, selector hints, capability narrowing —
+invalidates no Session and the next Run reuses normally. Reuse stops only when the operator changes a
+semantic identity choice: adding or changing `session_epoch`, which is exactly R4's escape hatch, or
+targeting a different `agent_id` or a different `profile`, each of which is simply a different Session
+identity under the symmetric equality of R4.
 
 ### R14 — Observed evidence, explicitly non-authoritative
 
@@ -494,8 +501,10 @@ flow. No sandboxing or unrelated hostile-code hardening is introduced.
 
 ## 4. Acceptance and staged delivery
 
-Documentation authority precedes source. The reset lands as one documentation gate followed by three
-source gates, each with its own approval; passing one never implies the next.
+Documentation authority precedes source. The reset landed as one documentation gate followed by three
+source gates, each under its own approval; passing one never implied the next. All four are merged on
+`main`; the sequence is recorded below because it is the contract each stage was accepted against, not
+because work remains.
 
 ### Stage 0 — Authority alignment (documentation only)
 
@@ -541,20 +550,18 @@ section records only the coarse position.
   reference is retained.
 - vNext Stage 0/1 (Native ACP core) and Stage 2 (`arsd` UDS ingress, ownership, reconciliation,
   service/cgroup containment) are implemented on `main` with their acceptance closed.
-- **Authority and released source differ deliberately.** This PRD states the V4 target. Source on `main`
-  still implements the retired artifact/Binding architecture: four registered profiles, a Binding reader, a
-  required Binding-root daemon flag, artifact digests, promotion, and attestation. The retired authority is
-  preserved at `docs/archive/binding-era-2026-07/`; the board carries the exact authority-versus-source
-  delta and the Stage 1→3 sequence that closes it.
-- R14 and R15 have source now, and it is **branch-local**. Stage 1 (fail-closed reuse, total
-  reconciliation) and the dynamic half of the environment-value guard are merged on `main`; the rest —
-  the registry reader, the value-blind launch snapshot, observed-evidence demotion, and `api_version` 2 —
-  is implemented and tested on the Stage 3 task branch and is **uncommitted, unmerged, unreleased, and
-  undeployed**. R13's registry file is therefore read by no released code, and authoring one against a
-  live deployment changes nothing and is not approved.
-- Release/publication is not done: the published wheel predates the reset. Production cutover with its
-  one-time legacy-Session load refusal, and the lifetime of the legacy `v0.5.x` line, are open human
-  decisions. Implementation status is never an approval for the next stage.
+- **Authority and source are aligned on `main`.** Every requirement above, R13–R15 included, has merged
+  source: the agent registry read once at startup, the four-way boundary, value-blind sealed launch
+  material with once-only environment resolution, observed-evidence demotion, `api_version` 2 with the
+  eight-operation drain matrix, `--agents-file`, and the validate/doctor/inspect operator surface. The
+  retired artifact/Binding implementation and the three per-agent profiles are deleted from source; the
+  retired authority is preserved at `docs/archive/binding-era-2026-07/`.
+- **Merged is not published and not deployed.** Package metadata is prepared as `0.6.0`, which is not a
+  tag, a GitHub Release, a PyPI upload, a deployment, or an activation. The released `0.5.x` line still
+  implements the artifact/Binding architecture and reads no agents file, so authoring a registry file
+  against a live deployment changes nothing there and is not approved.
+- Production cutover with its one-time legacy-Session load refusal, and the lifetime of the legacy `0.5.x`
+  line, are open human decisions. Implementation status is never an approval for the next stage.
 
 ## 6. Non-goals
 

@@ -7,6 +7,113 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-02
+
+> **Release preparation.** This section describes the source line prepared as
+> `0.6.0`. It is not tagged, not published to PyPI, not deployed, and not running
+> anywhere. Tagging, publication, deployment, service restart, and cutover each
+> remain separate decisions.
+
+`0.6.0` is a **breaking** change for operators and callers. The V4 external-AGENT
+boundary reset replaces the artifact/Binding architecture of the `0.5.x` line.
+There is no in-place upgrade, no dual-read shim, and no silent fallback in either
+direction, so plan one migration window per deployment.
+
+### Changed (breaking)
+
+- **One operator-owned agent registry replaces Runtime Binding and per-agent launch
+  profiles.** Which command is which AGENT is now a single TOML file you own, read
+  exactly once at daemon startup into an immutable in-memory snapshot. The
+  practical win: an AGENT upgrade behind an unchanged registered command now costs
+  nothing at all — no restart, no re-acceptance, and existing Sessions still reuse.
+  Any registry edit costs exactly one daemon restart. An identity-preserving one
+  (`command`, `args`, environment declarations, `mediation`, selectors, capability
+  narrowing) invalidates no Session, because identity is never a fingerprint of
+  registry bytes. Adding or changing `session_epoch`, or targeting a different
+  `agent_id` or `profile`, is a different Session identity and cuts reuse — which
+  is the deliberate operator escape hatch, not a side effect of restarting.
+- **Daemon and unit input moves from `--binding-root` to `--agents-file`.** Both
+  daemon mode and `--print-service-unit` require it, so a rendered unit can never
+  silently omit the registry. An older unit file fails closed instead of appearing
+  to keep working.
+- **The operator surface moves to `agents validate`, `agents doctor`, and
+  `run inspect`.** The `runtime-binding` command group is gone; there is no
+  `promote`, no `rollback`, and no `--force`.
+- **The upstream `arsd` wire is API v2.** `submit` is refused at `api_version: 1`,
+  because its payload dropped `profile_id` and now requires `agent_id`. The other
+  seven operations stay accepted at v1 during the drain window — including
+  `server_info`, which is how an older caller discovers *that* it must upgrade — so
+  in-flight Runs stay readable and cancellable (`run_status`, `run_events`,
+  `run_cancel`) and their Sessions stay readable and closable (`session_status`,
+  `session_list`, `session_close`). This is the ARS-owned upstream API version;
+  the downstream ACP protocol ARS speaks to agents is unchanged at v1.
+- **Legacy Sessions do not load across the boundary.** A Session created by the
+  `0.5.x` line carries retired ARS-derived identity hashes and is refused for
+  `session/load` with a stable code, while staying owner-scoped
+  `status`/`list`/`close`-readable. A reuse request never becomes `session/new`
+  under any error class. Continuing that work means a new Session with
+  caller-owned context handoff — a deliberate, one-time continuity loss.
+- **Environment values are no longer written into ARS-owned artifacts, logs,
+  events, or API projections.** Durable evidence records a name, its source class,
+  its precedence layer, and its redaction status, and nothing else — no value, and
+  no digest, length, or fingerprint computed from one. The visible cost: short,
+  common values such as `TERM`, `LANG`, `TZ`, `USER`, `HOME`, and `PATH` elements
+  are in the per-run guard's literal set, so run text echoing them is replaced or
+  withheld, with coarse suppression counters instead of the original text.
+
+### Removed
+
+- Runtime Binding roots, promoted generations, artifact digests, package closures,
+  and spawn-boundary attestation. ARS makes no artifact-integrity or supply-chain
+  claim, and performs no ownership, mode, ancestor, symlink, or digest check on the
+  registered command.
+- The three per-agent compatibility profiles, deleted rather than aliased or
+  disabled. Two source profiles remain: `standard-native-acp-v1` for every agent,
+  and `claude-agent-acp-compat-v1` for one evidenced ACP-level deviation.
+- Existing Binding roots, `/opt` artifact trees, and every historical Run and
+  Session byte on disk are **not** touched: nothing is deleted, migrated, or
+  re-hashed. Removing them is your separate decision.
+
+### Changed
+
+- Session reuse is fail-closed. An absent or corrupt Session record, a missing
+  stored external ID, or a changed binding fails *before* the lease, and a
+  conflicting identity-bearing callback is rejected at entry before any handler,
+  event, filesystem access, or permission decision.
+- Startup reconciliation is total and ordered, with absent distinguished from
+  corrupt. It is stricter than the reader it replaces: a corrupt terminal record,
+  unattributable uncertainty, or a launch record without its spec now refuses to
+  listen rather than guessing.
+- The registered command is launched exactly as declared. `argv[0]` is the declared
+  string byte-for-byte, a bare name is located by ordinary PATH lookup over the
+  child's projected `PATH`, and there is no pre-flight resolution gate — so shims,
+  symlink farms, package-relative resolution, and agent self-update keep working.
+  A failed exec reports `COMMAND_NOT_FOUND`, `COMMAND_NOT_EXECUTABLE`, or
+  `SPAWN_FAILED` as an ordinary configuration error.
+- Observed runtime facts — the PATH hit, the image the kernel mapped, `agentInfo`,
+  advertised capabilities, an optional operator probe — are recorded as explicitly
+  non-authoritative evidence and may raise a policy-warning event, but never gate
+  admission or block continuity.
+- Model and effort domains come from live discovery and exact readback, so an agent
+  adding a model is a non-event for ARS.
+- A workspace is no longer refused for containing an AGENT's own project
+  configuration file. That file is AGENT-owned.
+
+### Migration
+
+1. Author your agents file, then `agent-run-supervisor agents validate --agents-file <path>`.
+2. `agent-run-supervisor agents doctor --agents-file <path> --agent <agent-id>` per
+   agent, then run that agent's mandatory denied-action mediation canary.
+3. Re-render the service unit with `--agents-file`, then restart `arsd`.
+4. Move callers to `api_version` 2 and from `profile_id` to `agent_id`.
+5. Expect every live Session to end once, and hand context over from the caller side.
+
+### Notes
+
+- Runtime stays Python standard library only. The `native` extra still pins
+  `agent-client-protocol==0.11.1` for driving a real agent.
+- Full operator contract: `docs/design/agent-registry.md`.
+
 ## [0.5.3] - 2026-07-30
 
 ### Added

@@ -2,7 +2,7 @@
 title: "ARS agent registry — the operator contract"
 status: active
 created_at: 2026-07-30
-last_validated_at: 2026-08-01
+last_validated_at: 2026-08-02
 ---
 # ARS agent registry — the operator contract
 
@@ -10,12 +10,12 @@ This is the one document an operator needs in order to tell ARS which commands a
 normative contract for the registry file, its grammar and bounds, its refusal rules, the environment it
 projects into a child, and the restart semantics that follow from reading it exactly once.
 
-**Status.** This is the settled target of the V4 boundary reset, and it is **implemented in source on
-branch `feat/v4-boundary-reset`** — not merged, not released. `main` and every released artifact still
-run the retired artifact/Binding line. The board
-([`docs/roadmap/current-status.md`](../roadmap/current-status.md)) carries the exact position. Nothing
-here authorizes writing a registry file against a live deployment, restarting a service, or cutting any
-caller over; each of those remains a separate operator decision.
+**Status.** This contract is **merged on `main`** as part of the V4 boundary reset, and package metadata is
+prepared as `0.6.0`. It is **not published and not deployed**: the released `0.5.x` line still runs the
+retired artifact/Binding architecture and reads no agents file. The board
+([`docs/roadmap/current-status.md`](../roadmap/current-status.md)) carries the exact position. Nothing here
+authorizes writing a registry file against a live deployment, restarting a service, or cutting any caller
+over; each of those remains a separate operator decision.
 
 Every example below uses **placeholders**. A placeholder is never a supported version, a registered value
 domain, or an acceptance target.
@@ -330,7 +330,8 @@ effect at the **next daemon start**, not the next Run.
 | Change | Cost |
 |---|---|
 | **Agent upgrade behind an unchanged registered command** — same PATH name, repointed shim, reinstalled symlink target, new version at the same absolute path | **nothing.** No restart, no ARS action, no re-acceptance. An existing Session still reuses through a real `session/load`. This is the case the reset exists to fix, and it is the common one |
-| **Registry edit** | one daemon restart, which means draining in-flight Runs first. The restart is a service action, **not a promotion**: no measurement, no manifest, no acceptance receipt, no re-canary, and **no Session invalidation**, because no Session identity field derives from registry bytes |
+| **Identity-preserving registry edit** — `command`, `args`, `env_passthrough`, `env_overlay`, `mediation`, selector hints, `forbidden_capabilities` | one daemon restart, which means draining in-flight Runs first. The restart is a service action, **not a promotion**: no measurement, no manifest, no acceptance receipt, no re-canary, and **no Session invalidation**, because no Session identity field derives from registry bytes, mtimes, digests, command paths, or observed runtime facts |
+| **Identity-changing registry edit** — adding or changing `session_epoch`, targeting a different `agent_id`, selecting a different `profile` | the same one restart, **plus the continuity cut you asked for**: that is a different Session identity, so existing Sessions are refused for reuse by the symmetric equality of §13 |
 | **ARS release that does not change ACP semantics** | no Session invalidation, by construction: no identity field derives from an ARS version |
 
 What read-once buys: zero operator-config filesystem access on the Run path, one fail-closed parse per daemon
