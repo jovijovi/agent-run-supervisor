@@ -120,8 +120,9 @@ def test_the_scan_actually_covers_the_modules_this_change_touches() -> None:
     names = {path.name for path in _modules()}
     assert {
         "profile.py",
-        "runtime_binding.py",
+        "agent_registry.py",
         "agent_registration.py",
+        "observation.py",
         "spec.py",
         "run_task.py",
         "admission.py",

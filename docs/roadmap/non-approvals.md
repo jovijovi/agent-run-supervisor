@@ -2,7 +2,7 @@
 title: "ARS vNext Current Explicit Non-Approvals"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-30
+last_validated_at: 2026-08-01
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/non-approvals.md"
 ---
 # ARS vNext Current Explicit Non-Approvals
@@ -37,9 +37,10 @@ for the next change. This document does not approve:
 
 ## The V4 boundary reset adds no approval
 
-The reset is a **documentation and target-architecture** change. Retiring an authority is not deleting an
-implementation, and the tracked authority describing a capability is never evidence that it exists. This
-document specifically does not approve:
+The reset's Stage 3 source now exists on branch `feat/v4-boundary-reset`, and that changes nothing here:
+local source is not a merge, a release, a deployment, or an enablement, and the tracked authority
+describing a capability is never evidence that the capability is reachable in production. This document
+specifically does not approve:
 
 - **artifact installation or hosting** of any kind — no ARS-owned artifact prefix, package closure, tree
   digest, frozen interpreter identity, materialization, or relocation, and no re-owning of a path;
@@ -67,23 +68,46 @@ document specifically does not approve:
 - **any automatic `session_epoch` bump** — no code path may derive, increment, or infer an epoch from an
   observation, a digest, a version, or a file's bytes; only an operator's edit changes it.
 
+## Threat-model scope: what the environment-value rule does and does not cover
+
+**Decided 2026-08-02, and settled.** The approved invariant is that **ARS production writers must not
+persist an environment value.** It is a rule about what ARS writes.
+
+It is **not** a tamper-resistance claim about artifacts ARS already wrote. Defending `run inspect` against
+an actor who can arbitrarily rewrite a field of an ARS-owned reset `launch.json` — planting a secret in
+`profile_id`, say, and then asking the inspector to catch it — is **outside this Stage 3 threat model**: an
+actor with arbitrary local write access to the Run root has already defeated every projection boundary
+downstream of it, and closed-domain validation of each top-level launch field buys nothing against them.
+
+So: no top-level launch-field closed-domain validation is to be added, `launch_payload_shape_is_exact`,
+`_classify_launch_schema`, `_inspect_reset_record`, `_inspect_legacy_record`, and `_recompute_launch_hash`
+stay as they are, and tamper resistance is not to be broadened. This is recorded so the finding is not
+reopened as a blocker; reversing it would take a new explicit decision that says so.
+
+The `env` block's closed-domain check is a **different** rule and stands: it decides whether a document is
+a value-blind production projection at all, which is what selects the digest path over the withholding path.
+
 ## Retirement: what was decided, and what was not
 
 - **Decided (2026-07-30): Decision 1, option (a)** — the policy-level retirement of the three registered
   per-agent profiles. That decision authorized the authority retirement recorded in
   [`docs/archive/binding-era-2026-07/`](../archive/binding-era-2026-07/README.md) and the tracked authority
   chain that replaced it.
-- **Not approved: retiring, deprecating, disabling, deleting, aliasing, or redirecting a registered profile
-  in source.** Introducing a retirement capability and using one remain two separate decisions, and the
-  second is **not taken**. It is required, in writing, before that source work runs — and no such mechanism
-  may be added in the meantime as a field defaulting to `False`, an unused rule constant, or a marker.
+- **Decided (2026-08-01): deleting the three registered per-agent profiles from source.** Introducing a
+  retirement capability and using one were always two separate decisions; this is the second, taken in
+  writing, and it is narrow. It authorized exactly one source act, executed locally on branch
+  `feat/v4-boundary-reset`: the source registry now holds exactly `standard-native-acp-v1` and
+  `claude-agent-acp-compat-v1`. V4 retires profiles by **deleting** them — no alias, redirect, disable
+  flag, field defaulting to `False`, unused rule constant, or marker was added, and a test asserts that no
+  such mechanism exists. It authorized nothing else, and it is neither merged nor released.
 - **Decided (2026-07-30, after the authority alignment merged): local source implementation of V4 Stages
   1–3.** It authorizes local source, test, and status work on task branches, taken serially at the stage
-  gates, and per-stage commit and push **only** after that stage candidate has passed verification,
-  independent review, and acceptance. It authorizes nothing else: **PR creation, merge, release,
-  deployment, service restart, migration/cutover, the real-agent canary, production changes, and the Stage 3
-  profile deletion above all remain separately unapproved.** Recording Decision 1, activating a plan, and
-  merging the authority alignment still do not imply any of those.
+  gates — and stops there: the Stage 3 candidate stays in its worktree, uncommitted. It authorizes nothing
+  else: **commit, push, PR creation, merge, release,
+  deployment, service restart, migration/cutover, the real-agent canary, and production changes all remain
+  separately unapproved.** Recording Decision 1, activating a plan, merging the authority alignment, and
+  the narrow source-retirement approval above still do not imply any of those, and a green local
+  verification transfers approval to none of them.
 - **Not approved: production cutover** (Decision 2, including the one-time legacy-Session load refusal) or
   any decision about the **legacy `v0.5.x` line lifetime** (Decision 3). Both remain open.
 - **Not approved: touching the retired deployment.** The `/opt` artifact trees, the Binding roots, their

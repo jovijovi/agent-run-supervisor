@@ -23,7 +23,8 @@ from agent_run_supervisor.native_acp.run_task import (
 )
 from agent_run_supervisor.native_acp.spec import (
     AgentRunSpec,
-    ResolvedLaunchSpec,
+    EnvProjection,
+    LaunchSnapshot,
     spec_hash,
 )
 from agent_run_supervisor.result import build_result_payload
@@ -61,13 +62,16 @@ ACTIONABLE_SESSION_STATES = frozenset(
 
 CORRUPT_BYTES = b"{ this document was never finished"
 
+AGENT_ID = "fake-agent"
+
 NATIVE_SESSION_KWARGS: dict[str, Any] = dict(
-    profile_id="fake-agent-1.0",
+    profile_id="fake-agent-v1",
     profile_revision=1,
     profile_hash="a" * 64,
     workspace_hash="b" * 64,
     effective_cwd="/tmp/ws",
     matched_root="/tmp",
+    agent_id=AGENT_ID,
 )
 
 
@@ -175,26 +179,25 @@ def write_dispatch(run_dir: Path, *, run_id: str, present: bool) -> None:
 # -- Spec and launch ---------------------------------------------------------
 
 
-def launch_payload(*, executable: str = "/usr/bin/true", **overrides) -> dict[str, Any]:
+def launch_payload(*, command: str = "/usr/bin/true", **overrides) -> dict[str, Any]:
     """A launch snapshot in the exact shape ``RunTask`` seals and writes.
 
-    Built from the production ``ResolvedLaunchSpec`` and sealed by the
+    Built from the production :class:`LaunchSnapshot` and sealed by the
     production rule, so the document verifies against itself exactly as a real
     one does. A test that changes the body gets a correctly resealed document,
     which is what makes "self-consistent but not the Spec's launch" testable.
     """
     kwargs: dict[str, Any] = dict(
-        executable=executable,
-        argv=(executable,),
-        env_allowlist=("PATH",),
-        credential_refs=(),
-        profile_id="fake-agent-1.0",
+        command=command,
+        argv=(command,),
+        profile_id="fake-agent-v1",
         profile_revision=1,
         profile_hash="a" * 64,
-        config_schema_hash="c" * 64,
+        agent_id=AGENT_ID,
+        env=EnvProjection(resolved_count=0, names=()),
     )
     kwargs.update(overrides)
-    launch = ResolvedLaunchSpec(**kwargs)
+    launch = LaunchSnapshot(**kwargs)
     payload = launch.to_dict()
     payload["launch_spec_hash"] = launch.launch_hash()
     return payload
@@ -273,7 +276,7 @@ def submission_payload(
         "namespace": namespace,
         "session_reuse": reuse,
         "ars_session_id": ars_session_id,
-        "profile_id": "fake-agent-1.0",
+        "agent_id": AGENT_ID,
         "request_digest": "sha256:" + "d" * 64,
         "prompt_sha256": "e" * 64,
         "prompt_bytes": 17,

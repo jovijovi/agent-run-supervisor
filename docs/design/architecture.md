@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext System Architecture"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-30
+last_validated_at: 2026-08-01
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/architecture.md"
 ---
 # agent-run-supervisor vNext System Architecture
@@ -19,12 +19,15 @@ Status markers:
 
 - ✅ legacy released code still present on `main`, untouched by the reset and not a compatibility target;
 - 🟦 vNext supervision plane, implemented on `main` (Stage 0/1 closed, Stage 2 closed);
-- 🟨 settled target of the boundary reset, **not yet implemented in source**;
+- 🟨 settled target of the boundary reset, **not implemented in any released or merged source**;
 - ⏸ separately approved later integration.
 
 🟨 is the honest marker for most of §3, §4, §6, and §8 below. Source on `main` still runs the retired
 Binding line: a Binding reader, artifact digests, promotion, attestation, a required Binding-root daemon
-flag, and four registered profiles. This document is the target; the board
+flag, and four registered profiles. What 🟨 no longer means is "unwritten": the Stage 3 candidate
+implements these sections on a task branch, verified locally and **uncommitted, unmerged, unreleased, and
+undeployed**. A reader operating a deployment gets nothing from that branch, which is why the marker
+stays. This document is the target; the board
 ([`docs/roadmap/current-status.md`](../roadmap/current-status.md)) carries the exact
 authority-versus-source delta and the staged sequence that closes it. No marker here is an approval.
 

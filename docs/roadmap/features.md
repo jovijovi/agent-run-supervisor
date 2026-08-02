@@ -2,7 +2,7 @@
 title: "ARS vNext Feature and Capability Tracker"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-30
+last_validated_at: 2026-08-01
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/features.md"
 ---
 # ARS vNext Feature and Capability Tracker
@@ -10,12 +10,14 @@ supersedes: "docs/archive/pre-vnext-reset-2026-07-21/features.md"
 Only vNext direction and the authority-versus-source delta live here. Detailed v0.1.7 feature closure is
 retained in the cold archive and Git history; it is not default development context.
 
-Status legend: **Done** · **In review** · **Planned** · **Superseded** · **Retired** · **Parked** ·
-**Non-goal**
+Status legend: **Done** · **Implemented** · **In review** · **Planned** · **Superseded** · **Retired** ·
+**Parked** · **Non-goal**
 
-**Superseded** and **Retired** describe *authority*, not source. A row that reads
-"source retirement pending" means the tracked architecture no longer targets that capability while the
-code that implements it is still on `main`. The board carries the exact authority-versus-source delta.
+`Done` and `Implemented` differ by *where the source is*: `Done` is merged on `main`, `Implemented` is on
+branch `feat/v4-boundary-reset` and is neither merged, released, nor deployed. **Superseded** and
+**Retired** describe *authority*; the Remaining cell says what happened to the source, because for the
+boundary reset the two finally moved together. The board carries the exact authority-versus-source
+delta.
 
 | ID | Capability | Product | Impl | Evidence / authority | Remaining |
 |---|---|---|---|---|---|
@@ -23,56 +25,65 @@ code that implements it is still on `main`. The board carries the exact authorit
 | F-VNEXT-ADMISSION-001 | structured admission → immutable AgentRunSpec sealed before spawn | Required | Done | PRD R1; archived plan C1/C4; freeze-order + spec-hash suites | merged; the resolution inputs change with F-AGENT-REGISTRY-001 |
 | F-VNEXT-PROCESS-001 | ManagedProcess live stdio supervision | Required | Done | PRD R2; archived plan C3; live-wire/group-kill/reap suite | merged; first released in 0.2.0 |
 | F-NATIVE-ACP-001 | Native ACP exact-config core through ars-core | Required | Done | PRD R2–R3; archived plan C1–C10; real B-grade acceptance | merged; live option domains land with F-BOUNDARY-RESET-001 |
-| F-VNEXT-SESSION-001 | process-per-Run, session/load continuity, cross-Run switching | Required | Done | PRD R4; archived plan C6/C9/C10; real continuity + exact switch/rollback | merged; the fail-closed reuse gate is pending in F-BOUNDARY-RESET-001 |
+| F-VNEXT-SESSION-001 | process-per-Run, session/load continuity, cross-Run switching | Required | Done | PRD R4; archived plan C6/C9/C10; real continuity + exact switch/rollback | merged; the fail-closed reuse gate rides F-BOUNDARY-RESET-001 and is on the Stage 3 branch |
 | F-VNEXT-STATE-001 | unknown/quarantined/retryable=false, markers, no replay | Required | Done | PRD R5; archived plan C2/C8; terminal-table + write-once + cancellation suites | merged; first released in 0.2.0 |
 | F-VNEXT-PERMISSION-001 | frozen grant, default-deny mediation, real canary | Required | Done | PRD R7; L1/L2 bridge; real denied-action canary PASS (operator-held) | none — the canary stays mandatory per registered agent |
 | F-VNEXT-EVIDENCE-001 | isolated Native stores and bounded runtime ledger | Required | Done | PRD R8–R9; archived plan C6–C8; poisoned-legacy isolation + bounded-writer suites | merged; value-blind evidence lands with F-ENV-EVIDENCE-001 |
 | F-ARSD-001 | local UDS production ingress, ownership, reconciliation, cgroup containment | Required | Done | PRD R6/R10; A1–A5 closed; default-on enabled 2026-07-23 (operator-held) | none — operate on the recorded CPython runtime invariant |
-| F-NATIVE-ADAPTER-CODEX-001 | Codex official ACP adapter closed profile | Required | Superseded | PRD R12; [plan](../plans/archive/2026-07-25-codex-official-adapter-admission.md); local acceptance | superseded by an operator-registered adapter command; source retirement pending, and its execution needs its own confirmation |
-| F-NATIVE-ADAPTER-CLAUDE-001 | Claude official ACP adapter closed profile | Required | Superseded | PRD R12; [plan](../plans/archive/2026-07-25-claude-official-adapter-b3-b5-closure.md); ACP discovery | its one cited ACP deviation survives as an evidenced compat profile; the artifact half is retired; source retirement pending |
-| F-STANDARD-NATIVE-ACP-001 | versioned conformance profile + typed operator-owned agent identity | Required | Superseded | PRD R12; [plan](../plans/archive/2026-07-29-standard-native-acp-v1.md) | merged on the v0.5.3 line; superseded by the operator registry, which delivers the same idea without an artifact anchor |
-| F-RUNTIME-BINDING-001 | operator-owned Runtime Binding + sealed runtime provenance | Required | Retired | [history](../archive/binding-era-2026-07/README.md); [plan](../plans/archive/2026-07-26-runtime-binding-refactor.md) | retired as target architecture; source deletion is Stage 3 and needs its own confirmation |
-| F-RUNTIME-BINDING-002 | complete wrapped-adapter package closure in frozen artifact identity | Required | Retired | [history](../archive/binding-era-2026-07/README.md); [rationale](../archive/binding-era-2026-07/retirement-rationale.md) | retired: ARS makes no artifact-integrity claim; source deletion pending Stage 3 |
+| F-NATIVE-ADAPTER-CODEX-001 | Codex official ACP adapter closed profile | Required | Retired | PRD R12; [plan](../plans/archive/2026-07-25-codex-official-adapter-admission.md); local acceptance | deleted from source on the Stage 3 branch; the adapter is now an operator-registered command |
+| F-NATIVE-ADAPTER-CLAUDE-001 | Claude official ACP adapter closed profile | Required | Retired | PRD R12; [plan](../plans/archive/2026-07-25-claude-official-adapter-b3-b5-closure.md); ACP discovery | deleted from source; its one cited ACP deviation survives as claude-agent-acp-compat-v1 |
+| F-STANDARD-NATIVE-ACP-001 | versioned conformance profile + typed operator-owned agent identity | Required | Superseded | PRD R12; [plan](../plans/archive/2026-07-29-standard-native-acp-v1.md) | the profile survives as standard-native-acp-v1; its registration layer is replaced by the registry entry |
+| F-RUNTIME-BINDING-001 | operator-owned Runtime Binding + sealed runtime provenance | Required | Retired | [history](../archive/binding-era-2026-07/README.md); [plan](../plans/archive/2026-07-26-runtime-binding-refactor.md) | runtime_binding.py and attestation.py deleted on the Stage 3 branch; live roots untouched |
+| F-RUNTIME-BINDING-002 | complete wrapped-adapter package closure in frozen artifact identity | Required | Retired | [history](../archive/binding-era-2026-07/README.md); [rationale](../archive/binding-era-2026-07/retirement-rationale.md) | deleted from source: ARS makes no artifact-integrity claim, and a scan proves no digest survives |
 | F-RUNTIME-BINDING-003 | profile-scoped active selection, one generation per profile | Required | Retired | [plan](../plans/archive/2026-07-29-multi-profile-runtime-binding.md); binding-era archive | released on v0.5.2; retired with the Binding layer, and its live roots are untouched |
-| F-AGENT-REGISTRY-001 | one operator-owned TOML agent registry, read once at daemon startup | Required | Planned | PRD R13; GOAL contract 9; [registry contract](../design/agent-registry.md) | Stage 3 source work; needs source-implementation approval, then a restart to take effect at all |
-| F-BOUNDARY-RESET-001 | external AGENT boundary reset: two profiles, preserved command semantics, fail-closed load-only reuse | Required | Planned | PRD R4/R12/R13; GOAL contracts 1, 3, 9; architecture §3–§4 | Stages 1 and 3; profile deletion in source needs a separate confirmation on top of source approval |
-| F-OBSERVED-EVIDENCE-001 | observed runtime facts are evidence or a policy warning, never a gate | Required | Planned | PRD R14; architecture §3.3; result/event schema §9.5 | Stage 3 source work; retires the observed-identity gates without losing the records |
-| F-ENV-EVIDENCE-001 | environment-value non-persistence across every ARS-owned sink | Required | Planned | PRD R15; technical solution §7; result/event schema §9.2 | Stage 2 source work; erases substantial Run evidence by design, and that tradeoff is documented |
-| F-RECONCILE-ORDERED-001 | total ordered fail-closed startup reconciliation, absent ≠ corrupt | Required | Planned | PRD R10; architecture §6.1–§6.2; technical solution §9 | Stage 1 source work; strictly more refusals than the tolerant reader it replaces |
-| F-ARSD-API-002 | api_version 2 with the eight-operation drain matrix | Required | Planned | PRD R11; architecture §1 two-protocol note | Stage 3 source work; no caller cutover is approved, and the drain window exists to drain |
+| F-AGENT-REGISTRY-001 | one operator-owned TOML agent registry, read once at daemon startup | Required | Implemented | PRD R13; GOAL contract 9; [registry contract](../design/agent-registry.md) | on the Stage 3 branch; not merged or released. A registry edit takes effect at the next daemon start |
+| F-BOUNDARY-RESET-001 | external AGENT boundary reset: two profiles, preserved command semantics, fail-closed load-only reuse | Required | Implemented | PRD R4/R12/R13; GOAL contracts 1, 3, 9; architecture §3–§4 | on the Stage 3 branch; profile deletion approved 2026-08-01 and executed. Not merged or released |
+| F-OBSERVED-EVIDENCE-001 | observed runtime facts are evidence or a policy warning, never a gate | Required | Implemented | PRD R14; architecture §3.3; result/event schema §9.5 | on the Stage 3 branch; exactly five observation-based refusals remain, and agentInfo is not one |
+| F-ENV-EVIDENCE-001 | environment-value non-persistence across every ARS-owned sink | Required | Implemented | PRD R15; technical solution §7; result/event schema §9.2 | dynamic half merged; the value-blind launch snapshot is on the Stage 3 branch, not merged |
+| F-RECONCILE-ORDERED-001 | total ordered fail-closed startup reconciliation, absent ≠ corrupt | Required | Done | PRD R10; architecture §6.1–§6.2; technical solution §9 | merged; strictly more refusals than the tolerant reader it replaced |
+| F-ARSD-API-002 | api_version 2 with the eight-operation drain matrix | Required | Implemented | PRD R11; architecture §1 two-protocol note | on the Stage 3 branch; submit refused at v1, the other seven accepted. No caller cutover is approved |
 | F-SACHIMA-ARSD-001 | Sachima socket backend | Later integration | Parked | GOAL/PRD stage boundary | ARS production acceptance closed; integration still requires its own separate approval |
 | F-NONGOAL-001 | public/root/TCP/multi-tenant/business-orchestration surfaces | Non-goal | Non-goal | GOAL; PRD §6; non-approvals | separate product decision only |
 
 ## Completion roll-up
 
-| Area | Done | In review | Planned | Superseded | Retired | Parked | Non-goal |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Legacy acpx line — authority retired | 0 | 0 | 0 | 0 | 1 | 0 | 0 |
-| vNext Stage 0/1 | 7 | 0 | 0 | 0 | 0 | 0 | 0 |
-| vNext Stage 2 | 1 | 0 | 0 | 0 | 0 | 0 | 0 |
-| Registered per-agent profiles | 0 | 0 | 0 | 3 | 0 | 0 | 0 |
-| Runtime Binding era | 0 | 0 | 0 | 0 | 3 | 0 | 0 |
-| Boundary reset | 0 | 0 | 6 | 0 | 0 | 0 | 0 |
-| Later integration | 0 | 0 | 0 | 0 | 0 | 1 | 0 |
-| Explicit exclusions | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
+| Area | Done | Implemented | In review | Planned | Superseded | Retired | Parked | Non-goal |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Legacy acpx line — authority retired | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 |
+| vNext Stage 0/1 | 7 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| vNext Stage 2 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| Registered per-agent profiles | 0 | 0 | 0 | 0 | 1 | 2 | 0 | 0 |
+| Runtime Binding era | 0 | 0 | 0 | 0 | 0 | 3 | 0 | 0 |
+| Boundary reset | 1 | 5 | 0 | 0 | 0 | 0 | 0 | 0 |
+| Later integration | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 |
+| Explicit exclusions | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
+
+No row in this table is `Planned` any more: Stage 3 closed the last one. The columns stay because the
+legend does, and because the board still tracks planned work — acpx removal — that has no feature row here.
 
 **What Retired and Superseded mean here.** Both are **documentation-authority** states recorded by the
-boundary reset. `Retired` means the tracked architecture no longer targets the capability at all;
-`Superseded` means a narrower capability replaces it. In both cases the implementing source is **still
-merged on `main`** and still runs in production: no source file was deleted, no profile was unregistered,
-no acpx module was removed, no Binding root or artifact tree was touched, and no operator storage was
-migrated or removed. The rows say what the project is now *aiming at*, and the board says what the code
-currently *is*.
+boundary reset: `Retired` means the tracked architecture no longer targets the capability at all, and
+`Superseded` means a narrower capability replaces it. Where the Remaining cell says *deleted from source*,
+the deletion is real but **local**: it exists on branch `feat/v4-boundary-reset` under the narrow
+2026-08-01 source-retirement approval and is neither merged nor released. On `main` every one of those
+files and profiles is still present and still runs in production. Nothing outside the repository moved —
+no Binding root or artifact tree was touched, no acpx module was removed, no `/opt` path was deleted, and
+no operator storage was migrated or removed. The rows say what the project is *aiming at*; the board says
+what the deployed code *is*.
 
-**What Planned means here.** Documentation authority exists and is complete; source does not. Each Planned
-row needs a distinct source-implementation approval recorded after the authority alignment merges, and the
-row for profile retirement needs one further confirmation before any profile is deleted from source. A
-Planned row is never evidence that the capability is reachable, testable, or deployable today.
+**What Implemented means here.** Source exists, is tested, and passes local verification in the
+`feat/v4-boundary-reset` worktree — and stops there. It is **uncommitted**: the current controller
+authorization for the Stage 3 candidate is local source, test, and status work only. `Implemented` is
+therefore not committed, not pushed, not merged, not reviewed to acceptance, not released, not deployed,
+and not enabled; it is not evidence that the capability is reachable in production, and each of commit,
+push, PR, merge, release, deployment, service restart, cutover, and the real-agent canary remains its own
+separate decision. A row moves from `Implemented` to `Done` when it lands on `main`.
 
-**Publication boundary.** `Done` means implemented in the source line whose package metadata is 0.5.3 and
-which covers the Stage 0/1 Native ACP core, `arsd`, and the retired Binding framework. The live GitHub
-Releases and PyPI listings are authoritative for which versions are published; neither publication nor
-local acceptance is a deployment, enablement, cutover, or integration approval.
+**Publication boundary.** `Done` means merged on `main`, in the source line whose package metadata is
+0.5.3 and which covers the Stage 0/1 Native ACP core, `arsd`, and the retired Binding framework.
+`Implemented` rows are in **no** published artifact. The live GitHub Releases and PyPI listings are
+authoritative for which versions are published; neither publication nor local verification is a
+deployment, enablement, cutover, or integration approval.
 
 Update this tracker only when requirements, implementation state, or acceptance evidence changes. Keep
 evidence cells short; details belong in active plans or cold archives.

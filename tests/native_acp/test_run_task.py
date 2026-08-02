@@ -21,17 +21,10 @@ from agent_run_supervisor.exit_classifier import AgentRunStatus
 from agent_run_supervisor.native_acp import profile as profile_module
 from agent_run_supervisor.native_acp import storage
 from agent_run_supervisor.native_acp.driver import NativeAcpDriver
+from agent_run_supervisor.native_acp.agent_registration import AgentEntry
 from agent_run_supervisor.native_acp.profile import (
-    LAUNCH_KIND_DIRECT,
-    LAUNCH_KIND_WRAPPED,
-    SLOT_KIND_CONFIG_ROOT,
-    SLOT_KIND_PACKAGE_TREE,
-    AdapterContract,
-    AgentProfile,
-    BindingSlot,
+    AcpCompatProfile,
     ProfileRegistry,
-    VersionProbeRule,
-    WrappedRuntimeArtifacts,
 )
 from agent_run_supervisor.native_acp.run_task import (
     DISPATCH_STARTED_MARKER,
@@ -43,13 +36,14 @@ from agent_run_supervisor.native_acp.spec import (
     InputRef,
     RunLimits,
     RunSpecAssembler,
+    resolve_run_environment,
 )
 from agent_run_supervisor.redaction import ENV_VALUE_REPLACEMENT
 from agent_run_supervisor.session import SessionNotFoundError, SessionStore
 
-from . import binding_fixtures as bf
-
 FAKE_AGENT_PATH = Path(__file__).with_name("fake_agent.py")
+TEST_PROFILE_ID = "fake-agent-v1"
+TEST_AGENT_ID = "fake-agent"
 
 HAPPY_SCRIPT = {
     "initial_options": [
@@ -78,50 +72,41 @@ HAPPY_SCRIPT = {
 }
 
 
-def _bindingless_contract(**overrides) -> AdapterContract:
-    """A wholly source-frozen contract: no Binding slot, so no Binding needed.
+def _test_profile(**overrides) -> AcpCompatProfile:
+    """An ACP-v1 conformance profile for the fake agent.
 
-    The fake agent is not a deployment; its launch is entirely in this file, so
-    the contract accepts no operator value at all. The ACP identity is still
-    frozen and still checked after ``initialize``.
+    It freezes ACP semantics only. Which command the fake agent is, and which
+    environment names it needs, are operator facts — carried by the registry
+    entry below, exactly as a real deployment carries them.
     """
     kwargs = dict(
-        launch_kind=LAUNCH_KIND_DIRECT,
-        acp_agent_name="fake-acp-agent",
-        acp_protocol_version="1",
-        version_probe=VersionProbeRule(argv_suffix=("--version",)),
-    )
-    kwargs.update(overrides)
-    return AdapterContract(**kwargs)
-
-
-def _test_profile(**overrides) -> AgentProfile:
-    kwargs = dict(
-        profile_id="fake-agent-1.0",
+        profile_id=TEST_PROFILE_ID,
         revision=1,
-        executable_key="python-fake",
-        argv_template=(str(FAKE_AGENT_PATH),),
-        env_allowlist=("PATH", "HOME", "FAKE_AGENT_SCRIPT", "FAKE_AGENT_TRACE"),
-        credential_slots=(),
-        model_selector_id="model",
-        effort_selector_id="effort",
-        default_model="kimi-for-coding/k3",
-        default_effort="max",
-        registered_models=("kimi-for-coding/k3", "provider/base"),
-        allowed_efforts=("low", "medium", "high", "max"),
+        acp_protocol_version="1",
+        required_capabilities=(),
+        base_allowlist=("PATH", "HOME", "FAKE_AGENT_SCRIPT", "FAKE_AGENT_TRACE"),
         requires_session_load=False,
-        config_schema={"selectors": {"model": "string", "effort": "string"}},
-        contract=_bindingless_contract(),
     )
     kwargs.update(overrides)
-    return AgentProfile(**kwargs)
+    return AcpCompatProfile(**kwargs)
+
+
+def _test_entry(**overrides) -> AgentEntry:
+    kwargs = dict(
+        agent_id=TEST_AGENT_ID,
+        profile_id=TEST_PROFILE_ID,
+        command=sys.executable,
+        args=(str(FAKE_AGENT_PATH),),
+    )
+    kwargs.update(overrides)
+    return AgentEntry(**kwargs)
 
 
 def _request(**overrides) -> AgentRunRequest:
     kwargs = dict(
         owner="hermes",
         namespace="hermes/doc-check",
-        profile_id="fake-agent-1.0",
+        agent_id=TEST_AGENT_ID,
         session_reuse="reuse",
         ars_session_id="sess-native-1",
         expected_binding_hash=None,
@@ -172,18 +157,20 @@ def _seed_bound_session(kwargs: dict, external_id: str) -> None:
         return
     except SessionNotFoundError:
         pass
+    entry = kwargs["agent_entry"]
     assembler = RunSpecAssembler(request)
-    assembler.resolve_profile(kwargs["registry"])
-    assembler.bind_workspace(
-        root=kwargs["workspace_root"], cwd=kwargs.get("cwd")
+    instance = assembler.resolve_agent(entry, registry=kwargs["registry"])
+    assembler.bind_workspace(root=kwargs["workspace_root"], cwd=kwargs.get("cwd"))
+    assembler.resolve_launch(
+        environment=resolve_run_environment(
+            arsd_env=dict(os.environ), profile=instance.profile, entry=entry
+        )
     )
-    launch = assembler.resolve_launch(runtime=kwargs.get("runtime_binding"))
     spec = assembler.seal(
         run_id="run-seed-0",
         submitted_at="2026-07-21T00:00:00+00:00",
         retry_of_run_id=None,
     )
-    provenance = launch.runtime_provenance
     storage.create_native_session(
         store,
         session_id=session_id,
@@ -195,14 +182,8 @@ def _seed_bound_session(kwargs: dict, external_id: str) -> None:
         workspace_hash=spec.workspace.workspace_hash,
         effective_cwd=spec.workspace.cwd,
         matched_root=spec.workspace.canonical_root,
-        adapter_contract_hash=(
-            provenance.adapter_contract_hash if provenance else None
-        ),
-        session_compatibility_epoch=(
-            provenance.session_compatibility_epoch if provenance else None
-        ),
         agent_id=spec.agent.agent_id,
-        agent_registration_hash=spec.agent.agent_registration_hash,
+        session_epoch=spec.agent.session_epoch,
     )
     storage.bind_agent_session(store, session_id, agent_session_id=external_id)
 
@@ -218,14 +199,10 @@ class Harness:
         self.workspace = tmp_path / "workspace"
         self.workspace.mkdir(exist_ok=True)
         self.trace = tmp_path / "fake-agent-trace.log"
-        monkeypatch.setitem(
-            profile_module._REGISTERED_EXECUTABLES,
-            "python-fake",
-            Path(sys.executable),
-        )
         monkeypatch.setenv("FAKE_AGENT_SCRIPT", json.dumps(script))
         monkeypatch.setenv("FAKE_AGENT_TRACE", str(self.trace))
         self.registry = ProfileRegistry((_test_profile(),))
+        self.entry = _test_entry()
         self.external_id = script.get("session_id", DEFAULT_EXTERNAL_ID)
 
     def task(self, *, run_id: str = "run-0001", request=None, **overrides) -> RunTask:
@@ -235,6 +212,7 @@ class Harness:
             run_id=run_id,
             workspace_root=self.workspace,
             registry=self.registry,
+            agent_entry=self.entry,
             supervisor_root=self.root,
             submitted_at="2026-07-21T00:00:00+00:00",
         )
@@ -391,13 +369,12 @@ def test_spawn_failure_is_pre_dispatch_failed_session_active(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
-    monkeypatch.setitem(
-        profile_module._REGISTERED_EXECUTABLES,
-        "python-fake",
-        Path("/nonexistent/native-agent-binary"),
-    )
+    harness.entry = _test_entry(command="/nonexistent/native-agent-binary")
     result = _run(harness.task())
     assert result.status is AgentRunStatus.FAILED
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    # Classified from the errno ARS observed, never from a pre-flight check.
+    assert payload["detail_code"] == "COMMAND_NOT_FOUND"
     run_dir = harness.run_dir()
     assert not (run_dir / "prompt-dispatch-started").exists()
     assert not (run_dir / "prompt-accepted").exists()
@@ -2745,925 +2722,27 @@ def test_registered_permission_env_reaches_spawned_agent(
     # and the assertion would prove the guard, not the delivery. The child
     # therefore reports delivery to a test-owned file outside the Run tree and
     # answers ARS with a value-free marker.
-    binding_value = '{"bash":"ask","edit":"ask","webfetch":"ask"}'
+    mediation_id = "ask-privileged-tool-families-v1"
+    key, binding_value = profile_module.MEDIATION_BINDINGS[mediation_id][0]
     probe_path = tmp_path / "child-env-probe.txt"
     script = dict(HAPPY_SCRIPT)
-    script["env_probe"] = {"name": "OPENCODE_PERMISSION", "path": str(probe_path)}
+    script["env_probe"] = {"name": key, "path": str(probe_path)}
     harness = Harness(tmp_path, monkeypatch, script)
-    monkeypatch.setitem(
-        profile_module._REGISTERED_PERMISSION_ENV,
-        "python-fake",
-        (("OPENCODE_PERMISSION", binding_value),),
-    )
+    harness.entry = _test_entry(mediation_id=mediation_id)
     result = _run(harness.task())
 
     assert result.status is AgentRunStatus.COMPLETED
     assert probe_path.read_text(encoding="utf-8") == binding_value
     payload = json.loads((harness.run_dir() / "result.json").read_text())
     assert payload["final_message"] == "ENV_PROBE:PRESENT"
-    # launch.json still serializes the pair: making launch material
-    # structurally value-blind is Stage 3 (B2b) and depends on the new launch
-    # schema, so it is deliberately unchanged here.
+    # B2b: the launch record now names the binding it *selected* and never its
+    # source-owned pairs, so the mediation value is durable nowhere.
     launch_payload = json.loads((harness.run_dir() / "launch.json").read_text())
-    assert launch_payload["permission_env"] == [
-        ["OPENCODE_PERMISSION", binding_value]
-    ]
-
-
-# ---------------------------------------------------------------------------
-# Codex closed-profile admission: spawn-boundary attestation (D10a/D10b),
-# post-initialize identity gate (D10c), fixed spawn env (D2), and the
-# credential-ref binding (D11), driven end-to-end through RunTask.
-#
-# Fixture isolation (r8 clarification 2): every artifact any test here tampers,
-# swaps, retargets, deletes, or inserts into is a per-test temporary copy
-# staged under ``tmp_path``. The repository fake-agent source, the pinned
-# adapter tree, the frozen Node copy, and the real CLI are never opened for
-# write, renamed, chmodded, or deleted; ``sys.executable`` is only executed.
-# No real credential bytes are read anywhere in this section.
-# ---------------------------------------------------------------------------
-
-CODEX_CANONICAL_CONFIG = '{"features":{"use_legacy_landlock":true}}'
-CODEX_AUTH_PLACEHOLDER = b'{"placeholder":"not-a-real-credential"}'
-
-# This profile's frozen environment includes ``NO_BROWSER="1"``, so the shared
-# ``fake-external-session-1`` default *contains* one of this Run's final
-# environment values. That is a real external-Session-id collision, and the
-# only correct outcome is the categorical refusal — an id that must later be
-# replayed byte-for-byte can be neither redacted nor retained. The ordinary
-# success fixture therefore uses an id that contains none of its own final
-# environment literals (no ``1``, no ``read-only``, no config JSON). The
-# refusal itself, including the one-character no-minimum case, is proven
-# directly in ``tests/native_acp/test_env_value_sinks.py`` rather than as a
-# side effect of a fixture that happened to collide.
-CODEX_EXTERNAL_ID = "codex-external-session-alpha"
-
-CODEX_SCRIPT = {
-    "session_id": CODEX_EXTERNAL_ID,
-    "initial_options": [
-        {
-            "id": "model",
-            "name": "Model",
-            "type": "select",
-            "currentValue": "provider/base",
-            "options": [
-                {"value": "provider/base", "name": "Base"},
-                {"value": "gpt-5.6-sol", "name": "Sol"},
-            ],
-        },
-        {
-            "id": "reasoning_effort",
-            "name": "Reasoning effort",
-            "type": "select",
-            "currentValue": "high",
-            "options": [
-                {"value": "high", "name": "High"},
-                {"value": "max", "name": "Max"},
-            ],
-        },
-    ],
-    "final_message": "CODEX_FAKE_OK",
-}
-
-
-def _sha256_file(path: Path) -> str:
-    import hashlib
-
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for block in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-class CodexHarness:
-    """Codex-shaped closed profile over the fake agent, with private copies."""
-
-    def __init__(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        script: dict | None = None,
-        *,
-        cwd_subdir: str | None = None,
-    ) -> None:
-        import shutil
-
-        self.tmp_path = tmp_path
-        self.root = tmp_path / ".agent-run-supervisor"
-        self.workspace = tmp_path / "workspace"
-        self.workspace.mkdir(exist_ok=True)
-        self.cwd = self.workspace
-        if cwd_subdir:
-            self.cwd = self.workspace / cwd_subdir
-            self.cwd.mkdir(parents=True, exist_ok=True)
-        self.trace = tmp_path / "codex-fake-trace.log"
-
-        stage = tmp_path / "stage"
-        stage.mkdir(exist_ok=True)
-        # Private copy of the repository fake-agent entry, staged inside its own
-        # adapter package closure: the entry sits under the install root beside
-        # the hoisted dependency the runtime would resolve by walking up from
-        # it, which is the shape the source contract now freezes.
-        self.adapter_root = stage / "adapter-pkg"
-        self.entry = (
-            self.adapter_root / "node_modules" / "@scope" / "adapter" / "dist"
-            / "codex_fake_entry.py"
-        )
-        self.entry.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(FAKE_AGENT_PATH, self.entry)
-        self.adapter_sibling = self.adapter_root / "node_modules" / "dep" / "index.py"
-        self.adapter_sibling.parent.mkdir(parents=True, exist_ok=True)
-        self.adapter_sibling.write_bytes(b"# hoisted dependency\n")
-        # The interpreter is executed, never modified. It must be an artifact
-        # that actually satisfies C5 — the test runner's own uv-managed Python
-        # sits under a group-writable chain, so attesting it would be attesting
-        # something the service UID's group could rewrite.
-        self.interpreter = bf.trusted_system_interpreter()
-        # The downstream CLI is a package closure now: a launcher, the sibling
-        # code it loads, and its required interpreter — all private copies.
-        self.package_root = stage / "codex-pkg"
-        (self.package_root / "lib").mkdir(parents=True, exist_ok=True)
-        (self.package_root / "lib" / "sibling.py").write_bytes(b"# private sibling\n")
-        self.cli_interpreter = stage / "cli-runtime"
-        shutil.copy2(os.path.realpath("/bin/sh"), self.cli_interpreter)
-        os.chmod(self.cli_interpreter, 0o755)
-        # The launcher's shebang names the interpreter the descriptor freezes:
-        # a placeholder with no shebang would leave the real runtime unknown.
-        self.cli = self.package_root / "codex"
-        self.cli.write_bytes(
-            b"#!" + str(self.cli_interpreter).encode() + b"\n# private cli\n"
-        )
-        self.cred_root = tmp_path / "codex-home"
-        self.cred_root.mkdir(mode=0o700, exist_ok=True)
-        os.chmod(self.cred_root, 0o700)
-        self.auth = self.cred_root / "auth.json"
-        self.auth.write_bytes(CODEX_AUTH_PLACEHOLDER)
-        os.chmod(self.auth, 0o600)
-        bf.harden_tree(stage)
-
-        self.fixed_env = (
-            ("CODEX_CONFIG", CODEX_CANONICAL_CONFIG),
-            ("INITIAL_AGENT_MODE", "read-only"),
-            ("NO_BROWSER", "1"),
-        )
-        monkeypatch.setitem(
-            profile_module._REGISTERED_EXECUTABLES, "codex-fake", self.interpreter
-        )
-        monkeypatch.setenv(
-            "FAKE_AGENT_SCRIPT", json.dumps(script if script is not None else CODEX_SCRIPT)
-        )
-        monkeypatch.setenv("FAKE_AGENT_TRACE", str(self.trace))
-        self.registry = ProfileRegistry((self.profile(),))
-        self.runtime = self.binding()
-        self.external_id = (script if script is not None else CODEX_SCRIPT).get(
-            "session_id", DEFAULT_EXTERNAL_ID
-        )
-
-    def cli_slot(self) -> dict:
-        return {
-            "kind": SLOT_KIND_PACKAGE_TREE,
-            "package_root": str(self.package_root),
-            "tree_sha256": bf.rb.package_tree_digest(self.package_root),
-            "launcher_path": str(self.cli),
-            "launcher_sha256": _sha256_file(self.cli),
-            "interpreter_path": str(self.cli_interpreter),
-            "interpreter_sha256": _sha256_file(self.cli_interpreter),
-            "version": "0.0.0-private",
-        }
-
-    def binding(self, profile: AgentProfile | None = None, **overrides):
-        """The Binding value admission would have read once for this Run."""
-        return bf.admitted(
-            self.tmp_path / f"binding-{overrides.pop('tag', 'default')}",
-            profile or self.profile(),
-            slots={
-                "downstream_cli": self.cli_slot(),
-                "codex_home": {
-                    "kind": SLOT_KIND_CONFIG_ROOT,
-                    "path": str(self.cred_root),
-                },
-            },
-            **overrides,
-        )
-
-    def contract(self, **overrides) -> AdapterContract:
-        kwargs = dict(
-            launch_kind=LAUNCH_KIND_WRAPPED,
-            acp_agent_name="fake-acp-agent",
-            acp_protocol_version="1",
-            acp_agent_version="1.0.0",
-            version_probe=VersionProbeRule(argv_suffix=("--version",)),
-            binding_slots=(
-                BindingSlot(
-                    name="downstream_cli",
-                    kind=SLOT_KIND_PACKAGE_TREE,
-                    env_key="CODEX_PATH",
-                ),
-                BindingSlot(
-                    name="codex_home",
-                    kind=SLOT_KIND_CONFIG_ROOT,
-                    env_key="CODEX_HOME",
-                ),
-            ),
-            wrapped_runtime=WrappedRuntimeArtifacts(
-                interpreter_path=str(self.interpreter),
-                interpreter_sha256=_sha256_file(self.interpreter),
-                adapter_entry_path=str(self.entry),
-                adapter_entry_sha256=_sha256_file(self.entry),
-                adapter_package_root=str(self.adapter_root),
-                adapter_tree_sha256=bf.rb.package_tree_digest(self.adapter_root),
-                # This harness's interpreter is a real Python, not the frozen
-                # Node, so it declares Python's own closing option (-E ignores
-                # the PYTHON* environment) rather than Node's flag. The contract
-                # rule under test is that *some* closing prefix is frozen and
-                # that argv cannot drift from it.
-                interpreter_argv_prefix=("-E",),
-            ),
-            cli_slot="downstream_cli",
-            credential_root_slot="codex_home",
-            project_config_relpath=".codex/config.toml",
-        )
-        kwargs.update(overrides)
-        return AdapterContract(**kwargs)
-
-    def profile(self, **overrides) -> AgentProfile:
-        contract_overrides = overrides.pop("contract_overrides", {})
-        kwargs = dict(
-            profile_id="codex-fake-1.0",
-            revision=1,
-            executable_key="codex-fake",
-            argv_template=("-E", str(self.entry)),
-            env_allowlist=(
-                "PATH",
-                "HOME",
-                "FAKE_AGENT_SCRIPT",
-                "FAKE_AGENT_TRACE",
-            ),
-            fixed_env=self.fixed_env,
-            credential_slots=("codex-home-auth",),
-            required_credential_refs=("codex-home-auth",),
-            model_selector_id="model",
-            effort_selector_id="reasoning_effort",
-            default_model="gpt-5.6-sol",
-            default_effort="max",
-            registered_models=("gpt-5.6-sol",),
-            allowed_efforts=("max",),
-            requires_session_load=True,
-            config_schema={
-                "schema_version": 1,
-                "selectors": {
-                    "model": {
-                        "config_id": "model",
-                        "type": "string",
-                        "domain": ["gpt-5.6-sol"],
-                    },
-                    "effort": {
-                        "config_id": "reasoning_effort",
-                        "type": "string",
-                        "domain": ["max"],
-                    },
-                },
-            },
-            contract=self.contract(**contract_overrides),
-        )
-        kwargs.update(overrides)
-        return AgentProfile(**kwargs)
-
-    def request(self, **overrides) -> AgentRunRequest:
-        kwargs = dict(
-            profile_id="codex-fake-1.0",
-            requested_model="gpt-5.6-sol",
-            requested_effort="max",
-            credential_refs=("codex-home-auth",),
-        )
-        kwargs.update(overrides)
-        return _request(**kwargs)
-
-    def task(self, *, run_id: str = "run-codex-1", request=None, **overrides) -> RunTask:
-        kwargs = dict(
-            request=request or self.request(),
-            prompt_text="hello codex",
-            run_id=run_id,
-            workspace_root=self.workspace,
-            registry=self.registry,
-            supervisor_root=self.root,
-            submitted_at="2026-07-24T00:00:00+00:00",
-            cwd=str(self.cwd) if self.cwd != self.workspace else None,
-            runtime_binding=self.runtime,
-        )
-        kwargs.update(overrides)
-        _seed_bound_session(kwargs, self.external_id)
-        return RunTask(**kwargs)
-
-    def run_dir(self, run_id: str = "run-codex-1") -> Path:
-        return self.root / "native-runs" / run_id
-
-    def session_store(self) -> SessionStore:
-        return storage.native_session_store(self.root)
-
-    def attestation(self, run_id: str = "run-codex-1") -> dict:
-        return json.loads(
-            (self.run_dir(run_id) / "attestation.json").read_text(encoding="utf-8")
-        )
-
-    def rows(self, run_id: str = "run-codex-1") -> dict[str, dict]:
-        return {row["name"]: row for row in self.attestation(run_id)["checks"]}
-
-    def initialize_attestation(self, run_id: str = "run-codex-1") -> dict:
-        return json.loads(
-            (self.run_dir(run_id) / "initialize_attestation.json").read_text(
-                encoding="utf-8"
-            )
-        )
-
-
-def _fd_refs_to(dev: int, ino: int) -> list[str]:
-    """Descriptors in this (supervisor) process that reference an inode."""
-    hits: list[str] = []
-    for name in os.listdir("/proc/self/fd"):
-        try:
-            info = os.stat(f"/proc/self/fd/{name}")
-        except OSError:
-            continue
-        if (info.st_dev, info.st_ino) == (dev, ino):
-            hits.append(name)
-    return hits
-
-
-# -- pre-spawn refusals with durable evidence --------------------------------
-
-
-def test_codex_poisoned_workspace_refused_pre_spawn(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    harness = CodexHarness(tmp_path, monkeypatch)
-    spawned = _recording_spawn(monkeypatch)
-    layer = harness.cwd / ".codex"
-    layer.mkdir()
-    (layer / "config.toml").write_text("model = 'poison'\n", encoding="utf-8")
-
-    result = _run(harness.task())
-
-    assert result.status is AgentRunStatus.FAILED
-    assert spawned == []
-    run_dir = harness.run_dir()
-    payload = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
-    assert payload["detail_code"] == "PROJECT_CONFIG_LAYER_PRESENT"
-    row = harness.rows()["project_config_closure"]
-    assert row["passed"] is False
-    assert row["observed"] == str(layer / "config.toml")
-    assert (run_dir / "spec.json").exists()
-    assert (run_dir / "launch.json").exists()
-    assert not (
-        harness.root / "native-sessions" / "sess-native-1" / "lock.json"
-    ).exists()
-
-
-def test_codex_project_config_inserted_between_runs_refused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    harness = CodexHarness(tmp_path, monkeypatch)
-    first = _run(harness.task(run_id="run-codex-1"))
-    assert first.status is AgentRunStatus.COMPLETED
-
-    spawned = _recording_spawn(monkeypatch)
-    layer = harness.cwd / ".codex"
-    layer.mkdir()
-    (layer / "config.toml").write_text("model = 'poison'\n", encoding="utf-8")
-
-    second = _run(harness.task(run_id="run-codex-2"))
-    assert second.status is AgentRunStatus.FAILED
-    assert spawned == []
-    payload = json.loads(
-        (harness.run_dir("run-codex-2") / "result.json").read_text(encoding="utf-8")
-    )
-    assert payload["detail_code"] == "PROJECT_CONFIG_LAYER_PRESENT"
-    assert harness.rows("run-codex-2")["project_config_closure"]["passed"] is False
-    # Session record intact and the lease released.
-    record = harness.session_store().open_session("sess-native-1")
-    assert record.state == "open"
-    assert record.agent_session_id == CODEX_EXTERNAL_ID
-    assert not (
-        harness.root / "native-sessions" / "sess-native-1" / "lock.json"
-    ).exists()
-
-
-def test_artifact_tamper_before_run_refused_with_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    harness = CodexHarness(tmp_path, monkeypatch)
-    spawned = _recording_spawn(monkeypatch)
-    task = harness.task()
-    sealed_digest = harness.profile().contract.wrapped_runtime.adapter_entry_sha256
-    # Tamper the per-test temporary copy of the fake-agent entry — never the
-    # repository fixture — after construction and before run().
-    harness.entry.write_bytes(b"# tampered private adapter entry copy\n")
-
-    result = _run(task)
-
-    assert result.status is AgentRunStatus.FAILED
-    assert spawned == []
-    run_dir = harness.run_dir()
-    assert (run_dir / "spec.json").exists()
-    launch = json.loads((run_dir / "launch.json").read_text(encoding="utf-8"))
-    assert launch["expected_runtime"]["adapter_entry_sha256"] == sealed_digest
-    row = harness.rows()["adapter_entry_sha256"]
-    assert row["passed"] is False
-    assert row["expected"] == sealed_digest
-    payload = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
-    assert payload["detail_code"] == "RUNTIME_IDENTITY_MISMATCH"
-
-
-def test_inwindow_swap_refused_end_to_end_with_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from agent_run_supervisor.native_acp import attestation as attestation_module
-
-    harness = CodexHarness(tmp_path, monkeypatch)
-    spawned = _recording_spawn(monkeypatch)
-    replacement = tmp_path / "stage" / "codex_fake_entry_evil.py"
-    replacement.write_bytes(b"# swapped-in adapter entry\n")
-    monkeypatch.setattr(
-        attestation_module,
-        "_POST_ATTESTATION_HOOK",
-        lambda: os.replace(replacement, harness.entry),
-    )
-
-    result = _run(harness.task())
-
-    assert result.status is AgentRunStatus.FAILED
-    assert spawned == []
-    run_dir = harness.run_dir()
-    payload = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
-    # The surfaced detail_code is exactly the raised AttestationRefusal.code:
-    # proof of the _drive translation seam end to end.
-    assert payload["detail_code"] == "RUNTIME_IDENTITY_MISMATCH"
-    assert payload["retryable"] is False
-    assert harness.attestation()["pass"] is False
-    assert harness.rows()["adapter_entry_binding_lost"]["passed"] is False
-    assert not (
-        harness.root / "native-sessions" / "sess-native-1" / "lock.json"
-    ).exists()
-
-
-@pytest.mark.parametrize("location", ["workspace", "credential_root"])
-def test_inwindow_config_insertion_refused_end_to_end(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, location: str
-) -> None:
-    from agent_run_supervisor.native_acp import attestation as attestation_module
-
-    harness = CodexHarness(tmp_path, monkeypatch)
-    spawned = _recording_spawn(monkeypatch)
-    if location == "workspace":
-        inserted = harness.cwd / ".codex" / "config.toml"
-
-        def hook() -> None:
-            inserted.parent.mkdir()
-            inserted.write_text("model = 'poison'\n", encoding="utf-8")
-
-        expected_code = "PROJECT_CONFIG_LAYER_PRESENT"
-        expected_row = "project_config_closure_recheck"
-    else:
-        inserted = harness.cred_root / "config.toml"
-
-        def hook() -> None:
-            inserted.write_text("[features]\n", encoding="utf-8")
-
-        expected_code = "CREDENTIAL_ROOT_VIOLATION"
-        expected_row = "config_toml_absence_recheck"
-
-    monkeypatch.setattr(attestation_module, "_POST_ATTESTATION_HOOK", hook)
-    result = _run(harness.task())
-
-    assert result.status is AgentRunStatus.FAILED
-    assert spawned == []
-    payload = json.loads(
-        (harness.run_dir() / "result.json").read_text(encoding="utf-8")
-    )
-    assert payload["detail_code"] == expected_code
-    row = harness.rows()[expected_row]
-    assert row["passed"] is False
-    if location == "workspace":
-        assert row["observed"] == str(inserted)
-    assert not (
-        harness.root / "native-sessions" / "sess-native-1" / "lock.json"
-    ).exists()
-
-
-# -- descriptor wiring at the RunTask seam (D10b) ----------------------------
-
-
-def _fd_capturing_spawn(monkeypatch: pytest.MonkeyPatch, *, raise_after: bool = False):
-    from agent_run_supervisor.native_acp import run_task as run_task_module
-
-    captured: list[dict] = []
-    real_spawn = run_task_module.spawn_managed_process
-
-    async def wrapper(**kwargs):
-        fd = kwargs.get("interpreter_fd")
-        record: dict = {"kwarg_present": "interpreter_fd" in kwargs, "fd": fd}
-        if fd is not None:
-            info = os.fstat(fd)
-            record["dev"] = info.st_dev
-            record["ino"] = info.st_ino
-        captured.append(record)
-        if raise_after:
-            raise OSError("injected spawn failure after attestation")
-        return await real_spawn(**kwargs)
-
-    monkeypatch.setattr(run_task_module, "spawn_managed_process", wrapper)
-    return captured
-
-
-def test_codex_run_spawn_receives_attested_interpreter_fd(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    harness = CodexHarness(tmp_path, monkeypatch)
-    captured = _fd_capturing_spawn(monkeypatch)
-
-    result = _run(harness.task())
-
-    assert result.status is AgentRunStatus.COMPLETED
-    assert len(captured) == 1
-    record = captured[0]
-    assert record["kwarg_present"] is True
-    assert record["fd"] is not None
-    interpreter_stat = os.stat(harness.interpreter)
-    assert (record["dev"], record["ino"]) == (
-        interpreter_stat.st_dev,
-        interpreter_stat.st_ino,
-    )
-    binding = harness.attestation()["binding"]["node"]
-    assert (binding["dev"], binding["ino"]) == (record["dev"], record["ino"])
-    assert binding["recheck_passed"] is True
-    # Reuse-proof closure: no supervisor descriptor still references the
-    # attested node inode after run() returns.
-    assert _fd_refs_to(record["dev"], record["ino"]) == []
-
-
-def test_interpreter_fd_closed_after_spawn_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    harness = CodexHarness(tmp_path, monkeypatch)
-    captured = _fd_capturing_spawn(monkeypatch, raise_after=True)
-
-    result = _run(harness.task())
-
-    assert result.status is AgentRunStatus.FAILED
-    payload = json.loads(
-        (harness.run_dir() / "result.json").read_text(encoding="utf-8")
-    )
-    assert payload["detail_code"] == "SPAWN_FAILED"
-    record = captured[0]
-    assert record["fd"] is not None
-    # Attestation succeeded; the spawn failed after it.
-    assert harness.attestation()["pass"] is True
-    assert all(row["passed"] for row in harness.attestation()["checks"])
-    assert _fd_refs_to(record["dev"], record["ino"]) == []
-
-
-# -- post-initialize identity gate (D10c) ------------------------------------
-
-
-def _order_instrumentation(
-    monkeypatch: pytest.MonkeyPatch, *, method: str, run_dir: Path
-):
-    """Ordered storage-write / ACP-call log plus an at-call existence probe."""
-    from agent_run_supervisor.native_acp import run_task as run_task_module
-
-    events: list[tuple[str, str]] = []
-    probes: list[bool] = []
-
-    real_write = run_task_module.storage.write_once_json
-
-    def write_spy(path, payload):
-        events.append(("write", Path(path).name))
-        return real_write(path, payload)
-
-    monkeypatch.setattr(run_task_module.storage, "write_once_json", write_spy)
-
-    real_call = getattr(NativeAcpDriver, method)
-
-    async def call_spy(self, *args, **kwargs):
-        events.append(("acp", method))
-        probes.append((run_dir / "initialize_attestation.json").exists())
-        return await real_call(self, *args, **kwargs)
-
-    monkeypatch.setattr(NativeAcpDriver, method, call_spy)
-    return events, probes
-
-
-def test_codex_first_run_initialize_attestation_pass_precedes_new_session(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    harness = CodexHarness(tmp_path, monkeypatch)
-    events, probes = _order_instrumentation(
-        monkeypatch, method="new_session", run_dir=harness.run_dir()
-    )
-
-    # A first Run is a non-reuse Run: it is the only intent that may create a
-    # Session, and therefore the only one that reaches ``session/new``.
-    result = _run(
-        harness.task(
-            request=harness.request(session_reuse="none", ars_session_id=None)
-        )
-    )
-
-    assert result.status is AgentRunStatus.COMPLETED
-    assert probes == [True]
-    write_index = events.index(("write", "initialize_attestation.json"))
-    call_index = events.index(("acp", "new_session"))
-    assert write_index < call_index
-    artifact = harness.initialize_attestation()
-    assert artifact["pass"] is True
-    assert all(row["passed"] for row in artifact["checks"])
-
-
-def test_codex_reused_run_initialize_attestation_pass_precedes_load_session(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    harness = CodexHarness(tmp_path, monkeypatch)
-    first = _run(harness.task(run_id="run-codex-1"))
-    assert first.status is AgentRunStatus.COMPLETED
-
-    second_dir = harness.run_dir("run-codex-2")
-    events, probes = _order_instrumentation(
-        monkeypatch, method="load_session", run_dir=second_dir
-    )
-    second = _run(harness.task(run_id="run-codex-2"))
-
-    assert second.status is AgentRunStatus.COMPLETED
-    assert probes == [True]
-    write_index = events.index(("write", "initialize_attestation.json"))
-    call_index = events.index(("acp", "load_session"))
-    assert write_index < call_index
-    artifact = harness.initialize_attestation("run-codex-2")
-    assert artifact["pass"] is True
-    assert all(row["passed"] for row in artifact["checks"])
-
-
-def test_codex_agent_info_mismatch_pre_dispatch_failed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    script = dict(CODEX_SCRIPT)
-    script["agent_info"] = {"name": "impostor-agent", "version": "9.9.9"}
-    harness = CodexHarness(tmp_path, monkeypatch, script)
-
-    result = _run(harness.task())
-
-    assert result.status is AgentRunStatus.FAILED
-    payload = json.loads(
-        (harness.run_dir() / "result.json").read_text(encoding="utf-8")
-    )
-    assert payload["detail_code"] == "AGENT_IDENTITY_MISMATCH"
-    artifact = harness.initialize_attestation()
-    assert artifact["pass"] is False
-    rows = {row["name"]: row for row in artifact["checks"]}
-    assert rows["agent_name"]["expected"] == "fake-acp-agent"
-    # Golden moved by the documented fixed replacement marker, not by a
-    # weakening: this profile freezes ``NO_BROWSER="1"``, so ``1`` is one of
-    # this Run's final environment values and the frozen expectation ``1.0.0``
-    # contains it. There is no minimum length and no inconvenience waiver, so
-    # the durable projection loses that character and keeps the rest.
-    assert rows["agent_version"]["expected"] == f"{ENV_VALUE_REPLACEMENT}.0.0"
-    assert "1" not in rows["agent_version"]["expected"]
-    assert rows["agent_name"]["observed"] == "impostor-agent"
-    assert rows["agent_name"]["passed"] is False
-    assert rows["agent_version"]["observed"] == "9.9.9"
-    # The comparison itself still ran on the raw observation, so the mismatch
-    # verdict is unaffected by what the projection later withheld.
-    assert rows["agent_version"]["passed"] is False
-    # Zero session call, zero prompt, clean process group.
-    assert "session/new" not in harness_methods(harness)
-    assert "session/prompt" not in harness_methods(harness)
-    assert not (harness.run_dir() / "prompt-dispatch-started").exists()
-
-
-def harness_methods(harness: CodexHarness) -> list[str]:
-    if not harness.trace.exists():
-        return []
-    return [line for line in harness.trace.read_text().splitlines() if line]
-
-
-def test_codex_first_run_requires_load_session_advertised(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    script = dict(CODEX_SCRIPT)
-    script["load_session_advertised"] = False
-    harness = CodexHarness(tmp_path, monkeypatch, script)
-
-    result = _run(harness.task())
-
-    assert result.status is AgentRunStatus.FAILED
-    payload = json.loads(
-        (harness.run_dir() / "result.json").read_text(encoding="utf-8")
-    )
-    assert payload["detail_code"] == "LOAD_SESSION_UNADVERTISED"
-    artifact = harness.initialize_attestation()
-    assert artifact["pass"] is False
-    rows = {row["name"]: row for row in artifact["checks"]}
-    assert rows["load_session_advertised"]["passed"] is False
-    # The gate runs on the FIRST Run too, before session/new.
-    assert "session/new" not in harness_methods(harness)
-
-
-def test_codex_protocol_version_mismatch_refused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    script = dict(CODEX_SCRIPT)
-    script["protocol_version"] = 2
-    harness = CodexHarness(tmp_path, monkeypatch, script)
-
-    result = _run(harness.task())
-
-    assert result.status is AgentRunStatus.FAILED
-    payload = json.loads(
-        (harness.run_dir() / "result.json").read_text(encoding="utf-8")
-    )
-    assert payload["detail_code"] == "AGENT_IDENTITY_MISMATCH"
-    rows = {
-        row["name"]: row for row in harness.initialize_attestation()["checks"]
-    }
-    # Same documented marker, same reason: the frozen protocol major is the
-    # single character ``1``, which is also this profile's ``NO_BROWSER`` value.
-    assert rows["protocol_version"]["expected"] == ENV_VALUE_REPLACEMENT
-    assert "1" not in rows["protocol_version"]["expected"]
-    assert rows["protocol_version"]["observed"] == "2"
-    # Refusal semantics are untouched: the check compared the raw values.
-    assert rows["protocol_version"]["passed"] is False
-
-
-def test_initialize_attestation_survives_pre_dispatch_finalization(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    script = dict(CODEX_SCRIPT)
-    script["agent_info"] = {"name": "impostor-agent", "version": "9.9.9"}
-    harness = CodexHarness(tmp_path, monkeypatch, script)
-
-    _run(harness.task())
-
-    run_dir = harness.run_dir()
-    # _finalize_inner only adds files; the FAIL artifact is still there.
-    assert (run_dir / "initialize_attestation.json").exists()
-    assert (run_dir / "result.json").exists()
-    assert (run_dir / "effective.json").exists()
-    assert harness.initialize_attestation()["pass"] is False
-
-
-def test_initialize_attestation_sanitized_closed_keyset(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    harness = CodexHarness(tmp_path, monkeypatch)
-    _run(harness.task())
-
-    artifact = harness.initialize_attestation()
-    assert set(artifact) == {"schema_version", "expected", "observed", "checks", "pass"}
-    assert artifact["schema_version"] == 1
-    assert {row["name"] for row in artifact["checks"]} == {
-        "agent_name",
-        "agent_version",
-        "protocol_version",
-        "load_session_advertised",
-    }
-    for row in artifact["checks"]:
-        assert set(row) == {"name", "expected", "observed", "passed"}
-        assert isinstance(row["passed"], bool)
-        for key in ("expected", "observed"):
-            assert isinstance(row[key], str)
-    for block in ("expected", "observed"):
-        for value in artifact[block].values():
-            assert isinstance(value, (str, bool, list)) or value is None
-    raw = (harness.run_dir() / "initialize_attestation.json").read_bytes()
-    assert CODEX_EXTERNAL_ID.encode() not in raw   # no session id
-    assert b"CODEX_FAKE_OK" not in raw             # no model body
-    assert b"CODEX_HOME" not in raw                # no env dump
-    assert CODEX_AUTH_PLACEHOLDER not in raw       # no credential value
-
-
-# -- spawn env composition and OpenCode evidence stability -------------------
-
-
-def test_spawn_env_exact_composition_fixed_env_wins(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    harness = CodexHarness(tmp_path, monkeypatch)
-    # Ambient CODEX_* names are not allowlisted and can never pass through.
-    monkeypatch.setenv("CODEX_HOME", "/tmp/ambient-home")
-    monkeypatch.setenv("CODEX_PATH", "/tmp/ambient-codex")
-    monkeypatch.setenv("CODEX_CONFIG", '{"features":{"use_legacy_landlock":false}}')
-    monkeypatch.setenv("INITIAL_AGENT_MODE", "agent-full-access")
-    monkeypatch.setenv("NOT_ALLOWLISTED", "leak")
-
-    from agent_run_supervisor.native_acp.spec import RunSpecAssembler
-
-    task = harness.task()
-    assembler = RunSpecAssembler(harness.request())
-    assembler.resolve_profile(harness.registry)
-    assembler.bind_workspace(root=harness.workspace, cwd=str(harness.cwd))
-    assembler_launch = assembler.resolve_launch(runtime=harness.runtime)
-
-    env = task._spawn_env(assembler_launch)
-
-    allowlisted = {
-        name: os.environ[name]
-        for name in assembler_launch.env_allowlist
-        if name in os.environ
-    }
-    expected = dict(allowlisted)
-    expected.update(dict(assembler_launch.permission_env))
-    expected.update(dict(assembler_launch.fixed_env))
-    assert env == expected
-    # The projected launch environment wins, ambient values never leak in, and
-    # the Binding-filled keys carry the *sealed* values rather than any ambient
-    # or source-frozen one.
-    assert env["CODEX_HOME"] == str(harness.cred_root)
-    assert env["CODEX_PATH"] == str(harness.cli)
-    assert env["CODEX_CONFIG"] == CODEX_CANONICAL_CONFIG
-    assert env["INITIAL_AGENT_MODE"] == "read-only"
-    assert env["NO_BROWSER"] == "1"
-    assert "NOT_ALLOWLISTED" not in env
-
-
-def test_codex_seeded_session_profile_hash_drift_refused_before_attestation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """N9 (profile-hash drift on a seeded Session), pinned hermetically.
-
-    A registry revision bump alone breaks the bound profile hash, so
-    `validate_native_binding` refuses reuse inside the reuse plan builder —
-    before the lease and before the spawn-boundary attestation is ever called.
-    The surfaced `detail_code` is the categorical pre-dispatch
-    `SESSION_BINDING_MISMATCH`, distinct from the other three reuse refusals.
-    """
-    harness = CodexHarness(tmp_path, monkeypatch)
-    first = _run(harness.task(run_id="run-codex-1"))
-    assert first.status is AgentRunStatus.COMPLETED
-
-    spawned = _recording_spawn(monkeypatch)
-    drifted = ProfileRegistry((harness.profile(revision=2),))
-    second = _run(harness.task(run_id="run-codex-2", registry=drifted))
-
-    assert second.status is AgentRunStatus.FAILED
-    assert spawned == []
-    run_dir = harness.run_dir("run-codex-2")
-    payload = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
-    assert payload["detail_code"] == "SESSION_BINDING_MISMATCH"
-    assert payload["retryable"] is False
-    # Refused before the attestation stage: no observed-identity artifact.
-    assert not (run_dir / "attestation.json").exists()
-    assert not (run_dir / DISPATCH_STARTED_MARKER).exists()
-
-
-def test_codex_quarantined_session_reuse_refused_before_attestation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """N9 (quarantined-session reuse), pinned hermetically — same row."""
-    harness = CodexHarness(tmp_path, monkeypatch)
-    first = _run(harness.task(run_id="run-codex-1"))
-    assert first.status is AgentRunStatus.COMPLETED
-
-    store = harness.session_store()
-    store.write_quarantine_pending(
-        "sess-native-1", reason="test-arranged", run_id="run-codex-1"
-    )
-    store.mark_quarantined(
-        "sess-native-1", reason="test-arranged", run_id="run-codex-1"
-    )
-
-    spawned = _recording_spawn(monkeypatch)
-    second = _run(harness.task(run_id="run-codex-2"))
-
-    assert second.status is AgentRunStatus.FAILED
-    assert spawned == []
-    run_dir = harness.run_dir("run-codex-2")
-    payload = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
-    assert payload["detail_code"] == "RUN_EXCEPTION"
-    assert payload["retryable"] is False
-    assert not (run_dir / "attestation.json").exists()
-    assert not (run_dir / DISPATCH_STARTED_MARKER).exists()
-
-
-def test_bindingless_profile_writes_no_spawn_attestation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # A contract that accepts no Binding seals no runtime identity, so there is
-    # no artifact to attest at the spawn boundary and no file to write. The
-    # post-initialize identity gate still runs: every contract has an ACP
-    # identity, and proving it costs no artifact.
-    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
-    result = _run(harness.task())
-
-    assert result.status is AgentRunStatus.COMPLETED
-    run_dir = harness.run_dir()
-    assert not (run_dir / "attestation.json").exists()
-    assert json.loads(
-        (run_dir / "initialize_attestation.json").read_text(encoding="utf-8")
-    )["pass"] is True
-    launch = json.loads((run_dir / "launch.json").read_text(encoding="utf-8"))
-    assert "fixed_env" not in launch
-    assert "expected_runtime" not in launch
-    assert "runtime_provenance" not in launch
+    assert launch_payload["mediation_id"] == mediation_id
+    assert "permission_env" not in launch_payload
+    assert binding_value not in json.dumps(launch_payload)
+    names = {item["name"] for item in launch_payload["env"]["names"]}
+    assert key in names
 
 
 # -- B4: frozen permission mode + execute mediation over a Claude-shaped Run --
@@ -3714,28 +2793,33 @@ def _claude_shaped_script(initial_mode: str = "bypassPermissions", **overrides) 
     return script
 
 
-def _claude_shaped_profile(**overrides) -> AgentProfile:
+CLAUDE_COMPAT_PROFILE_ID = "fake-claude-compat-v1"
+
+
+def harness_methods(harness: Harness) -> list[str]:
+    """The ACP methods the fake agent actually observed, in wire order."""
+    return harness.methods_seen()
+
+
+def _claude_shaped_profile(**overrides) -> AcpCompatProfile:
+    """The compat profile's shape: a frozen mode selector plus frozen ``_meta``.
+
+    This is the surviving ACP-semantic deviation — the one thing
+    ``claude-agent-acp-compat-v1`` exists to carry — driven here over the fake
+    agent rather than over any real adapter.
+    """
     kwargs = dict(
-        profile_id="fake-claude-1.0",
+        profile_id=CLAUDE_COMPAT_PROFILE_ID,
         revision=1,
-        executable_key="python-fake",
-        argv_template=(str(FAKE_AGENT_PATH),),
-        env_allowlist=("PATH", "HOME", "FAKE_AGENT_SCRIPT", "FAKE_AGENT_TRACE"),
-        credential_slots=(),
-        model_selector_id="model",
-        effort_selector_id="effort",
-        default_model="opus[1m]",
-        default_effort="max",
-        registered_models=("claude-fable-5[1m]", "opus[1m]"),
-        allowed_efforts=("max",),
+        acp_protocol_version="1",
+        required_capabilities=(),
+        base_allowlist=("PATH", "HOME", "FAKE_AGENT_SCRIPT", "FAKE_AGENT_TRACE"),
         requires_session_load=False,
-        config_schema={"selectors": {"model": "string", "effort": "string"}},
         permission_mode_selector_id="mode",
         required_permission_mode="default",
-        contract=_bindingless_contract(),
     )
     kwargs.update(overrides)
-    return AgentProfile(**kwargs)
+    return AcpCompatProfile(**kwargs)
 
 
 def _claude_harness(
@@ -3743,19 +2827,17 @@ def _claude_harness(
     monkeypatch: pytest.MonkeyPatch,
     script: dict,
     *,
-    profile: AgentProfile | None = None,
+    profile: AcpCompatProfile | None = None,
 ) -> Harness:
     harness = Harness(tmp_path, monkeypatch, script)
-    harness.registry = ProfileRegistry((profile or _claude_shaped_profile(),))
+    resolved = profile or _claude_shaped_profile()
+    harness.registry = ProfileRegistry((resolved,))
+    harness.entry = _test_entry(profile_id=resolved.profile_id)
     return harness
 
 
 def _claude_request(**overrides) -> AgentRunRequest:
-    kwargs = dict(
-        profile_id="fake-claude-1.0",
-        requested_model="opus[1m]",
-        requested_effort="max",
-    )
+    kwargs = dict(requested_model="opus[1m]", requested_effort="max")
     kwargs.update(overrides)
     return _request(**kwargs)
 
@@ -4049,390 +3131,3 @@ def test_post_load_mode_fidelity_failure_refuses_before_prompt(
     captured = _captured_meta(capture)
     assert captured[-1]["method"] == "session/load"
     assert captured[-1]["meta"] == FROZEN_CLAUDE_SESSION_META
-
-
-# -- PR-B WP4: the session compatibility epoch on the real reuse path ---------
-
-
-def test_epoch_is_persisted_from_the_sealed_binding(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    harness = CodexHarness(tmp_path, monkeypatch)
-    assert _run(harness.task()).status is AgentRunStatus.COMPLETED
-    record = harness.session_store().open_session("sess-native-1")
-    assert record.session_compatibility_epoch == (
-        harness.runtime.resolved.session_compatibility_epoch
-    )
-    assert record.native_adapter_contract_hash == (
-        harness.profile().adapter_contract_hash()
-    )
-
-
-def test_epoch_bump_refuses_reuse_before_the_lease_and_before_session_load(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """C11: a promotion that bumps the epoch makes older Sessions non-reusable."""
-    harness = CodexHarness(tmp_path, monkeypatch)
-    assert _run(harness.task(run_id="run-codex-1")).status is AgentRunStatus.COMPLETED
-    store = harness.session_store()
-    assert store.open_session("sess-native-1").agent_session_id
-
-    spawned = _recording_spawn(monkeypatch)
-    # The trace is append-only across Runs, so the second Run's contribution is
-    # the delta — and it must be empty.
-    before = list(harness_methods(harness))
-    bumped = harness.binding(tag="bumped", epoch=2)
-    assert bumped.resolved.session_compatibility_epoch == 2
-    second = _run(harness.task(run_id="run-codex-2", runtime_binding=bumped))
-
-    assert second.status is AgentRunStatus.FAILED
-    # Refused before any spawn, so before session/load and before any prompt.
-    assert spawned == []
-    run_dir = harness.run_dir("run-codex-2")
-    payload = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
-    assert payload["detail_code"] == "SESSION_BINDING_MISMATCH"
-    assert payload["retryable"] is False
-    assert not (run_dir / "attestation.json").exists()
-    assert not (run_dir / DISPATCH_STARTED_MARKER).exists()
-    # No wire frame at all on the refused reuse path: in particular no
-    # session/load and, critically, no session/new fallback.
-    assert harness_methods(harness) == before
-    # The lease was never mutated and the record is untouched.
-    record = store.open_session("sess-native-1")
-    assert record.state == "open"
-    assert record.session_compatibility_epoch == 1
-    assert not (Path(store.base_dir) / "sess-native-1" / "lock.json").exists()
-
-
-def test_a_pre_epoch_session_is_refused_by_a_binding_era_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A Session created before the epoch existed cannot be silently loaded."""
-    harness = CodexHarness(tmp_path, monkeypatch)
-    store = storage.native_session_store(harness.root)
-    storage.create_native_session(
-        store,
-        session_id="sess-native-1",
-        profile_id="codex-fake-1.0",
-        profile_revision=1,
-        profile_hash=harness.profile().profile_hash(),
-        owner="hermes",
-        namespace="hermes/doc-check",
-        workspace_hash="0" * 64,
-        effective_cwd=str(harness.cwd),
-        matched_root=str(harness.workspace),
-    )
-    spawned = _recording_spawn(monkeypatch)
-    result = _run(harness.task())
-    assert result.status is AgentRunStatus.FAILED
-    assert spawned == []
-    # Still status/list/close-readable afterwards.
-    record = store.open_session("sess-native-1")
-    assert record.session_compatibility_epoch is None
-    assert "sess-native-1" in {row.session_id for row in store.list_records()}
-    assert store.mark_closed("sess-native-1").state == "closed"
-
-
-def test_adapter_sibling_tamper_before_run_refused_with_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """F-RUNTIME-BINDING-002 at the Run boundary.
-
-    The dependency the entry would resolve changes; the entry file does not.
-    An entry-only artifact identity cannot see this, so the Run must refuse on
-    the closure row, before any spawn, with the sealed closure durable in
-    ``launch.json``.
-    """
-    harness = CodexHarness(tmp_path, monkeypatch)
-    spawned = _recording_spawn(monkeypatch)
-    task = harness.task()
-    wrapped = harness.profile().contract.wrapped_runtime
-    sealed_tree = wrapped.adapter_tree_sha256
-    sealed_entry = wrapped.adapter_entry_sha256
-
-    mode = harness.adapter_sibling.stat().st_mode
-    harness.adapter_sibling.write_bytes(b"# swapped hoisted dependency\n")
-    harness.adapter_sibling.chmod(mode)
-
-    result = _run(task)
-
-    assert result.status is AgentRunStatus.FAILED
-    assert spawned == []
-    run_dir = harness.run_dir()
-    launch = json.loads((run_dir / "launch.json").read_text(encoding="utf-8"))
-    assert launch["expected_runtime"]["adapter_package_root"] == str(
-        harness.adapter_root
-    )
-    assert launch["expected_runtime"]["adapter_tree_sha256"] == sealed_tree
-    rows = harness.rows()
-    # The entry itself still matches: only the closure row can catch this.
-    assert rows["adapter_entry_sha256"]["passed"] is True
-    assert rows["adapter_entry_sha256"]["expected"] == sealed_entry
-    assert rows["adapter_package_closure"]["passed"] is False
-    assert rows["adapter_package_closure"]["expected"] == sealed_tree
-    payload = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
-    assert payload["detail_code"] == "RUNTIME_IDENTITY_MISMATCH"
-
-
-def test_inwindow_adapter_sibling_swap_refused_end_to_end(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from agent_run_supervisor.native_acp import attestation as attestation_module
-
-    harness = CodexHarness(tmp_path, monkeypatch)
-    spawned = _recording_spawn(monkeypatch)
-    task = harness.task()
-    sibling = harness.adapter_sibling
-
-    def tamper() -> None:
-        mode = sibling.stat().st_mode
-        sibling.write_bytes(b"# swapped inside the race seam\n")
-        sibling.chmod(mode)
-
-    monkeypatch.setattr(attestation_module, "_POST_ATTESTATION_HOOK", tamper)
-
-    result = _run(task)
-
-    assert result.status is AgentRunStatus.FAILED
-    assert spawned == []
-    rows = harness.rows()
-    assert rows["adapter_package_closure"]["passed"] is True
-    assert rows["adapter_package_closure_recheck"]["passed"] is False
-    payload = json.loads(
-        (harness.run_dir() / "result.json").read_text(encoding="utf-8")
-    )
-    assert payload["detail_code"] == "RUNTIME_IDENTITY_MISMATCH"
-
-
-# ---------------------------------------------------------------------------
-# G5 — two fake agents, one generic path (closure §5.5)
-#
-# The same admission → Binding → launch → Session sequence runs for both, with
-# only registration data differing. Nothing in RunTask, the driver, the
-# permission bridge, or the attestation layer learns which agent it is running.
-# ---------------------------------------------------------------------------
-
-_AGENT_SCRIPTS = {
-    bf.FAKE_ALPHA_ID: {
-        # The registration declares this ACP name, and the post-initialize
-        # identity gate compares the two — so the pair also proves the gate
-        # reads the *agent's* expected name rather than a source constant.
-        "agent_info": {"name": "FakeAlpha", "version": "1.0.0"},
-        "session_id": "alpha-external-session",
-        "initial_options": [
-            {
-                "id": "model",
-                "name": "Model",
-                "type": "select",
-                "currentValue": "alpha/zero",
-                "options": [
-                    {"value": "alpha/zero", "name": "Zero"},
-                    {"value": "alpha/one", "name": "One"},
-                ],
-            },
-            {
-                "id": "effort",
-                "name": "Effort",
-                "type": "select",
-                "currentValue": "low",
-                "options": [
-                    {"value": "low", "name": "Low"},
-                    {"value": "high", "name": "High"},
-                ],
-            },
-        ],
-        "final_message": "ALPHA_OK",
-    },
-    bf.FAKE_BETA_ID: {
-        # The registration declares this ACP name, and the post-initialize
-        # identity gate compares the two — so the pair also proves the gate
-        # reads the *agent's* expected name rather than a source constant.
-        "agent_info": {"name": "FakeBeta", "version": "1.0.0"},
-        "session_id": "beta-external-session",
-        "initial_options": [
-            {
-                "id": "modelId",
-                "name": "Model",
-                "type": "select",
-                "currentValue": "beta/one",
-                "options": [
-                    {"value": "beta/one", "name": "One"},
-                    {"value": "beta/two", "name": "Two"},
-                ],
-            },
-            {
-                "id": "reasoning",
-                "name": "Reasoning",
-                "type": "select",
-                "currentValue": "max",
-                "options": [{"value": "max", "name": "Max"}],
-            },
-        ],
-        "final_message": "BETA_OK",
-    },
-}
-
-_AGENT_MODELS = {bf.FAKE_ALPHA_ID: "alpha/one", bf.FAKE_BETA_ID: "beta/two"}
-_AGENT_EFFORTS = {bf.FAKE_ALPHA_ID: "high", bf.FAKE_BETA_ID: "max"}
-_AGENT_CREDS = {bf.FAKE_ALPHA_ID: ("alpha-auth",), bf.FAKE_BETA_ID: ()}
-
-
-class AgentHarness:
-    """One standard-native agent, staged exactly as an operator would stage it.
-
-    The agent's whole behavior lives in its own artifact, because the source
-    profile's ``env_allowlist`` is the frozen ACP-conformance nine and forwards
-    no test variable — which is precisely the point: the launch is built from
-    the registration and the slot, never from the harness.
-    """
-
-    def __init__(
-        self, tmp_path: Path, agent_id: str, *, dirname: str = "binding-root"
-    ) -> None:
-        from agent_run_supervisor.native_acp.profile import STANDARD_NATIVE_ACP_V1
-
-        self.agent_id = agent_id
-        self.profile = STANDARD_NATIVE_ACP_V1
-        self.tmp_path = tmp_path
-        self.root = tmp_path / ".agent-run-supervisor"
-        self.workspace = tmp_path / "workspace"
-        self.workspace.mkdir(exist_ok=True)
-        self.trace = tmp_path / f"{agent_id}-trace.log"
-
-        stage = tmp_path / f"stage-{agent_id}"
-        stage.mkdir(parents=True, exist_ok=True)
-        shell = bf.stage_interpreter(stage)
-        python = bf.trusted_system_interpreter()
-        entry = stage / "agent_entry.py"
-        shutil.copy2(FAKE_AGENT_PATH, entry)
-        script = json.dumps(_AGENT_SCRIPTS[agent_id])
-        binary = bf.make_native_binary(
-            stage,
-            name=f"{agent_id}-cli",
-            body=(
-                "#!" + str(shell) + "\n"
-                f"FAKE_AGENT_SCRIPT='{script}'\n"
-                f"FAKE_AGENT_TRACE='{self.trace}'\n"
-                "export FAKE_AGENT_SCRIPT FAKE_AGENT_TRACE\n"
-                f"exec '{python}' '{entry}' \"$@\"\n"
-            ),
-        )
-        bf.harden_tree(stage)
-        self.binding_root = bf.build_agent_binding_root(
-            tmp_path,
-            self.profile,
-            agent_id,
-            slots={"agent_cli": bf.native_binary_slot(binary, version="1.0.0")},
-            dirname=dirname,
-        )
-        self.registry = ProfileRegistry((self.profile,))
-        self.runtime = bf.admit_from_root(self.binding_root, self.profile, agent_id)
-
-    def request(self, **overrides) -> AgentRunRequest:
-        kwargs = dict(
-            profile_id=self.profile.profile_id,
-            agent_id=self.agent_id,
-            ars_session_id=f"sess-{self.agent_id}",
-            requested_model=_AGENT_MODELS[self.agent_id],
-            requested_effort=_AGENT_EFFORTS[self.agent_id],
-            credential_refs=_AGENT_CREDS[self.agent_id],
-        )
-        kwargs.update(overrides)
-        return _request(**kwargs)
-
-    def task(self, *, run_id: str | None = None, **overrides) -> RunTask:
-        kwargs = dict(
-            request=self.request(),
-            prompt_text="hello agent",
-            run_id=run_id or f"run-{self.agent_id}",
-            workspace_root=self.workspace,
-            registry=self.registry,
-            supervisor_root=self.root,
-            submitted_at="2026-07-29T00:00:00+00:00",
-            runtime_binding=self.runtime,
-        )
-        kwargs.update(overrides)
-        _seed_bound_session(
-            kwargs, _AGENT_SCRIPTS[self.agent_id].get("session_id", DEFAULT_EXTERNAL_ID)
-        )
-        return RunTask(**kwargs)
-
-    def run_dir(self, run_id: str | None = None) -> Path:
-        return self.root / "native-runs" / (run_id or f"run-{self.agent_id}")
-
-
-@pytest.mark.parametrize("agent_id", [bf.FAKE_ALPHA_ID, bf.FAKE_BETA_ID])
-def test_the_full_sequence_runs_identically_for_both_fake_agents(
-    tmp_path: Path, agent_id: str
-) -> None:
-    harness = AgentHarness(tmp_path, agent_id)
-    result = _run(harness.task())
-    assert result.status is AgentRunStatus.COMPLETED
-
-    run_dir = harness.run_dir()
-    for artifact in (
-        "spec.json",
-        "launch.json",
-        "effective.json",
-        "attestation.json",
-        "initialize_attestation.json",
-        "result.json",
-    ):
-        assert (run_dir / artifact).exists(), artifact
-
-    spec = json.loads((run_dir / "spec.json").read_text(encoding="utf-8"))
-    launch = json.loads((run_dir / "launch.json").read_text(encoding="utf-8"))
-    assert spec["agent"]["agent_id"] == agent_id
-    assert spec["agent"]["profile_id"] == "standard-native-acp-v1"
-    assert launch["agent_id"] == agent_id
-    assert (
-        spec["agent"]["agent_registration_hash"] == launch["agent_registration_hash"]
-    )
-    effective = json.loads((run_dir / "effective.json").read_text(encoding="utf-8"))
-    assert effective["effective_model"] == _AGENT_MODELS[agent_id]
-    assert effective["effective_effort"] == _AGENT_EFFORTS[agent_id]
-
-    identity = json.loads(
-        (run_dir / "initialize_attestation.json").read_text(encoding="utf-8")
-    )
-    assert identity["pass"] is True
-    assert identity["expected"]["protocol_version"] == "1"
-
-
-def test_the_session_record_carries_the_agent_and_its_registration(
-    tmp_path: Path,
-) -> None:
-    harness = AgentHarness(tmp_path, bf.FAKE_ALPHA_ID)
-    _run(harness.task())
-    record = storage.native_session_store(harness.root).open_session(
-        f"sess-{bf.FAKE_ALPHA_ID}"
-    )
-    assert record.native_agent_id == bf.FAKE_ALPHA_ID
-    assert len(record.native_agent_registration_hash) == 64
-
-
-def test_g2_5_agent_identity_survives_the_crash_window_between_artifacts(
-    tmp_path: Path,
-) -> None:
-    """``spec.json`` is written before ``launch.json``; reconcile reads only the
-    first, so agent identity has to be in it."""
-    harness = AgentHarness(tmp_path, bf.FAKE_ALPHA_ID)
-    _run(harness.task())
-    run_dir = harness.run_dir()
-    (run_dir / "launch.json").unlink()
-    spec = json.loads((run_dir / "spec.json").read_text(encoding="utf-8"))
-    assert spec["agent"]["agent_id"] == bf.FAKE_ALPHA_ID
-    assert spec["agent"]["agent_registration_hash"]
-
-
-def test_g2_6_a_legacy_spec_json_stays_readable_and_carries_no_agent_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
-    _run(harness.task())
-    spec = json.loads(
-        (harness.run_dir() / "spec.json").read_text(encoding="utf-8")
-    )
-    assert spec["identity"]["owner"] == "hermes"
-    assert "agent_id" not in spec["agent"]
-    assert "agent_registration_hash" not in spec["agent"]

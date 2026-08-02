@@ -12,20 +12,63 @@ here touches it. Startup/turn timeouts are owned by the caller via
 from __future__ import annotations
 
 import asyncio
+import errno as _errno
 import os
 import signal as _signal
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Any, Callable, Mapping
 
 from agent_run_supervisor.process_liveness import ProcessIdentity, identity_for_pid
 
 DEFAULT_MAX_STDERR_BYTES = 262_144
 STDERR_TRUNCATION_MARKER = b"\n[stderr truncated by supervisor byte cap]\n"
 
+# Stable spawn classifications. These are ordinary configuration errors — "you
+# upgraded and the shim moved" — never security refusals, and no process exists
+# in any of these cases.
+COMMAND_NOT_FOUND = "COMMAND_NOT_FOUND"
+COMMAND_NOT_EXECUTABLE = "COMMAND_NOT_EXECUTABLE"
+SPAWN_FAILED = "SPAWN_FAILED"
+
+# Exactly two errnos are classified, and everything else falls through. The
+# narrowness is the point: each of these tells an operator something specific
+# and actionable about the command they declared, and nothing else does.
+#
+# EPERM and EISDIR look like they belong here and do not. EPERM is raised for
+# ptrace scope, seccomp, and no_new_privs situations that say nothing about the
+# file's mode, and EISDIR says the operand was never a program at all —
+# reporting either as COMMAND_NOT_EXECUTABLE would send an operator to fix a
+# permission bit that is not the problem.
+_ERRNO_CLASSIFICATION = {
+    _errno.ENOENT: COMMAND_NOT_FOUND,
+    _errno.EACCES: COMMAND_NOT_EXECUTABLE,
+}
+
 
 class ManagedProcessError(RuntimeError):
-    """Spawn/supervision failure of a managed native-agent process."""
+    """Spawn/supervision failure of a managed native-agent process.
+
+    ``code`` is one of the stable classifications above. The message is fixed
+    text plus that code: the OS error names the image path and errno detail,
+    both of which are child- or operator-controlled, so neither is interpolated
+    into anything projectable.
+    """
+
+    def __init__(self, message: str, *, code: str = SPAWN_FAILED) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def classify_spawn_errno(exc: BaseException) -> str:
+    """Classify the exec failure ARS observed. There is no pre-flight check.
+
+    Classification happens *after* the attempt, deliberately: a pre-flight
+    resolution gate would have to re-implement ``execvp`` lookup, and would then
+    disagree with the kernel exactly when it mattered.
+    """
+    number = getattr(exc, "errno", None)
+    return _ERRNO_CLASSIFICATION.get(number, SPAWN_FAILED)
 
 
 @dataclass(frozen=True)
@@ -139,6 +182,31 @@ class ManagedProcess:
         except ProcessLookupError:
             pass
 
+    def group_is_gone(self) -> bool:
+        """Is the launched process group empty?
+
+        A separate question from :meth:`wait`, which reaps the **leader** and
+        reports on nothing else. A descendant that inherited the group outlives
+        its parent: if it also ignores SIGTERM and does not hold the inherited
+        pipes open, the leader's exit and stderr EOF both arrive promptly and
+        the reap looks completely clean while the descendant keeps running.
+
+        ``killpg(pgid, 0)`` is the POSIX existence probe for the whole group.
+        ESRCH means empty. Every other answer — including EPERM, which says
+        something is there that this process may not signal — is *present*, so
+        an ambiguous probe fails closed.
+
+        Ask this only after the leader has been reaped: until then the leader's
+        own zombie is a group member and the answer is trivially "present".
+        """
+        try:
+            os.killpg(self.pgid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        return False
+
     def terminate_group(self, *, reason: str = "terminate_group") -> None:
         self._record_kill("SIGTERM", reason)
         self._signal_group(_signal.SIGTERM)
@@ -172,49 +240,62 @@ class ManagedProcess:
         return self._exit
 
 
+def _exec_environment(env: Any) -> dict[str, str]:
+    """Take the child environment from the one resolution, never from ambient.
+
+    A :class:`~agent_run_supervisor.native_acp.spec.ResolvedEnvironment` hands
+    over its own copy; a plain mapping is copied here. Either way the mapping
+    this function returns is what the child receives, and nothing re-reads
+    ``os.environ`` at spawn.
+    """
+    exec_mapping = getattr(env, "exec_mapping", None)
+    if exec_mapping is not None:
+        return dict(exec_mapping)
+    return dict(env)
+
+
 async def spawn_managed_process(
     *,
     argv: list[str],
     cwd: Path,
-    env: Mapping[str, str],
+    env: Any,
     limits: ManagedProcessLimits,
     on_spawn: Callable[[int], None] | None = None,
-    interpreter_fd: int | None = None,
 ) -> ManagedProcess:
     """Spawn a supervised child in its own POSIX session/process group.
+
+    Declared command semantics are preserved exactly: ``argv[0]`` is the
+    declared string as handed in, and the exec image is located by ordinary
+    ``execvp``-style lookup over the **child's** projected ``PATH``. There is no
+    ``executable=`` override, no descriptor-based image, and no realpath — which
+    is what lets version-manager shims, symlink farms, package-relative
+    resolution, multicall ``argv[0]`` dispatch, and an agent's own self-relaunch
+    keep working.
 
     ``on_spawn`` failure is fail-closed: the just-spawned group is terminated
     (SIGTERM → grace → SIGKILL), reaped, and the error re-raised as
     :class:`ManagedProcessError` — an untracked child is never left running.
-
-    ``interpreter_fd`` binds the exec image to an already-attested inode: the
-    descriptor is inherited across the fork and the child execs
-    ``/proc/self/fd/N``, which resolves directly to that inode without
-    re-walking any path, while ``argv[0]`` keeps its canonical path string.
-    Callers own the descriptor's lifetime. ``None`` is the ordinary pathname
-    exec and is byte-identical to the pre-attestation behavior.
     """
     if os.name != "posix":
         raise ManagedProcessError(
             "spawn_managed_process requires POSIX: start_new_session is mandatory"
         )
-    image_kwargs: dict[str, object] = {}
-    if interpreter_fd is not None:
-        image_kwargs["executable"] = f"/proc/self/fd/{interpreter_fd}"
-        image_kwargs["pass_fds"] = (interpreter_fd,)
     try:
         process = await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(cwd),
-            env=dict(env),
+            env=_exec_environment(env),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
-            **image_kwargs,
         )
     except (OSError, ValueError) as exc:
-        raise ManagedProcessError(f"failed to spawn managed process: {exc}") from exc
+        # The errno survives as a stable code; the exception's own text does
+        # not, because it names the image path the operator declared.
+        raise ManagedProcessError(
+            "failed to spawn managed process", code=classify_spawn_errno(exc)
+        ) from exc
 
     try:
         pgid = os.getpgid(process.pid)

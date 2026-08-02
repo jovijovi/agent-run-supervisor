@@ -2,7 +2,7 @@
 title: "agent-run-supervisor Result / Event Schema"
 status: active
 created_at: 2026-06-01
-last_validated_at: 2026-07-30
+last_validated_at: 2026-08-01
 ---
 # agent-run-supervisor Result / Event Schema
 
@@ -30,8 +30,9 @@ last_validated_at: 2026-07-30
 > **Evidence rules for the reset line.** [§9](#9-native-reset-line-evidence-rules) records the
 > environment-value, guard, withholding, and policy-warning rules that every Native emitter on the V4
 > boundary-reset line must obey, and the audit that found no launch, provenance, or attestation field in the
-> caller-stable contract above. Those rules are **normative for the reset line and not yet implemented in
-> source**; §1–§8 continue to describe what the code emits today.
+> caller-stable contract above. Those rules are normative for the reset line and are **implemented in source
+> on branch `feat/v4-boundary-reset`** — not merged, not released, so no released artifact emits them yet.
+> §1–§8 describe the caller-stable contract, which the reset does not change.
 >
 > **Stability rule (read this first).** `business_verdict` is **always `null`**
 > and caller-owned — the supervisor never sets it. Schema evolution is
@@ -493,9 +494,10 @@ never deletes an open or live-locked session.
 
 ## 9. Native reset-line evidence rules
 
-Normative for every Native emitter on the V4 boundary-reset line. **Not implemented in source yet** — the
-board carries the authority-versus-source delta. Nothing in this section changes any key documented in
-§1–§8: those keys keep their names, types, and meanings, and the additive-only rule still holds.
+Normative for every Native emitter on the V4 boundary-reset line, and **implemented in source on branch
+`feat/v4-boundary-reset`** — not merged, not released; the board carries the exact position. Nothing in this
+section changes any key documented in §1–§8: those keys keep their names, types, and meanings, and the
+additive-only rule still holds.
 
 ### 9.1 Audit result — no launch, provenance, or attestation field, and no environment value
 
@@ -511,6 +513,16 @@ The caller-stable contract in §1–§8 was audited field by field against the r
 The retired Binding-era launch and attestation material lived in `launch.json` and `attestation.json`, which
 this document never described. It is retired with the architecture and preserved only under
 [`docs/archive/binding-era-2026-07/`](../archive/binding-era-2026-07/README.md).
+
+On the reset line `launch.json` is a **value-blind launch snapshot** whose key set is closed by a schema-level
+allowlist: the declared `command`, the exact `argv`, profile identity, `agent_id`, the selector ids, the
+capability narrowing, the caller's `credential_refs`, the operator's `session_epoch`, the selected
+`mediation_id`, and one `env` block of the shape described in §9.2. `fixed_env`, `permission_env`,
+`env_allowlist`, `expected_runtime`, and `runtime_provenance` are not merely absent — a document carrying one
+is rejected as not a production record, so none can be reintroduced by an additive edit. `attestation.json` is
+not written at all; the post-`initialize` artifact is `initialize_evidence.json`, which records the
+observation with an explicit `authoritative: false` and carries no expected-identity block to compare against
+(§9.5).
 
 ### 9.2 All dynamic keys and free-form text are guard-produced
 
@@ -585,16 +597,25 @@ change an outcome.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `type` | `string` | the policy-warning family name |
-| `subject` | `string` | which non-authoritative observation drifted — for example the agent self-reported name, the self-reported version, the advertised capability set, the path-lookup observation, or the mapped-image observation |
-| `comparison` | `string` | what it was compared against, always a *record*, never a gate: the previous Run of this Session, or the observation recorded earlier in this Run |
+| `type` | `string` | the policy-warning family name — always `policy_warning` |
+| `code` | `string` | the stable machine-readable pairing of `subject` and `comparison`, for callers that switch on one token. One of `AGENT_SELF_REPORT_CHANGED`, `ADVERTISED_CAPABILITIES_CHANGED` |
+| `subject` | `string` | which non-authoritative observation drifted. One of `agent_self_report` (the agent's self-reported name and version, taken together), `advertised_capabilities` (the advertised capability set) |
+| `comparison` | `string` | what it was compared against, always a *record*, never a gate. One of `previous_run_of_session` |
 | `authoritative` | `boolean` | **always `false`** |
 | `refused` | `boolean` | **always `false`** — the Run continued and the Session stayed reusable |
+
+Every field is present on every warning, and every string value is drawn from the closed vocabularies above:
+a policy warning contains no free-form text at all. `code` is documented as part of the shape rather than as
+an alternative to it — it does not replace `subject`, `comparison`, or `refused`, and a caller may read
+either the token or the pair.
 
 The event carries no value, no digest, no length, and no raw child text: its subject names *which* fact
 drifted, not what the fact was. A caller must not treat a policy warning as a failure signal, a business
 verdict, or grounds to retire a Session, and no ARS code path branches on one. Zero policy-warning events
 means no observed drift, never that a check was skipped.
+
+Adding a subject or a comparison is an ordinary additive change and extends the closed set here in the same
+commit as the emitter — the two are one contract, not a document that describes an implementation.
 
 ### 9.6 What does not change
 

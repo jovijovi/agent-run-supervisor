@@ -17,7 +17,7 @@ from collections.abc import Sequence
 from agent_run_supervisor.arsd.operand import (
     OperandError,
     admit_exact_text,
-    capture_binding_root,
+    capture_agents_file,
 )
 
 __all__ = [
@@ -100,7 +100,7 @@ def render_service_unit(
     *,
     socket_path: str | None = None,
     supervisor_root: str | None = None,
-    binding_root: str | None = None,
+    agents_file: str | None = None,
     caller_mappings: Sequence[str] = (),
     python_executable: str | None = None,
     timeout_stop_sec: int = DEFAULT_TIMEOUT_STOP_SEC,
@@ -112,15 +112,15 @@ def render_service_unit(
     until an A3/G12-approved mapping is explicitly supplied). Paths and
     mappings are argv data — never shell, never root/system-scope directives.
 
-    ``binding_root`` is the operator-owned Runtime Binding root (PRD R13). It
-    is **required**: there is no safe service-UID-owned location for it, so a
+    ``agents_file`` is the operator-owned agent registry file. It is
+    **required**: there is no safe service-UID-owned location for it, so a
     ``%h``-rooted or otherwise relative value is refused rather than invented,
     and an absent one is refused rather than omitted. The keyword keeps a
     ``None`` default only so that omission raises a catchable
     ``ServiceUnitError`` like every other refusal here, instead of a
     ``TypeError`` that would escape the CLI's fail-closed handler.
     It is rendered as argv data only — this module never opens, creates, or
-    validates the root.
+    validates the file.
     """
     if not isinstance(timeout_stop_sec, int) or not (30 <= timeout_stop_sec <= 300):
         raise ServiceUnitError("TimeoutStopSec must be an int in [30, 300]")
@@ -150,23 +150,23 @@ def render_service_unit(
         (root, not root_is_default),
     ]
     # Fail closed rather than emit a shorter ExecStart: a unit without
-    # ``--binding-root`` installs a daemon that refuses every registered
-    # profile at admission, so omission is never a valid render.
-    if binding_root is None:
+    # ``--agents-file`` installs a daemon that can resolve no agent at all, so
+    # omission is never a valid render.
+    if agents_file is None:
         raise ServiceUnitError(
-            "binding_root is required (refusing to render a unit that omits "
-            "the operator Runtime Binding root)"
+            "agents_file is required (refusing to render a unit that omits the "
+            "operator agent registry file)"
         )
     # One capture, shared with the daemon: admitted by type identity, read once,
     # non-empty/control-free/absolute checked against the frozen text, and the
     # operator's spelling preserved byte-for-byte because nothing round-trips
     # through ``Path``.
     try:
-        binding = capture_binding_root(binding_root)
+        agents = capture_agents_file(agents_file)
     except OperandError as exc:
         raise ServiceUnitError(str(exc)) from exc
-    argv_parts.append(("--binding-root", True))
-    argv_parts.append((binding, True))
+    argv_parts.append(("--agents-file", True))
+    argv_parts.append((agents, True))
     for raw in caller_mappings:
         mapping = _reject_controls(raw, label="caller_mapping")
         parts = mapping.split(":", 3)

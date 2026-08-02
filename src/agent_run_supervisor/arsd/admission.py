@@ -18,39 +18,58 @@ from typing import Any, AsyncIterator, Mapping
 
 from agent_run_supervisor.event_store import EventStore, RunHandle, _RUN_ID_RE
 from agent_run_supervisor.exit_classifier import AgentRunStatus
-from agent_run_supervisor.native_acp import runtime_binding, storage
-from agent_run_supervisor.native_acp.profile import AgentProfile
+from agent_run_supervisor.native_acp import agent_registry, storage
+from agent_run_supervisor.native_acp.agent_registration import AgentEntry
 from agent_run_supervisor.result import build_result_payload
 
 from . import protocol
 
-DIGEST_SCHEMA_VERSION = 1
-SUBMISSION_SCHEMA_VERSION = 1
+# Moved with the reset: the digest material genuinely changed, because agent
+# identity replaced profile selection and the launch material became
+# value-blind. A pre-reset frame therefore hashes differently by construction
+# rather than being silently reinterpreted.
+DIGEST_SCHEMA_VERSION = 2
+SUBMISSION_SCHEMA_VERSION = 2
 
-# Request fields that would let a caller choose a runtime. None of them exist
-# on ``AgentRunRequest`` and none is added here: the guard is a structural
-# assertion that admission never grew one, not a filter over caller input.
+# Request fields that would let a caller choose a runtime, name a value, or
+# anticipate a transport. None of them exists on ``AgentRunRequest`` and none is
+# added here: the guard is a structural assertion that admission never grew one,
+# not a filter over caller input.
 FORBIDDEN_RUNTIME_SELECTION_FIELDS = (
     "runtime_path",
     "executable",
+    "command",
+    "argv",
+    "args",
+    "env",
+    "environment",
+    "env_overlay",
+    "env_passthrough",
     "cli_path",
     "cli_version",
     "cli_sha256",
+    "sha256",
+    "digest",
     "binding_generation_id",
     "generation_id",
     "adapter_contract_hash",
+    "agent_registration_hash",
     "session_compatibility_epoch",
+    "profile_id",
+    "mediation",
+    "secret",
+    "secret_refs",
+    "transport",
+    "endpoint",
+    "attach",
+    "remote",
 )
 
-# The closed set of request fields that leave the digest material when they are
-# ``None`` — deliberately one named field, never a blanket null-strip.
-#
-# Production is live at the pre-change digest, so a legacy frame must hash
-# byte-identically or every in-flight retry becomes an idempotency conflict for
-# no information gain. A blanket strip would go the other way and collapse the
-# meaningful existing nulls (``ars_session_id``, ``expected_binding_hash``,
-# ``cwd``, ``retry_of_run_id``), changing every digest instead.
-_DIGEST_OMIT_WHEN_NONE = ("agent_id",)
+# No request field leaves the digest material. The one omission that used to
+# exist was a compatibility measure for a wire that had not yet moved; the
+# schema version moves instead, which is the honest way to say the material
+# changed.
+_DIGEST_OMIT_WHEN_NONE: tuple[str, ...] = ()
 
 _RUN_ID_PREFIX = "run-"
 _DERIVATION_TAG = b"arsd-run-id-v1\x00"
@@ -156,58 +175,24 @@ def prepare_run(event_store: EventStore, run_id: str) -> RunHandle:
     return event_store.create_run(run_id)
 
 
-def resolve_runtime_binding(
-    profile: AgentProfile,
-    *,
-    binding_root: Path | None,
-    ownership: runtime_binding.TrustedOwnership | None = None,
-    agent_id: str | None = None,
-) -> runtime_binding.AdmittedRuntimeBinding | None:
-    """The single per-Run Binding read (C8) — one pointer, one generation.
+def resolve_agent_entry(
+    snapshot: agent_registry.AgentRegistrySnapshot | None, agent_id: str
+) -> AgentEntry:
+    """Resolve one Run's agent against the startup snapshot. **In memory only.**
 
-    Reads ``active.json`` exactly once and the generation it names exactly
-    once, revalidates contract match and artifact digest against the trusted
-    immutable paths, and hands the result forward as a sealed value. Nothing
-    downstream re-opens the Binding root, so a promotion between two Runs can
-    never re-point work already admitted.
+    This is the whole per-Run agent resolution. It performs zero filesystem
+    access: the registry was opened exactly once, at daemon startup, before the
+    socket was bound, and the snapshot it produced is immutable. Two concurrent
+    Runs therefore cannot resolve different registry contents, a serving daemon
+    cannot be re-pointed, and a registry edit takes effect at the next daemon
+    start rather than the next Run.
 
-    An agent-scoped profile reads one ``registration.json`` first — three reads
-    total, still exactly once each — and the whole read set is anchored inside
-    that agent's subtree.
-
-    The profile comes from the closed registry and the root from operator
-    supplied daemon configuration. ``agent_id`` *is* caller text, and it selects
-    among operator-authored, source-bounded registrations exactly as
-    ``profile_id`` selects among source-registered profiles: it names no path,
-    executable, argv, env key, digest, or version, and the component grammar
-    that runs before any filesystem query makes it unable to.
-
-    A profile whose contract declares no slot needs no Binding and gets
-    ``None``; a profile that declares slots refuses fail-closed when no root is
-    configured, rather than falling back to a source constant that no longer
-    exists.
+    ``agent_id`` *is* caller text, and it selects among operator-authored,
+    source-bounded entries. It names no path, executable, argv, environment key,
+    digest, or version, and the grammar that runs before the lookup makes it
+    unable to.
     """
-    if not profile.contract.requires_binding:
-        return None
-    if binding_root is None:
-        raise runtime_binding.BindingRefusal(
-            rule="BINDING_ROOT_NOT_CONFIGURED",
-            message=(
-                "runtime binding refused [BINDING_ROOT_NOT_CONFIGURED]: profile "
-                f"{profile.profile_id} requires a Runtime Binding root and none "
-                "is configured"
-            ),
-        )
-    policy = ownership or runtime_binding.default_ownership()
-    reader = runtime_binding.BindingReader(binding_root, ownership=policy)
-    registration = (
-        None if agent_id is None else reader.read_registration(profile, agent_id)
-    )
-    return runtime_binding.AdmittedRuntimeBinding(
-        resolved=reader.resolve_active(profile, agent_id=agent_id),
-        ownership=policy,
-        registration=registration,
-    )
+    return agent_registry.resolve_agent_entry(snapshot, agent_id)
 
 
 def finalize_registration_failure(handle: RunHandle, run_id: str) -> None:
@@ -257,7 +242,7 @@ def build_submission_artifact(
         "namespace": command.request.namespace,
         "session_reuse": command.request.session_reuse,
         "ars_session_id": command.request.ars_session_id,
-        "profile_id": command.request.profile_id,
+        "agent_id": command.request.agent_id,
         "request_digest": digest.value,
         "prompt_sha256": digest.prompt_sha256,
         "prompt_bytes": digest.prompt_bytes,
@@ -287,7 +272,7 @@ SUBMISSION_FIELDS = (
     "namespace",
     "session_reuse",
     "ars_session_id",
-    "profile_id",
+    "agent_id",
     "request_digest",
     "prompt_sha256",
     "prompt_bytes",
@@ -343,7 +328,7 @@ def validate_submission_artifact(
         return None
     if payload.get("schema_version") != SUBMISSION_SCHEMA_VERSION:
         return None
-    if not _nonempty_str(payload.get("profile_id")):
+    if not _nonempty_str(payload.get("agent_id")):
         return None
     if payload.get("run_id") != run_id or not _nonempty_str(run_id):
         return None

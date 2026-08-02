@@ -34,8 +34,8 @@ from tests.arsd.test_admission import (
 )
 from tests.arsd.test_handlers_registry import CancelFactory, seed_events, seed_session
 from tests.arsd.test_service_unit import (
-    _LYING_BINDING_ROOT_KINDS,
-    _lying_binding_root,
+    _LYING_AGENTS_FILE_KINDS,
+    _lying_agents_file,
     _record_fs_queries,
 )
 
@@ -62,6 +62,19 @@ def sock_path(root: Path) -> Path:
 
 def supervisor_root(root: Path) -> Path:
     return root / "sv"
+
+
+def make_agents_file(root: Path) -> Path:
+    """A real operator agents file, parsed once at daemon startup.
+
+    It lives in its own directory: the daemon refuses to listen when its own
+    writable surfaces contain, or sit inside, the operator's configuration.
+    """
+    from tests.native_acp import registry_fixtures as rfx
+
+    conf = root / "conf"
+    conf.mkdir(parents=True, exist_ok=True)
+    return rfx.write_registry(conf)
 
 
 def local_principal() -> server.Principal:
@@ -182,7 +195,7 @@ class ThreadedDaemon:
             socket_path=self.path,
             supervisor_root=self.root,
             policy=self.policy,
-            binding_root=BINDING_ROOT,
+            agents_file=str(make_agents_file(self.root.parent)),
             max_concurrent_runs=self.max_concurrent_runs,
             max_connections=self.max_connections,
             run_task_factory=self.factory,
@@ -321,20 +334,20 @@ def test_argparse_requires_supervisor_root_and_accepts_flags() -> None:
 
 # Deliberately synthetic and never created: configuration is a value here, and
 # ARS must not create, repair, promote, or even stat the operator's root.
-BINDING_ROOT = "/opt/ars-runtime-binding-root-that-does-not-exist"
+AGENTS_FILE_SPELLING = "/etc/agent-run-supervisor/agents.toml"
 
 
-def test_argparse_accepts_absolute_binding_root() -> None:
+def test_argparse_accepts_absolute_agents_file() -> None:
     parser = arsd_main.build_arg_parser()
     ns = parser.parse_args(
         [
             "--supervisor-root",
             "/tmp/sv",
-            "--binding-root",
-            BINDING_ROOT,
+            "--agents-file",
+            AGENTS_FILE_SPELLING,
         ]
     )
-    assert ns.binding_root == Path(BINDING_ROOT)
+    assert ns.agents_file == AGENTS_FILE_SPELLING
 
 
 @pytest.mark.parametrize(
@@ -351,21 +364,21 @@ def test_argparse_accepts_absolute_binding_root() -> None:
         "/srv/binding\x1b",
     ],
 )
-def test_argparse_refuses_unsafe_binding_root(bad: str, capsys) -> None:
+def test_argparse_refuses_unsafe_agents_file(bad: str, capsys) -> None:
     """Relative / empty / control input fails closed at the operator boundary."""
     parser = arsd_main.build_arg_parser()
     with pytest.raises(SystemExit) as exc:
         parser.parse_args(
-            ["--supervisor-root", "/tmp/sv", "--binding-root", bad]
+            ["--supervisor-root", "/tmp/sv", "--agents-file", bad]
         )
     assert exc.value.code == 2
     err = capsys.readouterr().err
     # Refused as an unsafe *value*, not as an unknown flag.
-    assert "--binding-root" in err
+    assert "--agents-file" in err
     assert "unrecognized" not in err.lower()
 
 
-def test_serve_daemon_refuses_without_binding_root_before_lease_or_reconcile(
+def test_serve_daemon_refuses_without_agents_file_before_lease_or_reconcile(
     sock_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def case():
@@ -375,11 +388,11 @@ def test_serve_daemon_refuses_without_binding_root_before_lease_or_reconcile(
 
         def boom_lease(_root):
             order.append("lease")
-            raise AssertionError("lease must not run without a Binding root")
+            raise AssertionError("lease must not run without an agents file")
 
         def boom_reconcile(_root):
             order.append("reconcile")
-            raise AssertionError("reconcile must not run without a Binding root")
+            raise AssertionError("reconcile must not run without an agents file")
 
         monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", boom_lease)
         monkeypatch.setattr(arsd_main.reconcile, "reconcile", boom_reconcile)
@@ -390,14 +403,14 @@ def test_serve_daemon_refuses_without_binding_root_before_lease_or_reconcile(
                 policy=same_uid_policy(),
                 install_signals=False,
             )
-        assert "binding" in str(err.value).lower()
+        assert "agent" in str(err.value).lower()
         assert order == []
         assert not path.exists()
 
     run_async(case())
 
 
-def test_serve_daemon_requires_binding_root_even_with_an_injected_factory(
+def test_serve_daemon_requires_agents_file_even_with_an_injected_factory(
     sock_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Blocker regression: an injected factory used to excuse the omission.
@@ -406,7 +419,7 @@ def test_serve_daemon_requires_binding_root_even_with_an_injected_factory(
     binds is a production ingress for whoever can reach the socket, so operator
     Binding configuration is a property of the daemon, not of the factory that
     happens to be wired into it. The old exemption let
-    ``serve_daemon(binding_root=None, run_task_factory=...)`` take the instance
+    ``serve_daemon(agents_file=None, run_task_factory=...)`` take the instance
     lease, mkdir the supervisor root, reconcile, and listen — with no operator
     root configured anywhere.
     """
@@ -418,11 +431,11 @@ def test_serve_daemon_requires_binding_root_even_with_an_injected_factory(
 
         def boom_lease(_root):
             reached.append("lease")
-            raise AssertionError("lease must not run without a Binding root")
+            raise AssertionError("lease must not run without an agents file")
 
         def boom_reconcile(_root):
             reached.append("reconcile")
-            raise AssertionError("reconcile must not run without a Binding root")
+            raise AssertionError("reconcile must not run without an agents file")
 
         def boom_server(**_kwargs):
             reached.append("server")
@@ -445,7 +458,7 @@ def test_serve_daemon_requires_binding_root_even_with_an_injected_factory(
                     install_signals=False,
                 )
 
-        assert "binding" in str(err.value).lower()
+        assert "agent" in str(err.value).lower()
         assert reached == []
         assert log.calls == []
         assert not path.exists()
@@ -454,22 +467,28 @@ def test_serve_daemon_requires_binding_root_even_with_an_injected_factory(
     run_async(case())
 
 
-def test_serve_daemon_passes_binding_root_into_handlers(
+def test_serve_daemon_passes_the_snapshot_into_handlers(
     sock_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """serve_daemon → ArsdHandlers carries the operator-configured root."""
+    """serve_daemon → ArsdHandlers carries the *snapshot*, never a path.
+
+    The registry is opened exactly once, by startup, before the socket is
+    bound. What crosses into the handlers is the immutable result of that one
+    read, so nothing below the daemon entrypoint can reopen it and a serving
+    daemon cannot be re-pointed.
+    """
 
     async def case():
         path = sock_path(sock_root)
         root = supervisor_root(sock_root)
+        agents = make_agents_file(sock_root)
         seen: dict = {}
         real_cls = arsd_main.handlers.ArsdHandlers
 
         def capturing(**kwargs):
             seen.update(kwargs)
             passthrough = dict(kwargs)
-            passthrough.pop("binding_root", None)
-            passthrough.pop("binding_ownership", None)
+            passthrough.pop("agents", None)
             passthrough.pop("supervisor_root", None)
             passthrough["run_task_factory"] = CompletingFactory()
             return real_cls(**passthrough)
@@ -481,20 +500,22 @@ def test_serve_daemon_passes_binding_root_into_handlers(
             socket_path=path,
             supervisor_root=root,
             policy=same_uid_policy(),
-            binding_root=Path(BINDING_ROOT),
+            agents_file=str(agents),
             stop_event=stop,
             install_signals=False,
         )
         assert rc == 0
-        assert seen["binding_root"] == Path(BINDING_ROOT)
+        snapshot = seen["agents"]
+        assert snapshot.ids() == ("native-agent",)
         assert seen["supervisor_root"] == root
-        # Read-once stays per Run: startup never opens the operator root.
-        assert not Path(BINDING_ROOT).exists()
+        # A path never reaches the handlers, so there is no seam for a reread.
+        assert "agents_file" not in seen
+        assert not hasattr(snapshot, "path")
 
     run_async(case())
 
 
-def test_main_passes_binding_root_to_serve_daemon(
+def test_main_passes_agents_file_to_serve_daemon(
     sock_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = sock_path(sock_root)
@@ -514,16 +535,16 @@ def test_main_passes_binding_root_to_serve_daemon(
             str(path),
             "--caller-mapping",
             mapping_flag(),
-            "--binding-root",
-            BINDING_ROOT,
+            "--agents-file",
+            AGENTS_FILE_SPELLING,
         ]
     )
     assert rc == 0
-    assert seen["binding_root"] == Path(BINDING_ROOT)
+    assert seen["agents_file"] == AGENTS_FILE_SPELLING
     assert seen["supervisor_root"] == root
 
 
-def test_main_daemon_mode_refuses_without_binding_root(
+def test_main_daemon_mode_refuses_without_agents_file(
     sock_root: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     path = sock_path(sock_root)
@@ -549,7 +570,7 @@ def test_main_daemon_mode_refuses_without_binding_root(
     assert calls["n"] == 0
     assert not path.exists()
     err = capsys.readouterr().err.lower()
-    assert "binding" in err
+    assert "agents-file" in err or "agents file" in err
 
 
 # --- Binding root vs. daemon-owned surfaces (pure text, before the lease) ---
@@ -566,25 +587,25 @@ def test_main_daemon_mode_refuses_without_binding_root(
 def _daemon_overlap_cases(root: Path, path: Path) -> dict[str, dict[str, object]]:
     """Materially distinct Binding/daemon-surface overlaps for ``serve_daemon``."""
     return {
-        "binding_equals_supervisor_root": {"binding_root": str(root)},
-        "binding_parent_of_supervisor_root": {"binding_root": str(root.parent)},
+        "binding_equals_supervisor_root": {"agents_file": str(root)},
+        "binding_parent_of_supervisor_root": {"agents_file": str(root.parent)},
         "binding_child_of_supervisor_root": {
-            "binding_root": str(root / "native-runs")
+            "agents_file": str(root / "native-runs")
         },
-        "binding_equals_socket_path": {"binding_root": str(path)},
-        "socket_directly_inside_binding": {"binding_root": str(path.parent)},
+        "binding_equals_socket_path": {"agents_file": str(path)},
+        "socket_directly_inside_binding": {"agents_file": str(path.parent)},
         "socket_deep_inside_binding": {
-            "binding_root": str(path.parent),
+            "agents_file": str(path.parent),
             "socket_path": str(path.parent / "run" / "arsd.sock"),
         },
         "binding_inside_socket_directory": {
-            "binding_root": str(path.parent / "binding")
+            "agents_file": str(path.parent / "binding")
         },
         "double_slash_binding_aliases_supervisor_root": {
-            "binding_root": "//" + str(root).lstrip("/")
+            "agents_file": "//" + str(root).lstrip("/")
         },
         "double_slash_socket_aliases_binding": {
-            "binding_root": str(path.parent),
+            "agents_file": str(path.parent),
             "socket_path": "//" + str(path).lstrip("/"),
         },
     }
@@ -603,7 +624,7 @@ def test_serve_daemon_refuses_binding_overlap_before_lease_or_query(
         path = sock_path(sock_root)
         root = supervisor_root(sock_root)
         overrides = _daemon_overlap_cases(root, path)[case]
-        binding = Path("/" + str(overrides["binding_root"]).lstrip("/"))
+        binding = Path("/" + str(overrides["agents_file"]).lstrip("/"))
         reached: list[str] = []
 
         def boom_lease(_root):
@@ -640,7 +661,7 @@ def test_serve_daemon_refuses_binding_overlap_before_lease_or_query(
                 await arsd_main.serve_daemon(**kwargs)
 
         message = str(err.value).lower()
-        assert "binding" in message
+        assert "agent" in message
         assert "overlap" in message or "inside" in message
         assert reached == []
         assert log.touching(binding) == []
@@ -671,52 +692,64 @@ def test_serve_daemon_refuses_binding_overlap_even_with_injected_factory(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
-                binding_root=root,
+                agents_file=root,
                 run_task_factory=CompletingFactory(),
                 install_signals=False,
             )
-        assert "binding" in str(err.value).lower()
+        assert "agent" in str(err.value).lower()
         assert not path.exists()
 
     run_async(case())
 
 
-def test_serve_daemon_disjoint_binding_root_is_never_queried_at_startup(
+def test_serve_daemon_opens_a_disjoint_agents_file_exactly_once(
     sock_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Disjoint roots keep working, and startup still never touches the root."""
+    """A disjoint layout works, and the registry is opened once — then never again.
+
+    The predecessor of this test asserted the operand was *never* touched at
+    startup, which was true of a Binding root only a per-Run reader ever opened.
+    The daemon now performs that read itself, before the lease and before any
+    state write, so "exactly once for the whole daemon lifetime" is the property
+    that actually holds.
+    """
 
     async def case():
         path = sock_path(sock_root)
         root = supervisor_root(sock_root)
-        binding = Path(BINDING_ROOT)
+        agents = make_agents_file(sock_root)
+        opened: list[str] = []
+        real_load = arsd_main.agent_registry.load_agents_file
+
+        def counting_load(target):
+            opened.append(str(target))
+            return real_load(target)
+
         real_cls = arsd_main.handlers.ArsdHandlers
 
         def capturing(**kwargs):
             passthrough = dict(kwargs)
-            passthrough.pop("binding_root", None)
-            passthrough.pop("binding_ownership", None)
+            passthrough.pop("agents", None)
             passthrough.pop("supervisor_root", None)
             passthrough["run_task_factory"] = CompletingFactory()
             return real_cls(**passthrough)
 
+        monkeypatch.setattr(arsd_main.agent_registry, "load_agents_file", counting_load)
         monkeypatch.setattr(arsd_main.handlers, "ArsdHandlers", capturing)
         stop = asyncio.Event()
         stop.set()
-        with _record_fs_queries(monkeypatch) as log:
-            rc = await arsd_main.serve_daemon(
-                socket_path=path,
-                supervisor_root=root,
-                policy=same_uid_policy(),
-                binding_root=binding,
-                stop_event=stop,
-                install_signals=False,
-            )
+        rc = await arsd_main.serve_daemon(
+            socket_path=path,
+            supervisor_root=root,
+            policy=same_uid_policy(),
+            agents_file=str(agents),
+            stop_event=stop,
+            install_signals=False,
+        )
         assert rc == 0
-        assert log.touching(binding) == []
+        assert opened == [str(agents)]
         # Paired guard: the daemon-owned surfaces really were created.
-        assert log.touching(root)
-        assert not binding.exists()
+        assert root.exists()
 
     run_async(case())
 
@@ -784,7 +817,7 @@ def test_serve_daemon_refuses_relative_runtime_path_before_lease_or_query(
             "policy": same_uid_policy(),
             # Deliberately disjoint *as text* from every relative spelling
             # above, so only the absoluteness rule can produce this refusal.
-            "binding_root": BINDING_ROOT,
+            "agents_file": AGENTS_FILE_SPELLING,
             "install_signals": False,
         }
         kwargs.update(overrides)
@@ -820,7 +853,7 @@ def test_serve_daemon_refuses_relative_runtime_path_with_injected_factory(
                 socket_path="relative-arsd.sock",
                 supervisor_root="relative-sv",
                 policy=same_uid_policy(),
-                binding_root=BINDING_ROOT,
+                agents_file=str(make_agents_file(sock_root)),
                 run_task_factory=CompletingFactory(),
                 install_signals=False,
             )
@@ -855,7 +888,7 @@ def test_serve_daemon_accepts_the_double_slash_absolute_alias(
                 socket_path="//" + str(sock_path(sock_root)).lstrip("/"),
                 supervisor_root=alias_root,
                 policy=same_uid_policy(),
-                binding_root=BINDING_ROOT,
+                agents_file=str(make_agents_file(sock_root)),
                 install_signals=False,
             )
 
@@ -883,8 +916,8 @@ def test_main_refuses_relative_runtime_path_before_serve(
         overrides.get("socket_path", str(tmp_path / "s" / "arsd.sock")),
         "--caller-mapping",
         mapping_flag(),
-        "--binding-root",
-        BINDING_ROOT,
+        "--agents-file",
+        AGENTS_FILE_SPELLING,
     ]
     rc = arsd_main.main(argv)
 
@@ -914,8 +947,8 @@ def test_main_refuses_a_relative_xdg_derived_socket_path(
             str(tmp_path / "sv"),
             "--caller-mapping",
             mapping_flag(),
-            "--binding-root",
-            BINDING_ROOT,
+            "--agents-file",
+            AGENTS_FILE_SPELLING,
         ]
     )
 
@@ -944,8 +977,8 @@ def test_main_still_starts_with_absolute_runtime_paths(
             str(tmp_path / "s" / "arsd.sock"),
             "--caller-mapping",
             mapping_flag(),
-            "--binding-root",
-            BINDING_ROOT,
+            "--agents-file",
+            AGENTS_FILE_SPELLING,
         ]
     )
     assert rc == 0
@@ -953,7 +986,7 @@ def test_main_still_starts_with_absolute_runtime_paths(
 
 
 def test_service_unit_specifiers_stay_rendered_data_not_daemon_paths(
-    monkeypatch: pytest.MonkeyPatch, capsys
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     """``%h``/``%t`` survive the render and are refused if they ever reach the daemon.
 
@@ -966,7 +999,7 @@ def test_service_unit_specifiers_stay_rendered_data_not_daemon_paths(
         "geteuid",
         lambda: (_ for _ in ()).throw(AssertionError("print mode: no euid check")),
     )
-    rc = arsd_main.main(["--print-service-unit", "--binding-root", BINDING_ROOT])
+    rc = arsd_main.main(["--print-service-unit", "--agents-file", AGENTS_FILE_SPELLING])
     assert rc == 0
     out = capsys.readouterr().out
     assert "%t/" in out and "%h/" in out
@@ -980,7 +1013,7 @@ def test_service_unit_specifiers_stay_rendered_data_not_daemon_paths(
                 socket_path="%t/agent-run-supervisor/arsd.sock",
                 supervisor_root="%h/.local/share/agent-run-supervisor",
                 policy=same_uid_policy(),
-                binding_root=BINDING_ROOT,
+                agents_file=str(make_agents_file(sock_root)),
                 install_signals=False,
             )
         assert "absolute" in str(err.value).lower()
@@ -990,7 +1023,7 @@ def test_service_unit_specifiers_stay_rendered_data_not_daemon_paths(
 
 # --- the programmatic Binding-root contract (blockers 2 and 3) --------------
 #
-# ``main()`` validates its argv through ``parse_binding_root``, but argv is not
+# ``main()`` validates its argv through ``parse_agents_file``, but argv is not
 # the only way in: ``serve_daemon`` is an exported coroutine and is what every
 # embedder, test, and future supervisor entry actually calls. Whatever it binds
 # is a listening ingress, so it owns the same operator contract as the CLI —
@@ -1012,14 +1045,14 @@ class _HostileBindingRoot:
 
     def __str__(self) -> str:  # pragma: no cover - must never be called
         self.coercions += 1
-        return BINDING_ROOT
+        return AGENTS_FILE_SPELLING
 
     def __fspath__(self) -> str:  # pragma: no cover - must never be called
         self.coercions += 1
-        return BINDING_ROOT
+        return AGENTS_FILE_SPELLING
 
 
-def _malformed_binding_roots() -> dict[str, object]:
+def _malformed_agents_files() -> dict[str, object]:
     """Binding roots the programmatic contract must refuse from text/type alone."""
     return {
         # The reported blocker: relative text that lexical overlap calls
@@ -1051,8 +1084,8 @@ def _malformed_binding_roots() -> dict[str, object]:
     }
 
 
-@pytest.mark.parametrize("case", sorted(_malformed_binding_roots()))
-def test_serve_daemon_refuses_malformed_binding_root_before_lease_or_query(
+@pytest.mark.parametrize("case", sorted(_malformed_agents_files()))
+def test_serve_daemon_refuses_malformed_agents_file_before_lease_or_query(
     sock_root: Path, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
     """Blocker regression: a relative Binding root reached the instance lease."""
@@ -1080,11 +1113,11 @@ def test_serve_daemon_refuses_malformed_binding_root_before_lease_or_query(
                     socket_path=str(sock_path(sock_root)),
                     supervisor_root=str(supervisor_root(sock_root)),
                     policy=same_uid_policy(),
-                    binding_root=_malformed_binding_roots()[case],
+                    agents_file=_malformed_agents_files()[case],
                     install_signals=False,
                 )
 
-        assert "binding" in str(err.value).lower()
+        assert "agent" in str(err.value).lower()
         assert reached == []
         assert log.calls == []
         assert sorted(p.name for p in Path(sock_root).iterdir()) == []
@@ -1092,7 +1125,7 @@ def test_serve_daemon_refuses_malformed_binding_root_before_lease_or_query(
     run_async(run_case())
 
 
-def test_serve_daemon_refuses_a_hostile_binding_root_without_coercing_it(
+def test_serve_daemon_refuses_a_hostile_agents_file_without_coercing_it(
     sock_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The union is checked by type; the operand is never handed to ``str``."""
@@ -1109,10 +1142,10 @@ def test_serve_daemon_refuses_a_hostile_binding_root_without_coercing_it(
                 socket_path=str(sock_path(sock_root)),
                 supervisor_root=str(supervisor_root(sock_root)),
                 policy=same_uid_policy(),
-                binding_root=hostile,
+                agents_file=hostile,
                 install_signals=False,
             )
-        assert "binding" in str(err.value).lower()
+        assert "agent" in str(err.value).lower()
         assert hostile.coercions == 0
 
     run_async(case())
@@ -1137,36 +1170,36 @@ def test_serve_daemon_refuses_a_hostile_binding_root_without_coercing_it(
 # platform fact independently: this is the type ``Path(...)`` actually produces.
 _EXACT_PATH_TYPE = type(Path(os.sep))
 
-# ``_LYING_BINDING_ROOT_KINDS`` / ``_lying_binding_root`` are imported from
+# ``_LYING_AGENTS_FILE_KINDS`` / ``_lying_agents_file`` are imported from
 # ``tests.arsd.test_service_unit``: the renderer needs the same hostile-operand
 # factory, and that module is this suite's existing shared-helper home. The
 # import direction is one-way, so the factory cannot live here.
 
 
-@pytest.mark.parametrize("kind", _LYING_BINDING_ROOT_KINDS)
-def test_capture_binding_root_refuses_inexact_types_untouched(kind: str) -> None:
+@pytest.mark.parametrize("kind", _LYING_AGENTS_FILE_KINDS)
+def test_capture_agents_file_refuses_inexact_types_untouched(kind: str) -> None:
     """The union means exact types: a subclass is refused before any hook runs."""
-    hostile, probes = _lying_binding_root(kind, "/tmp/ars-daemon-state/sv")
+    hostile, probes = _lying_agents_file(kind, "/tmp/ars-daemon-state/sv")
     with pytest.raises(arsd_operand.OperandError) as err:
-        arsd_operand.capture_binding_root(hostile)
+        arsd_operand.capture_agents_file(hostile)
     problem = str(err.value)
-    assert "binding" in problem.lower()
+    assert "agent" in problem.lower()
     # Fixed, sanitized text: no spelling of the operand, no ``repr`` of it.
-    assert BINDING_ROOT not in problem
+    assert AGENTS_FILE_SPELLING not in problem
     assert "/tmp/ars-daemon-state/sv" not in problem
     assert probes == []
 
 
-def test_capture_binding_root_accepts_both_exact_types() -> None:
+def test_capture_agents_file_accepts_both_exact_types() -> None:
     """Paired guard: the two types the declared API promises still pass."""
-    assert arsd_operand.capture_binding_root(BINDING_ROOT) == BINDING_ROOT
-    assert type(BINDING_ROOT) is str
-    assert arsd_operand.capture_binding_root(Path(BINDING_ROOT)) == BINDING_ROOT
-    assert type(Path(BINDING_ROOT)) is _EXACT_PATH_TYPE
+    assert arsd_operand.capture_agents_file(AGENTS_FILE_SPELLING) == AGENTS_FILE_SPELLING
+    assert type(AGENTS_FILE_SPELLING) is str
+    assert arsd_operand.capture_agents_file(Path(AGENTS_FILE_SPELLING)) == AGENTS_FILE_SPELLING
+    assert type(Path(AGENTS_FILE_SPELLING)) is _EXACT_PATH_TYPE
 
 
-@pytest.mark.parametrize("kind", _LYING_BINDING_ROOT_KINDS)
-def test_serve_daemon_refuses_a_lying_binding_root_before_lease_or_query(
+@pytest.mark.parametrize("kind", _LYING_AGENTS_FILE_KINDS)
+def test_serve_daemon_refuses_a_lying_agents_file_before_lease_or_query(
     sock_root: Path, monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
     """Blocker regression: a ``str``/``Path`` subclass cleared every text gate.
@@ -1180,7 +1213,7 @@ def test_serve_daemon_refuses_a_lying_binding_root_before_lease_or_query(
 
     async def run_case():
         real = str(supervisor_root(sock_root))
-        hostile, probes = _lying_binding_root(kind, real)
+        hostile, probes = _lying_agents_file(kind, real)
         reached: list[str] = []
 
         def boom_lease(_root):
@@ -1205,13 +1238,13 @@ def test_serve_daemon_refuses_a_lying_binding_root_before_lease_or_query(
                     socket_path=str(sock_path(sock_root)),
                     supervisor_root=real,
                     policy=same_uid_policy(),
-                    binding_root=hostile,
+                    agents_file=hostile,
                     install_signals=False,
                 )
 
         message = str(err.value)
-        assert "binding" in message.lower()
-        assert BINDING_ROOT not in message and real not in message
+        assert "agent" in message.lower()
+        assert AGENTS_FILE_SPELLING not in message and real not in message
         # The type decided it: not one conversion hook ran.
         assert probes == []
         assert reached == []
@@ -1221,7 +1254,7 @@ def test_serve_daemon_refuses_a_lying_binding_root_before_lease_or_query(
 
 
 @pytest.mark.parametrize("kind", ("exact_path", "exact_str"))
-def test_serve_daemon_accepts_an_exact_disjoint_binding_root(
+def test_serve_daemon_accepts_an_exact_disjoint_agents_file(
     sock_root: Path, monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
     """Paired guard: exactness is the rule, not "refuse anything typed"."""
@@ -1230,7 +1263,8 @@ def test_serve_daemon_accepts_an_exact_disjoint_binding_root(
         pass
 
     async def case():
-        supplied = BINDING_ROOT if kind == "exact_str" else Path(BINDING_ROOT)
+        agents = make_agents_file(sock_root)
+        supplied = str(agents) if kind == "exact_str" else Path(agents)
 
         def wall(_root):
             raise _LeaseReached
@@ -1241,7 +1275,7 @@ def test_serve_daemon_accepts_an_exact_disjoint_binding_root(
                 socket_path=str(sock_path(sock_root)),
                 supervisor_root=str(supervisor_root(sock_root)),
                 policy=same_uid_policy(),
-                binding_root=supplied,
+                agents_file=supplied,
                 install_signals=False,
             )
 
@@ -1249,27 +1283,28 @@ def test_serve_daemon_accepts_an_exact_disjoint_binding_root(
 
 
 @pytest.mark.parametrize("kind", ("exact_path", "exact_str"))
-def test_serve_daemon_hands_handlers_a_frozen_standard_binding_root(
+def test_serve_daemon_hands_handlers_a_frozen_standard_agents_file(
     sock_root: Path, monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
-    """What the per-Run factory receives is the daemon's snapshot, not the operand.
+    """What the handlers receive is the daemon's snapshot, never the operand.
 
     Freezing is the half of the contract the type gate cannot supply: a value
-    validated as text and then read again is still two reads. The propagated
-    value must be a plain standard path the daemon built itself — for a ``Path``
-    operand, provably a different object.
+    validated as text and then read again is still two reads. The daemon
+    therefore propagates the immutable *result* of its one read, and the caller's
+    object reaches nothing downstream at all — which is strictly stronger than
+    handing on a rebuilt path.
     """
 
     async def case():
-        supplied = BINDING_ROOT if kind == "exact_str" else Path(BINDING_ROOT)
+        agents = make_agents_file(sock_root)
+        supplied = str(agents) if kind == "exact_str" else Path(agents)
         seen: dict = {}
         real_cls = arsd_main.handlers.ArsdHandlers
 
         def capturing(**kwargs):
             seen.update(kwargs)
             passthrough = dict(kwargs)
-            passthrough.pop("binding_root", None)
-            passthrough.pop("binding_ownership", None)
+            passthrough.pop("agents", None)
             passthrough.pop("supervisor_root", None)
             passthrough["run_task_factory"] = CompletingFactory()
             return real_cls(**passthrough)
@@ -1281,34 +1316,36 @@ def test_serve_daemon_hands_handlers_a_frozen_standard_binding_root(
             socket_path=sock_path(sock_root),
             supervisor_root=supervisor_root(sock_root),
             policy=same_uid_policy(),
-            binding_root=supplied,
+            agents_file=supplied,
             stop_event=stop,
             install_signals=False,
         )
         assert rc == 0
-        propagated = seen["binding_root"]
-        assert type(propagated) is _EXACT_PATH_TYPE
-        assert propagated == Path(BINDING_ROOT)
+        propagated = seen["agents"]
+        assert isinstance(propagated, arsd_main.agent_registry.AgentRegistrySnapshot)
+        assert propagated.ids() == ("native-agent",)
+        # No path, and no reference to the caller's object, survives the seam.
+        assert "agents_file" not in seen
         assert propagated is not supplied
-        # Read-once stays per Run: startup still never opens the operator root.
-        assert not Path(BINDING_ROOT).exists()
 
     run_async(case())
 
 
-def test_argparse_binding_root_stays_an_exact_concrete_path() -> None:
-    """argv keeps its shape: an exact ``str`` in, an ordinary ``Path`` out.
+def test_argparse_agents_file_stays_an_exact_concrete_path() -> None:
+    """argv keeps its shape: an exact ``str`` in, the same frozen text out.
 
     The programmatic gate has to accept what the CLI produces, or the two doors
-    disagree and ``main()`` locks itself out of its own daemon.
+    disagree and ``main()`` locks itself out of its own daemon. The text is not
+    rebuilt as a ``Path``, so the operator's spelling reaches the rendered unit
+    and the daemon byte-for-byte.
     """
     parser = arsd_main.build_arg_parser()
     ns = parser.parse_args(
-        ["--supervisor-root", "/tmp/sv", "--binding-root", BINDING_ROOT]
+        ["--supervisor-root", "/tmp/sv", "--agents-file", AGENTS_FILE_SPELLING]
     )
-    assert type(ns.binding_root) is _EXACT_PATH_TYPE
-    assert ns.binding_root == Path(BINDING_ROOT)
-    assert arsd_operand.capture_binding_root(ns.binding_root) == BINDING_ROOT
+    assert type(ns.agents_file) is str
+    assert ns.agents_file == AGENTS_FILE_SPELLING
+    assert arsd_operand.capture_agents_file(ns.agents_file) == AGENTS_FILE_SPELLING
 
 
 # --- reading an operand is not inspecting it --------------------------------
@@ -1352,7 +1389,7 @@ def _poisoned_exact_path(text: str, poison: str) -> Path:
     return node
 
 
-def test_serve_daemon_refuses_a_poisoned_binding_root_read(
+def test_serve_daemon_refuses_a_poisoned_agents_file_read(
     sock_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """RED-3 (F3): a poisoned ``_str`` carried a control-bearing root to the lease.
@@ -1415,7 +1452,7 @@ def test_serve_daemon_refuses_a_poisoned_binding_root_read(
                     socket_path=str(sock_path(sock_root)),
                     supervisor_root=str(supervisor_root(sock_root)),
                     policy=same_uid_policy(),
-                    binding_root=supplied,
+                    agents_file=supplied,
                     install_signals=False,
                 )
             except arsd_main.DaemonStartupError as err:
@@ -1427,7 +1464,7 @@ def test_serve_daemon_refuses_a_poisoned_binding_root_read(
         assert outcome == ["refused"], (
             "a Binding root whose text was never admitted reached the lease"
         )
-        assert "binding" in message.lower()
+        assert "agent" in message.lower()
         # Sanitized: neither the advertised nor the real spelling is quoted back.
         assert "/opt/ars-binding" not in message
         assert reached == []
@@ -1453,7 +1490,7 @@ def test_serve_daemon_admits_supervisor_root_before_any_path_protocol_call(
                 # The forbidden pre-BindingReader read, swallowed so the daemon
                 # keeps going and the *refusal path* is what the test measures.
                 with contextlib.suppress(OSError):
-                    os.lstat(BINDING_ROOT)
+                    os.lstat(AGENTS_FILE_SPELLING)
                 return "relative-sv"
 
         reached: list[str] = []
@@ -1472,7 +1509,7 @@ def test_serve_daemon_admits_supervisor_root_before_any_path_protocol_call(
                     socket_path=str(sock_path(sock_root)),
                     supervisor_root=_LstatOnPathProtocol(),
                     policy=same_uid_policy(),
-                    binding_root=BINDING_ROOT,
+                    agents_file=str(make_agents_file(sock_root)),
                     install_signals=False,
                 )
             except arsd_main.DaemonStartupError:
@@ -1482,20 +1519,20 @@ def test_serve_daemon_admits_supervisor_root_before_any_path_protocol_call(
 
         assert outcome == ["refused"]
         assert reached == []
-        assert log.touching(Path(BINDING_ROOT)) == []
+        assert log.touching(Path(AGENTS_FILE_SPELLING)) == []
         assert log.calls == []
 
     run_async(case())
 
 
 @pytest.mark.parametrize("operand", ("socket_path", "supervisor_root"))
-@pytest.mark.parametrize("kind", _LYING_BINDING_ROOT_KINDS)
+@pytest.mark.parametrize("kind", _LYING_AGENTS_FILE_KINDS)
 def test_serve_daemon_refuses_an_inexact_surface_before_lease_or_query(
     sock_root: Path, monkeypatch: pytest.MonkeyPatch, operand: str, kind: str
 ) -> None:
     """RED-4(b) (F4): the matrix's other two operands were never admitted.
 
-    ``binding_root`` was gated by type identity while the two surfaces it is
+    ``agents_file`` was gated by type identity while the two surfaces it is
     compared against were coerced with ``Path()``. A hostile object can then
     show the matrix one location and hand the kernel another.
     """
@@ -1506,7 +1543,7 @@ def test_serve_daemon_refuses_an_inexact_surface_before_lease_or_query(
             if operand == "socket_path"
             else str(supervisor_root(sock_root))
         )
-        hostile, probes = _lying_binding_root(kind, real)
+        hostile, probes = _lying_agents_file(kind, real)
 
         reached: list[str] = []
 
@@ -1525,7 +1562,7 @@ def test_serve_daemon_refuses_an_inexact_surface_before_lease_or_query(
             "socket_path": str(sock_path(sock_root)),
             "supervisor_root": str(supervisor_root(sock_root)),
             "policy": same_uid_policy(),
-            "binding_root": BINDING_ROOT,
+            "agents_file": AGENTS_FILE_SPELLING,
             "install_signals": False,
         }
         kwargs[operand] = hostile
@@ -1542,7 +1579,7 @@ def test_serve_daemon_refuses_an_inexact_surface_before_lease_or_query(
                 outcome.append("lease")
 
         assert outcome == ["refused"], f"an inexact {operand} reached the lease"
-        assert BINDING_ROOT not in message and real not in message
+        assert AGENTS_FILE_SPELLING not in message and real not in message
         assert probes == []
         assert reached == []
         assert log.calls == []
@@ -1550,7 +1587,7 @@ def test_serve_daemon_refuses_an_inexact_surface_before_lease_or_query(
     run_async(case())
 
 
-def test_binding_root_operand_is_unreachable_after_capture(
+def test_agents_file_operand_is_unreachable_after_capture(
     sock_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """G-1 — lasting guard, **not** RED evidence: green before and after.
@@ -1565,7 +1602,8 @@ def test_binding_root_operand_is_unreachable_after_capture(
 
     async def case():
         overlapping = str(supervisor_root(sock_root))
-        supplied = Path(BINDING_ROOT)
+        real_agents = str(make_agents_file(sock_root))
+        supplied = Path(real_agents)
         str(supplied)
         try:
             supplied._str = overlapping  # type: ignore[attr-defined]
@@ -1573,7 +1611,7 @@ def test_binding_root_operand_is_unreachable_after_capture(
             pytest.skip("PurePath._str is not assignable on this interpreter")
         if str(supplied) != overlapping:
             pytest.skip("PurePath._str is not observable through str() here")
-        supplied._str = BINDING_ROOT  # type: ignore[attr-defined]
+        supplied._str = real_agents  # type: ignore[attr-defined]
 
         real_lease = arsd_main.acquire_daemon_instance_lease
 
@@ -1592,8 +1630,7 @@ def test_binding_root_operand_is_unreachable_after_capture(
         def capturing(**kwargs):
             seen.update(kwargs)
             passthrough = dict(kwargs)
-            passthrough.pop("binding_root", None)
-            passthrough.pop("binding_ownership", None)
+            passthrough.pop("agents", None)
             passthrough.pop("supervisor_root", None)
             passthrough["run_task_factory"] = CompletingFactory()
             return real_cls(**passthrough)
@@ -1605,18 +1642,17 @@ def test_binding_root_operand_is_unreachable_after_capture(
             socket_path=sock_path(sock_root),
             supervisor_root=supervisor_root(sock_root),
             policy=same_uid_policy(),
-            binding_root=supplied,
+            agents_file=supplied,
             stop_event=stop,
             install_signals=False,
         )
         # The overlap decision used the pre-mutation text: the mutated spelling
         # *is* the supervisor root, and would have been refused.
         assert rc == 0
-        propagated = seen["binding_root"]
-        assert type(propagated) is _EXACT_PATH_TYPE
-        assert propagated == Path(BINDING_ROOT)
+        assert seen["agents"].ids() == ("native-agent",)
+        # The operand really did start answering differently, and nothing after
+        # capture ever asked it again.
         assert str(supplied) == overlapping
-        assert not Path(BINDING_ROOT).exists()
 
     run_async(case())
 
@@ -1626,104 +1662,160 @@ def test_binding_root_operand_is_unreachable_after_capture(
 _SHARED = "/opt/ars-shared-ancestor"
 
 
-def _shared_ancestor_cases() -> dict[str, dict[str, str]]:
-    """Layouts where no path contains another, yet a Binding component is queried.
+def _containment_cases() -> dict[str, dict[str, str]]:
+    """Layouts where an ARS-owned surface would land inside the operator's file.
 
-    Every case pairs a Binding root with a daemon-owned surface that shares a
-    lexical ancestor. ``durable_secure_mkdir`` walks upward with ``os.lstat``
-    until it finds an existing ancestor, and the kernel resolves every component
-    of every surface it is handed, so a shared ancestor *is* a pre-``BindingReader``
-    read of a Binding path component — even though neither path contains the other.
+    ARS never creates, writes, repairs, or migrates the agents file, so a
+    daemon-owned surface that sits on top of it — or under it — would put that
+    guarantee in the hands of a directory layout. Every case here is equality or
+    containment, including the alias spellings of both, because ``//x``, ``.``
+    and ``..`` hops all reach the same place the kernel does.
     """
     return {
-        # The reported blocker, verbatim in shape.
-        "supervisor_root_beside_binding": {
-            "binding_root": f"{_SHARED}/binding",
+        "agents_file_equals_supervisor_root": {
+            "agents_file": f"{_SHARED}/sv",
             "supervisor_root": f"{_SHARED}/sv",
             "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
         },
-        "socket_beside_binding": {
-            "binding_root": f"{_SHARED}/binding",
+        "supervisor_root_contains_agents_file": {
+            "agents_file": f"{_SHARED}/sv/agents.toml",
+            "supervisor_root": f"{_SHARED}/sv",
+            "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
+        },
+        "agents_file_contains_supervisor_root": {
+            "agents_file": _SHARED,
+            "supervisor_root": f"{_SHARED}/sv",
+            "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
+        },
+        "socket_directory_contains_agents_file": {
+            "agents_file": f"{_SHARED}/s/agents.toml",
             "supervisor_root": "/tmp/ars-elsewhere/sv",
             "socket_path": f"{_SHARED}/s/arsd.sock",
         },
-        "socket_parent_is_the_binding_parent": {
-            "binding_root": f"{_SHARED}/binding",
-            "supervisor_root": "/tmp/ars-elsewhere/sv",
-            "socket_path": f"{_SHARED}/arsd.sock",
-        },
-        # Prefix siblings: pure text prefix, no containment either way.
-        "prefix_sibling_supervisor_root": {
-            "binding_root": f"{_SHARED}/binding",
-            "supervisor_root": f"{_SHARED}/binding-state",
-            "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
-        },
-        "top_level_component_shared": {
-            "binding_root": "/opt/ars-binding",
-            "supervisor_root": "/opt/ars-state",
-            "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
-        },
-        # Alias spellings of the same collision.
-        "double_slash_binding_alias": {
-            "binding_root": f"/{_SHARED}/binding",
+        # Alias spellings of the same containment, on either operand.
+        "double_slash_agents_file_alias": {
+            "agents_file": f"/{_SHARED}/sv",
             "supervisor_root": f"{_SHARED}/sv",
             "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
         },
         "double_slash_surface_alias": {
-            "binding_root": f"{_SHARED}/binding",
+            "agents_file": f"{_SHARED}/sv",
             "supervisor_root": f"/{_SHARED}/sv",
             "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
         },
         "dot_hop_in_surface": {
-            "binding_root": f"{_SHARED}/binding",
+            "agents_file": f"{_SHARED}/sv",
             "supervisor_root": f"{_SHARED}/./sv",
             "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
         },
         "dot_dot_hop_in_surface": {
-            "binding_root": f"{_SHARED}/binding",
+            "agents_file": f"{_SHARED}/sv",
             "supervisor_root": f"{_SHARED}/neutral/../sv",
             "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
         },
-        "dot_dot_hop_in_binding_root": {
-            "binding_root": f"{_SHARED}/neutral/../binding",
+        "dot_dot_hop_in_agents_file": {
+            "agents_file": f"{_SHARED}/neutral/../sv",
             "supervisor_root": f"{_SHARED}/sv",
             "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
         },
         # The as-written spelling walks a *different* tree than the collapsed
-        # one, and the kernel really does traverse both: the raw components are
-        # queried on the way, the collapsed ones name the destination.
-        "surface_normalizes_into_the_binding_tree": {
-            "binding_root": f"{_SHARED}/binding",
+        # one, and the kernel really does traverse both.
+        "surface_normalizes_into_the_agents_file": {
+            "agents_file": f"{_SHARED}/sv",
             "supervisor_root": f"/tmp/ars-elsewhere/../..{_SHARED}/sv",
             "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
         },
         # The filesystem root contains — and is contained by — everything.
-        "binding_is_the_filesystem_root": {
-            "binding_root": "/",
+        "agents_file_is_the_filesystem_root": {
+            "agents_file": "/",
             "supervisor_root": "/tmp/ars-elsewhere/sv",
             "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
         },
-        "binding_normalizes_to_the_filesystem_root": {
-            "binding_root": "/opt/..",
+        "agents_file_normalizes_to_the_filesystem_root": {
+            "agents_file": "/opt/..",
             "supervisor_root": "/tmp/ars-elsewhere/sv",
             "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
         },
     }
 
 
-@pytest.mark.parametrize("case", sorted(_shared_ancestor_cases()))
-def test_serve_daemon_refuses_shared_binding_component_before_lease_or_query(
+def _sibling_layouts() -> dict[str, dict[str, str]]:
+    """Layouts that merely *share a parent*, and are ordinary and admitted.
+
+    The predecessor of this rule refused these too, because under the retired
+    Binding architecture any kernel walk over a shared ancestor was itself the
+    forbidden read — the per-Run reader had to be the first and only one. That
+    premise is gone: the registry is opened by ARS itself, once, at startup,
+    before the lease and before any state write. Refusing a sibling layout now
+    would protect nothing while making ``~/ars/agents.toml`` beside
+    ``~/ars/state`` an unstartable daemon.
+    """
+    return {
+        "supervisor_root_beside_agents_file": {
+            "agents_file": f"{_SHARED}/conf/agents.toml",
+            "supervisor_root": f"{_SHARED}/sv",
+            "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
+        },
+        "socket_beside_agents_file": {
+            "agents_file": f"{_SHARED}/conf/agents.toml",
+            "supervisor_root": "/tmp/ars-elsewhere/sv",
+            "socket_path": f"{_SHARED}/s/arsd.sock",
+        },
+        "prefix_sibling_supervisor_root": {
+            "agents_file": f"{_SHARED}/conf",
+            "supervisor_root": f"{_SHARED}/conf-state",
+            "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
+        },
+        "top_level_component_shared": {
+            "agents_file": "/opt/ars-conf/agents.toml",
+            "supervisor_root": "/opt/ars-state",
+            "socket_path": "/tmp/ars-elsewhere/s/arsd.sock",
+        },
+    }
+
+
+@pytest.mark.parametrize("case", sorted(_sibling_layouts()))
+def test_serve_daemon_admits_a_sibling_layout_and_reaches_the_parse(
     monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
-    """Blocker regression: sibling layouts lstat-ed a Binding component pre-reader."""
+    """The gate refuses containment, not every layout under one parent.
+
+    Reaching the registry parse — which then fails closed on a file that was
+    never created — is the proof that the overlap matrix let the layout through.
+    Without this the whole class could be "fixed" by refusing everything.
+    """
 
     async def run_case():
-        overrides = _shared_ancestor_cases()[case]
+        overrides = _sibling_layouts()[case]
+
+        def boom_lease(_root):  # pragma: no cover - must never run
+            raise AssertionError("the parse must fail closed before the lease")
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", boom_lease)
+        with pytest.raises(arsd_main.DaemonStartupError) as err:
+            await arsd_main.serve_daemon(
+                policy=same_uid_policy(), install_signals=False, **overrides
+            )
+        message = str(err.value).lower()
+        assert "overlap" not in message
+        assert "registry_absent" in message
+
+    run_async(run_case())
+
+
+@pytest.mark.parametrize("case", sorted(_containment_cases()))
+def test_serve_daemon_refuses_containment_before_lease_or_query(
+    monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """A daemon-owned write must never be able to land in operator configuration."""
+
+    async def run_case():
+        overrides = _containment_cases()[case]
         reached: list[str] = []
 
         def boom_lease(_root):
             reached.append("lease")
-            raise AssertionError("lease must not run for a shared Binding component")
+            raise AssertionError("lease must not run for an overlapping layout")
 
         def boom_reconcile(_root):
             reached.append("reconcile")
@@ -1744,7 +1836,7 @@ def test_serve_daemon_refuses_shared_binding_component_before_lease_or_query(
                 )
 
         message = str(err.value).lower()
-        assert "binding" in message
+        assert "agent" in message
         assert "overlap" in message or "inside" in message
         assert reached == []
         # The ordering claim, stated as the absence of every query: a refusal
@@ -1779,7 +1871,7 @@ def test_serve_daemon_accepts_a_genuinely_disjoint_operator_layout(
                 socket_path=str(sock_path(sock_root)),
                 supervisor_root=str(supervisor_root(sock_root)),
                 policy=same_uid_policy(),
-                binding_root=BINDING_ROOT,
+                agents_file=str(make_agents_file(sock_root)),
                 install_signals=False,
             )
 
@@ -1798,7 +1890,7 @@ def test_zero_mappings_refuse_before_listen(sock_root: Path) -> None:
                 socket_path=path,
                 supervisor_root=root,
                 policy=server.CallerPolicy({}),
-                binding_root=BINDING_ROOT,
+                agents_file=str(make_agents_file(sock_root)),
                 run_task_factory=CompletingFactory(),
                 install_signals=False,
             )
@@ -1827,7 +1919,7 @@ def test_root_euid_refused_before_reconcile_or_listen(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
-                binding_root=BINDING_ROOT,
+                agents_file=str(make_agents_file(sock_root)),
                 run_task_factory=CompletingFactory(),
                 install_signals=False,
             )
@@ -1864,7 +1956,7 @@ def test_reconcile_runs_before_listen_and_failure_means_nothing_listens(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
-                binding_root=BINDING_ROOT,
+                agents_file=str(make_agents_file(sock_root)),
                 run_task_factory=CompletingFactory(),
                 install_signals=False,
             )
@@ -1920,7 +2012,7 @@ def test_same_root_second_daemon_fails_before_reconcile(
                     socket_path=path2,
                     supervisor_root=root,
                     policy=same_uid_policy(),
-                    binding_root=BINDING_ROOT,
+                    agents_file=str(make_agents_file(sock_root)),
                     run_task_factory=CompletingFactory(),
                     install_signals=False,
                 )
@@ -2095,7 +2187,7 @@ def test_r8_b1_parent_fsync_failure_blocks_flock_reconcile_listen(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
-                binding_root=BINDING_ROOT,
+                agents_file=str(make_agents_file(sock_root)),
                 run_task_factory=CompletingFactory(),
                 install_signals=False,
             )
@@ -2138,7 +2230,7 @@ def test_r8_b1_supervisor_root_symlink_or_nondir_refused(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
-                binding_root=BINDING_ROOT,
+                agents_file=str(make_agents_file(sock_root)),
                 run_task_factory=CompletingFactory(),
                 install_signals=False,
             )
@@ -2211,7 +2303,7 @@ def test_root_refusal_still_precedes_lease_and_reconcile(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
-                binding_root=BINDING_ROOT,
+                agents_file=str(make_agents_file(sock_root)),
                 run_task_factory=CompletingFactory(),
                 install_signals=False,
             )
@@ -2260,7 +2352,7 @@ def test_lease_lock_dir_symlink_or_nondir_refused_before_reconcile(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
-                binding_root=BINDING_ROOT,
+                agents_file=str(make_agents_file(sock_root)),
                 run_task_factory=CompletingFactory(),
                 install_signals=False,
             )
@@ -2852,7 +2944,8 @@ def test_submit_status_events_cancel_session_roundtrips(sock_root: Path) -> None
 
         with arsd_client.ArsdClient(path) as cli:
             info = cli.server_info()
-            assert info["api_version"] == 1
+            assert info["api_version"] == 2
+            assert info["supported_api_versions"] == [1, 2]
             assert "limits" in info
 
             accepted = cli.submit(
@@ -2940,7 +3033,8 @@ def test_explicit_same_uid_allow_mapping_works(sock_root: Path) -> None:
     with running_daemon(path, root, policy=policy):
         with arsd_client.ArsdClient(path) as cli:
             info = cli.server_info()
-            assert info["api_version"] == 1
+            assert info["api_version"] == 2
+            assert info["supported_api_versions"] == [1, 2]
 
 
 # --- SIGTERM lifecycle ----------------------------------------------------
@@ -2957,7 +3051,7 @@ def test_sigterm_shutdown_shutting_down_unlink_bounded_exit(sock_root: Path) -> 
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
-                binding_root=BINDING_ROOT,
+                agents_file=str(make_agents_file(sock_root)),
                 run_task_factory=factory,
                 cancel_wait_seconds=1.0,
                 shutdown_timeout=5.0,
@@ -3081,7 +3175,7 @@ def test_r11_b3_shutdown_holds_lease_until_registry_drained(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
-                binding_root=BINDING_ROOT,
+                agents_file=str(make_agents_file(sock_root)),
                 run_task_factory=factory,
                 cancel_wait_seconds=0.05,
                 shutdown_timeout=0.2,
@@ -3198,7 +3292,7 @@ def test_r11b_serve_task_cancel_holds_lease_until_registry_idle(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
-                binding_root=BINDING_ROOT,
+                agents_file=str(make_agents_file(sock_root)),
                 run_task_factory=factory,
                 cancel_wait_seconds=0.05,
                 shutdown_timeout=0.2,
@@ -3291,7 +3385,7 @@ def test_r12_cancel_during_stop_wait_closes_admission_before_lease_release(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
-                binding_root=BINDING_ROOT,
+                agents_file=str(make_agents_file(sock_root)),
                 run_task_factory=factory,
                 cancel_wait_seconds=0.05,
                 shutdown_timeout=0.2,
@@ -3414,7 +3508,7 @@ def test_r12b_lifecycle_ordinary_failure_retries_before_lease_release(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
-                binding_root=BINDING_ROOT,
+                agents_file=str(make_agents_file(sock_root)),
                 run_task_factory=factory,
                 cancel_wait_seconds=0.05,
                 shutdown_timeout=0.2,
@@ -3518,7 +3612,7 @@ def test_r12b_cancel_during_lifecycle_retry_propagates_after_release(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
-                binding_root=BINDING_ROOT,
+                agents_file=str(make_agents_file(sock_root)),
                 run_task_factory=factory,
                 cancel_wait_seconds=0.05,
                 shutdown_timeout=0.2,
@@ -3602,7 +3696,7 @@ def test_r12b_permanent_lifecycle_failure_holds_lease_until_unblocked(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
-                binding_root=BINDING_ROOT,
+                agents_file=str(make_agents_file(sock_root)),
                 run_task_factory=factory,
                 cancel_wait_seconds=0.05,
                 shutdown_timeout=0.2,
@@ -3720,7 +3814,7 @@ def test_r13_b1_handlers_descriptor_raise_cleans_lifecycle_once(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
-                binding_root=BINDING_ROOT,
+                agents_file=str(make_agents_file(sock_root)),
                 run_task_factory=factory,
                 cancel_wait_seconds=0.05,
                 shutdown_timeout=0.2,
@@ -3796,7 +3890,7 @@ def test_r13_b1_startup_before_handlers_still_releases_lease(
                 socket_path=path,
                 supervisor_root=root,
                 policy=same_uid_policy(),
-                binding_root=BINDING_ROOT,
+                agents_file=str(make_agents_file(sock_root)),
                 run_task_factory=CompletingFactory(),
                 install_signals=False,
             )

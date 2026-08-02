@@ -206,8 +206,13 @@ class FakeAgent:
                 "protocolVersion": self.script.get(
                     "protocol_version", params.get("protocolVersion", 1)
                 ),
+                # ``agent_capabilities`` merges over the default so a script can
+                # advertise more than ``loadSession`` — which is what a real
+                # agent does after an upgrade, and what capability-drift
+                # evidence has to be driven by.
                 "agentCapabilities": {
-                    "loadSession": self.script.get("load_session_advertised", True)
+                    "loadSession": self.script.get("load_session_advertised", True),
+                    **self.script.get("agent_capabilities", {}),
                 },
                 "agentInfo": self.script.get(
                     "agent_info", {"name": "fake-acp-agent", "version": "1.0.0"}

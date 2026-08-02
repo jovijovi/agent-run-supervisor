@@ -59,6 +59,19 @@ SIGTERM_IGNORER = (
     "time.sleep(600)\n"
 )
 
+# A leader that leaves one descendant behind in its own process group and then
+# exits at once. The descendant's stdio goes to /dev/null, so it does not hold
+# the inherited pipes open and the leader's reap looks entirely clean.
+ORPHAN_LEAVER = (
+    "import os, subprocess, sys\n"
+    "devnull = os.open(os.devnull, os.O_RDWR)\n"
+    "child = subprocess.Popen(\n"
+    "    [sys.executable, '-c', 'import time; time.sleep(600)'],\n"
+    "    stdin=devnull, stdout=devnull, stderr=devnull)\n"
+    "print(child.pid, flush=True)\n"
+    "os._exit(0)\n"
+)
+
 
 def _spawn(script: str, *, limits: ManagedProcessLimits | None = None, on_spawn=None):
     return spawn_managed_process(
@@ -174,6 +187,43 @@ def test_escalation_kills_sigterm_ignoring_child() -> None:
     asyncio.run(case())
 
 
+def test_group_is_gone_after_the_whole_group_exits() -> None:
+    async def case() -> None:
+        proc = await _spawn("pass")
+        await asyncio.wait_for(proc.wait(), 10)
+        assert proc.group_is_gone() is True
+
+    asyncio.run(case())
+
+
+def test_group_absence_is_not_implied_by_leader_reap() -> None:
+    """Reaping the leader proves the leader exited. That is all it proves.
+
+    A descendant that inherited the group outlives its parent, and ``wait()``
+    reports nothing about it — which is why group absence has to be asked as its
+    own question rather than inferred from a clean exit.
+    """
+
+    async def case() -> None:
+        proc = await _spawn(ORPHAN_LEAVER)
+        descendant = int(await asyncio.wait_for(proc.stdout.readline(), 10))
+        try:
+            assert os.getpgid(descendant) == proc.pgid
+            await asyncio.wait_for(proc.wait(), 10)
+            assert proc.group_is_gone() is False
+
+            os.kill(descendant, signal.SIGKILL)
+            await _assert_pid_gone(descendant)
+            assert proc.group_is_gone() is True
+        finally:
+            try:
+                os.killpg(proc.pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    asyncio.run(case())
+
+
 def test_wait_reaps_child_no_zombie() -> None:
     async def case() -> None:
         proc = await _spawn("pass")
@@ -236,32 +286,42 @@ def _stage_exec_pair(tmp_path: Path) -> tuple[Path, Path]:
     return image, decoy
 
 
-def test_spawn_uses_interpreter_fd_image_not_argv0_path(tmp_path: Path) -> None:
+def test_the_declared_path_is_always_the_exec_image(tmp_path: Path) -> None:
+    """A2: there is no descriptor-based image, so the path is authoritative.
+
+    The retired line pinned the exec image to an already-attested inode and let
+    ``argv[0]`` keep a different path string. That override is gone with the
+    layer that justified it: ARS launches the operator's declared command
+    exactly as declared, and where the kernel finds it is an observation.
+    """
     image, decoy = _stage_exec_pair(tmp_path)
 
     async def case() -> None:
-        fd = os.open(str(image), os.O_PATH | os.O_CLOEXEC)
-        try:
-            proc = await spawn_managed_process(
-                argv=[str(decoy), "ATTESTED_IMAGE"],
-                cwd=tmp_path,
-                env=dict(os.environ),
-                limits=ManagedProcessLimits(),
-                interpreter_fd=fd,
-            )
-            # argv[0] keeps the canonical path string; the exec image is the
-            # pinned inode, so the descriptor — not the path — is authoritative.
-            out = await asyncio.wait_for(proc.stdout.readline(), 10)
-            await asyncio.wait_for(proc.wait(), 10)
-        finally:
-            os.close(fd)
-        assert out == b"ATTESTED_IMAGE\n"
-        assert out != b"ARGV0_IMAGE\n"
+        proc = await spawn_managed_process(
+            argv=[str(decoy), "ATTESTED_IMAGE"],
+            cwd=tmp_path,
+            env=dict(os.environ),
+            limits=ManagedProcessLimits(),
+        )
+        out = await asyncio.wait_for(proc.stdout.readline(), 10)
+        await asyncio.wait_for(proc.wait(), 10)
+        # The decoy at ``argv[0]`` is what runs: no second image can be named.
+        assert out == b"ARGV0_IMAGE\n"
+        assert image.exists()
 
     asyncio.run(case())
 
 
-def test_spawn_without_interpreter_fd_unchanged(tmp_path: Path) -> None:
+def test_the_spawn_seam_accepts_no_image_override() -> None:
+    import inspect
+
+    parameters = inspect.signature(spawn_managed_process).parameters
+    assert "interpreter_fd" not in parameters
+    assert "executable" not in parameters
+    assert "pass_fds" not in parameters
+
+
+def test_spawn_execs_the_pathname_it_was_given(tmp_path: Path) -> None:
     _image, decoy = _stage_exec_pair(tmp_path)
 
     async def case() -> None:
@@ -273,8 +333,8 @@ def test_spawn_without_interpreter_fd_unchanged(tmp_path: Path) -> None:
         )
         out = await asyncio.wait_for(proc.stdout.readline(), 10)
         exit_state = await asyncio.wait_for(proc.wait(), 10)
-        # The None path is byte-identical to today's behavior: the pathname is
-        # exec'd, so the decoy script runs.
+        # The pathname is exec'd, so the decoy script runs — the one and only
+        # image-selection behavior there is.
         assert out == b"ARGV0_IMAGE\n"
         assert exit_state.exit_code == 0
 

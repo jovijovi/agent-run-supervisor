@@ -40,8 +40,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Supervise local acpx exec or persist safe dry-run artifacts.",
         description="Supervise local acpx exec under AgentRoleSpec policy, or persist safe dry-run artifacts with --no-real-run.",
     )
-    run.add_argument("--role", required=True, help="Path to AgentRoleSpec JSON file.")
-    run.add_argument("--prompt-file", required=True, help="Path to prompt text file.")
+    # Not ``required`` at the parser level: ``run inspect`` is a sibling
+    # subcommand that needs neither, and argparse would demand them before it
+    # ever reached the subparser. ``cmd_run`` enforces both instead, so the
+    # legacy invocation is unchanged and the new one is expressible.
+    run.add_argument("--role", default=None, help="Path to AgentRoleSpec JSON file.")
+    run.add_argument("--prompt-file", default=None, help="Path to prompt text file.")
     run.add_argument("--cwd", default=None, help="Override effective cwd for exec or dry-run compilation.")
     run.add_argument(
         "--no-real-run",
@@ -54,101 +58,78 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Directory that holds run artifacts (defaults to .agent-run-supervisor/runs).",
     )
 
+    _add_run_inspect_parser(run)
     _add_session_parser(subparsers)
     _add_cleanup_parser(subparsers)
-    _add_runtime_binding_parser(subparsers)
+    _add_agents_parser(subparsers)
     return parser
 
 
-def _add_runtime_binding_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Operator surface for the Runtime Binding (PRD R13, C14).
+def _add_agents_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Operator surface for the agent registry.
 
-    Exactly four subcommands. There is no ``--force``: a generation that cannot
-    be validated is never promoted. No command escalates privilege, installs an
-    artifact, edits a service unit, restarts ``arsd``, or contacts a provider.
-    A pure promotion needs no restart because admission re-reads the active
-    pointer per Run — it takes effect on the *next* Run and never re-points one
-    that is already sealed.
+    Exactly two subcommands, and deliberately no third. There is no ``promote``,
+    no ``rollback``, and no ``--force``: nothing here installs an artifact, edits
+    a service unit, restarts ``arsd``, escalates privilege, or contacts a
+    provider. A registry edit takes effect at the next daemon start, which is a
+    service action an operator takes, not something this tool can do.
     """
-    binding = subparsers.add_parser(
-        "runtime-binding",
-        help="Validate, promote, roll back, or inspect an operator Runtime Binding.",
+    agents = subparsers.add_parser(
+        "agents",
+        help="Validate the operator agent registry, or run a per-agent doctor.",
         description=(
-            "Read-only inspection plus atomic replacement of active.json. "
-            "Preparing an immutable, non-service-writable artifact root is an "
-            "operator action outside this tool."
+            "Read-only checks over the operator-owned agents file. Output names "
+            "entry ids, counts, environment names, source classes, and rule "
+            "outcomes — never an overlay or mediation value."
         ),
     )
-    binding_sub = binding.add_subparsers(
-        dest="runtime_binding_command", metavar="runtime_binding_command"
-    )
+    agents_sub = agents.add_subparsers(dest="agents_command", metavar="agents_command")
 
-    def _add_generation_args(sub: argparse.ArgumentParser) -> None:
-        sub.add_argument(
-            "--binding-root",
-            required=True,
-            help="Operator-owned Binding root (read-only except active.json).",
-        )
-        sub.add_argument(
-            "--profile",
-            required=True,
-            help="Registered profile id whose live contract must accept the generation.",
-        )
-        sub.add_argument(
-            "--agent",
-            default=None,
-            help=(
-                "Registered agent id, for a profile whose contract is "
-                "instantiated per operator-owned Agent Registration. Required "
-                "for such a profile and refused for any other."
-            ),
-        )
-        sub.add_argument("--generation", required=True, help="Generation id to act on.")
-        sub.add_argument(
-            "--trusted-uid",
-            type=int,
-            action="append",
-            default=None,
-            help=(
-                "UID permitted to own the artifact root and its ancestors "
-                "(repeatable). Root is always trusted; default is root only."
-            ),
-        )
-        sub.add_argument(
-            "--service-uid",
-            type=int,
-            default=None,
-            help=(
-                "The arsd/AGENT UID that must NOT be able to rewrite the "
-                "artifacts (defaults to this process's effective UID)."
-            ),
-        )
-
-    validate = binding_sub.add_parser(
+    validate = agents_sub.add_parser(
         "validate",
-        help="Probe-backed check of one generation against the live contract.",
-    )
-    _add_generation_args(validate)
-
-    promote = binding_sub.add_parser(
-        "promote",
-        help="Validate, then atomically replace active.json. No daemon restart.",
-    )
-    _add_generation_args(promote)
-
-    rollback = binding_sub.add_parser(
-        "rollback",
         help=(
-            "Re-promote a previously validated generation: the target is "
-            "re-proven with the same validation and probe that promotion "
-            "required, and must not already be active."
+            "Parse the agents file and apply the identical checks the daemon "
+            "applies at startup, including the mediation-key collision rule."
         ),
     )
-    _add_generation_args(rollback)
+    validate.add_argument(
+        "--agents-file", required=True, help="Path to the operator agents file."
+    )
 
-    inspect = binding_sub.add_parser(
-        "inspect-run",
-        help="Recompute one Run's launch seal and report its runtime provenance.",
+    doctor = agents_sub.add_parser(
+        "doctor",
+        help=(
+            "Report the projected environment name set and declared launch for "
+            "each registered agent, plus an optional zero-prompt ACP probe."
+        ),
+    )
+    doctor.add_argument(
+        "--agents-file", required=True, help="Path to the operator agents file."
+    )
+    doctor.add_argument(
+        "--agent", default=None, help="Limit the report to one registered agent id."
+    )
+    doctor.add_argument(
+        "--no-probe",
+        action="store_true",
+        help=(
+            "Report the projection only and start no external child. Without "
+            "this flag doctor starts the registered command, which writes that "
+            "AGENT's own state."
+        ),
+    )
+
+
+def _add_run_inspect_parser(run: argparse.ArgumentParser) -> None:
+    """``run inspect`` — per-Run evidence, read-only, value-blind for legacy."""
+    run_sub = run.add_subparsers(dest="run_command", metavar="run_command")
+    inspect = run_sub.add_parser(
+        "inspect",
+        help=(
+            "Report one Run's launch evidence. A reset-schema record has its "
+            "value-blind launch hash recomputed; a pre-reset record is "
+            "classified first and its value-bearing material withheld."
+        ),
     )
     inspect.add_argument(
         "--run-dir", required=True, help="Native run directory holding launch.json."
@@ -281,6 +262,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         return cmd_doctor(args)
     if args.command == "run":
+        if getattr(args, "run_command", None) == "inspect":
+            from agent_run_supervisor.commands import cmd_run_inspect
+
+            return cmd_run_inspect(args)
         from agent_run_supervisor.commands import cmd_run
 
         return cmd_run(args)
@@ -292,10 +277,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from agent_run_supervisor.commands import cmd_cleanup
 
         return cmd_cleanup(args)
-    if args.command == "runtime-binding":
-        from agent_run_supervisor.commands import cmd_runtime_binding
+    if args.command == "agents":
+        from agent_run_supervisor.commands import cmd_agents
 
-        return cmd_runtime_binding(args)
+        return cmd_agents(args)
     parser.print_usage(sys.stderr)
     print(f"error: unknown command {args.command}", file=sys.stderr)
     return 2

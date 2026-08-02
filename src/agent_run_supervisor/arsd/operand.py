@@ -25,9 +25,8 @@ and, unlike a helper living in ``__main__``, it is one module object however it
 is reached.
 
 Nothing here touches the filesystem, and nothing here reads a process-wide
-setting. ARS never creates, writes, repairs, promotes, or migrates the operator
-Runtime Binding root, and the per-Run ``BindingReader`` remains its first and
-only reader (PRD R13, C7/C8).
+setting. ARS never creates, writes, or repairs the operator agents file; it is
+opened read-only, exactly once, at daemon startup.
 """
 
 from __future__ import annotations
@@ -39,7 +38,7 @@ __all__ = [
     "EXACT_PATH_TYPE",
     "OperandError",
     "admit_exact_text",
-    "capture_binding_root",
+    "capture_agents_file",
 ]
 
 
@@ -73,7 +72,7 @@ def admit_exact_text(value: object, *, label: str, allow_path: bool = False) -> 
     daemon entrypoint. One rule, two admitted sets — never two rules.
 
     Applies **no** shape rules. Non-empty, control-free and absolute belong to
-    :func:`capture_binding_root` alone, because that is where they live today.
+    :func:`capture_agents_file` alone, because that is where they live today.
 
     The returned text is safe to share by identity: a ``str`` is immutable, so no
     later reader can be shown a different answer, and no reference to the
@@ -99,15 +98,16 @@ def admit_exact_text(value: object, *, label: str, allow_path: bool = False) -> 
     return text
 
 
-def capture_binding_root(value: object) -> str:
-    """Admit, shape-check and freeze the operator Runtime Binding root (PRD R13).
+def capture_agents_file(value: object) -> str:
+    """Admit, shape-check and freeze the operator agents-file path.
 
     Shape only, and only *after* admission: non-blank, control-free, and
     explicitly absolute. There is no fallback, no PATH lookup, and no
     service-UID-owned default — an unconfigured daemon stays fail-closed rather
-    than guessing a root.
+    than guessing a location for the file that decides which command is which
+    agent.
 
-    Both doors call this one: ``parse_binding_root`` (argv) and ``serve_daemon``
+    Both doors call this one: ``parse_agents_file`` (argv) and ``serve_daemon``
     (programmatic). ``main()`` is not the only entry — every embedder calls the
     coroutine directly — so both must apply the same contract, or the weaker one
     becomes the real one.
@@ -115,12 +115,12 @@ def capture_binding_root(value: object) -> str:
     Every refusal text is fixed and quotes nothing: reporting the operand would
     hand an operator back whatever text the operand's own code chose.
     """
-    text = admit_exact_text(value, label="binding root", allow_path=True)
+    text = admit_exact_text(value, label="agents file", allow_path=True)
     if not text.strip():
-        raise OperandError("binding root must be a non-empty absolute path")
+        raise OperandError("agents file must be a non-empty absolute path")
     for ch in text:
         if ord(ch) < 32 or ord(ch) == 127:
-            raise OperandError("binding root contains control characters")
+            raise OperandError("agents file contains control characters")
     if not text.startswith("/"):
-        raise OperandError("binding root must be an absolute path")
+        raise OperandError("agents file must be an absolute path")
     return text

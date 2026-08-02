@@ -4,16 +4,16 @@
 Production-usable harness source. Execution requires an explicit A3
 acknowledgment flag/env plus operator-supplied user-unit name, socket,
 supervisor root, test-scoped caller mapping, evidence directory, and Runtime
-Binding root.
+agents file.
 
 Import, ``--help``, and dry validation must not mutate the host (no
 systemctl/loginctl/cgroup writes). Never embeds real mapping/credentials.
 Never enables a unit; always cleans up a unit file this run created. The
-Binding root is reusable pre-existing operator storage: it is validated for
+agents file is reusable pre-existing operator storage: it is validated for
 operator-input shape and lexical non-overlap only, and is never created,
 emptied, written, promoted, or otherwise mutated here. It is also never *read*
 — no resolve/stat/lstat/readlink/open/list touches it or its path components,
-so the per-Run ``BindingReader`` remains the first and only metadata reader.
+so ARS opens the operator's agents file exactly once, at daemon startup.
 """
 
 from __future__ import annotations
@@ -38,6 +38,19 @@ _UNIT_NAME_RE = re.compile(r"^[A-Za-z0-9@_.+-]+\.service$")
 # needs pure text work, not ``Path.resolve``.
 _REQUIRED_MODEL = "kimi-for-coding/k3"
 _REQUIRED_EFFORT = "max"
+
+# The wire version this harness drives. A health check that waits for a version
+# the daemon no longer reports never observes a healthy server and times out
+# looking like a crash-containment failure, so this tracks the shipped contract.
+_REQUIRED_API_VERSION = 2
+
+# The registry-entry id grammar, restated here for the same reason
+# ``_agents_file_query_conflict`` is: this script must stay runnable from a bare
+# checkout, so it cannot import the package to validate an operator input before
+# the A3 gates have passed. ``run_s4`` re-validates through the package's own
+# grammar once it is importable, so the shipped rule is still the one that
+# decides — this only refuses obviously malformed input earlier and offline.
+_AGENT_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 _FRESH_MARKER = "S4_FRESH_OK"
 # Conservative bound for crash-run effective.json evidence (1 MiB).
 _MAX_EFFECTIVE_JSON_BYTES = 1 * 1024 * 1024
@@ -97,12 +110,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Absolute known-empty disposable workspace",
     )
     parser.add_argument(
-        "--binding-root",
+        "--agents-file",
         default="",
         help=(
-            "Absolute operator-owned Runtime Binding root (PRD R13). Required: "
-            "the submitted profile refuses admission without it. Read-only "
-            "reusable storage — never created, emptied, or written here"
+            "Absolute operator-owned agent registry file. Required: "
+            "the daemon refuses to listen without it. Read-only reusable "
+            "storage — never created, emptied, or written here"
+        ),
+    )
+    parser.add_argument(
+        "--agent-id",
+        default="",
+        help=(
+            "Registered agent id to submit against. Required: it must already "
+            "be an entry in --agents-file, which this harness never reads. "
+            "The operator selects it; the harness invents nothing"
         ),
     )
     return parser
@@ -172,19 +194,19 @@ def _lexical_repo_root(file_spelling: str, *, cwd: str | None = None) -> Path:
 
     ``Path(__file__).resolve()`` lstats every component of the repository path
     the moment this module is executed — a filesystem query made before the
-    operator's Binding root has even been parsed, inside a module whose contract
-    is to query nothing before ``BindingReader``. ``os.path.normpath`` and
+    operator's agents file has even been parsed, inside a module whose contract
+    is to query nothing before the registry reader. ``os.path.normpath`` and
     ``os.path.dirname`` are pure string work, so the same root is available
     without a single syscall; ``_forbid_inside_repo`` still resolves this value
     at *call* time for the surfaces it is allowed to touch.
 
     ``__file__`` is absolute for imported modules and, since Python 3.9, for
     ``__main__`` too, but a relative spelling is handled all the same: the
-    Binding root is required absolute, so a relative repository root would
+    agents file is required absolute, so a relative repository root would
     silently degrade the containment gate below into a no-op. Anchoring reads
     ``os.getcwd()`` — the process's own working directory, taken once at import,
     before any operator input exists. It reads no path's metadata, walks no
-    components, and cannot be steered by the Binding root.
+    components, and cannot be steered by the agents file.
     """
     text = _collapse_leading_slashes(str(file_spelling))
     if not text.startswith("/"):
@@ -233,7 +255,7 @@ def _lexical_query_components(value: Path | str) -> frozenset[str]:
     first: look it up, check it is a traversable directory, follow it if it is a
     symlink. The surface this harness names is therefore never the only path the
     operation touches; the whole ancestor chain is, and that chain is exactly
-    what a ``BindingReader``-first boundary must protect.
+    what a ``read-only-operator-configuration boundary must protect.
 
     Both spellings contribute, because the kernel really does visit both trees:
     ``/x/neutral/../ws`` walks ``/x/neutral`` on the way to a destination that
@@ -255,31 +277,45 @@ def _lexical_query_components(value: Path | str) -> frozenset[str]:
     return frozenset(components)
 
 
-def _binding_query_conflict(binding_root: Path | str, surface: Path | str) -> bool:
-    """May a filesystem operation on ``surface`` query the Binding root or a component?
+def _terminal_components(value: Path | str) -> frozenset[str]:
+    """The path(s) ``value`` itself names, both spellings, without ancestors."""
+    raw = _collapse_leading_slashes(str(value))
+    collapsed = _collapse_leading_slashes(os.path.normpath(raw))
+    return frozenset({raw, collapsed}) - {"/"}
 
-    One rule for the whole class, not a conditional per layout. Equality,
-    containment in either direction, prefix siblings, and shared-ancestor
-    layouts are the same fact from different angles: the two component chains
-    intersect somewhere above ``/``. No resolve/stat/lstat/readlink/open/list
-    touches either operand — the Runtime Binding root stays operator-supplied
-    configuration *text* until the per-Run ``BindingReader`` opens it, and
-    symlinked aliases are deliberately out of scope because exposing one needs
-    precisely the read this boundary forbids.
+
+def _agents_file_query_conflict(agents_file: Path | str, surface: Path | str) -> bool:
+    """Could an ARS-owned write on ``surface`` land inside the operator's registry?
+
+    **This must stay semantically identical to the daemon's own copy.** The
+    harness installs the unit that daemon runs, so a layout one accepts and the
+    other refuses is a unit that can never start. The duplication exists only
+    because this script must remain runnable from a bare checkout.
+
+    One rule: equality, and containment in either direction. ``surface`` is
+    always a path ARS creates or mutates, and ARS never creates, writes, or
+    repairs the operator's agents file — so a daemon-owned surface sitting on
+    top of it (or under it) would put that guarantee in the hands of a directory
+    layout. Sibling directories under one parent are an ordinary, safe layout
+    and are admitted. No resolve/stat/lstat/readlink/open/list touches either
+    operand; symlinked aliases are deliberately out of scope because exposing
+    one needs precisely the read this boundary avoids.
 
     Fail closed on a relative operand, which names no fixed location until the
     kernel joins it to an inherited cwd, and on the filesystem root, which
     contains and is contained by everything and must be asked about directly
     (its "total reach" shows up here as an *empty* component set).
     """
-    for operand in (binding_root, surface):
+    for operand in (agents_file, surface):
         if not _is_lexically_absolute(operand) or _lexical_is_filesystem_root(operand):
             return True
-    protected = _lexical_query_components(binding_root)
+    protected = _lexical_query_components(agents_file)
     queried = _lexical_query_components(surface)
     if not protected or not queried:
         return True
-    return not protected.isdisjoint(queried)
+    return bool(protected & _terminal_components(surface)) or bool(
+        queried & _terminal_components(agents_file)
+    )
 
 
 def _forbid_inside_repo_lexically(path: Path, *, label: str) -> None:
@@ -288,13 +324,13 @@ def _forbid_inside_repo_lexically(path: Path, *, label: str) -> None:
     ``_REPO_ROOT`` comes from this file's own spelling by pure string work (see
     ``_lexical_repo_root``) — no query, on the repository or on ``path``.
 
-    Containment is refused in **both** directions. A Binding root inside the
-    worktree would put operator storage under version control; a Binding root
+    Containment is refused in **both** directions. An agents file inside the
+    worktree would put operator storage under version control; a agents file
     that *contains* the worktree is the same collision seen from the other end —
     every repository file, including this harness and the surfaces it derives
-    from ``Path.home()``, becomes a Binding subpath. A symlinked spelling of the
+    from ``Path.home()``, becomes a agents-file subpath. A symlinked spelling of the
     worktree is outside what a no-stat check can see; that is the accepted cost
-    of not touching the Binding root.
+    of not touching the agents file.
     """
     for candidate in _lexical_forms(path):
         if candidate.is_relative_to(_REPO_ROOT) or _REPO_ROOT.is_relative_to(candidate):
@@ -328,7 +364,8 @@ def _require_operator_inputs(args: argparse.Namespace) -> dict[str, str]:
         "caller_mapping": args.caller_mapping,
         "evidence_dir": args.evidence_dir,
         "workspace": args.workspace,
-        "binding_root": args.binding_root,
+        "agents_file": args.agents_file,
+        "agent_id": args.agent_id,
     }
     missing = [name for name, value in required.items() if not str(value).strip()]
     if missing:
@@ -364,27 +401,37 @@ def _require_operator_inputs(args: argparse.Namespace) -> dict[str, str]:
         )
     required["caller_mapping"] = mapping
 
+    # Shape only, and offline: which ids actually exist is a fact of the
+    # operator's agents file, which the daemon reads once at startup and this
+    # harness never opens.
+    agent_id = _reject_controls(required["agent_id"].strip(), label="agent_id")
+    if _AGENT_ID_RE.fullmatch(agent_id) is None:
+        raise HarnessGateError(
+            "refusing: agent_id must match '[a-z0-9][a-z0-9._-]{0,63}'"
+        )
+    required["agent_id"] = agent_id
+
     socket = _require_absolute(required["socket"], label="socket")
     root = _require_absolute(required["supervisor_root"], label="supervisor_root")
     evidence = _require_absolute(required["evidence_dir"], label="evidence_dir")
     workspace = _require_absolute(required["workspace"], label="workspace")
     # Shape only. Existence, generation layout, and artifact trust belong to
-    # the per-Run BindingReader — this harness must never read or repair them.
-    binding = _require_absolute(required["binding_root"], label="binding_root")
+    # the daemon's startup registry read — this harness must never read or repair them.
+    binding = _require_absolute(required["agents_file"], label="agents_file")
 
-    # Binding root guards, decided from the operator's text alone and run before
+    # agents file guards, decided from the operator's text alone and run before
     # *any* surface is probed. Nothing this harness resolves, stats, lists,
     # creates, empties, or writes may let a kernel path walk reach the reusable
     # operator storage — and proving that must not itself resolve, stat, lstat,
-    # readlink, open, or list the Binding root or its components: the first and
-    # only metadata read belongs to the per-Run BindingReader.
+    # readlink, open, or list the agents file or its components: the first and
+    # only metadata read belongs to the daemon's startup registry read.
     #
     # The ordering *is* the guard. `_resolve` walks every path component, so
-    # resolving any surface that shares an ancestor with the Binding root lstats
-    # that ancestor — a Binding path component — and a refusal placed after the
+    # resolving any surface that shares an ancestor with the agents file lstats
+    # that ancestor — a agent registry path component — and a refusal placed after the
     # repo check below would already have leaked the read it exists to prevent.
     unit_path = _user_unit_path(unit_name)
-    _forbid_inside_repo_lexically(binding, label="binding_root")
+    _forbid_inside_repo_lexically(binding, label="agents_file")
     for label, path in (
         ("supervisor_root", root),
         ("workspace", workspace),
@@ -405,13 +452,13 @@ def _require_operator_inputs(args: argparse.Namespace) -> dict[str, str]:
         # Derived too, and genuinely queried: `_forbid_inside_repo` calls
         # `_REPO_ROOT.resolve()` on every operator surface below, which lstats
         # each component of the worktree path. `_forbid_inside_repo_lexically`
-        # above only answers the containment question; a Binding root that
+        # above only answers the containment question; a agents file that
         # merely shares an ancestor with the worktree is refused right here.
         ("repository_root", _REPO_ROOT),
     ):
-        if _binding_query_conflict(binding, path):
+        if _agents_file_query_conflict(binding, path):
             raise HarnessGateError(
-                f"refusing: path overlap between binding_root and {label}"
+                f"refusing: path overlap between agents_file and {label}"
             )
 
     for label, path in (
@@ -443,7 +490,7 @@ def _require_operator_inputs(args: argparse.Namespace) -> dict[str, str]:
 
     # Path overlap / alias guards among the durable surfaces this harness owns.
     # These may be resolved: the harness creates, empties, or writes every one of
-    # them. The Binding root is deliberately absent — it was cleared lexically
+    # them. The agents file is deliberately absent — it was cleared lexically
     # above and carries no freshness/emptiness gate of its own.
     durable = {
         "supervisor_root": root,
@@ -471,7 +518,7 @@ def _require_operator_inputs(args: argparse.Namespace) -> dict[str, str]:
     required["supervisor_root"] = str(root)
     required["evidence_dir"] = str(evidence)
     required["workspace"] = str(workspace)
-    required["binding_root"] = str(binding)
+    required["agents_file"] = str(binding)
     return required
 
 
@@ -498,11 +545,11 @@ def _render_unit(
     supervisor_root: str,
     mapping: str,
     *,
-    binding_root: str,
+    agents_file: str,
 ) -> str:
-    """Render the unit via the shipped CLI. ``binding_root`` is keyword-only.
+    """Render the unit via the shipped CLI. ``agents_file`` is keyword-only.
 
-    Print mode refuses without ``--binding-root``, so the operator root is
+    Print mode refuses without ``--agents-file``, so the operator root is
     mandatory here too; keyword-only keeps it from ever being swapped with the
     caller mapping positionally. The path is argv data — the CLI does not open
     it, and this harness never creates or mutates it.
@@ -517,8 +564,8 @@ def _render_unit(
             socket,
             "--supervisor-root",
             supervisor_root,
-            "--binding-root",
-            binding_root,
+            "--agents-file",
+            agents_file,
             "--caller-mapping",
             mapping,
         ],
@@ -531,9 +578,9 @@ def _render_unit(
         raise HarnessGateError("rendered unit missing required containment directives")
     if "RestartSec=" not in unit:
         raise HarnessGateError("rendered unit missing RestartSec")
-    # Never install a unit whose Binding configuration silently vanished.
-    if "--binding-root" not in unit:
-        raise HarnessGateError("rendered unit missing --binding-root")
+    # Never install a unit whose agent registry configuration silently vanished.
+    if "--agents-file" not in unit:
+        raise HarnessGateError("rendered unit missing --agents-file")
     return unit
 
 
@@ -975,17 +1022,68 @@ def _cleanup_created_unit(*, unit_name: str, unit_path: Path, created: bool) -> 
         raise HarnessGateError("cleanup failed: " + ",".join(failures))
 
 
+def _s4_submit_payload(
+    *,
+    owner: str,
+    namespace: str,
+    agent_id: str,
+    session_id: str,
+    workspace: str,
+) -> dict[str, Any]:
+    """The one submit frame S4 sends, built as pure data.
+
+    Split out so the wire shape can be constructed and fed to the production
+    parser without starting a service, a daemon, or an agent. The caller names
+    an operator-registered ``agent_id`` and nothing else about the runtime: no
+    command, argv, environment key or value, path, digest, or version is a field
+    here, and none may become one.
+    """
+    return {
+        "request": {
+            "owner": owner,
+            "namespace": namespace,
+            "agent_id": agent_id,
+            "session_reuse": "reuse",
+            "ars_session_id": session_id,
+            "expected_binding_hash": None,
+            "input_refs": [
+                {"ref": "prompt:inline", "content_hash": "sha256:" + "0" * 64}
+            ],
+            "requested_model": _REQUIRED_MODEL,
+            "requested_effort": _REQUIRED_EFFORT,
+            "grant_ref": "grant:s4-crash",
+            "grant_hash": "sha256:" + "1" * 64,
+            "grant_role_hash": "sha256:" + "2" * 64,
+            "grant_capabilities": ["read"],
+            "mcp_snapshot_hashes": [],
+            "credential_refs": ["kimi-for-coding"],
+            "limits": {},
+            "evidence_policy_hash": "sha256:" + "3" * 64,
+            "recovery_policy_hash": "sha256:" + "4" * 64,
+        },
+        "prompt_text": (
+            "Remain busy without finishing quickly so crash containment "
+            "can be observed. Do not write files."
+        ),
+        "workspace_root": workspace,
+        "cwd": None,
+        "retry_of_run_id": None,
+    }
+
+
 def run_s4(inputs: dict[str, str]) -> int:
     """Mutating S4 path — only after A3 gates and input validation."""
     from agent_run_supervisor.arsd import client as arsd_client
     from agent_run_supervisor.native_acp import storage
+    from agent_run_supervisor.native_acp.agent_registration import validate_agent_id
     from agent_run_supervisor.session import STATE_QUARANTINED
 
     unit_name = inputs["unit_name"]
     socket = inputs["socket"]
     root = inputs["supervisor_root"]
     mapping = inputs["caller_mapping"]
-    binding_root = inputs["binding_root"]
+    agents_file = inputs["agents_file"]
+    agent_id = inputs["agent_id"]
     evidence_dir = Path(inputs["evidence_dir"])
     workspace = Path(inputs["workspace"])
     unit_path = _user_unit_path(unit_name)
@@ -995,7 +1093,7 @@ def run_s4(inputs: dict[str, str]) -> int:
     fresh_session = f"arsd-s4-fresh-{int(time.time())}"
 
     try:
-        unit_text = _render_unit(socket, root, mapping, binding_root=binding_root)
+        unit_text = _render_unit(socket, root, mapping, agents_file=agents_file)
         unit_path.parent.mkdir(parents=True, exist_ok=True)
 
         def _mark_created() -> None:
@@ -1014,7 +1112,7 @@ def run_s4(inputs: dict[str, str]) -> int:
             try:
                 with arsd_client.ArsdClient(socket) as probe:
                     info = probe.server_info(request_id="s4-preflight")
-                if info.get("api_version") == 1:
+                if info.get("api_version") == _REQUIRED_API_VERSION:
                     healthy = True
                     break
             except arsd_client.ArsdClientError:
@@ -1024,42 +1122,17 @@ def run_s4(inputs: dict[str, str]) -> int:
 
         owner, namespace = mapping.split(":", 3)[2], mapping.split(":", 3)[3]
         request_id = f"s4-crash-{int(time.time())}"
-        payload = {
-            "request": {
-                "owner": owner,
-                "namespace": namespace,
-                # C15: the stable ID replaced ``opencode-1.18.4`` with no
-                # compatibility alias, so the old ID is refused at admission.
-                # This harness also now requires the operator to have promoted
-                # a Runtime Binding generation for the profile: after the R13
-                # split there is no source constant naming the executable.
-                "profile_id": "opencode-native-acp",
-                "session_reuse": "reuse",
-                "ars_session_id": crash_session,
-                "expected_binding_hash": None,
-                "input_refs": [
-                    {"ref": "prompt:inline", "content_hash": "sha256:" + "0" * 64}
-                ],
-                "requested_model": _REQUIRED_MODEL,
-                "requested_effort": _REQUIRED_EFFORT,
-                "grant_ref": "grant:s4-crash",
-                "grant_hash": "sha256:" + "1" * 64,
-                "grant_role_hash": "sha256:" + "2" * 64,
-                "grant_capabilities": ["read"],
-                "mcp_snapshot_hashes": [],
-                "credential_refs": ["kimi-for-coding"],
-                "limits": {},
-                "evidence_policy_hash": "sha256:" + "3" * 64,
-                "recovery_policy_hash": "sha256:" + "4" * 64,
-            },
-            "prompt_text": (
-                "Remain busy without finishing quickly so crash containment "
-                "can be observed. Do not write files."
-            ),
-            "workspace_root": str(workspace),
-            "cwd": None,
-            "retry_of_run_id": None,
-        }
+        # The shipped grammar decides, now that the package is importable. The
+        # offline check in ``_require_operator_inputs`` refused malformed input
+        # earlier; this is the rule the daemon itself will apply.
+        validate_agent_id(agent_id)
+        payload = _s4_submit_payload(
+            owner=owner,
+            namespace=namespace,
+            agent_id=agent_id,
+            session_id=crash_session,
+            workspace=str(workspace),
+        )
         with arsd_client.ArsdClient(socket) as cli:
             accepted = cli.submit(request_id=request_id, payload=payload)
             run_id = accepted["run_id"]
@@ -1126,7 +1199,7 @@ def run_s4(inputs: dict[str, str]) -> int:
                     try:
                         with arsd_client.ArsdClient(socket) as probe:
                             info = probe.server_info(request_id="s4-health")
-                        if info.get("api_version") == 1:
+                        if info.get("api_version") == _REQUIRED_API_VERSION:
                             new_main = candidate
                             break
                     except arsd_client.ArsdClientError:
@@ -1264,7 +1337,7 @@ def main(argv: list[str] | None = None) -> int:
             "evidence_dir": inputs["evidence_dir"],
             "workspace": inputs["workspace"],
             # Path/config fact only: never opened, created, or promoted here.
-            "binding_root": inputs["binding_root"],
+            "agents_file": inputs["agents_file"],
             "caller_mapping_supplied": True,
             "unit_file_exists": _user_unit_path(inputs["unit_name"]).exists(),
             "next_step_if_authorized": (

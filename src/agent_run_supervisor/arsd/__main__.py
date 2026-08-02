@@ -18,7 +18,7 @@ from agent_run_supervisor.arsd import handlers, reconcile, server
 from agent_run_supervisor.arsd.operand import (
     OperandError,
     admit_exact_text,
-    capture_binding_root,
+    capture_agents_file,
 )
 from agent_run_supervisor.arsd.server import (
     DEFAULT_MAX_CONNECTIONS,
@@ -32,7 +32,7 @@ from agent_run_supervisor.event_store import (
     EventStoreError,
     durable_secure_mkdir,
 )
-from agent_run_supervisor.native_acp import storage
+from agent_run_supervisor.native_acp import agent_registry, storage
 
 _LOGGER = logging.getLogger("agent_run_supervisor.arsd")
 
@@ -221,18 +221,18 @@ def parse_caller_mapping(value: str) -> tuple[int, Principal]:
     )
 
 
-def parse_binding_root(value: str) -> Path:
-    """argparse adapter for :func:`~agent_run_supervisor.arsd.operand.capture_binding_root`.
+def parse_agents_file(value: str) -> str:
+    """argparse adapter for :func:`~agent_run_supervisor.arsd.operand.capture_agents_file`.
 
     argparse hands over the exact built-in ``str`` it read from argv, so the gate
-    admits it and the frozen text becomes an ordinary ``Path`` — byte-for-byte
-    the value the programmatic door derives from the same text.
+    admits it and returns the frozen text — kept as ``str`` rather than rebuilt
+    as a ``Path``, so the operator's spelling reaches the rendered unit and the
+    daemon byte-for-byte.
     """
     try:
-        text = capture_binding_root(value)
+        return capture_agents_file(value)
     except OperandError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
-    return Path(text)
 
 
 def _is_lexically_absolute(value: Path | str) -> bool:
@@ -287,7 +287,7 @@ def _lexical_query_components(value: Path | str) -> frozenset[str]:
     first: look it up, check it is a traversable directory, follow it if it is a
     symlink. So the surface a caller names is never the only path an operation
     touches; the whole ancestor chain is, and that chain is exactly what a
-    ``BindingReader``-first boundary has to protect.
+    read-only-operator-configuration boundary has to protect.
 
     Both spellings contribute, because the kernel really does visit both trees:
     ``/x/neutral/../sv`` walks ``/x/neutral`` on the way to a destination only
@@ -297,13 +297,12 @@ def _lexical_query_components(value: Path | str) -> frozenset[str]:
     implementation-defined, Linux resolves it to ``/x``), and ``PurePosixPath``
     enumerates ancestors without a syscall. No resolve/stat/lstat/readlink/
     open/access/listdir/scandir/realpath is involved anywhere in this file's
-    Binding decisions (PRD R13, C7/C8).
+    operand decisions.
 
     The filesystem root is excluded: every absolute path shares it, so counting
     it would refuse every conceivable layout. Symlinked aliases stay out of
     scope by the same rule — exposing one needs precisely the metadata read this
-    boundary forbids, and Binding symlink/ownership/layout trust belongs to
-    ``BindingReader``.
+    boundary forbids, and the registry reader owns its own hygiene check.
     """
     components: set[str] = set()
     raw = _collapse_leading_slashes(str(value))
@@ -316,16 +315,26 @@ def _lexical_query_components(value: Path | str) -> frozenset[str]:
     return frozenset(components)
 
 
-def _binding_query_conflict(binding_root: Path | str, surface: Path | str) -> bool:
-    """May a filesystem operation on ``surface`` query the Binding root or a component?
+def _agents_file_query_conflict(agents_file: Path | str, surface: Path | str) -> bool:
+    """Could an ARS-owned write on ``surface`` land inside the operator's registry?
 
-    One rule for the whole class, not a conditional per reported layout. Equality,
-    containment in either direction, prefix siblings, and shared-ancestor
-    layouts are all the same fact seen from different angles: the two component
-    chains intersect somewhere above ``/``. For absolute paths that reduces to
-    "the first component differs" — which is why a real deployment separates
-    them at the top level (Binding under ``/opt``, daemon state and socket
-    elsewhere) rather than by sharing a parent directory.
+    One rule for the whole class: equality, and containment in either direction.
+    ``surface`` is always a path ARS **creates or mutates** — the supervisor
+    root, the instance lease, the socket directory, the socket — so the hazard
+    is a layering error rather than a race: ARS never creates, writes, repairs,
+    or migrates the operator's agents file, and a daemon-owned surface that sits
+    on top of it (or under it) would put that guarantee in the hands of a
+    directory layout.
+
+    **Scope, stated openly.** The predecessor of this rule refused any *shared
+    ancestor*, because under the retired Binding architecture the operand was a
+    tree ARS had to leave entirely untouched until a per-Run reader opened it,
+    and a kernel walk over a shared ancestor was itself the forbidden read. That
+    premise is gone: the registry is opened by ARS itself, once, at startup,
+    before the lease and before any state write. Keeping the wider rule would
+    now refuse ordinary safe layouts such as ``~/ars/agents.toml`` beside
+    ``~/ars/state`` while protecting nothing, which is the fail-closed rule that
+    turns a startable daemon into a non-startable one for no gain.
 
     Fail closed on a relative operand: it names no fixed location until the
     kernel joins it to an inherited cwd, so ``relative-sv`` and
@@ -334,14 +343,26 @@ def _binding_query_conflict(binding_root: Path | str, surface: Path | str) -> bo
     it contains, and is contained by, everything — and has to be asked about
     directly, since "total reach" shows up here as an *empty* component set.
     """
-    for operand in (binding_root, surface):
+    for operand in (agents_file, surface):
         if not _is_lexically_absolute(operand) or _lexical_is_filesystem_root(operand):
             return True
-    protected = _lexical_query_components(binding_root)
+    protected = _lexical_query_components(agents_file)
     queried = _lexical_query_components(surface)
     if not protected or not queried:
         return True
-    return not protected.isdisjoint(queried)
+    # Containment in either direction, judged on the *deepest* spelling each
+    # operand names, so ``/x/agents.toml`` and ``/x/state`` stay disjoint while
+    # ``/x/state/agents.toml`` and ``/x/state`` do not.
+    return bool(protected & _terminal_components(surface)) or bool(
+        queried & _terminal_components(agents_file)
+    )
+
+
+def _terminal_components(value: Path | str) -> frozenset[str]:
+    """The path(s) ``value`` itself names, both spellings, without ancestors."""
+    raw = _collapse_leading_slashes(str(value))
+    collapsed = _collapse_leading_slashes(os.path.normpath(raw))
+    return frozenset({raw, collapsed}) - {"/"}
 
 
 def build_caller_policy(values: list[str]) -> CallerPolicy:
@@ -374,8 +395,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Render a systemd --user unit to stdout and exit. "
             "Does not check euid, reconcile, bind, or start the daemon. "
-            "Requires --binding-root so a rendered unit never silently omits "
-            "Binding configuration; the path is argv data and is not accessed. "
+            "Requires --agents-file so a rendered unit never silently omits the "
+            "agent registry; the path is argv data and is not accessed. "
             "Optional --socket/--supervisor-root/--caller-mapping override "
             "user-scope specifier defaults; zero mappings remain fail-closed."
         ),
@@ -400,16 +421,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--binding-root",
-        type=parse_binding_root,
+        "--agents-file",
+        type=parse_agents_file,
         default=None,
         metavar="ABSOLUTE_PATH",
         help=(
-            "Operator-owned Runtime Binding root (PRD R13). Absolute path, "
-            "server configuration only — never caller-selectable. Required in "
-            "daemon mode and for --print-service-unit; every registered "
-            "profile refuses admission fail-closed without it. ARS opens it "
-            "read-only, once per Run, and never creates or promotes it."
+            "Operator-owned agent registry file (TOML). Absolute path, server "
+            "configuration only — never caller-selectable. Required in daemon "
+            "mode and for --print-service-unit. ARS opens it read-only, exactly "
+            "once at startup, and never creates, writes, or repairs it; an edit "
+            "takes effect at the next daemon start."
         ),
     )
     parser.add_argument(
@@ -590,7 +611,7 @@ async def serve_daemon(
     policy: CallerPolicy,
     max_concurrent_runs: int = handlers.DEFAULT_MAX_CONCURRENT_RUNS,
     max_connections: int = DEFAULT_MAX_CONNECTIONS,
-    binding_root: Path | str | None = None,
+    agents_file: Path | str | None = None,
     run_task_factory: Any | None = None,
     cancel_wait_seconds: float = DEFAULT_CANCEL_WAIT_SECONDS,
     shutdown_timeout: float = DEFAULT_SHUTDOWN_TIMEOUT,
@@ -606,36 +627,36 @@ async def serve_daemon(
         raise DaemonStartupError(
             "caller policy has zero configured caller mappings; refusing to listen"
         )
-    # Operator Binding configuration is mandatory for every listening entry,
+    # Operator registry configuration is mandatory for every listening entry,
     # including this one. ``serve_daemon`` is not an internal helper: it is the
     # exported coroutine every embedder and future supervisor entry calls, and
     # whatever it binds is a production ingress for whoever can reach the
     # socket. A ``run_task_factory`` says nothing about that — the previous
     # exemption let an injected factory take the instance lease, mkdir the
-    # supervisor root, reconcile, and listen with no operator root configured
-    # anywhere. Whether a *particular* factory consults the root is the
+    # supervisor root, reconcile, and listen with no operator file configured
+    # anywhere. Whether a *particular* factory consults the registry is the
     # factory's business; requiring the daemon to be configured is the daemon's.
-    if binding_root is None:
+    if agents_file is None:
         raise DaemonStartupError(
-            "no Runtime Binding root is configured; refusing to listen "
-            "(pass --binding-root)"
+            "no agent registry file is configured; refusing to listen "
+            "(pass --agents-file)"
         )
     # Same text/type contract as argv, applied to *every* path-shaped operand of
     # this call before any of them is coerced or compared. argparse is not the
     # only door in, and the overlap matrix below is exactly as strong as its
-    # weakest operand: gating the Binding root while ``Path()`` runs a caller's
+    # weakest operand: gating the agents file while ``Path()`` runs a caller's
     # path protocol on the two surfaces it is compared against gates nothing.
     #
-    # Binding capture stays first so that a bad Binding root is still reported as
-    # a Binding refusal when a surface is also bad — today's message precedence.
-    # After each ``del`` there is no name left through which a caller's object
-    # could be read a second time by accident; everything downstream reads the
-    # frozen text, which cannot answer differently later.
+    # The agents-file capture stays first so that a bad operand is still reported
+    # as an operand refusal when a surface is also bad — today's message
+    # precedence. After each ``del`` there is no name left through which a
+    # caller's object could be read a second time by accident; everything
+    # downstream reads the frozen text, which cannot answer differently later.
     try:
-        binding_text = capture_binding_root(binding_root)
+        agents_text = capture_agents_file(agents_file)
     except OperandError as exc:
         raise DaemonStartupError(f"{exc}; refusing to listen") from exc
-    del binding_root
+    del agents_file
     try:
         root_text = admit_exact_text(
             supervisor_root, label="supervisor root", allow_path=True
@@ -651,8 +672,8 @@ async def serve_daemon(
     # decided from text, and text can only be compared once both operands name a
     # fixed location. A relative supervisor root or socket would slip past that
     # matrix as "disjoint" and then have the lease, the mkdirs, and
-    # reconciliation land under the inherited cwd — possibly inside operator
-    # Binding storage.
+    # reconciliation land under the inherited cwd — possibly beside the
+    # operator's own configuration.
     for label, surface in (
         ("supervisor root", root_text),
         ("socket path", socket_text),
@@ -669,13 +690,12 @@ async def serve_daemon(
     root = Path(root_text)
     path = Path(socket_text)
 
-    # Every path this daemon queries or mutates before the per-Run BindingReader,
-    # enumerated once and checked against the Binding root as pure text. The
-    # ordering *is* the guard: each of these surfaces is reached by a kernel walk
-    # over its own ancestors, so a refusal placed after the lease would already
-    # have lstat-ed a Binding path component — the exact read the first-and-only-
-    # reader invariant exists to prevent. Ancestors need no separate entries: a
-    # surface's component set already contains them.
+    # Every path this daemon writes to or mutates, enumerated once and checked
+    # against the agents file as pure text. ARS never creates, writes, or
+    # repairs the operator's registry file, so a daemon-owned surface that could
+    # reach it is a layering error rather than a race: the check is lexical,
+    # asks the filesystem nothing, and runs before the lease. Ancestors need no
+    # separate entries — a surface's component set already contains them.
     lock_dir = root / _DAEMON_LOCK_DIRNAME
     for label, surface in (
         # durable_secure_mkdir(root), reconciliation state, native session and
@@ -687,12 +707,24 @@ async def serve_daemon(
         ("socket directory", path.parent),
         ("socket path", socket_text),
     ):
-        if _binding_query_conflict(binding_text, surface):
+        if _agents_file_query_conflict(agents_text, surface):
             raise DaemonStartupError(
-                f"Runtime Binding root overlaps the {label}; refusing to listen"
+                f"agent registry file overlaps the {label}; refusing to listen"
             )
 
-    # Exclusive ownership before any reconciliation mutation or listen.
+    # Step 1, and it is first for a reason: the registry parse is the only step
+    # that can fail without ARS having written anything at all. Any defect
+    # refuses to listen *before any state write* — before the lease, before the
+    # supervisor root is created, before reconciliation, and long before bind.
+    try:
+        agents = agent_registry.load_agents_file(agents_text)
+    except agent_registry.RegistryRefusal as err:
+        raise DaemonStartupError(
+            f"agent registry refused [{err.rule}]; refusing to listen"
+        ) from err
+
+    # Step 2 onwards. Exclusive ownership before any reconciliation mutation or
+    # listen.
     lease = acquire_daemon_instance_lease(root)
     arsd_handlers: handlers.ArsdHandlers | None = None
     srv: server.ArsdServer | None = None
@@ -715,10 +747,11 @@ async def serve_daemon(
             handler_kwargs["run_task_factory"] = run_task_factory
         else:
             handler_kwargs["supervisor_root"] = root
-            # Configuration handed on as a value — built here from the frozen
-            # text, never from the caller's object. The per-Run factory performs
-            # the single read (C8), and startup never opens the root.
-            handler_kwargs["binding_root"] = Path(binding_text)
+            # The immutable snapshot, handed on as a value. The registry was
+            # opened exactly once, above; nothing below this line can reopen it,
+            # so a serving daemon cannot be re-pointed and two concurrent Runs
+            # cannot resolve different registry contents.
+            handler_kwargs["agents"] = agents
         arsd_handlers = handlers.ArsdHandlers(**handler_kwargs)
         try:
             # Descriptor lookup/setter and server construction are inside the
@@ -793,12 +826,12 @@ def main(argv: list[str] | None = None) -> int:
     # Print mode exits before euid check, reconciliation, socket bind,
     # service/process creation, or caller-policy admission.
     if args.print_service_unit:
-        # Socket/supervisor-root have safe user-scope specifier defaults; a
-        # Binding root has none, and a unit rendered without one would install
-        # a daemon that refuses every registered profile. Refuse the render.
-        if args.binding_root is None:
+        # Socket/supervisor-root have safe user-scope specifier defaults; the
+        # agents file has none, and a unit rendered without one would install a
+        # daemon that can resolve no agent at all. Refuse the render.
+        if args.agents_file is None:
             print(
-                "arsd: refusing to render a service unit without --binding-root",
+                "arsd: refusing to render a service unit without --agents-file",
                 file=sys.stderr,
             )
             return 2
@@ -808,7 +841,7 @@ def main(argv: list[str] | None = None) -> int:
                 supervisor_root=(
                     None if args.supervisor_root is None else str(args.supervisor_root)
                 ),
-                binding_root=str(args.binding_root),
+                agents_file=args.agents_file,
                 caller_mappings=tuple(args.caller_mapping or ()),
                 python_executable=sys.executable,
             )
@@ -860,10 +893,10 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    if args.binding_root is None:
+    if args.agents_file is None:
         print(
-            "arsd: refusing to start without --binding-root "
-            "(operator-owned Runtime Binding root)",
+            "arsd: refusing to start without --agents-file "
+            "(operator-owned agent registry file)",
             file=sys.stderr,
         )
         return 2
@@ -875,7 +908,7 @@ def main(argv: list[str] | None = None) -> int:
                 policy=policy,
                 max_concurrent_runs=args.max_concurrent_runs,
                 max_connections=args.max_connections,
-                binding_root=args.binding_root,
+                agents_file=args.agents_file,
                 install_signals=True,
             )
         )
