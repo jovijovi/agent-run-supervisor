@@ -50,11 +50,6 @@
 | 单一 supervisor root 下的脱敏运行证据 | agent 的 `$HOME`、凭据库、插件、缓存与配置 |
 | 本地套接字上的调用方认证 | 凭据 —— ARS 不解析、不签发、不刷新、不存储 |
 
-> **版本说明。** 本 README 描述的是 **`0.6.0`** 代码线：由运维方拥有的 agent 注册表、`--agents-file`
-> 与 `arsd` API v2。`0.6.0` 已在本仓库中准备好，但**尚未发布** —— PyPI 上目前仍是 `0.5.x`，它实现的
-> 是更早的 Runtime Binding 架构、用的是 `--binding-root`。要照本文操作请从源码检出安装；在动线上部署
-> 之前，请先读[从 0.5.x 升级](#从-05x-升级)。
-
 ## 工作原理
 
 <p align="center">
@@ -80,12 +75,10 @@
 磁盘上的脱敏工件。
 
 **两个协议、两条版本线，谁也推不出谁。** **下游**是 ARS 与 agent 进程之间、通过 stdio JSON-RPC 讲的
-**ACP Protocol v1**，本次发布不变；**上游**是你的应用与 `arsd` 之间、由 ARS 自己拥有的 **`arsd` API
+**ACP Protocol v1**；**上游**是你的应用与 `arsd` 之间、由 ARS 自己拥有的 **`arsd` API
 v2**：客户端发出的每一个**请求**信封都带 `api_version`，未知版本一律拒绝而不是猜测；结果帧与错误帧带
-的是用于关联的 `request_id`，不带版本号。API 升到 2，是因为 `submit` 的含义变了 —— `profile_id` 不再
-选择启动方式，改由 `agent_id` 选择。在排空窗口内，`submit` 是**唯一**在
-`api_version: 1` 上被拒绝的操作；其余七个照常接受，包括 `server_info` —— 旧调用方正是靠它才能发现
-「自己必须升级」。
+的是用于关联的 `request_id`，不带版本号。`submit` 只在 `api_version: 2` 上受理，由 `agent_id` 指定要
+启动哪个 agent；其余七个操作在 `api_version: 1` 上同样受理，`server_info` 也在其中。
 
 ## 环境要求
 
@@ -102,7 +95,7 @@ v2**：客户端发出的每一个**请求**信封都带 `api_version`，未知�
 pip install 'agent-run-supervisor[native]'      # 或：uv pip install 'agent-run-supervisor[native]'
 ```
 
-这装到的是当前已发布的代码线，不是 `0.6.0`。由于运行时仅依赖标准库，源码检出无需安装即可直接运行：
+由于运行时仅依赖标准库，源码检出无需安装即可直接运行：
 
 ```bash
 git clone https://github.com/jovijovi/agent-run-supervisor.git
@@ -247,23 +240,6 @@ with ArsdClient(socket_path) as client:
 文件路径或凭据内容 —— 这些字段在协议上根本不存在，而 `credential_refs` 只是**引用**，ARS 从不把它
 解析成值。错误是类型化且失败关闭的：异常携带 `PEER_UID_DENIED`、`OWNER_MISMATCH`、
 `IDEMPOTENCY_CONFLICT`、`CAPACITY_EXHAUSTED` 这样的稳定错误码，服务端文本绝不会被回显进异常。
-
-## 从 0.5.x 升级
-
-`0.6.0` 对运维方与调用方都是**破坏性**变更，没有原地升级，也没有兼容垫片 —— 这是有意为之：静默地按新
-语义重新解释旧输入，正是本项目拒绝的那种失败模式。
-
-| 你原来有（`0.5.x`） | 你现在需要（`0.6.0`） |
-|---|---|
-| `--binding-root` 与已晋级的 generation | `--agents-file` 与一个 TOML 注册表 |
-| `runtime-binding` 命令组 | `agents validate`、`agents doctor`、`run inspect` |
-| `api_version: 1`，submit 带 `profile_id` | `api_version: 2`，submit 带 `agent_id` |
-| 四个已注册 profile | 两个：`standard-native-acp-v1`、`claude-agent-acp-compat-v1` |
-
-要为两件事做好准备。**所有活动 Session 会被一次性终结：** 在已退役身份模型下创建的 Session 会以稳定
-错误码被拒绝重新加载，同时仍按 owner 归属可读、可关闭；要继续那些工作，就得开一个新 Session，并由调用
-方自己完成上下文交接。以及 **ARS 不迁移、也不删除任何东西：** 旧的 Binding root、工件树，以及每一个
-历史 Run 与 Session 字节都原样保留。完整说明见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## 保证与边界
 
