@@ -12,9 +12,6 @@
 
 <!-- Badges -->
 <p align="center">
-  <a href="https://pypi.org/project/agent-run-supervisor/">
-    <img src="https://img.shields.io/pypi/v/agent-run-supervisor.svg" alt="PyPI">
-  </a>
   <a href="https://github.com/jovijovi/agent-run-supervisor/actions/workflows/verify.yml">
     <img src="https://github.com/jovijovi/agent-run-supervisor/actions/workflows/verify.yml/badge.svg" alt="CI">
   </a>
@@ -57,12 +54,6 @@ the agent try to do, what was it allowed to do, how did it end?*
 | redacted per-run evidence under one supervisor root | agent `$HOME`, auth stores, plugins, caches, config |
 | caller authentication over a local socket | credentials — ARS resolves, mints, refreshes, and stores none |
 
-> **Version note.** This README documents the **`0.6.0`** line: an operator-owned agent registry,
-> `--agents-file`, and `arsd` API v2. `0.6.0` is prepared in this repository and is **not published
-> yet** — PyPI still serves `0.5.x`, which implements the earlier Runtime Binding architecture and takes
-> `--binding-root`. Install from a source checkout to follow this document, and read
-> [Upgrading from 0.5.x](#upgrading-from-05x) before touching a live deployment.
-
 ## How it works
 
 <p align="center">
@@ -89,13 +80,11 @@ Back over the same socket come normalized `seq`-ordered events, a supervisor-own
 local artifacts.
 
 **Two protocols, two version lines — neither implies the other.** *Downstream*, ARS speaks **ACP
-Protocol v1** over stdio JSON-RPC to the agent, unchanged here. *Upstream*, your application speaks the
-ARS-owned **`arsd` API v2**: every *request* envelope your client sends carries `api_version`, and an
-unknown one is refused rather than guessed. Result and error frames carry the correlating `request_id`,
-not a version. The API moved to 2 because `submit` changed meaning — `profile_id` stopped selecting a
-launch and `agent_id` started. During the drain window `submit` is the only operation refused at
-`api_version: 1`; the other seven stay accepted, including `server_info`, which is how an older caller
-learns it must upgrade.
+Protocol v1** over stdio JSON-RPC to the agent. *Upstream*, your application speaks the ARS-owned
+**`arsd` API v2**: every *request* envelope your client sends carries `api_version`, and an unknown one
+is refused rather than guessed. Result and error frames carry the correlating `request_id`, not a
+version. `submit` is served only at `api_version: 2`, where `agent_id` names the launch; the other seven
+operations, including `server_info`, are served at `api_version: 1` as well.
 
 ## Requirements
 
@@ -112,8 +101,7 @@ learns it must upgrade.
 pip install 'agent-run-supervisor[native]'      # or: uv pip install 'agent-run-supervisor[native]'
 ```
 
-That installs the currently published line, not `0.6.0`. Since the runtime is standard library only, a
-source checkout runs without installing anything:
+Since the runtime is standard library only, a source checkout runs without installing anything:
 
 ```bash
 git clone https://github.com/jovijovi/agent-run-supervisor.git
@@ -264,24 +252,6 @@ argv, environment value, executable path, or credential material on it — those
 wire, and `credential_refs` are *references* ARS never resolves to values. Errors are typed and fail
 closed: exceptions carry a stable code such as `PEER_UID_DENIED`, `OWNER_MISMATCH`,
 `IDEMPOTENCY_CONFLICT`, or `CAPACITY_EXHAUSTED`, and server-side text is never echoed back into one.
-
-## Upgrading from 0.5.x
-
-`0.6.0` is a **breaking** change for operators and callers, with no in-place upgrade and no compatibility
-shim — deliberately, because quietly reinterpreting old input is the failure mode this project refuses.
-
-| You had (`0.5.x`) | You need (`0.6.0`) |
-|---|---|
-| `--binding-root` with promoted generations | `--agents-file` with one TOML registry |
-| the `runtime-binding` command group | `agents validate`, `agents doctor`, `run inspect` |
-| `api_version: 1`, `profile_id` on submit | `api_version: 2`, `agent_id` on submit |
-| four registered profiles | two: `standard-native-acp-v1`, `claude-agent-acp-compat-v1` |
-
-Plan for two consequences. **Every live session ends once:** sessions created under the retired identity
-model are refused for reload with a stable code while staying owner-scoped readable and closable, so
-continuing that work means a new session with caller-owned context handoff. And **ARS migrates and
-deletes nothing:** old Binding roots, artifact trees, and every historical run and session byte are left
-exactly as they are. Full detail: [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Guarantees and boundaries
 
