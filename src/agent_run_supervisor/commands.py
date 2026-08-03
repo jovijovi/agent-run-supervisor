@@ -18,7 +18,6 @@ from agent_run_supervisor.managed_process import (
     ManagedProcessLimits,
     spawn_managed_process,
 )
-from agent_run_supervisor.redaction import RunTextGuard
 from agent_run_supervisor.goal import GoalPromptError, GoalSpec, compile_goal_prompt
 from agent_run_supervisor.mcp_config import McpConfigError
 from agent_run_supervisor.parser import ParseResult, parse_acpx_stdout
@@ -543,7 +542,7 @@ def _probe_report(
     return report
 
 
-def _probe_client(instance: Any, guard: Any) -> Any:
+def _probe_client(instance: Any) -> Any:
     """Build the SDK-backed driver. Raises **before** anything is started.
 
     Separated from the spawn for one reason: ``NativeAcpClient.__init__`` calls
@@ -553,18 +552,26 @@ def _probe_client(instance: Any, guard: Any) -> Any:
     therefore happens while there is still nothing to leak.
     """
     from agent_run_supervisor.native_acp.client import NativeAcpClient
-    from agent_run_supervisor.native_acp.config_fidelity import ConfigFidelityMachine
+    from agent_run_supervisor.native_acp.config_fidelity import (
+        EFFORT_NOT_APPLICABLE,
+        FIDELITY_MODEL_ONLY,
+        ConfigFidelityMachine,
+    )
     from agent_run_supervisor.native_acp.driver import NativeAcpDriver
 
+    # The probe reaches ``initialize`` and stops, so the machine is never
+    # driven — but it still has to be constructible under the instance's own
+    # fidelity mode rather than under an assumed one.
+    model_only = instance.config_fidelity_mode == FIDELITY_MODEL_ONLY
     return NativeAcpDriver(
         client=NativeAcpClient(on_update=lambda _update: None),
         machine=ConfigFidelityMachine(
             model_selector_id=instance.model_selector_id,
             effort_selector_id=instance.effort_selector_id,
             requested_model="",
-            requested_effort="",
+            requested_effort=EFFORT_NOT_APPLICABLE if model_only else "",
+            fidelity_mode=instance.config_fidelity_mode,
         ),
-        guard=guard,
     )
 
 
@@ -677,64 +684,45 @@ async def _probe_exchange(driver: Any, proc: Any, instance: Any) -> dict[str, An
 async def _probe_initialize(instance: Any, resolved: Any) -> dict[str, Any]:
     """Start the registered command and speak ACP exactly once.
 
-    The whole boundary runs under the Stage 2 handler-level guard. Passing a
-    ``RunTextGuard`` to the driver alone guards what the *driver* projects and
-    does nothing about the ACP SDK's own ``logging`` calls or any dependency
-    that happens to be loaded — those reach a handler, and the handler is where
-    the filter lives. So the guard is bound before anything that could log,
-    unbound in the outermost boundary, and cleared only after the last sink.
-
-    Order is the other half of the fix: setup that can refuse runs before the
+    Order is what keeps the probe honest: setup that can refuse runs before the
     spawn, and from the spawn onward every path — success, refusal, timeout,
-    unexpected failure — leaves through the same bounded cleanup.
+    unexpected failure — leaves through the same bounded cleanup. Every failure
+    the probe can report is a stable code, never SDK or OS text.
     """
-    from agent_run_supervisor.arsd import safe_logging
     from agent_run_supervisor.native_acp import NativeSdkUnavailableError
 
     try:
-        guard = RunTextGuard.from_environment(resolved)
+        driver = _probe_client(instance)
+    except NativeSdkUnavailableError:
+        return _probe_report(PROBE_FAILED, code=ACP_SDK_UNAVAILABLE)
     except Exception:
         return _probe_report(PROBE_FAILED, code=PROBE_FAILED_CODE)
 
-    binding = safe_logging.bind_run_guard(
-        guard, run_id=f"agents-doctor:{instance.agent_id}"
-    )
     try:
-        try:
-            driver = _probe_client(instance, guard)
-        except NativeSdkUnavailableError:
-            return _probe_report(PROBE_FAILED, code=ACP_SDK_UNAVAILABLE)
-        except Exception:
-            return _probe_report(PROBE_FAILED, code=PROBE_FAILED_CODE)
+        proc = await spawn_managed_process(
+            argv=list(instance.argv),
+            cwd=Path.cwd(),
+            env=resolved,
+            limits=ManagedProcessLimits(),
+        )
+    except ManagedProcessError as exc:
+        # Classified from the errno ARS observed. The exception's own text
+        # names the declared image path and never reaches the report.
+        return _probe_report(PROBE_FAILED, code=exc.code)
+    except Exception:
+        return _probe_report(PROBE_FAILED, code=PROBE_FAILED_CODE)
 
-        try:
-            proc = await spawn_managed_process(
-                argv=list(instance.argv),
-                cwd=Path.cwd(),
-                env=resolved,
-                limits=ManagedProcessLimits(),
-            )
-        except ManagedProcessError as exc:
-            # Classified from the errno ARS observed. The exception's own text
-            # names the declared image path and never reaches the report.
-            return _probe_report(PROBE_FAILED, code=exc.code)
-        except Exception:
-            return _probe_report(PROBE_FAILED, code=PROBE_FAILED_CODE)
-
-        try:
-            report = await _probe_exchange(driver, proc, instance)
-        except BaseException:
-            # Nothing between the spawn and the cleanup may escape, including a
-            # cancellation: the group would outlive the command that started it.
-            await _probe_cleanup(driver, proc)
-            raise
-        cleanup = await _probe_cleanup(driver, proc)
-        if cleanup is not None:
-            return _probe_report(PROBE_FAILED, code=cleanup)
-        return report
-    finally:
-        safe_logging.unbind_run_guard(binding)
-        guard.clear()
+    try:
+        report = await _probe_exchange(driver, proc, instance)
+    except BaseException:
+        # Nothing between the spawn and the cleanup may escape, including a
+        # cancellation: the group would outlive the command that started it.
+        await _probe_cleanup(driver, proc)
+        raise
+    cleanup = await _probe_cleanup(driver, proc)
+    if cleanup is not None:
+        return _probe_report(PROBE_FAILED, code=cleanup)
+    return report
 
 
 def _cmd_agents_doctor(args: argparse.Namespace) -> int:

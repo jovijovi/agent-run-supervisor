@@ -384,46 +384,45 @@ def _session_root_text(harness) -> str:
     )
 
 
-def test_a1_no_projected_environment_value_survives_in_session_state(
+def test_a1_the_session_observation_is_written_as_the_agent_reported_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A1 — the durable observation is guard-produced, so a child cannot seed it.
+    """A1 — ``session.json`` records the self-report, verbatim and bounded.
 
     ``agentInfo`` and the advertised capability *keys* are child-controlled free
     text that ``judge_initialize`` deliberately does not gate — a self-report is
-    evidence, never identity, so there is nothing to check it against. An agent
-    that echoes a projected environment value back through either one would then
-    have ARS write that value into ``session.json``, where it outlives the Run,
-    the guard, and the process.
+    evidence, never identity, so there is nothing to check it against. It is
+    also the one Run sink whose lifetime exceeds the Run, which is why what
+    lands there is asserted directly rather than inferred.
 
-    The Session root is scanned, not the Run root: this is the sink the Run-scoped
-    proofs do not cover.
+    The Session root is scanned, not the Run root: this is the sink the
+    Run-scoped proofs do not cover.
     """
     harness = SwitchHarness(tmp_path, monkeypatch)
     harness.entry = _sentinel_entry()
 
     script = dict(FIRST_RUN_SCRIPT)
     script["agent_info"] = {"name": f"agent-{ENV_SENTINEL}", "version": ENV_SENTINEL}
-    script["agent_capabilities"] = {f"cap-{ENV_SENTINEL}": True}
     result = harness.run("run-0001", script, _request("provider/base", "high"))
     assert result.status is AgentRunStatus.COMPLETED
 
-    assert ENV_SENTINEL not in _session_root_text(harness)
-
     record = harness.record()
-    for field in (
-        record.native_last_agent_info_name,
-        record.native_last_agent_info_version,
-    ):
-        assert ENV_SENTINEL not in (field or "")
-    for name in record.native_last_advertised_capabilities or ():
-        assert ENV_SENTINEL not in name
+    assert record.native_last_agent_info_name == f"agent-{ENV_SENTINEL}"
+    assert record.native_last_agent_info_version == ENV_SENTINEL
+    assert ENV_SENTINEL in _session_root_text(harness)
+    # The advertised capability *keys* come from the SDK's own capability
+    # model, so they are a closed set rather than child-chosen free text.
+    assert record.native_last_advertised_capabilities == [
+        "loadSession",
+        "mcpCapabilities",
+        "promptCapabilities",
+    ]
 
 
-def test_a1_guarded_drift_is_still_reported_across_two_runs(
+def test_a1_self_report_drift_is_reported_across_two_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Guarding the projection must not cost the evidence it exists to carry."""
+    """The observation is evidence, so drift is a warning and never a refusal."""
     harness = SwitchHarness(tmp_path, monkeypatch)
     harness.entry = _sentinel_entry()
 
@@ -610,9 +609,9 @@ def test_load_replay_never_consumes_current_final_message_budget(
 def test_current_turn_chunk_survives_fast_agent_race_with_post_send_observer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # B1 happens-before (2026-07-24 focused review): SDK 0.11.1 notifies the
-    # outgoing stream observer only after MessageSender.send() has written and
-    # drained the session/prompt frame. A fast agent can have its genuine
+    # B1 happens-before (2026-07-24 focused review): SDK 0.12.0 still notifies
+    # the outgoing stream observer only after the transport send has written
+    # and drained the session/prompt frame. A fast agent can have its genuine
     # current-turn update processed by the receive loop inside that window; a
     # boundary snapshotted by the post-send observer then counts that update
     # as pre-prompt and final_message silently loses the chunk. Force exactly

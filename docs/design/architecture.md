@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext System Architecture"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-02
+last_validated_at: 2026-08-03
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/architecture.md"
 ---
 # agent-run-supervisor vNext System Architecture
@@ -29,10 +29,14 @@ attestation module, and three per-agent profiles are deleted from source. The fo
 source" marker is therefore retired; `docs/archive/binding-era-2026-07/` holds the retired architecture as
 cold history.
 
-Merged is not published, deployed, or activated. Package metadata is prepared as `0.6.0`; no tag, GitHub
-Release, PyPI upload, deployment, service restart, or cutover has happened, and each remains its own
-explicit decision. The board ([`docs/roadmap/current-status.md`](../roadmap/current-status.md)) carries the
-current position and the open decisions. No marker here is an approval.
+Two later decisions are folded in: the per-Run exact-literal guard over free-form Run text is **removed**
+(PRD R15), and a profile now declares a **configuration-fidelity mode**, with `cursor-native-acp-v1`
+registered for the one evidenced model-only deviation (PRD R3/R12).
+
+Merge, publication, deployment, and activation stay separate facts; a merge implies none of the others, and
+each is its own explicit decision. Which version is published and which is running are volatile facts the
+board ([`docs/roadmap/current-status.md`](../roadmap/current-status.md)) owns, together with the open
+decisions. No marker here is an approval.
 
 ## 1. System context and ownership
 
@@ -88,7 +92,7 @@ current position and the open decisions. No marker here is an approval.
 | Agent registry file | operator | open read-only, exactly once at daemon startup, wherever it lives, including through a symlink; refuse to listen on defect | write, create, repair, migrate, promote, or re-read while serving |
 | ACP compatibility profiles | ARS source | version, register, revise under review with cited evidence | contain any path, version, digest, model literal, or deployment fact |
 | Permission-mediation env binding | ARS source (key **and** value) | apply last, unconditionally | let a registry entry author, replace, or disable it |
-| Environment values reaching the child | operator for ambient/pass-through/overlay; ARS source for mediation | resolve once in memory, construct the guard, and hand only the mapping to exec | copy into ARS evidence, hash, log, echo in an error, or return from any API |
+| Environment values reaching the child | operator for ambient/pass-through/overlay; ARS source for mediation | resolve once in memory and hand only the mapping to exec | copy into sealed material, hash, render the carrier into a log line or an exception, or return it from any API |
 | Per-Run Spec + launch snapshot | one Run | seal before spawn; write once | re-read, re-resolve, or mutate after sealing |
 | Observed runtime evidence | one Run | record; report; warn | use as an admission gate or a continuity blocker |
 | Process created by the Run | ARS (lifecycle only) | PGID, signals, wait, reap, bound | claim isolation or containment of hostile code |
@@ -142,9 +146,12 @@ and wait-before-return shape cannot carry Native ACP.
   8 resolve the entry's profile from the source registry      ✗ UNKNOWN_PROFILE
   9 bind workspace (canonical root, effective cwd, hash)      ✗ WORKSPACE_*
  10 validate the frozen execution_grant + referenced refs     ✗ GRANT_INVALID
- 11 build argv = [command_declared, *args]; RESOLVE THE FINAL
-    CHILD ENVIRONMENT ONCE, IN MEMORY, and construct its
-    ephemeral per-Run literal guard. No command resolution.
+ 11 build argv = [command_declared, *args]; if the profile
+    selects a launch-permission policy, compile it from the
+    frozen grant and materialize it privately under this Run's
+    directory (0700/0600, exclusive, no-symlink); then RESOLVE
+    THE FINAL CHILD ENVIRONMENT ONCE, IN MEMORY, layer 5 last.
+    No command resolution.                    ✗ LAUNCH_PERMISSION_*
     No realpath. No value is serialized or hashed.
  12 compute the Spec and the launch snapshot IN MEMORY; the
     snapshot carries env NAMES + source class + precedence
@@ -162,12 +169,12 @@ and wait-before-return shape cannot carry Native ACP.
  16 SPAWN: new POSIX session + process group; exec the declared
     command through declared PATH/shim/symlink semantics with
     declared argv[0]; hand it the in-memory environment from
-    step 11; record ProcessIdentity immediately; bounded stderr
-    enters only through the byte-aware Run guard
+    step 11; record ProcessIdentity immediately; stderr is
+    bounded and statically redacted
       · exec ENOENT  → COMMAND_NOT_FOUND
       · exec EACCES  → COMMAND_NOT_EXECUTABLE
       · other        → SPAWN_FAILED
- 17 record guarded, non-authoritative resolution evidence
+ 17 record non-authoritative resolution evidence
  18 ACP initialize over the child's stdin/stdout
       · protocol major must equal the profile's               ✗ PROTOCOL_MISMATCH
       · required capabilities present                         ✗ CAPABILITY_MISSING
@@ -179,23 +186,25 @@ and wait-before-return shape cannot carry Native ACP.
         never session/new under any return or exception        ✗ SESSION_LOAD_FAILED
  20 read the complete config option set (live discovery)
  21 set requested model → exact                               ✗ CONFIG_*
- 22 consume the model-dependent option set; rediscover effort
- 23 set requested effort → exact
+ 22 consume the model-dependent option set
+ 23 [separate-selectors] rediscover effort; set it → exact
+    (model-only stops here: no effort option is discovered and
+     no effort set is dispatched; effective effort is "N/A")
  24 exact readback: requested == effective, literal, no coercion ✗ CONFIG_INEXACT
     (a compatibility profile additionally proves its required mode)
- 25 persist guarded observed runtime state; ready to prompt
+ 25 persist observed runtime state; ready to prompt
  26 marker: prompt-dispatch-started      ← THE UNCERTAINTY BOUNDARY
  27 write the prompt frame
  28 marker: prompt-accepted
  29 at each callback entry, reject a conflicting session id
-    before any sink or handler; then guard normalized updates
-    and mediate every permission / fs / terminal request
+    before any sink or handler; then normalize updates and
+    mediate every permission / fs / terminal request
     default-deny against the frozen grant
  30 terminal ACP event | turn timeout | cancel | child exit
  31 finalize: one irreversible result.json; Session state;
     lease release; ACP close; terminate_group → grace →
-    kill_group; wait; reap; guarded bounded stderr + a
-    value-blind redaction/suppression report
+    kill_group; wait; reap; bounded statically-redacted stderr
+    plus the redaction report
 ```
 
 **Fail-closed invariants.** Steps 1–25 all fail *pre-dispatch*: the Run is `failed`, no prompt is written,
@@ -487,10 +496,22 @@ is applied last anyway as defense in depth, so a defect in the collision check c
 mediation. A profile-registry construction invariant asserts the base allowlist and the reserved key set are
 disjoint. There is no "mediation off" and no per-entry key/value form.
 
+🟦 **Launch permission, for agents that do not always ask.** Mediation can only decide before a side effect
+when the agent asks. An agent whose `agent` mode completes an edit with no `session/request_permission` is
+caught only by the completion backstop, after the file exists. A profile may therefore select one closed,
+source-owned **launch-permission policy id**: before the spawn, ARS compiles that policy from the Run's
+frozen grant, writes it privately under this Run's own directory in the supervisor root, and projects the
+source-owned pair that points the agent at it, so the agent refuses the side effect itself. The registered
+policy is read-only — write and shell execution denied explicitly, reads untouched — and a grant it cannot
+faithfully enforce refuses the Run before spawn rather than widening. `launch.json` binds the policy id and a
+content digest, never the directory or the document, and the material is removed only after the child is
+proven reaped. It adds no writable surface: it lives inside the first of the two.
+
 **Honest limit.** Mediation is cooperative. An agent that ignores the knob, or one with no registered
-binding, can execute in-process tools with no ACP permission event and the bridge will never see them. The
-mandatory denied-action canary proves the knob works *for a specific agent* and must precede that agent's
-use.
+binding, can execute in-process tools with no ACP permission event and the bridge will never see them. A
+launch-permission policy narrows that gap for the profiles that select one and closes nothing for the rest.
+The mandatory denied-action canary proves the knob works *for a specific agent* and must precede that
+agent's use.
 
 Exact caller UID values and policy ownership are gate G12, closed as a recorded operator decision; the
 repository stores no production mapping value.
@@ -541,8 +562,7 @@ writes it. There is no `attestation.json` and no Binding root.
 
 The workspace canonical root and effective `cwd` in `spec.json` remain complete literals and remain
 hash-covered even when the workspace lives under `$HOME`. They are independently derived authority facts,
-not environment-value flow, and are deliberately outside the guarded sink set: guarding them would break
-workspace binding, reconciliation attribution, and audit.
+and truncating or tokenising them would break workspace binding, reconciliation attribution, and audit.
 
 `native_acp/storage.py` is the only constructor seam for Native roots. Legacy `runs/`/`sessions/` and acpx
 storage are never read, written, imported, mirrored, or migrated by Native code.
@@ -561,7 +581,7 @@ Evidence grades: A — pre-implementation compatibility context; B — direct-dr
 | 0 | SDK/source/API/consumer/load capability gates | deterministic preflight | none |
 | 1 | ManagedProcess + Native ACP core + state/session/permission/evidence | L1/L2 + real direct-drive B-grade | none |
 | 2 | `arsd` UDS, ownership, reconciliation, cgroup containment | real S1–S5 C-grade | ARS production acceptance |
-| 🟦 reset | authority alignment, then fail-closed reuse + reconciliation, then the environment-value guard, then the boundary reset | per-gate hermetic suites; documentation gate for the authority stage | none until a separate cutover decision |
+| 🟦 reset | authority alignment, then fail-closed reuse + reconciliation, then the environment-value sink boundary, then the boundary reset | per-gate hermetic suites; documentation gate for the authority stage | none until a separate cutover decision |
 | ⏸ later | Sachima `ArsdBackend` | separate integration evidence | separately approved |
 
 Stage 1 was an intermediate implementation boundary, not a downgrade of the production target. Production was

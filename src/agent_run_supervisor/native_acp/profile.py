@@ -19,7 +19,7 @@ That split is what makes an AGENT or adapter upgrade behind an unchanged
 registered command cost no ARS action at all: no identity field anywhere derives
 from what the agent turned out to be.
 
-Two profiles are registered. ``standard-native-acp-v1`` is the ACP-v1
+Three profiles are registered. ``standard-native-acp-v1`` is the ACP-v1
 conformance contract every standards-conforming agent runs under.
 ``claude-agent-acp-compat-v1`` exists because one adapter carries a cited
 ACP-semantic deviation: it resolves its initial permission mode from ambient
@@ -28,6 +28,12 @@ while that mode is permissive, so the mode is frozen as a config selector and
 proven by exact readback before any prompt, and the frozen session metadata
 removes the ambient setting sources that would otherwise define the underlying
 SDK's permission rules and tool surface. Neither half is sufficient alone.
+
+``cursor-native-acp-v1`` exists for the one other cited ACP-semantic deviation:
+an agent whose model selector *is* the whole configuration, with no independent
+effort selector to discover or set. That is expressed as a declared
+configuration-fidelity mode, and it is the profile's only deviation — every
+other frozen term equals the standard contract.
 
 The ``-v1`` suffix is load-bearing: the id carries the ACP protocol generation,
 construction refuses a profile whose frozen protocol disagrees with it, and a
@@ -43,6 +49,19 @@ import re
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
+
+from .config_fidelity import (
+    EFFORT_NOT_APPLICABLE,
+    FIDELITY_MODEL_ONLY,
+    FIDELITY_SEPARATE_SELECTORS,
+    ConfigFidelityError,
+    validate_fidelity_pairing,
+)
+from .launch_permissions import (
+    LAUNCH_PERMISSION_POLICY_IDS,
+    POLICY_DENY_WRITE_AND_SHELL_V1,
+    RESERVED_LAUNCH_PERMISSION_KEYS,
+)
 
 
 class UnknownProfileError(ValueError):
@@ -185,15 +204,28 @@ class AcpCompatProfile:
     forbidden_capabilities: tuple[str, ...] = ()
     requires_session_load: bool = True
     base_allowlist: tuple[str, ...] = BASE_ENV_ALLOWLIST
+    # How this class of agent is configured: two independent selectors, or a
+    # model selector that is the whole configuration. See ``config_fidelity``.
+    config_fidelity_mode: str = FIDELITY_SEPARATE_SELECTORS
     # Selector-id *conventions*, not value domains. An entry may hint a
     # different id; the live-advertised option set is the domain authority and
-    # exact readback is the proof.
+    # exact readback is the proof. ``effort_selector_id`` is ``None`` exactly
+    # when the mode is model-only: naming a selector no Run ever sets would put
+    # a fiction into every launch snapshot.
     model_selector_id: str = "model"
-    effort_selector_id: str = "effort"
+    effort_selector_id: str | None = "effort"
     # Declared together or not at all: a selector with no required literal
     # proves nothing, and a required literal with no selector cannot be set.
     permission_mode_selector_id: str | None = None
     required_permission_mode: str | None = None
+    # An optional, closed, source-owned launch-permission policy id. Absent by
+    # default. When present, ARS compiles that policy from the Run's frozen
+    # grant and hands the child a private per-Run configuration *before* the
+    # process starts, so an agent that would otherwise complete a side effect
+    # without asking refuses it itself. It is a permission-mediation semantic,
+    # so it belongs here — and it is an **id**, never a path, a document, or a
+    # deployment fact.
+    launch_permission_policy_id: str | None = None
     # Frozen ACP session metadata, stored as canonical JSON **text** so the
     # value is deeply immutable by construction and hashes canonically. It is
     # sent identically on ``session/new`` and ``session/load``: the agent
@@ -214,12 +246,63 @@ class AcpCompatProfile:
             raise ProfileValidationError(
                 f"capability declared both required and forbidden: {sorted(overlap)}"
             )
-        if self.model_selector_id == self.effort_selector_id:
-            raise ProfileValidationError("the two selector ids must be distinct")
+        self._validate_config_fidelity()
+        self._validate_launch_permissions()
         self._validate_protocol_generation()
         self._validate_permission_mode()
         self._validate_session_meta()
         self._validate_mediation_disjointness()
+
+    def _validate_config_fidelity(self) -> None:
+        """The mode and the selector set are one declaration, not two.
+
+        Asked of ``config_fidelity`` so the profile layer and the state machine
+        cannot drift into two readings. The requested effort is not a profile
+        fact, so the sentinel stands in for it here; the per-Run check happens
+        where the request exists.
+        """
+        try:
+            validate_fidelity_pairing(
+                fidelity_mode=self.config_fidelity_mode,
+                effort_selector_id=self.effort_selector_id,
+                requested_effort=EFFORT_NOT_APPLICABLE,
+            )
+        except ConfigFidelityError as exc:
+            raise ProfileValidationError(str(exc)) from exc
+        if self.model_selector_id == self.effort_selector_id:
+            raise ProfileValidationError("the two selector ids must be distinct")
+
+    def _validate_launch_permissions(self) -> None:
+        """The selected policy is one of the closed set, and owns its own key.
+
+        A base-allowlist name that is also a policy's environment key would let
+        an ambient value and a source-owned pair claim the same variable — the
+        same rule the mediation binding already obeys.
+        """
+        policy_id = self.launch_permission_policy_id
+        if policy_id is None:
+            return
+        # Judged before the lookup and before any formatting: an unhashable id
+        # would raise out of a public constructor, a ``str`` subclass can lie
+        # about hash and equality, and ``!r`` on a hostile object would invite
+        # its own ``__repr__`` into the refusal. Categorical text only.
+        if type(policy_id) is not str:
+            raise ProfileValidationError(
+                "launch_permission_policy_id must be a str when it is present"
+            )
+        if policy_id not in LAUNCH_PERMISSION_POLICY_IDS:
+            raise ProfileValidationError(
+                f"unregistered launch permission policy: {policy_id!r}"
+            )
+        collisions = sorted(
+            (set(self.base_allowlist) | set(RESERVED_MEDIATION_KEYS))
+            & RESERVED_LAUNCH_PERMISSION_KEYS
+        )
+        if collisions:
+            raise ProfileValidationError(
+                "base allowlist or mediation binding collides with reserved "
+                f"launch permission keys: {collisions}"
+            )
 
     def _validate_protocol_generation(self) -> None:
         """A versioned profile id carries its ACP major, exactly.
@@ -333,6 +416,14 @@ class AcpCompatProfile:
             "model_selector_id": self.model_selector_id,
             "effort_selector_id": self.effort_selector_id,
         }
+        # Emitted only when it deviates, exactly like the two optional terms
+        # below: a profile whose ACP semantics did not move must keep the
+        # ``profile_hash`` it already has, because that hash is Session
+        # identity.
+        if self.config_fidelity_mode != FIDELITY_SEPARATE_SELECTORS:
+            payload["config_fidelity_mode"] = self.config_fidelity_mode
+        if self.launch_permission_policy_id is not None:
+            payload["launch_permission_policy_id"] = self.launch_permission_policy_id
         if self.permission_mode_selector_id is not None:
             payload["permission_mode_selector_id"] = self.permission_mode_selector_id
             payload["required_permission_mode"] = self.required_permission_mode
@@ -374,6 +465,14 @@ class AgentInstance:
         if getattr(self.entry, "profile_id", None) != self.profile.profile_id:
             raise ProfileValidationError(
                 "registry entry names a different profile than the one resolving it"
+            )
+        if (
+            self.profile.config_fidelity_mode == FIDELITY_MODEL_ONLY
+            and getattr(self.entry, "effort_selector_id", None) is not None
+        ):
+            raise ProfileValidationError(
+                "a model-only profile sets no effort selector, so an entry "
+                "hint for one would name a call that never happens"
             )
 
     # -- identity ----------------------------------------------------------
@@ -449,11 +548,23 @@ class AgentInstance:
     # -- configuration -----------------------------------------------------
 
     @property
+    def config_fidelity_mode(self) -> str:
+        return self.profile.config_fidelity_mode
+
+    @property
+    def launch_permission_policy_id(self) -> str | None:
+        """The profile's selection, asked of the pair. Never an agent name."""
+        return self.profile.launch_permission_policy_id
+
+    @property
     def model_selector_id(self) -> str:
         return self.entry.model_selector_id or self.profile.model_selector_id
 
     @property
-    def effort_selector_id(self) -> str:
+    def effort_selector_id(self) -> str | None:
+        """``None`` under model-only fidelity, and only there."""
+        if self.profile.config_fidelity_mode == FIDELITY_MODEL_ONLY:
+            return None
         return self.entry.effort_selector_id or self.profile.effort_selector_id
 
 
@@ -520,4 +631,31 @@ CLAUDE_AGENT_ACP_COMPAT_V1 = AcpCompatProfile(
     ),
 )
 
-DEFAULT_REGISTRY = ProfileRegistry((STANDARD_NATIVE_ACP_V1, CLAUDE_AGENT_ACP_COMPAT_V1))
+# The one profile whose *configuration fidelity* deviates, with cited evidence.
+#
+# The agent advertises a single model selector whose value carries the whole
+# configuration — the observed literal is ``grok-4.5[effort=high,fast=true]`` —
+# and advertises no independent effort selector at all. ARS therefore sets and
+# exact-reads-back that one opaque literal and reports ``N/A`` as the effective
+# effort. It does not parse the literal, infer an effort from it, map a model
+# name, or read the agent's unrelated ACP ``mode`` selector as an effort. Every
+# other frozen term equals ``standard-native-acp-v1``.
+# The second cited deviation is a *permission* one, and it is why this profile
+# selects a launch-permission policy: the agent's `agent` mode can complete an
+# edit without emitting ``session/request_permission``, so ACP mediation alone
+# would only ever detect the side effect after the file exists.
+CURSOR_NATIVE_ACP_V1 = AcpCompatProfile(
+    profile_id="cursor-native-acp-v1",
+    revision=1,
+    acp_protocol_version="1",
+    required_capabilities=("loadSession",),
+    forbidden_capabilities=(),
+    requires_session_load=True,
+    config_fidelity_mode=FIDELITY_MODEL_ONLY,
+    effort_selector_id=None,
+    launch_permission_policy_id=POLICY_DENY_WRITE_AND_SHELL_V1,
+)
+
+DEFAULT_REGISTRY = ProfileRegistry(
+    (STANDARD_NATIVE_ACP_V1, CLAUDE_AGENT_ACP_COMPAT_V1, CURSOR_NATIVE_ACP_V1)
+)

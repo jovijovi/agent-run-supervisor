@@ -37,16 +37,9 @@ from agent_run_supervisor.managed_process import (
     ManagedProcessLimits,
     spawn_managed_process,
 )
-from agent_run_supervisor.arsd import safe_logging
 from agent_run_supervisor.redaction import (
-    EMPTY_SAFE_TEXT,
-    GUARDED_RECORD_WITHHELD,
-    GUARDED_TEXT_WITHHELD,
     RedactionReport,
-    RunTextGuard,
-    SafeText,
     redact_text,
-    serialized_projection_is_safe,
 )
 from agent_run_supervisor.result import (
     COMPLETED_ACP_STOP_REASONS,
@@ -73,13 +66,16 @@ from . import storage
 from .agent_registration import AgentEntry
 from .client import NativeAcpClient
 from .config_fidelity import ConfigFidelityError, ConfigFidelityMachine
-from .driver import (
-    SESSION_EXTERNAL_ID_SENSITIVE_COLLISION,
-    NativeAcpDriver,
-    NativeDriverError,
-    SessionExternalIdSensitiveCollision,
-)
+from .driver import NativeAcpDriver, NativeDriverError
 from .event_writer import EventWriter, EventWriterOverflow
+from .launch_permissions import (
+    LAUNCH_PERMISSION_CLEANUP_FAILED,
+    LAUNCH_PERMISSION_CLEANUP_MARKER,
+    LaunchPermissionError,
+    MaterializedLaunchPermissions,
+    discard as discard_launch_permissions,
+    materialize as materialize_launch_permissions,
+)
 from .events import NativeAcpEventNormalizer
 from .observation import (
     InitializeObservation,
@@ -279,23 +275,18 @@ def _categorical_failure_reason(detail_code: str | None) -> str:
 
 @dataclass
 class FinalMessageAccumulator:
-    """Bounded, guarded agent-message accumulation at ingestion.
+    """Bounded agent-message accumulation at ingestion.
 
-    Two bounds, not one. The byte bound keeps evidence finite; the guard keeps
-    it value-free. Guarding only at finalization would be too late: the raw
-    chunks would already be retained, and an agent that splits a projected
-    value across two ``agent_message_chunk`` frames would defeat a per-chunk
-    matcher. So ingestion holds back a rolling ``max_literal_chars - 1``
-    carry — the smallest window in which any literal that begins in the
-    emitted prefix necessarily ends — guards the resolved prefix, and retains
-    only that. Nothing unguarded is retained beyond the carry.
+    One bound: the byte ceiling that keeps evidence finite. Chunks are retained
+    in arrival order and the assembled message is exactly their concatenation,
+    so a value an agent split across two ``agent_message_chunk`` frames needs
+    no carry, no recomposition window, and no rescan — it is simply the text
+    the agent sent.
     """
 
     max_bytes: int = MAX_FINAL_MESSAGE_BYTES
-    guard: RunTextGuard | None = None
     _parts: list[str] = field(default_factory=list)
     _byte_len: int = 0
-    _carry: str = ""
     _finished: bool = False
     truncated: bool = False
     discarded_chunks: int = 0
@@ -303,23 +294,11 @@ class FinalMessageAccumulator:
     def ingest(self, text: str) -> None:
         if not isinstance(text, str) or not text or self._finished:
             return
-        if self.guard is None:
-            self._retain(text)
-            return
-        emitted, self._carry = self.guard.guard_prefix(self._carry + text)
-        if emitted:
-            self._retain(emitted)
+        self._retain(text)
 
     def finish(self) -> None:
-        """Guard and retain the held-back carry. Idempotent."""
-        if self._finished:
-            return
+        """Close the accumulator. Idempotent."""
         self._finished = True
-        carry = self._carry
-        self._carry = ""
-        if not carry:
-            return
-        self._retain(self.guard.guard_text(carry) if self.guard else carry)
 
     def _retain(self, text: str) -> None:
         if not text:
@@ -392,11 +371,11 @@ class _RunContext:
     )
     exit_state: ManagedExit | None = None
     redaction: RedactionReport = field(default_factory=RedactionReport)
-    # The ephemeral per-Run literal guard and its log-context binding. Both
-    # exist only from the moment the final environment is resolved until the
-    # last sink of this Run has been served.
-    guard: RunTextGuard | None = None
-    log_binding: safe_logging.RunGuardBinding | None = None
+    # The private per-Run launch-permission material, when the resolved profile
+    # selected a policy. It exists from before the spawn until the child is
+    # proven reaped, and never one step longer or shorter.
+    launch_permissions: MaterializedLaunchPermissions | None = None
+    launch_permission_cleanup_failed: bool = False
     error: BaseException | None = None
     # When True, required quarantine/disposition failed: retain lease and
     # refuse to publish a terminal result.
@@ -527,42 +506,34 @@ class RunTask:
                 )
         cancelled = False
         try:
-            try:
-                await self._drive(ctx)
-            except _PreDispatchFailure as failure:
-                ctx.pre_dispatch = failure
-            except asyncio.CancelledError:
-                # Supervisor-side cancellation still finalizes (bounded): child
-                # shutdown/reap, one terminal fact, session disposition, lease
-                # release — then the cancellation is re-raised, never hidden.
-                cancelled = True
-                ctx.supervisor_cancelled = True
-                if ctx.dispatch_started and ctx.stop_reason is None:
-                    # The wind-down kills the child without an ACP terminal: the
-                    # escalated-kill-after-dispatch row (conservative, never
-                    # completed).
-                    ctx.escalated_kill = True
-            except BaseException as exc:  # top-level exception guard
-                ctx.error = exc
-                if ctx.dispatch_started and ctx.stop_reason is None:
-                    ctx.observation_interrupted = True
+            await self._drive(ctx)
+        except _PreDispatchFailure as failure:
+            ctx.pre_dispatch = failure
+        except asyncio.CancelledError:
+            # Supervisor-side cancellation still finalizes (bounded): child
+            # shutdown/reap, one terminal fact, session disposition, lease
+            # release — then the cancellation is re-raised, never hidden.
+            cancelled = True
+            ctx.supervisor_cancelled = True
+            if ctx.dispatch_started and ctx.stop_reason is None:
+                # The wind-down kills the child without an ACP terminal: the
+                # escalated-kill-after-dispatch row (conservative, never
+                # completed).
+                ctx.escalated_kill = True
+        except BaseException as exc:  # top-level exception guard
+            ctx.error = exc
+            if ctx.dispatch_started and ctx.stop_reason is None:
+                ctx.observation_interrupted = True
+        try:
             result = await self._finalize_bounded(ctx)
         finally:
-            # Lifetime minimization, not erasure: the guard stays installed
-            # through SDK close, child reap, persistence, and the final
-            # response projection, and is released only once every sink of
-            # this Run has been served — including the cancelled path.
-            self._release_guard(ctx)
+            # Last resort for the paths that reap inside ``_emergency_cleanup``
+            # and never reach ``_finalize_inner``. Idempotent, and it runs only
+            # after the finalizer has proven the child exited.
+            self._cleanup_launch_permissions(ctx)
         if cancelled:
             raise asyncio.CancelledError()
         return result
-
-    def _release_guard(self, ctx: _RunContext) -> None:
-        safe_logging.unbind_run_guard(ctx.log_binding)
-        ctx.log_binding = None
-        if ctx.guard is not None:
-            ctx.guard.clear()
-        ctx.final_message_acc.guard = None
 
     # -- drive -------------------------------------------------------------
 
@@ -571,13 +542,8 @@ class RunTask:
         limits = spec.limits
 
         # The final projected environment was resolved exactly once during
-        # admission, and the very same carrier is both guarded and handed to the
-        # child — so the guard's literal set can never disagree with what the
-        # child received, and no ambient re-read happens at spawn.
-        ctx.guard = RunTextGuard.from_environment(environment)
-        ctx.log_binding = safe_logging.bind_run_guard(ctx.guard, run_id=self._run_id)
-        ctx.final_message_acc.guard = ctx.guard
-
+        # admission, and that very carrier is what the child receives — no
+        # ambient re-read happens at spawn.
         plan = self._bind_session(ctx, spec, binding, instance)
 
         try:
@@ -619,7 +585,6 @@ class RunTask:
             max_event_bytes=limits.max_event_bytes,
             max_events=limits.max_events,
             filename="events.jsonl",
-            guard=ctx.guard,
         )
         await ctx.writer.start()
         normalizer = NativeAcpEventNormalizer()
@@ -627,7 +592,6 @@ class RunTask:
             capabilities=spec.execution_grant.capabilities,
             workspace_root=Path(binding.effective_cwd),
             evidence_sink=self._mediation_sink(ctx),
-            guard=ctx.guard,
         )
         client = NativeAcpClient(
             on_update=self._update_sink(ctx, normalizer),
@@ -640,17 +604,24 @@ class RunTask:
         # Selector ids come from the instance, so a source-frozen profile and an
         # operator-registered agent take the identical code path with different
         # data — there is no agent-aware branch anywhere below this line.
-        ctx.machine = ConfigFidelityMachine(
-            model_selector_id=instance.model_selector_id,
-            effort_selector_id=instance.effort_selector_id,
-            requested_model=spec.runtime.model_id,
-            requested_effort=spec.runtime.effort,
-            permission_mode_selector_id=instance.profile.permission_mode_selector_id,
-            required_permission_mode=instance.profile.required_permission_mode,
-        )
-        ctx.driver = NativeAcpDriver(
-            client=client, machine=ctx.machine, guard=ctx.guard
-        )
+        try:
+            ctx.machine = ConfigFidelityMachine(
+                model_selector_id=instance.model_selector_id,
+                effort_selector_id=instance.effort_selector_id,
+                requested_model=spec.runtime.model_id,
+                requested_effort=spec.runtime.effort,
+                permission_mode_selector_id=(
+                    instance.profile.permission_mode_selector_id
+                ),
+                required_permission_mode=instance.profile.required_permission_mode,
+                fidelity_mode=instance.config_fidelity_mode,
+            )
+        except ConfigFidelityError as exc:
+            # An effort the declared fidelity mode cannot honour — a non-``N/A``
+            # effort against a model-only agent — is refused here, before any
+            # ACP frame and long before a prompt.
+            raise _PreDispatchFailure(str(exc), "CONFIG_FIDELITY") from exc
+        ctx.driver = NativeAcpDriver(client=client, machine=ctx.machine)
 
         try:
             await asyncio.wait_for(
@@ -680,17 +651,38 @@ class RunTask:
             binding = assembler.bind_workspace(
                 root=self._workspace_root, cwd=self._cwd
             )
+            # Before the one environment resolution, because the pair it
+            # produces is part of that resolution, and before the seal, because
+            # its digest is part of the sealed launch evidence.
+            material = self._materialize_launch_permissions(
+                ctx, instance, self._request.grant_capabilities
+            )
             environment = resolve_run_environment(
                 arsd_env=dict(os.environ),
                 profile=instance.profile,
                 entry=self._agent_entry,
+                launch_permission=() if material is None else material.env_pairs,
             )
-            launch = assembler.resolve_launch(environment=environment)
+            launch = assembler.resolve_launch(
+                environment=environment, launch_permission=material
+            )
             spec = assembler.seal(
                 run_id=self._run_id,
                 submitted_at=self._submitted_at,
                 retry_of_run_id=self._retry_of_run_id,
             )
+        except LaunchPermissionError as exc:
+            # A grant this backend cannot faithfully enforce, or material that
+            # could not be created safely. Either way: no child, no prompt, and
+            # only the stable code.
+            if exc.code == LAUNCH_PERMISSION_CLEANUP_FAILED:
+                # Material this Run created survived its own failed rollback.
+                # The terminal already carries the code; the marker keeps
+                # "a leftover exists" one uniform, value-blind fact whether the
+                # removal failed here or after the child was reaped.
+                ctx.launch_permission_cleanup_failed = True
+                self._record_cleanup_failure(ctx)
+            raise _PreDispatchFailure(exc.code, exc.code) from exc
         except NativeSpecError as exc:
             raise _PreDispatchFailure(f"admission failed: {exc}", "ADMISSION") from exc
         spec_payload = spec.to_dict()
@@ -701,6 +693,77 @@ class RunTask:
         storage.write_once_json(ctx.handle.run_dir / "launch.json", launch_payload)
         self._spec = spec
         return spec, launch, binding, instance, environment
+
+    def _materialize_launch_permissions(
+        self, ctx: _RunContext, instance, capabilities
+    ) -> MaterializedLaunchPermissions | None:
+        """Compile and write the policy the resolved **profile** selected.
+
+        The profile answers, so no runtime path branches on which agent this is.
+        A profile that selects nothing materializes nothing, and its launch
+        snapshot and environment projection are byte-identical to before.
+        """
+        policy_id = instance.launch_permission_policy_id
+        if policy_id is None:
+            return None
+        material = materialize_launch_permissions(
+            policy_id, capabilities=capabilities, run_dir=ctx.handle.run_dir
+        )
+        ctx.launch_permissions = material
+        return material
+
+    def _cleanup_launch_permissions(self, ctx: _RunContext) -> bool:
+        """Remove the private material. Idempotent, and never early.
+
+        The material exists so a **live** child can consult it, so removal is
+        gated on proven exit: with an un-reaped child still able to read it,
+        this returns without touching anything rather than racing the agent.
+        """
+        material = ctx.launch_permissions
+        if material is None:
+            return True
+        if ctx.proc is not None and ctx.exit_state is None:
+            return True
+        try:
+            discard_launch_permissions(material)
+        except LaunchPermissionError:
+            # Sticky: a later successful retry clears the leftover, never the
+            # fact that the in-order attempt could not complete.
+            ctx.launch_permission_cleanup_failed = True
+            self._record_cleanup_failure(ctx)
+            return False
+        ctx.launch_permissions = None
+        return True
+
+    def _record_cleanup_failure(self, ctx: _RunContext) -> None:
+        """One durable, value-blind categorical fact per Run.
+
+        An event needs a live ``EventWriter``, and the pre-spawn, spawn-failure
+        and emergency paths have none — so a leftover could be durable while its
+        classification was not. The marker is the surface that always exists,
+        written **once**: the outer last-resort retry cannot erase it, and it
+        carries a stable code and the Run id and nothing else. No path, no
+        errno, no document content, no environment value, no exception text.
+        """
+        handle = ctx.handle
+        if handle is None:
+            return
+        try:
+            storage.write_once_json(
+                Path(handle.run_dir) / LAUNCH_PERMISSION_CLEANUP_MARKER,
+                {
+                    "code": LAUNCH_PERMISSION_CLEANUP_FAILED,
+                    "run_id": self._run_id,
+                },
+            )
+        except FileExistsError:
+            # An earlier attempt already classified this Run. Write-once is
+            # exactly what keeps that first fact.
+            pass
+        except Exception:
+            # Housekeeping evidence must never become a supervision failure.
+            # The in-memory flag still stands for this process.
+            pass
 
     def _bind_session(
         self, ctx: _RunContext, spec, binding, instance
@@ -901,13 +964,6 @@ class RunTask:
             model, effort = await driver.set_config_exact()
         except _PreDispatchFailure:
             raise
-        except SessionExternalIdSensitiveCollision as exc:
-            # Categorical and terminal: the id was never assigned, never
-            # persisted, never serviced, never prompted, never exposed.
-            raise _PreDispatchFailure(
-                SESSION_EXTERNAL_ID_SENSITIVE_COLLISION,
-                SESSION_EXTERNAL_ID_SENSITIVE_COLLISION,
-            ) from exc
         except (ConfigFidelityError, NativeDriverError) as exc:
             if ctx.client is not None and ctx.client.identity_violation:
                 raise _PreDispatchFailure(
@@ -923,11 +979,9 @@ class RunTask:
                 # quarantine.
                 await self._rollback_after_partial_switch(ctx)
             # Fidelity errors quote the exact requested/observed option values,
-            # which are child-advertised strings.
-            detail = str(exc)
-            if ctx.guard is not None:
-                detail = ctx.guard.guard_text(detail)
-            raise _PreDispatchFailure(detail, "CONFIG_FIDELITY") from exc
+            # which are child-advertised strings; the terminal carries the
+            # stable code and a categorical reason, never this text.
+            raise _PreDispatchFailure(str(exc), "CONFIG_FIDELITY") from exc
 
         ctx.effective.effective_model = model
         ctx.effective.effective_effort = effort
@@ -946,71 +1000,13 @@ class RunTask:
         self._write_progress(ctx, "running")
 
     def _effective_payload(self, ctx: _RunContext) -> dict[str, Any]:
-        """``effective.json`` is observed child data end to end.
+        """``effective.json`` is observed child data end to end."""
+        return ctx.effective.to_dict()
 
-        ``agentInfo``, the advertised capability structure, every discovery
-        snapshot, and the external Session id are all agent-authored, so the
-        whole document crosses the guard once, immediately before the write —
-        including its dynamic keys.
-        """
-        payload = ctx.effective.to_dict()
-        return self._guarded_document(ctx, payload)
-
-    @staticmethod
-    def _guarded_document(ctx: _RunContext, payload: dict[str, Any]) -> dict[str, Any]:
-        if ctx.guard is None:
-            return payload
-        guarded = ctx.guard.guard_value(payload)
-        if not isinstance(guarded, dict):
-            guarded = {
-                "withheld": True,
-                "withheld_reason": GUARDED_RECORD_WITHHELD,
-            }
-        # The serialized form is the artifact; the dict is not. Indentation,
-        # separators, and quoting all arrive at ``write_once_json`` time, after
-        # every field-level matcher has run.
-        rendered = json.dumps(guarded, sort_keys=True, indent=2)
-        if serialized_projection_is_safe(ctx.guard, rendered):
-            return guarded
-        ctx.guard.counters.suppressed_records += 1
-        return {"withheld": True, "withheld_reason": GUARDED_RECORD_WITHHELD}
-
-    def _serialization_safe_terminal(
-        self, ctx: _RunContext, payload: dict[str, Any]
-    ) -> dict[str, Any]:
-        """The terminal's own serialized postcondition, grammar preserved.
-
-        A terminal must exist and must stay schema-valid, so this withholds
-        the two child-authored free-form fields before it falls back to the
-        minimal evidence-pipeline terminal — evidence completeness is given up
-        one step at a time, confidentiality never is.
-        """
-        if ctx.guard is None:
-            return payload
-
-        def render(document: dict[str, Any]) -> str:
-            return json.dumps(document, sort_keys=True, indent=2)
-
-        if serialized_projection_is_safe(ctx.guard, render(payload)):
-            return payload
-        ctx.guard.counters.suppressed_records += 1
-        reduced = dict(payload)
-        reduced["final_message"] = GUARDED_TEXT_WITHHELD
-        reduced["usage"] = None
-        if serialized_projection_is_safe(ctx.guard, render(reduced)):
-            return reduced
-        return build_minimal_evidence_pipeline_result(
-            run_id=self._run_id,
-            run_dir=ctx.handle.run_dir,
-            session_id=ctx.session_id,
-        )
-
-    def _write_guarded_once(
+    def _write_once(
         self, ctx: _RunContext, name: str, payload: dict[str, Any]
     ) -> None:
-        storage.write_once_json(
-            ctx.handle.run_dir / name, self._guarded_document(ctx, payload)
-        )
+        storage.write_once_json(ctx.handle.run_dir / name, payload)
 
     def _observe_initialize(self, ctx: _RunContext, instance, summary) -> None:
         """Record what ``initialize`` reported, then apply the contract checks.
@@ -1033,9 +1029,7 @@ class RunTask:
             load_session_advertised=summary.load_session_advertised,
         )
         verdict = judge_initialize(instance, observed, previous=ctx.previous_observation)
-        self._write_guarded_once(
-            ctx, "initialize_evidence.json", verdict.to_evidence()
-        )
+        self._write_once(ctx, "initialize_evidence.json", verdict.to_evidence())
         for warning in verdict.warnings:
             self._emit(ctx, dict(warning))
         if verdict.refusal is not None:
@@ -1054,21 +1048,12 @@ class RunTask:
         # Recorded only after the observation passed every contract check, so
         # what a later Run compares against is an observation this Session
         # actually accepted. Still evidence: nothing reads it to decide anything.
-        #
-        # Guarded on the way out, because this is the one sink whose lifetime
-        # exceeds the Run's. The self-report and the advertised capability keys
-        # are child-chosen strings that no contract check inspects, so the guard
-        # is the only thing standing between a projected environment value and
-        # ``session.json``.
-        assert ctx.guard is not None
         name, version = observed.self_report()
         self._session_store.commit_last_observation(
             ctx.session_id,
-            agent_info_name=ctx.guard.safe_text(name),
-            agent_info_version=ctx.guard.safe_text(version),
-            advertised_capabilities=tuple(
-                ctx.guard.safe_text(capability) for capability in observed.advertised()
-            ),
+            agent_info_name=name,
+            agent_info_version=version,
+            advertised_capabilities=tuple(observed.advertised()),
         )
 
     async def _rollback_after_partial_switch(self, ctx: _RunContext) -> None:
@@ -1087,6 +1072,9 @@ class RunTask:
                 effort_selector_id=ctx.instance.effort_selector_id,
                 requested_model=previous_model,
                 requested_effort=previous_effort,
+                # The rollback runs the declared mode, so a model-only Session
+                # is restored by the same model-only sequence.
+                fidelity_mode=ctx.instance.config_fidelity_mode,
                 # The rollback re-runs the full exact sequence, so a frozen
                 # permission mode is re-proven too — a rollback must never
                 # leave the session in an unproven mode.
@@ -1151,22 +1139,10 @@ class RunTask:
                 ctx.observation_interrupted = True
             return
         # Both are agent-authored: the stop reason is a wire string and usage
-        # is a free-form object. They are guarded at capture so every later
-        # consumer — event, terminal, API projection — sees only safe text.
+        # is a free-form object. Both stay subject to the existing size
+        # ceilings and to nothing else.
         ctx.stop_reason = outcome.stop_reason
-        raw_usage = outcome.usage
-        if ctx.guard is not None:
-            if isinstance(ctx.stop_reason, str):
-                ctx.stop_reason = ctx.guard.guard_text(ctx.stop_reason)
-            if raw_usage is not None:
-                guarded_usage = ctx.guard.guard_value(raw_usage)
-                raw_usage = guarded_usage if isinstance(guarded_usage, dict) else None
-        # Bounded only *after* guarding. Sizing the raw object first makes the
-        # truncation branch a function of a projected value's length, and that
-        # branch is durable evidence — a value-derived fact about a value the
-        # rest of this stage exists to keep out. Guarded first, the same value
-        # is a short fixed token and the size decision is never reached.
-        ctx.usage = sanitize_usage(raw_usage)
+        ctx.usage = sanitize_usage(outcome.usage)
         # The durable completed lifecycle fact is recorded only when this ACP
         # terminal can actually finalize completed permission-wise: a known
         # permission violation already forces FAILED, and a completed→failed
@@ -1209,11 +1185,6 @@ class RunTask:
         if ctx.writer is None:
             return
         try:
-            # Guarded at enqueue as well as inside the writer: the queue is an
-            # in-memory fan-out that a failing Run can be inspected around, so
-            # unguarded child text must not sit in it even briefly.
-            if ctx.guard is not None:
-                event = ctx.guard.guard_event(event)
             ctx.writer.emit_nowait(event)
         except EventWriterOverflow as exc:
             if ctx.pipeline_error is None:
@@ -1254,17 +1225,6 @@ class RunTask:
                     if isinstance(text, str) and self._current_turn_chunk(ctx):
                         ctx.final_message_acc.ingest(text)
                 event = normalizer.normalize_update(update)
-                # ``text_length`` is structural for ordinary chatter, but a
-                # chunk that *contains* a projected value would turn it into a
-                # length-by-value. Withhold the number, never shrink it.
-                if (
-                    ctx.guard is not None
-                    and "text_length" in event
-                    and isinstance(text, str)
-                    and ctx.guard.matches(text)
-                ):
-                    del event["text_length"]
-                    event["text_length_withheld"] = True
                 self._emit(ctx, event)
                 if ctx.bridge is not None:
                     violation = ctx.bridge.observe_tool_update(update)
@@ -1600,7 +1560,7 @@ class RunTask:
                     signal=None,
                     stop_reason=ctx.stop_reason,
                     usage=sanitize_usage(ctx.usage),
-                    final_message=EMPTY_SAFE_TEXT,
+                    final_message="",
                     truncated=False,
                     truncate_reason=None,
                     run_dir=ctx.handle.run_dir,
@@ -1614,7 +1574,6 @@ class RunTask:
                     run_dir=ctx.handle.run_dir,
                     session_id=ctx.session_id,
                 )
-                payload = self._serialization_safe_terminal(ctx, payload)
                 storage.write_once_json(
                     ctx.handle.run_dir / "result.json", payload
                 )
@@ -1710,6 +1669,12 @@ class RunTask:
             except asyncio.TimeoutError:
                 ctx.proc.kill_group(reason="finalize_force_kill")
                 ctx.exit_state = await ctx.proc.wait()
+
+        # The child is proven exited (or never existed), so the private
+        # launch-permission material may go. A failure is housekeeping, not a
+        # terminal fact: it is recorded categorically and never as errno text.
+        if not self._cleanup_launch_permissions(ctx):
+            self._emit(ctx, {"type": "launch_permission_cleanup_failed"})
 
         # Provisional state only as needed to enqueue final failure evidence
         # before the writer is closed. Close/drain next; capture close failure
@@ -1813,51 +1778,34 @@ class RunTask:
             except FileExistsError:
                 pass
 
-        # Drain the accumulator's held-back carry through the guard before any
-        # emptiness test: a whole short final message can still be sitting in
-        # the carry, and reading ``retained_bytes`` first would drop it.
         ctx.final_message_acc.finish()
-        final_message: SafeText = EMPTY_SAFE_TEXT
+        final_message = ""
         truncated = False
         truncate_reason: str | None = None
-        # ``ctx.guard`` is None only when the Run failed before the environment
-        # was resolved — which is also before any child existed, so there is no
-        # child text to project on that path.
-        if ctx.guard is not None and (
-            ctx.final_message_acc.retained_bytes or ctx.final_message_acc.truncated
-        ):
+        if ctx.final_message_acc.retained_bytes or ctx.final_message_acc.truncated:
             joined = ctx.final_message_acc.text()
-            redacted, report = redact_text(joined, location="final_message")
+            # The static shape redactor runs on the assembled message, which is
+            # a different string from any chunk that formed it.
+            final_message, report = redact_text(joined, location="final_message")
             ctx.redaction.merge(report)
-            # Guarded once more after the static patterns: the assembled
-            # message is a different string from any chunk that formed it.
-            final_message = ctx.guard.safe_text(redacted)
             if ctx.final_message_acc.truncated:
                 truncated = True
                 truncate_reason = "max_final_message_bytes"
-        stderr_text: SafeText = EMPTY_SAFE_TEXT
-        if ctx.proc is not None and ctx.guard is not None:
-            # Bytes first: a value that survives ``os.fsencode`` but not UTF-8
-            # would otherwise reach retained diagnostics through
-            # ``errors="replace"`` with its bytes intact. Text second, because
-            # decoding produces a string no byte matcher ever saw.
-            guarded_bytes = ctx.guard.guard_bytes(ctx.proc.stderr_bytes())
-            decoded = guarded_bytes.decode("utf-8", errors="replace")
-            redacted_stderr, stderr_report = redact_text(decoded, location="stderr")
+        stderr_text = ""
+        if ctx.proc is not None:
+            decoded = ctx.proc.stderr_bytes().decode("utf-8", errors="replace")
+            stderr_text, stderr_report = redact_text(decoded, location="stderr")
             ctx.redaction.merge(stderr_report)
-            stderr_text = ctx.guard.safe_text(redacted_stderr)
         storage.write_run_text(ctx.handle, "stderr.log", stderr_text)
-        redaction_payload: dict[str, Any] = {
-            "matches": [
-                {"pattern": match.pattern_name, "note": match.note}
-                for match in ctx.redaction.matches
-            ]
-        }
-        if ctx.guard is not None:
-            # Coarse sink-local integers only: how much was erased is itself a
-            # length-by-value and is deliberately absent.
-            redaction_payload["environment_guard"] = ctx.guard.report()
-        ctx.handle.write_json("redaction-report.json", redaction_payload)
+        ctx.handle.write_json(
+            "redaction-report.json",
+            {
+                "matches": [
+                    {"pattern": match.pattern_name, "note": match.note}
+                    for match in ctx.redaction.matches
+                ]
+            },
+        )
 
         payload = build_native_result_payload(
             run_id=self._run_id,
@@ -1897,7 +1845,6 @@ class RunTask:
             run_dir=ctx.handle.run_dir,
             session_id=ctx.session_id,
         )
-        payload = self._serialization_safe_terminal(ctx, payload)
         if payload is not before_ceiling and payload.get("status") == "failed":
             status = AgentRunStatus.FAILED
 

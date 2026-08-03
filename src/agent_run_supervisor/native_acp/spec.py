@@ -7,8 +7,8 @@ materialize the value-blind ``LaunchSnapshot`` → seal the immutable
 
 Two environment types carry the value boundary and never merge.
 :class:`ResolvedEnvironment` is the ephemeral, non-serializable carrier of the
-final projected values; it is accepted only by the process-spawn seam and by
-``RunTextGuard.from_environment``. :class:`EnvProjection` is the separate
+final projected values; it is accepted only by the process-spawn seam and is
+consumed by nothing else. :class:`EnvProjection` is the separate
 durable, value-blind shape that reaches ``launch.json``: per name, the name, its
 source class, its precedence layer, and its redaction status, plus a resolved
 count, the mediation id, and the operator-declared names that were absent from
@@ -33,6 +33,12 @@ from agent_run_supervisor.process_liveness import ProcessIdentity
 from agent_run_supervisor.role import PERMISSION_KINDS
 
 from .agent_registration import AgentEntry, validate_agent_id
+from .launch_permissions import (
+    ENV_SOURCE_LAUNCH_PERMISSION,
+    MaterializedLaunchPermissions,
+    policy_pair_is_exact,
+    projection_matches_policy,
+)
 from .profile import (
     AcpCompatProfile,
     AgentInstance,
@@ -60,9 +66,11 @@ LIMIT_MAX_EVENTS_MAX = 1_000_000
 LIMIT_MAX_EVENT_BYTES_MIN = 256
 LIMIT_EVENT_BUDGET_BYTES = 1024 * 1024 * 1024
 
-# The four environment layers, in application order. Layer 4 is applied last,
-# always, as defense in depth: a defect in the parse-time collision check cannot
-# silently let configuration shadow a source-owned mediation pair.
+# The environment layers, in application order. The two source-owned layers are
+# applied last, always, as defense in depth: a defect in a parse-time collision
+# check cannot silently let configuration shadow a source-owned pair. Layer 5 is
+# present only for a profile that selects a launch-permission policy, and its
+# key is source-owned in key and value exactly like layer 4's.
 ENV_SOURCE_BASE = "base"
 ENV_SOURCE_PASSTHROUGH = "passthrough"
 ENV_SOURCE_OVERLAY = "overlay"
@@ -72,6 +80,7 @@ ENV_PRECEDENCE = {
     ENV_SOURCE_PASSTHROUGH: 2,
     ENV_SOURCE_OVERLAY: 3,
     ENV_SOURCE_MEDIATION: 4,
+    ENV_SOURCE_LAUNCH_PERMISSION: 5,
 }
 
 
@@ -308,6 +317,7 @@ def environment_layers(
     arsd_env: Mapping[str, str],
     base_names: Iterable[str],
     entry: AgentEntry,
+    launch_permission: Iterable[tuple[str, str]] = (),
 ) -> tuple[tuple[str, str, str, int], ...]:
     """Compose the four layers and report the **winning** one per name.
 
@@ -336,6 +346,8 @@ def environment_layers(
     # Applied last, always.
     for name, literal in mediation_pairs(entry.mediation_id):
         place(name, literal, ENV_SOURCE_MEDIATION)
+    for name, literal in launch_permission:
+        place(name, literal, ENV_SOURCE_LAUNCH_PERMISSION)
     return tuple(
         (name, resolved[name][0], resolved[name][1], resolved[name][2])
         for name in sorted(resolved)
@@ -406,9 +418,9 @@ class ResolvedEnvironment:
     """The ephemeral per-Run value carrier. Never durable, never serializable.
 
     It exists from the moment the environment is resolved until the child has
-    been spawned and the Run's last sink has been served. Two consumers are
-    allowed: the process-spawn seam, through :attr:`exec_mapping`, and
-    ``RunTextGuard.from_environment``, through :meth:`sensitive_values`.
+    been spawned. Exactly **one** consumer is allowed: the process-spawn seam,
+    through :attr:`exec_mapping`. There is no accessor that enumerates the
+    values for any other purpose, because there is no other purpose.
 
     Everything that could turn a value into a record is refused rather than
     merely avoided: there is no ``to_dict``, no mapping protocol, no
@@ -444,10 +456,6 @@ class ResolvedEnvironment:
         """A fresh copy for exec. The carrier never hands out its own mapping."""
         return dict(self._values)
 
-    def sensitive_values(self) -> tuple[str, ...]:
-        """Every final projected value, for the guard's literal set alone."""
-        return tuple(self._values.values())
-
     def value_blind_projection(self) -> EnvProjection:
         return self._projection
 
@@ -468,6 +476,7 @@ def resolve_environment(
     overlay: Iterable[tuple[str, str]],
     mediation: Iterable[tuple[str, str]],
     mediation_id: str | None = None,
+    launch_permission: Iterable[tuple[str, str]] = (),
 ) -> ResolvedEnvironment:
     """Resolve the four layers exactly once, in memory, before sealing and spawn.
 
@@ -490,6 +499,8 @@ def resolve_environment(
         place(name, literal, ENV_SOURCE_OVERLAY)
     for name, literal in mediation:
         place(name, literal, ENV_SOURCE_MEDIATION)
+    for name, literal in launch_permission:
+        place(name, literal, ENV_SOURCE_LAUNCH_PERMISSION)
     layers = tuple(
         (name, resolved[name][0], resolved[name][1], resolved[name][2])
         for name in sorted(resolved)
@@ -502,9 +513,18 @@ def resolve_environment(
 
 
 def resolve_run_environment(
-    *, arsd_env: Mapping[str, str], profile: AcpCompatProfile, entry: AgentEntry
+    *,
+    arsd_env: Mapping[str, str],
+    profile: AcpCompatProfile,
+    entry: AgentEntry,
+    launch_permission: Iterable[tuple[str, str]] = (),
 ) -> ResolvedEnvironment:
-    """The one-call composition the Run path uses. One resolution, one snapshot."""
+    """The one-call composition the Run path uses. One resolution, one snapshot.
+
+    ``launch_permission`` carries the source-owned pair of a profile that
+    selected a launch-permission policy, and nothing else ever supplies it. It
+    is empty for every other profile, so their projection is unchanged.
+    """
     return resolve_environment(
         arsd_env=arsd_env,
         base_names=profile.base_allowlist,
@@ -512,6 +532,7 @@ def resolve_run_environment(
         overlay=entry.env_overlay,
         mediation=mediation_pairs(entry.mediation_id),
         mediation_id=entry.mediation_id,
+        launch_permission=launch_permission,
     )
 
 
@@ -539,11 +560,18 @@ class LaunchSnapshot:
     env: EnvProjection
     mediation_id: str | None = None
     model_selector_id: str = "model"
-    effort_selector_id: str = "effort"
+    # ``None`` under model-only fidelity: the Run sets no effort selector, so
+    # naming one here would seal a call that never happened.
+    effort_selector_id: str | None = "effort"
     forbidden_capabilities: tuple[str, ...] = ()
     credential_refs: tuple[str, ...] = ()
     session_epoch: int | None = None
     session_meta: str | None = None
+    # Present only for a profile that selected a launch-permission policy. The
+    # digest binds the exact document the child was launched under, so the
+    # policy is auditable without persisting where it lived or what it said.
+    launch_permission_policy_id: str | None = None
+    launch_permission_digest: str | None = None
     schema_version: int = LAUNCH_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -551,6 +579,25 @@ class LaunchSnapshot:
         _require(
             self.argv[0] == self.command,
             "argv[0] must be the declared command string, byte for byte",
+        )
+        # The launch-permission evidence is one fact in three places, so it is
+        # bound here rather than merely carried: the id and the digest are
+        # all-or-none with a registered id and a canonical digest, and the
+        # environment projection has to describe the same launch.
+        _require(
+            policy_pair_is_exact(
+                self.launch_permission_policy_id, self.launch_permission_digest
+            ),
+            "launch permission policy id and digest must be absent together or "
+            "present together, with a registered id and a canonical digest",
+        )
+        _require(
+            projection_matches_policy(
+                self.launch_permission_policy_id,
+                tuple((item.name, item.source) for item in self.env.names),
+            ),
+            "the launch permission pair and the environment projection must "
+            "describe the same launch",
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -572,6 +619,9 @@ class LaunchSnapshot:
         }
         if self.session_meta is not None:
             payload["session_meta"] = json.loads(self.session_meta)
+        if self.launch_permission_policy_id is not None:
+            payload["launch_permission_policy_id"] = self.launch_permission_policy_id
+            payload["launch_permission_digest"] = self.launch_permission_digest
         return payload
 
     def launch_hash(self) -> str:
@@ -817,7 +867,9 @@ LAUNCH_REQUIRED_FIELDS = frozenset(
         "launch_spec_hash",
     }
 )
-LAUNCH_OPTIONAL_FIELDS = frozenset({"session_meta"})
+LAUNCH_OPTIONAL_FIELDS = frozenset(
+    {"session_meta", "launch_permission_policy_id", "launch_permission_digest"}
+)
 ENV_PROJECTION_FIELDS = frozenset(
     {
         "values_persisted",
@@ -856,7 +908,23 @@ def launch_payload_shape_is_exact(payload: Any) -> bool:
         return False
     if not isinstance(payload.get("launch_spec_hash"), str):
         return False
-    return env_projection_shape_is_exact(payload.get("env"))
+    if not env_projection_shape_is_exact(payload.get("env")):
+        return False
+    # The same binding the constructor enforces, asked of a document ARS is
+    # reading back rather than one it just built.
+    policy_id = payload.get("launch_permission_policy_id")
+    digest = payload.get("launch_permission_digest")
+    if not policy_pair_is_exact(policy_id, digest):
+        return False
+    names = payload["env"].get("names") or []
+    return projection_matches_policy(
+        policy_id,
+        tuple(
+            (item.get("name"), item.get("source"))
+            for item in names
+            if isinstance(item, dict)
+        ),
+    )
 
 
 def _is_exact_int(value: Any) -> bool:
@@ -1055,7 +1123,12 @@ class RunSpecAssembler:
         self._binding = resolve_workspace_binding(root=root, cwd=cwd)
         return self._binding
 
-    def resolve_launch(self, *, environment: ResolvedEnvironment) -> LaunchSnapshot:
+    def resolve_launch(
+        self,
+        *,
+        environment: ResolvedEnvironment,
+        launch_permission: MaterializedLaunchPermissions | None = None,
+    ) -> LaunchSnapshot:
         """Materialize the value-blind launch snapshot from the one resolution."""
         if self._instance is None or self._binding is None:
             raise SpecFreezeOrderError(
@@ -1065,7 +1138,39 @@ class RunSpecAssembler:
             raise SpecValidationError(
                 "resolve_launch accepts only a ResolvedEnvironment, resolved once"
             )
+        if launch_permission is not None and (
+            type(launch_permission) is not MaterializedLaunchPermissions
+        ):
+            # Typed before it is dereferenced: reaching for ``.policy_id`` on an
+            # arbitrary object raises ``AttributeError`` out of a public seam,
+            # and naming the object in the refusal would render whatever
+            # ``__repr__`` it chose.
+            raise SpecValidationError(
+                "resolve_launch accepts only the launch permission material "
+                "carrier, or None"
+            )
         instance = self._instance
+        # The resolved **profile** decides whether material exists at all, so a
+        # mismatch here is an inconsistency between the layer that selects and
+        # the layer that materializes — never something to reconcile silently.
+        selected = instance.launch_permission_policy_id
+        if launch_permission is None:
+            if selected is not None:
+                raise SpecValidationError(
+                    "the resolved profile selects a launch permission policy, "
+                    "so its material is required before the launch is sealed"
+                )
+        else:
+            if selected is None:
+                raise SpecValidationError(
+                    "launch permission material was supplied for a profile "
+                    "that selects no policy"
+                )
+            if launch_permission.policy_id != selected:
+                raise SpecValidationError(
+                    "launch permission material does not match the policy the "
+                    "resolved profile selected"
+                )
         self._launch = LaunchSnapshot(
             command=instance.command,
             argv=instance.argv,
@@ -1081,6 +1186,12 @@ class RunSpecAssembler:
             credential_refs=self._request.credential_refs,
             session_epoch=instance.session_epoch,
             session_meta=instance.profile.session_meta,
+            launch_permission_policy_id=(
+                None if launch_permission is None else launch_permission.policy_id
+            ),
+            launch_permission_digest=(
+                None if launch_permission is None else launch_permission.digest
+            ),
         )
         return self._launch
 

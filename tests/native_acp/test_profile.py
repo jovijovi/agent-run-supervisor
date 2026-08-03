@@ -31,6 +31,7 @@ from agent_run_supervisor.native_acp import profile as profile_mod
 from agent_run_supervisor.native_acp.agent_registration import AgentEntry
 from agent_run_supervisor.native_acp.profile import (
     CLAUDE_AGENT_ACP_COMPAT_V1,
+    CURSOR_NATIVE_ACP_V1,
     DEFAULT_REGISTRY,
     RESERVED_MEDIATION_KEYS,
     STANDARD_NATIVE_ACP_V1,
@@ -67,12 +68,17 @@ def entry(**overrides):
     return AgentEntry(**body)
 
 
-# -- WP3.3: exactly two registered profiles ---------------------------------
+# -- WP3.3: a closed, enumerated registry -----------------------------------
+#
+# The registry stays closed and small. It is three entries now: the conformance
+# contract, the one profile with an evidenced ACP-semantic deviation, and the
+# one with an evidenced configuration-fidelity deviation.
 
 
-def test_registry_holds_exactly_two_profiles():
+def test_registry_holds_exactly_the_three_registered_profiles():
     assert DEFAULT_REGISTRY.ids() == (
         "claude-agent-acp-compat-v1",
+        "cursor-native-acp-v1",
         "standard-native-acp-v1",
     )
 
@@ -80,6 +86,7 @@ def test_registry_holds_exactly_two_profiles():
 def test_registry_is_a_closed_set():
     assert DEFAULT_REGISTRY.get("standard-native-acp-v1") is STANDARD_NATIVE_ACP_V1
     assert DEFAULT_REGISTRY.get("claude-agent-acp-compat-v1") is CLAUDE_AGENT_ACP_COMPAT_V1
+    assert DEFAULT_REGISTRY.get("cursor-native-acp-v1") is CURSOR_NATIVE_ACP_V1
     with pytest.raises(UnknownProfileError):
         DEFAULT_REGISTRY.get("mystery-agent-9.9")
 

@@ -13,11 +13,6 @@ from agent_run_supervisor.native_acp.event_writer import (
     EventWriter,
     EventWriterOverflow,
 )
-from agent_run_supervisor.redaction import (
-    ENV_VALUE_REPLACEMENT,
-    GUARDED_RECORD_WITHHELD,
-    RunTextGuard,
-)
 
 
 class RecordingHandle:
@@ -57,18 +52,19 @@ def test_seq_is_monotonic_from_one() -> None:
     asyncio.run(case())
 
 
-def test_the_writer_guards_before_it_assigns_a_sequence() -> None:
-    """The last common boundary, and it runs before the record has an identity.
+def test_records_reach_the_stream_verbatim_under_their_ordinal(tmp_path) -> None:
+    """The writer bounds and sequences; it does not rewrite field content.
 
-    Guarding after the sequence was assigned would leave a numbered gap when a
-    record is suppressed; guarding before keeps the suppressed record inside
-    the same monotonic stream, which is what a reader can actually verify.
+    Driven through the **real** ``EventStore`` handle, so the assertion is on
+    the bytes that land in ``events.jsonl`` rather than on a dict the writer
+    happened to hand back. Child-authored strings — a tool call id here — reach
+    the stream exactly as the normalizer produced them.
     """
+    from agent_run_supervisor.event_store import EventStore
 
     async def case() -> None:
-        handle = RecordingHandle()
-        guard = RunTextGuard.from_environment({"TOKEN": "writer-sentinel-6a12"})
-        writer = EventWriter(handle, max_event_bytes=65536, guard=guard)
+        handle = EventStore(tmp_path / "runs").create_run("run-verbatim")
+        writer = EventWriter(handle, max_event_bytes=65536, filename="events.jsonl")
         await writer.start()
         await writer.emit(
             {"type": "tool_started", "tool_call_id": "call-writer-sentinel-6a12"}
@@ -76,19 +72,28 @@ def test_the_writer_guards_before_it_assigns_a_sequence() -> None:
         await writer.emit({"type": "tool_updated", "status": "ok"})
         await writer.close()
 
-        first, second = (record for _name, record in handle.records)
-        assert first["seq"] == 1 and second["seq"] == 2
-        assert "writer-sentinel-6a12" not in json.dumps(handle.records)
-        assert first["tool_call_id"] == f"call-{ENV_VALUE_REPLACEMENT}"
+        records = [
+            json.loads(line)
+            for line in (handle.run_dir / "events.jsonl").read_text().splitlines()
+        ]
+        assert [record["seq"] for record in records] == [1, 2]
+        assert records[0]["tool_call_id"] == "call-writer-sentinel-6a12"
+        assert all("withheld" not in record for record in records)
 
     asyncio.run(case())
 
 
-def test_a_guarded_key_collision_suppresses_the_record_without_a_seq_gap() -> None:
+def test_dynamic_child_keys_are_carried_without_suppressing_the_record() -> None:
+    """A record with agent-chosen keys keeps its ordinal, family, and fields.
+
+    Two dynamic keys used to be able to collapse onto one replacement token and
+    suppress the whole enclosing record. With no replacement token there is no
+    collision to arbitrate.
+    """
+
     async def case() -> None:
         handle = RecordingHandle()
-        guard = RunTextGuard.from_environment({"A": "alpha-6a12", "B": "beta-6a12"})
-        writer = EventWriter(handle, max_event_bytes=65536, guard=guard)
+        writer = EventWriter(handle, max_event_bytes=65536)
         await writer.start()
         await writer.emit({"type": "tool_started", "alpha-6a12": 1, "beta-6a12": 2})
         await writer.emit({"type": "tool_updated", "status": "ok"})
@@ -96,85 +101,10 @@ def test_a_guarded_key_collision_suppresses_the_record_without_a_seq_gap() -> No
 
         first, second = (record for _name, record in handle.records)
         assert first["seq"] == 1 and second["seq"] == 2
-        assert first["withheld_reason"] == GUARDED_RECORD_WITHHELD
         assert first["type"] == "tool_started"
-        assert "alpha-6a12" not in json.dumps(handle.records)
-
-    asyncio.run(case())
-
-
-def test_a_value_recomposed_by_the_serializer_is_suppressed(tmp_path) -> None:
-    """B1: field-wise guarding cannot see the bytes the serializer inserts.
-
-    Driven through the **real** ``EventStore`` handle, so the assertion is on
-    the bytes that actually land in ``events.jsonl`` rather than on a dict the
-    writer happened to hand back. ``A`` is a projected value inside a child
-    field, so the guard replaces it; ``B`` is a *different* projected value
-    that exists nowhere in the record and is created only by the replacement
-    token meeting the JSON separator and the following source-owned key. No
-    field-level matcher can ever see it, because it does not exist until the
-    document is composed.
-    """
-    from agent_run_supervisor.event_store import EventStore
-
-    value_a = "recomposition-sentinel-a"
-    value_b = 'ED]", "type"'
-
-    async def case() -> None:
-        handle = EventStore(tmp_path / "runs").create_run("run-recompose")
-        guard = RunTextGuard.from_environment({"A": value_a, "B": value_b})
-        writer = EventWriter(
-            handle, max_event_bytes=65536, guard=guard, filename="events.jsonl"
-        )
-        await writer.start()
-        await writer.emit(
-            {"type": "tool_started", "tool_call_id": value_a, "kind": "read"}
-        )
-        await writer.emit({"type": "tool_updated", "status": "ok"})
-        await writer.close()
-
-        raw = (handle.run_dir / "events.jsonl").read_bytes()
-        assert value_a.encode() not in raw
-        assert value_b.encode() not in raw
-        records = [json.loads(line) for line in raw.decode().splitlines()]
-        # Suppression must not tear a hole in the stream a reader has to
-        # explain: the record keeps its ordinal and its family.
-        assert [record["seq"] for record in records] == [1, 2]
-        assert records[0]["type"] == "tool_started"
-        assert records[0]["withheld_reason"] == GUARDED_RECORD_WITHHELD
-
-    asyncio.run(case())
-
-
-def test_an_ordinary_guarded_record_is_not_suppressed_by_coincidence(
-    tmp_path,
-) -> None:
-    """The postcondition is taint-directed, not a blanket byte scan.
-
-    A one-character value that merely coincides with an independently derived
-    fact — here the sequence number ARS assigns after guarding — is lexical
-    coincidence, not value-derived flow. Erasing evidence for it would be
-    exactly the over-erasure this stage is warned against.
-    """
-    from agent_run_supervisor.event_store import EventStore
-
-    async def case() -> None:
-        handle = EventStore(tmp_path / "runs").create_run("run-coincidence")
-        guard = RunTextGuard.from_environment({"NO_BROWSER": "1", "A": "leak-1a2b"})
-        writer = EventWriter(
-            handle, max_event_bytes=65536, guard=guard, filename="events.jsonl"
-        )
-        await writer.start()
-        await writer.emit({"type": "tool_started", "tool_call_id": "call-leak-1a2b"})
-        await writer.close()
-
-        records = [
-            json.loads(line)
-            for line in (handle.run_dir / "events.jsonl").read_text().splitlines()
-        ]
-        assert records[0]["seq"] == 1
-        assert "withheld" not in records[0]
-        assert records[0]["tool_call_id"] == f"call-{ENV_VALUE_REPLACEMENT}"
+        assert first["alpha-6a12"] == 1
+        assert first["beta-6a12"] == 2
+        assert "withheld_reason" not in first
 
     asyncio.run(case())
 

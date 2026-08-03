@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Union
 
 from ..event_store import secure_mkdir
-from . import protocol, safe_logging
+from . import protocol
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -180,16 +180,6 @@ class ArsdServer:
         return self._socket_path
 
     async def start(self) -> None:
-        # Mandatory, and first: once the socket listens, a Run can begin and a
-        # projected environment value can reach a log handler. Installing the
-        # containment afterwards would leave that window open, so an
-        # uninstallable filter refuses to serve rather than degrading.
-        safe_logging.install_safe_logging()
-        if not safe_logging.safe_logging_installed():
-            raise ServerStartupError(
-                "run-text log containment could not be installed on every "
-                "root handler; refusing to serve"
-            )
         if getattr(socket, "SO_PEERCRED", None) is None:
             raise ServerStartupError(
                 "SO_PEERCRED peer authentication is unavailable on this "

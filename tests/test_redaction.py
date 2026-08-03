@@ -92,17 +92,15 @@ def test_redact_argv_report_note_never_republishes_the_redacted_value() -> None:
     assert SYNTHETIC_OPENAI_KEY not in redacted
 
 
-def test_static_patterns_remain_defense_in_depth_beneath_the_run_guard() -> None:
-    # The per-Run literal guard removes *declared* values; the static patterns
-    # still catch credential shapes no operator ever declared to ARS.
-    from agent_run_supervisor.redaction import RunTextGuard
-
-    guard = RunTextGuard.from_environment({"DECLARED": "declared-value-1a2b"})
+def test_static_patterns_catch_credential_shapes_no_one_declared() -> None:
+    # Shape rules, and only shape rules. There is no per-Run value set any
+    # more, so a declared environment value that carries no credential shape
+    # passes through untouched — the stated, accepted consequence — while a
+    # credential-shaped literal is still removed wherever it came from.
     text = f"declared-value-1a2b and {SYNTHETIC_OPENAI_KEY}"
 
-    guarded = guard.guard_text(text)
-    redacted, report = redact_text(guarded, location="text")
+    redacted, report = redact_text(text, location="text")
 
-    assert "declared-value-1a2b" not in redacted
+    assert "declared-value-1a2b" in redacted
     assert SYNTHETIC_OPENAI_KEY not in redacted
-    assert report.matches
+    assert [item.pattern_name for item in report.matches] == ["openai_api_key"]

@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext Technical Solution"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-02
+last_validated_at: 2026-08-03
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/technical-solution.md"
 ---
 # agent-run-supervisor vNext Technical Solution
@@ -13,9 +13,11 @@ This is the module-level design authority for new ARS work. It describes the sha
 V4 external-AGENT boundary reset. The previous mixed v0.1.7/vNext solution is preserved at
 `docs/archive/pre-vnext-reset-2026-07-21/technical-solution.md` and must not direct new development.
 
-ARS stays Python and **stdlib-only at runtime**. `tomllib` and `contextvars` are standard library on the
-supported Python floor, so the registry parser and the per-Run guard context add no dependency and no
-lockfile change. vNext extends the existing package additively. The legacy acpx path is still present in
+ARS stays Python and **stdlib-only at runtime**. `tomllib` is standard library on the supported Python
+floor, so the registry parser adds no dependency. The only declared dependency is the optional `native`
+extra, pinned exactly to `agent-client-protocol==0.12.0` (ACP schema v1.19); its own `http` extra is never
+installed, because ARS is stdio ACP only and adds no HTTP/WS transport. vNext extends the existing package
+additively. The legacy acpx path is still present in
 that package and is **not** a compatibility baseline, surface, or obligation, and never a Native driver,
 fallback, or session store: no module below owes it compatibility, removing it is separately authorized
 work this document does not perform, and it survives here only as a bounded differential/comparison-test
@@ -23,14 +25,15 @@ reference.
 
 **Authority and source are aligned on `main`.** Every module disposition below describes merged source:
 `native_acp/runtime_binding.py` and `native_acp/attestation.py` are deleted, `native_acp/agent_registry.py`
-is the one reader of the operator agents file, the sealed launch snapshot is value-blind, and exactly two
-profiles are registered. The retired Binding-era module design is preserved under
+is the one reader of the operator agents file, the sealed launch snapshot is value-blind, and the profile
+registry is a closed set of three. The retired Binding-era module design is preserved under
 [`docs/archive/binding-era-2026-07/`](../archive/binding-era-2026-07/architecture-3.1-3.3.md) as cold
 history.
 
-Merged is not published or deployed. Package metadata is prepared as `0.6.0`, and no tag, GitHub Release,
-PyPI upload, deployment, service restart, or cutover follows from that. This document grants no approval,
-and a green verification transfers approval to nothing.
+Merge, publication, and deployment stay three separate facts, and which version is published or running is
+a volatile fact the board ([`docs/roadmap/current-status.md`](../roadmap/current-status.md)) owns rather than
+this document. No tag, GitHub Release, PyPI upload, deployment, service restart, or cutover follows from a
+merge. This document grants no approval, and a green verification transfers approval to nothing.
 
 ## 1. Package shape
 
@@ -53,17 +56,18 @@ authorized. Native code must not share their stdout consumer or wait-before-retu
 | Module | Responsibility |
 |---|---|
 | `agent_registry.py` **(new)** | the only reader of the operator agents file: strict `tomllib` parse, bounded validation, typed `REGISTRY_*`/`ENTRY_*`/`MEDIATION_KEY_COLLISION` refusals, **one read per daemon lifetime** into an immutable snapshot, zero per-Run filesystem access, and the config-hygiene check (resolve symlinks; require a regular file that is not group- or world-writable) |
-| `profile.py` | `AcpCompatProfile` + `AgentInstance` + a **two-entry** registry (`standard-native-acp-v1`, `claude-agent-acp-compat-v1`) + the source-owned mediation binding table and its global `RESERVED_MEDIATION_KEYS`. A profile freezes ACP semantics only: protocol major, required and forbidden capabilities, session semantics, selector-id conventions, the base environment allowlist, mediation semantics, and — only where evidenced — frozen session metadata and a required permission-mode selector. No executables map, wrapped artifacts, binding slots, probe-as-gate, closure predicate, launch kind, or per-agent value domain |
+| `profile.py` | `AcpCompatProfile` + `AgentInstance` + a **three-entry** registry (`standard-native-acp-v1`, `claude-agent-acp-compat-v1`, `cursor-native-acp-v1`) + the source-owned mediation binding table and its global `RESERVED_MEDIATION_KEYS`. A profile freezes ACP semantics only: protocol major, required and forbidden capabilities, session semantics, the declared configuration-fidelity mode and its selector-id conventions, the base environment allowlist, mediation semantics, and — only where evidenced — frozen session metadata and a required permission-mode selector. No executables map, wrapped artifacts, binding slots, probe-as-gate, closure predicate, launch kind, or per-agent value domain |
 | `agent_registration.py` | the typed operator registry **entry** value and its bounded grammars — command, argv tokens, environment declarations, mediation selection, selector-id hints, capability narrowing, optional epoch. **Pure**: no filesystem access, so the single reader of the agents file stays `agent_registry.py` |
-| `spec.py` | versioned `AgentRunRequest`; immutable `AgentRunSpec`/`spec_hash`; the sealed **launch snapshot** that replaces `ResolvedLaunchSpec`; the ephemeral non-serializable `ResolvedEnvironment`; the durable value-blind `EnvProjection`; guarded `ObservedRuntime` extending the observed-state record. `launch_spec_hash` on the Spec is **retained and load-bearing**. No sealed runtime identity, no runtime provenance, no artifact descriptor |
-| `storage.py` | the only constructor seam for `native-runs/` and `native-sessions/`; write-once discipline; bounded no-follow classifying readers returning valid/absent/corrupt while retaining the existing terminal trichotomy; free-form Run text accepted only as a guard-produced safe projection type |
-| `driver.py` | ACP wire/state machine over a supplied `ManagedProcess`; never spawns or selects policy/profile. Accepts a typed load plan and the exact stored ID; `load_session()` keeps returning `None`, the expected ID is set before the call, and options are seeded from the load response; on `session/new` the returned external ID is certified against the per-Run guard **before** it is assigned, returned, or persisted |
-| `config_fidelity.py` | exact-or-zero configuration and between-Run switch/rollback state machine; option domains come from **live discovery**, with no source-domain preflight |
+| `spec.py` | versioned `AgentRunRequest`; immutable `AgentRunSpec`/`spec_hash`; the sealed **launch snapshot** that replaces `ResolvedLaunchSpec`; the ephemeral non-serializable `ResolvedEnvironment`; the durable value-blind `EnvProjection`; the observed-state record. `launch_spec_hash` on the Spec is **retained and load-bearing**. No sealed runtime identity, no runtime provenance, no artifact descriptor |
+| `storage.py` | the only constructor seam for `native-runs/` and `native-sessions/`; write-once discipline; bounded no-follow classifying readers returning valid/absent/corrupt while retaining the existing terminal trichotomy; the one sanctioned writer for free-form Run text, which judges the type before writing |
+| `driver.py` | ACP wire/state machine over a supplied `ManagedProcess`; never spawns or selects policy/profile. Accepts a typed load plan and the exact stored ID; `load_session()` keeps returning `None`, the expected ID is set before the call, and options are seeded from the load response |
+| `config_fidelity.py` | exact-or-zero configuration and between-Run switch/rollback state machine; the two **configuration-fidelity modes** and the shared `EFFORT_NOT_APPLICABLE` sentinel; option domains come from **live discovery**, with no source-domain preflight |
+| `launch_permissions.py` **(new)** | the closed set of source-owned launch-permission policies a profile may select, each keyed by the capability family it enforces. Compiles one deterministic document from the Run's frozen grant, digests it, materializes it privately per Run under the supervisor root, and removes it. No dynamic approval, no path-level write policy, no positive write/execute grant, and no agent-named literal |
 | `client.py` | official SDK callback implementation. Synchronous fail-closed identity rejection at callback entry for every ID-bearing update, permission, filesystem, terminal, and session-scoped elicitation surface, using exact pinned SDK signatures rather than varargs; categorical violations carry no IDs |
-| `permissions.py` | frozen-grant → default-deny mediation; deterministic mediation evidence; child-supplied fields guarded before recording or returning |
-| `events.py` | ACP update normalization into the caller-stable event families without copying thought/raw bulk bodies; dynamic keys and strings guarded before enqueue |
-| `event_writer.py` | one bounded writer per Run, monotonic `seq`, truncation markers preserving lifecycle/permission/error events; guards again before sequence assignment, fan-out, and append — the last common boundary, not the only one |
-| `run_task.py` | admission assembly, the closed start plan, lease, process/driver coordination, dispatch markers, timeout/cancel, finalization, quarantine, top-level exception boundary; once-only environment resolution and guard construction; Spec-then-launch write order preserved; `agentInfo` name/version recorded as evidence and gating nothing |
+| `permissions.py` | frozen-grant → default-deny mediation; deterministic mediation evidence; every decision reason is ARS-authored and stable |
+| `events.py` | ACP update normalization into the caller-stable event families without copying thought/raw bulk bodies |
+| `event_writer.py` | one bounded writer per Run, monotonic `seq`, truncation markers preserving lifecycle/permission/error events |
+| `run_task.py` | admission assembly, the closed start plan, lease, process/driver coordination, dispatch markers, timeout/cancel, finalization, quarantine, top-level exception boundary; once-only environment resolution; Spec-then-launch write order preserved; `agentInfo` name/version recorded as evidence and gating nothing |
 
 **Deleted by the reset:** `runtime_binding.py` and `attestation.py`. No module may re-create artifact
 identity, promotion, digests, ownership or mode gates, or credential-root inspection under another name.
@@ -72,10 +76,9 @@ identity, promotion, digests, ownership or mode gates, or credential-root inspec
 
 | Module | Responsibility |
 |---|---|
-| `server.py` | asyncio UDS accept loop, `SO_PEERCRED`, finite backlog, per-connection isolation; UDS create/chmod/replace/unlink as the second writable surface; installs the log filter before serving |
-| `safe_logging.py` **(new)** | the mandatory **handler-level** log filter, installed before serving and before any diagnostic CLI spawns an ACP child. It guards complete ARS-authored `msg + args`, clears raw `args`/`exc_info`, replaces every dependency/SDK-originated record in inherited SDK context with a categorical record, and suppresses any Run-tagged record lacking a guard categorically |
+| `server.py` | asyncio UDS accept loop, `SO_PEERCRED`, finite backlog, per-connection isolation; UDS create/chmod/replace/unlink as the second writable surface |
 | `protocol.py` | bounded JSON frames, mandatory `api_version`, **per-operation** version admission rather than envelope-level rejection, so the drain matrix is expressible |
-| `handlers.py` | submit/status/events/cancel and Session status/list/close with owner checks; Session creation is part of `submit`; `server_info` reports the supported version set; responses expose only guarded fields through an explicit allowlist and never raw stored objects or exceptions |
+| `handlers.py` | submit/status/events/cancel and Session status/list/close with owner checks; Session creation is part of `submit`; `server_info` reports the supported version set; responses expose only allowlisted fields and never raw stored objects or exceptions |
 | `admission.py` | durable submission/idempotency records, keyed admission locks, typed terminal-result inspection; the strict submission writer/validator shared with reconciliation; **pure in-memory** agent resolution against the startup snapshot with zero filesystem access; value-blind digest material; the forbidden runtime-selection field set |
 | `reconcile.py` | startup-only, ordered, exhaustive, fail-closed reconciliation (§9); no prompt replay, resume, or repair |
 | `client.py` | typed local caller for Hermes/CLI; explicit connect/close, no silent reconnect or replay |
@@ -101,7 +104,7 @@ child. There is no `promote`, no `rollback`, no `--force`, no internal privilege
 that installs an artifact, edits a service unit, restarts the daemon, or contacts a provider.
 
 `run inspect` recomputes the **value-blind** launch hash for a reset-schema record after excluding exactly
-one top-level field, and reports only guarded, allowlisted evidence. For a pre-reset record it classifies the
+one top-level field, and reports only allowlisted evidence. For a pre-reset record it classifies the
 schema **before** selecting a verifier, returns immediately through the safe legacy projection, marks the
 record value-bearing with environment values withheld, reports launch-seal verification as not performed,
 and **never calls any hash function over value-bearing material**.
@@ -150,17 +153,18 @@ resolved = resolve_environment(
     base_names=profile.base_allowlist,         # layer 1
     passthrough_names=entry.env_passthrough,   # layer 2
     overlay=entry.env_overlay,                 # layer 3
-    mediation=source_mediation_pairs(entry.mediation),   # layer 4, applied LAST
+    mediation=source_mediation_pairs(entry.mediation),   # layer 4
+    launch_permission=material.env_pairs if material else (),  # layer 5, LAST
 )
-guard = RunTextGuard.from_environment(resolved)
 launch_env = resolved.value_blind_projection()
 managed_process.start(argv=argv, env=resolved.exec_mapping)
 ```
 
 - `ResolvedEnvironment` is **ephemeral and non-serializable**: its value mapping is `repr=False`, excluded
-  from equality and hashing, exposes no `to_dict`, and is accepted **only** by the process-spawn seam and by
-  the guard constructor. A type and static-boundary test prevents it from entering any Spec, launch, event,
-  result, log, exception, or API serializer.
+  from equality and hashing, exposes no `to_dict`, and is accepted **only** by the process-spawn seam. It has
+  exactly one consumer and no accessor that enumerates its values for any other purpose. A type and
+  static-boundary test prevents it from entering any Spec, launch, event, result, log, exception, or API
+  serializer.
 - `EnvProjection` is the separate **durable, value-blind** shape: per name, the name, its source class, its
   precedence layer, and its redaction status, plus a resolved count, the mediation id, and the
   declared-but-absent names. Nothing else. The old `fixed_env`/`permission_env` value fields disappear from
@@ -170,13 +174,18 @@ managed_process.start(argv=argv, env=resolved.exec_mapping)
   to exec and the exec mapping stays byte-identical if the ambient environment mutates afterwards.
 - `SSH_AUTH_SOCK` is deliberately **not** in the layer-1 base set; forwarding it is an explicit per-agent
   pass-through opt-in.
+- **Layer 5 is the launch-permission pair**, present only for a profile that selected a policy and empty for
+  every other profile, so their projection is byte-identical to before. Like layer 4 it is source-owned in
+  key *and* value and applied last, so an operator overlay can never shadow it; a profile-construction
+  invariant additionally refuses a base allowlist or mediation binding that claims the same key. Its value is
+  an ephemeral local path, withheld exactly like every other value — what is durable is the **name**, its
+  source class, and its precedence.
 
-**Reviewer-note boundary, binding.** The workspace canonical root and the effective `cwd` are **not** routed
-through the guard. When the workspace lives under `$HOME`, `spec.json`'s canonical root and effective cwd
-contain the complete `HOME` literal as a substring and `spec_hash` covers them. That is correct and
-intentional: they are **independently derived authority facts, not environment-value flow**, and guarding
-them would break workspace binding, reconciliation attribution, and audit. An implementer must not route the
-binding fields through the guard, and a test encodes this rather than a comment.
+**Workspace binding fields stay complete literals.** When the workspace lives under `$HOME`, `spec.json`'s
+canonical root and effective cwd contain the complete `HOME` literal as a substring and `spec_hash` covers
+them. That is correct and intentional: they are **independently derived authority facts**, and truncating or
+tokenising them would break workspace binding, reconciliation attribution, and audit. A test encodes this
+rather than a comment.
 
 ### `SessionStartPlan`
 
@@ -238,7 +247,7 @@ and is **not** silently changed while moving digest material.
 
 ### `ObservedRuntime`
 
-Observed-only, and guarded before storage: `ProcessIdentity`, agent/protocol info, capability and config
+Observed-only: `ProcessIdentity`, agent/protocol info, capability and config
 advertisements, external Session ID, discovery snapshots, exact effective model/effort, and the
 non-authoritative resolution observations — declared command, path-lookup observation, mapped-image
 observation, and an optional operator probe result. Each carries an explicit non-authoritative marker. It
@@ -291,7 +300,7 @@ protocol consumer, and exactly one `ManagedProcess` per Run from spawn to reap.
 
 The reset drops the descriptor-based interpreter exec so the declared `command` and `argv[0]` survive
 exactly as declared, accepts `ResolvedEnvironment` only at the spawn seam, never formats the environment
-mapping, and guards stderr bytes before any retained diagnostic output. Child-exec errno is preserved
+mapping, and bounds stderr before any retained diagnostic output. Child-exec errno is preserved
 through the process error type so the caller can classify `ENOENT`, `EACCES`, and everything else without
 embedding raw exception text. Process-group and reap behavior are unchanged.
 
@@ -307,15 +316,63 @@ initialize
 → read complete config options (live discovery)
 → set model
 → consume complete model-dependent options
-→ rediscover effort from that fresh set
-→ set effort
-→ consume updates and exact-read the effective pair
-→ persist guarded ObservedRuntime
+→ [separate-selectors only] rediscover effort from that fresh set
+→ [separate-selectors only] set effort
+→ consume updates and exact-read the effective configuration
+→ persist ObservedRuntime
 → ready-to-prompt
 ```
 
 Any missing, unknown, or inexact state raises a stable pre-dispatch failure. Prompt code is unreachable until
 the state machine reaches `ready-to-prompt`.
+
+**Launch permission, decided before the wire exists.** ACP mediation decides before a side effect only when
+the agent asks, and some agents do not always ask: an `agent`-mode edit can complete with no
+`session/request_permission` at all, so the completion backstop sees the violation only once the file exists.
+A profile may therefore select one closed **launch-permission policy id**. Before spawn, ARS compiles that
+policy's deterministic document from the Run's frozen grant, writes it `0600` inside a `0700` per-Run
+directory under the Run's own supervisor-root directory — created with an exclusive `mkdir` and written
+through the directory's own descriptor with `O_EXCL | O_NOFOLLOW`, so an existing path or a symlink refuses
+rather than being adopted — and projects the pair that points the agent at it. The agent then refuses the
+side effect itself.
+
+The slice is read-only and stays that way. The one registered policy denies `Write(**)` and `Shell(*)`
+explicitly, because leaving either unclassified is what lets an edit complete unasked, and it denies no read,
+so ordinary workspace reading is untouched. A Run whose frozen grant asks for a capability this backend
+cannot faithfully enforce is refused **before spawn and before any prompt** with
+`LAUNCH_PERMISSION_UNSUPPORTED_GRANT`, rather than being silently widened by a document that ignores the
+grant or silently narrowed by one that contradicts it. `launch.json` binds the policy id and a SHA-256
+content digest — never the directory, never the document — so the launched policy is auditable value-blind.
+The material is removed only once the child is **proven exited and reaped**, on every path including
+pre-spawn failure, cancellation, turn timeout, and emergency finalization. Removal enumerates the directory
+incrementally and stops at its entry bound, because the child owns what it wrote there and the listing is
+bounded by nothing ARS controls. A removal that fails is classified durably — a write-once
+`launch-permission-cleanup-failed.json` carrying a stable code and the Run id, plus an event when a writer is
+still open — and never as errno, path, document, or exception text. Material that a *failed materialization*
+created and then could not roll back is reported under that same cleanup code rather than as a materialize
+failure, because no material was returned for the Run path to classify later and the leftover is the one fact
+an operator needs; a refused pre-existing target creates nothing, so it never reports one. The marker is written once, so the outer
+last-resort retry clears the leftover without erasing the fact that the first attempt failed, and cleanup
+hygiene never becomes the Run's terminal verdict. `PermissionBridge` and the post-completion violation
+detector are unchanged: this is an earlier line, not a replacement for either.
+
+**Two configuration-fidelity modes, declared by the profile.** `config_fidelity.py` owns both, and a profile
+declares exactly one.
+
+| Mode | Selectors | Sequence | Effective effort |
+|---|---|---|---|
+| `separate-selectors` (default) | model **and** effort | the full sequence above | the exact effort read back |
+| `model-only` | model only; `effort_selector_id` is `None` | stops at the exact model readback; **no effort option is discovered and no effort `set_config_option` frame is ever written** | the shared `EFFORT_NOT_APPLICABLE` sentinel, `"N/A"` |
+
+The sentinel is one source constant. A `model-only` Run must *request* it: any other requested effort is a
+pre-dispatch `CONFIG_FIDELITY` failure before the first ACP frame, because silently ignoring a requested
+effort is exactly the coercion R3 forbids. An operator entry may not hint an effort selector on a
+`model-only` profile, and the sealed launch snapshot records `effort_selector_id: null` — naming a selector
+no Run ever sets would seal a call that never happened. Rollback re-runs the Session's declared mode.
+
+The selector value is **opaque** in both modes. A model literal such as `grok-4.5[effort=high,fast=true]` is
+set and read back byte-for-byte: no code path parses it, infers an effort from it, maps a model name, or
+reads an agent's ACP `mode` selector as an effort.
 
 **Value domains are live.** Registered model sets, allowed effort sets, and selector value domains are
 deleted as admission gates: the live-discovered option set is the domain authority and exact literal readback
@@ -350,7 +407,7 @@ ordinary process exit classification.
 existing terminal results, reconstructs only from trustworthy terminal events, and maps uncertain started
 Runs to `unknown/quarantined/retryable=false`. It never calls prompt.
 
-## 7. Credentials, environment, and the sink guard
+## 7. Credentials and the environment boundary
 
 **ARS resolves no credentials.** There is no credential resolution anywhere on the Native path;
 `credential_refs` are caller-supplied **names** recorded as admission evidence and grant material, checked
@@ -363,59 +420,39 @@ Deleted with the reset: the credential-root slot, the managed-credential-root co
 mode inspection, credential-root permission enforcement, config-file absence checks, and every
 credential-root refusal. ARS does not know what an AGENT's credential file is called and must not.
 
-**The guard.** `RunTextGuard.from_environment(resolved)` is constructed at admission step 11 from every
-**non-empty** final projected value across all four layers. Empty strings contribute no bytes. The guard:
+**No per-Run literal guard.** ARS previously constructed an ephemeral per-Run guard from every non-empty
+final projected value and denied that exact literal at every ARS-owned textual, event, log, error, storage,
+and API boundary. That guard — `RunTextGuard`, `SafeText`, its counters, its markers, and the handler-level
+`arsd/safe_logging.py` filter — is **removed**, together with the external-Session-id sensitive-collision
+refusal and `ResolvedEnvironment.sensitive_values()`. Nothing replaces it, and it must not be reintroduced
+under another name.
 
-1. keeps its sensitive set in memory only, with `repr=False`, no serializer, no equality or hash
-   implementation, and no diagnostic enumeration;
-2. builds bounded longest-first lists for the Python string form **and** the actual POSIX exec byte encoding,
-   removing duplicates by direct equality only; matching is a bounded direct scan / `startswith` walk —
-   never a regex cache, set or dict key, Bloom filter, digest, or any operation that hashes a sensitive
-   value, even transiently;
-3. applies the existing static secret-pattern redactor **and** the per-Run exact matcher;
-4. recursively guards every string value and every dynamic string key in structured child-controlled data
-   before JSON encoding, suppressing the enclosing record when two guarded keys collide rather than
-   overwriting one;
-5. rescans the guarded result, and where safe replacement cannot be established suppresses the whole field or
-   record and emits only a stable categorical withholding marker.
+**What the boundary still guarantees.** The scope narrows to what ARS itself authors or seals:
 
-The replacement token is a fixed source literal containing no input data. Only coarse sink-local integers
-may be recorded — matched occurrences, suppressed fields, suppressed records — and original or replaced
-lengths are **not** recorded. Confidentiality wins over evidence completeness: there is no minimum secret
-length and no value is waived for inconvenience. The guard stays installed through SDK close, cancellation
-and join of every inherited task, persistence, logging flush, and final response projection; only then is the
-context cleared and the carrier dereferenced. That is lifetime minimization, **not** a claim that Python can
-zero immutable strings.
-
-**Mandatory sink placement.** Every row below is inside the guarantee:
-
-| Sink | Required boundary |
+| Surface | Rule |
 |---|---|
-| ACP final/agent/thought text and the final-message accumulator | guard on ingestion with a rolling carry one byte short of the longest literal, so a value split across chunks is caught before accumulation; retain no unguarded chunk beyond that carry; guard the assembled message again before the result write |
-| normalized updates and lifecycle/tool/config/permission evidence | guard all dynamic keys and strings before enqueue; the writer guards again before sequence assignment, fan-out, and append |
-| permission and filesystem evidence | guard child tool-call ids, kinds, reasons, path and content summaries, option fields, handler exceptions, and denial diagnostics before recording or returning |
-| `effective.json` and initialize/discovery evidence | guard `agentInfo`, capability and config structures, selector ids, observations, and every child-supplied string before storage |
-| the external Session ID returned by `session/new` | it must be replayed unchanged and therefore **cannot** be redacted: test it inside the driver **before** assigning the expected ID, returning it, or updating the Session record; any match yields a categorical sensitive-collision refusal, connection teardown, no ID persistence, no callback servicing, no prompt, and no API exposure |
-| stderr/stdout diagnostic capture | byte matcher over the joined bounded buffer (or a streaming carry) **before decode**, text matcher again after decode, then bounded safe retention; undecodable or unsafe input is replaced wholesale with a categorical marker |
-| `result.json`, `progress.json`, the redaction report, terminal/failure detail | guard before the storage call; terminal codes stay stable and value-blind |
-| spawn, ACP, callback, timeout, cleanup, and SDK exceptions | translate known failures to stable codes; otherwise guard the safe projection. Daemon and diagnostic-CLI outer boundaries replace any otherwise-unhandled exception with a stable code. Raw `repr`, raw args, raw frame bytes, raw traceback locals, and raw environment mappings are never emitted |
-| daemon and SDK logging | a per-Run `contextvars` guard and an SDK-child flag are inherited by driver and SDK tasks. ARS-authored Run logs are preformatted as complete `msg + args`, guarded, and stripped of raw `args`/`exc_info`. **Every** dependency/SDK-originated record in that context is replaced wholesale by a stable categorical record rather than trying to recognize arbitrary repr or escape transforms, and any Run-tagged record lacking a guard is suppressed categorically. `contextvars` do **not** cross thread boundaries, so the implementer must prove that no value-bearing record can originate off-loop and untagged; the categorical suppression backstop is what makes that provable, and `ManagedProcess` never formatting the mapping is what makes it practically closed |
-| live events, terminal response, status/list, `run inspect`, and other API projections | live data crosses the guard before fan-out; completed reset-schema data is read only from already-guarded stores through an explicit response-field allowlist; handlers never return raw exceptions or raw stored objects |
-| structured launch/spec/hash material | names + source class + precedence only. **No value, value digest, keyed digest, length, prefix, suffix, equality token, or matcher table is hash material**, and the retired value-bearing env fields are rejected by a schema-level allowlist rather than ignored |
-| pre-reset value-bearing records | classify the schema **before** selecting a verifier; return a categorical allowlist; withhold environment fields, raw documents, value-bearing seals, the external session id, and free-form text; **never** call a launch-hash recomputation on a legacy record |
-| startup and registry validation | structurally value-blind by construction, because it runs before a per-Run guard exists: refusals name a stable rule and at most a field path or an environment **name**; successful offline validation prints only entry ids, counts, names, source classes, and rule outcomes |
+| structured launch/spec/hash material | per name: the name, its source class, its precedence layer, and its redaction status. **No value, value digest, keyed digest, length, prefix, suffix, or equality token is hash material**, and the retired value-bearing env fields are rejected by a schema-level allowlist rather than ignored |
+| the resolved environment carrier | ephemeral, non-serializable, one consumer (process spawn). A source scan refuses any `repr` of, or f-string interpolation over, an environment mapping anywhere in `src/`, and `ManagedProcess` never formats it |
+| free-form Run text | the static shape redactor (API key / Bearer / JWT / PEM) plus the existing byte/event/final-message ceilings. One sanctioned storage seam, which judges the type before writing |
+| mapping and env-key projections | a key whose *name* marks it sensitive is replaced with `[REDACTED]`, independently of value shape |
+| spawn, ACP, callback, timeout, cleanup, and SDK exceptions | translate known failures to stable codes; daemon and diagnostic-CLI outer boundaries replace any otherwise-unhandled exception with a stable code. Raw `repr`, raw args, raw frame bytes, raw traceback locals, and raw environment mappings are never emitted |
+| SDK root logging | `_RootExceptionDetailRedactor` stays: the SDK's module-level `logging.exception` records keep their message and the exception's class name and lose the detail. It is a dependency-containment seam, not the removed literal guard |
+| pre-reset value-bearing records | classify the schema **before** selecting a verifier; return a categorical allowlist; withhold environment fields, raw documents, and value-bearing seals; **never** call a launch-hash recomputation on a legacy record |
+| startup and registry validation | refusals name a stable rule and at most a field path or an environment **name**, never an overlay value or a raw file fragment |
 
-The event writer is the **last** common boundary, not the only one: early guarding keeps values out of
-buffers, while writer guarding stops a missed call site from becoming durable or externally visible.
+**The accepted consequence, stated rather than hidden.** An AGENT that echoes an arbitrary environment value
+back through free-form Run text — a final message, an event field, a tool-call id, `agentInfo`, usage
+metadata, stderr, or the external Session id it mints — may have that value **retained** in ARS evidence
+unless it matches a static credential pattern. That is a deliberate trade: exact-literal matching erased
+substantial ordinary evidence (`TERM`, `LANG`, `USER`, `HOME`, `PATH` elements, and any one-character value)
+and refused otherwise-valid Session ids, and the erasure was not worth its cost. Operators who treat a
+projected value as a secret must reason about what the AGENT does with it, exactly as they already must for
+what the AGENT transmits to its provider.
 
-**Honest limits.** The guarantee covers ARS-owned persistence and every externally exposed ARS
-daemon/CLI/log/error/event projection. It does not erase the operator-authored value at its source, stop the
-child from writing its own logs or state, stop the child transmitting a value to a remote service, prevent
-OS crash dumps or privileged process inspection, or detect a transformed disclosure — a substring or partial
-value, base64, encryption, hashing, character-by-character fragmentation, or a semantic paraphrase. Those
-require containment or information-flow control and are not claimed. Independently derived public facts with
-identical bytes are not treated as value-derived flow; tests prove the boundary with unique sentinels and
-taint-directed call paths, not lexical coincidence.
+**Honest limits, unchanged in kind.** ARS does not erase the operator-authored value at its source, stop the
+child from writing its own logs or state, stop the child transmitting a value to a remote service, prevent OS
+crash dumps or privileged process inspection, or detect a transformed disclosure. Those require containment
+or information-flow control and are not claimed.
 
 The permission and workspace evidence rules are otherwise unchanged: the caller-provided grant is frozen into
 the Spec, the bridge maps only registered ACP operations and denies unknown classes, and decisions record
@@ -424,7 +461,7 @@ acceptance still requires a real denied-action canary with a recorded deny, a co
 absent sentinel, and direct pre/post listing of a disposable known-empty workspace. `workspace_hash` remains
 a canonical binding hash only; v1 adds no content-digest service, watcher, or sandbox claim.
 
-## 8. Storage seam and safe projection types
+## 8. Storage seam and free-form Run text
 
 `native_acp/storage.py` constructs all Native `SessionStore(base_dir=.../native-sessions)` and
 `EventStore(base_dir=.../native-runs)` instances. No other Native module constructs a legacy-root store.
@@ -432,20 +469,21 @@ Tests seed poisoned same-ID legacy records and prove Native never reads or mutat
 and bytes remain unchanged.
 
 Files and directories use `0600`/`0700`, with exclusive create or atomic replace as appropriate. One bounded
-writer owns each event stream. Credential values, raw environment values, cookies, authorization headers,
-and unredacted bulk payloads never persist.
+writer owns each event stream. ARS never writes a projected environment value here out of the resolved
+carrier, and cookies, authorization headers, and unredacted bulk payloads are never retained. Free-form Run
+text an AGENT authored is a different case: it is bounded and statically redacted, not matched against this
+Run's projected values, so an echoed value can persist (§7).
 
-**Safe projection types are a seam property, not a convention.** Storage APIs for free-form Run text accept a
-guard-produced safe projection type, so an unguarded `str` is not accepted at those seams and a missed guard
-call is a type error rather than a leak. Reset-schema readers expose explicit allowlists; terminal builders
-accept stable detail codes rather than raw child or exception text.
+**One seam for free-form Run text.** `storage.write_run_text` is the only sanctioned Native writer for it,
+so the set of places that can create such an artifact stays enumerable, and it judges the type before
+writing — `session.json` and `stderr.log` are durable text, and an object with a hostile `__str__` must not
+reach a serializer. Reset-schema readers expose explicit allowlists; terminal builders accept stable detail
+codes rather than raw child or exception text.
 
-**The workspace binding fields are outside the guarded set, deliberately.** `spec.json`'s canonical workspace
-root and effective `cwd` retain their complete literal text and stay covered by `spec_hash`, even when the
-workspace lives under `$HOME` and the literal therefore contains the complete `HOME` value as a substring.
-They are independently derived authority facts, not environment-value flow. Guarding them would break
-workspace binding, reconciliation attribution, and audit, so no storage seam may route them through the
-guard.
+**The workspace binding fields keep their complete literal text.** `spec.json`'s canonical workspace root and
+effective `cwd` stay covered by `spec_hash`, even when the workspace lives under `$HOME` and the literal
+therefore contains the complete `HOME` value as a substring. They are independently derived authority facts,
+and truncating or tokenising them would break workspace binding, reconciliation attribution, and audit.
 
 **Two writable surfaces, enumerated.** The supervisor root through this seam, and the configured UDS runtime
 path in `arsd/server.py`. The operator agents file is operator storage that ARS opens read-only, exactly once
@@ -519,22 +557,22 @@ trusted terminal are no-ops.
 
 - **L1 pure/unit:** registry grammar, bounds, and typed refusals; profile construction invariants;
   value-blind launch and hash projection; Spec freeze order and goldens; once-only environment precedence;
-  guard string, byte, recursive, overlap, and suppression behavior with a spy proving no hash of a sensitive
-  value is computed even transiently; mediation collision and layer-4-last precedence; typed start-plan
-  construction and the reuse truth table; SDK callback signature and entry-guard conformance; the generated
-  reconciliation oracle over the full artifact product crossed with Session states; terminal and marker
-  tables; event bounds.
+  the two configuration-fidelity modes, their invalid combinations, and the shared `N/A` sentinel declared
+  once; mediation collision and layer-4-last precedence; typed start-plan construction and the reuse truth
+  table; SDK callback signature and entry-guard conformance; the generated reconciliation oracle over the
+  full artifact product crossed with Session states; terminal and marker tables; event bounds.
 - **L2 hermetic ACP child** over real stdio JSON-RPC: existing fake-agent coverage plus `argv[0]`/shim
   semantics, registry startup defects, errno spawn classes, observation drift without a continuity refusal,
-  child-HOME mutation completing normally, every reuse and callback failure, every environment-value sink
-  echo including short, overlapping, Unicode, JSON-metacharacter, non-ASCII exec-byte, and
-  deliberately-split-across-chunk sentinels, legacy value-blind reads, and crash injection at every
-  reconciliation write boundary.
+  child-HOME mutation completing normally, every reuse and callback failure, the projected-value retention
+  matrix (final message, split chunks, events, permission fields, observations, usage, stderr, and an
+  external Session id equal to a projected value), a Cursor-shaped model-only server that can be prompted
+  only after an exact model readback, legacy value-blind reads, and crash injection at every reconciliation
+  write boundary.
 - **L2 structural:** no deployment fact in source; no wire launch field; no endpoint, transport, remote, or
   attach key, field, branch, or dependency; exactly one process per Run; read-once open counters across a
-  full daemon lifecycle; no raw environment `repr`; no hash over a value set; no unsafe storage signature; no
-  load→new edge; no reconciliation replay edge; a monkeypatched legacy hash function that raises, proving the
-  legacy branch never calls it.
+  full daemon lifecycle; no raw environment `repr` or interpolation; no `write_text` outside the storage
+  seam; no load→new edge; no reconciliation replay edge; a monkeypatched legacy hash function that raises,
+  proving the legacy branch never calls it; the installed SDK distribution version.
 - **L3 real, opt-in, never in CI, per registered agent:** zero-prompt discovery; exact readback including a
   literal that must not be coerced; same-Session continuity across a real agent upgrade behind an unchanged
   registered command; the mandatory denied-action canary; cgroup crash containment.
@@ -559,18 +597,20 @@ deleting the rest would silently drop the only real-agent continuity evidence.
   landed under its own recorded approval and are merged on `main`. The retired Binding source framework is
   deleted.
 - Publication (tag, GitHub Release, PyPI) is separate from implementation, and a prepared version number is
-  not a publication. The runtime remains stdlib-only, which the locked-dependency and version-sync gates
-  assert at every stage.
+  not a publication. The runtime remains stdlib-only apart from the optional `native` extra, which the
+  locked-dependency and version-sync gates assert at every stage.
 - Rollback disables Native ingress; there is no auto-fallback to acpx and no terminal-fact rewrite.
 - Each reset gate is one revertable merge commit. Reverting the authority alignment restores the Binding-era
   authority chain exactly and touches no source, runtime, or deployment state. Reverting the fail-closed
   hardening restores baseline reuse and reconciliation behavior; its only non-revertable side-effect class is
   a durable quarantine or fence written before the revert, and those are pre-existing, idempotent,
-  irreversible-by-design facts that are correct outcomes under both versions. Reverting the guard restores
-  baseline redaction while categorical withholding markers written under it stay readable and schema-valid.
+  irreversible-by-design facts that are correct outcomes under both versions.
   Reverting the boundary reset restores the Binding line in source, with the `/opt` trees and Binding roots
-  intact because no gate ever wrote to them.
-- Sachima `ArsdBackend` and pin changes are later work.
+  intact because no gate ever wrote to them. Records written while the removed per-Run literal guard was live
+  keep their categorical withholding markers; those markers stay readable and schema-valid, and nothing
+  rewrites them.
+- Sachima `ArsdBackend` is later work. The ACP SDK pin moved to `0.12.0` under this document; the SDK's
+  `http` extra stays uninstalled and HTTP/WS transport remains a non-goal.
 
 Executable slice sequences, fresh worktree/branch rules, exact commands, and separate push/PR/merge
 approvals live only in `docs/plans/active/`, which is empty right now: the reset's plan is archived at

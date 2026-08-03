@@ -85,7 +85,7 @@ v2**：客户端发出的每一个**请求**信封都带 `api_version`，未知�
 | 需求 | 要求 |
 |---|---|
 | 运行时 | **Python ≥ 3.11**，**零第三方运行时依赖**。 |
-| 驱动真实 agent | `native` 额外依赖，钉住官方 ACP 客户端 `agent-client-protocol==0.11.1`。基础安装可正常导入，只在真正用到 SDK 时才失败。 |
+| 驱动真实 agent | `native` 额外依赖，钉住官方 ACP 客户端 `agent-client-protocol==0.12.0`。基础安装可正常导入，只在真正用到 SDK 时才失败。ARS 仅使用 stdio ACP，永不安装 SDK 的 `http` 额外依赖。 |
 | 运行 `arsd` | Linux，且有可放置 AF_UNIX 套接字的 POSIX 用户会话，另需 supervisor root、一个 agents 文件与至少一条 caller 映射。崩溃遏制还需要用户级 service manager 的 cgroup 与带 pidfd 支持的 CPython。 |
 | 运行 agent | 由你安装好的 agent，以及一条写明其命令的注册表条目。 |
 
@@ -133,7 +133,9 @@ forbidden_capabilities = ["terminal"]
 `env_passthrough`、`env_overlay`、`model_selector`、`effort_selector`、`forbidden_capabilities` 与
 `session_epoch` —— 除此以外没有别的，任何层级上的未知键都会被拒绝。CLI 本身不讲 ACP 的 agent 也没有
 区别：把 `command` 指向你安装的那个 ACP 适配器，profile 照旧，因为适配器是部署事实而不是源码常量。
-只有 `claude-agent-acp-compat-v1` 不同，且仅用于一处有据可查的 ACP 层偏差。
+有两个 profile 不同，各自只对应一处有据可查的偏差：`claude-agent-acp-compat-v1` 保留它既有的
+ACP 层兼容性差异；`cursor-native-acp-v1` 使用 model-only 配置保真，外加一份源码拥有的只读启动
+权限策略。`standard-native-acp-v1` 的行为一如往常。
 
 - **你的命令按声明原样启动。** `argv[0]` 逐字节就是你声明的那个字符串；裸名字由**子进程**投影出的
   `PATH` 按普通查找定位，因此 shim、符号链接农场以及 agent 自更新都照常可用。这里没有任何预检解析；
@@ -246,7 +248,7 @@ with ArsdClient(socket_path) as client:
 | ARS 保证 | ARS 不声称 |
 |---|---|
 | 对照调用方冻结的授权做默认拒绝中介，每次决策都产出脱敏证据；权限中介所用的环境绑定在**键与值两侧**都由源码拥有、最后施加，条目永远无法编写或禁用它 | **是沙箱。** 这是协作式 agent 策略，不是操作系统隔离：agent 以守护进程的 UID 运行，拥有该 UID 的全部权限 |
-| 任何 ARS 工件、哈希输入、日志、错误、事件、inspect 响应或 API 响应里都不含环境值 —— 连它的摘要、指纹或长度都没有 | 值不会到达子进程，或能识别出**变形后**的泄露（片段、编码、哈希、改写） |
+| 已解析的环境载体绝不会被序列化进结构化的 launch/Spec/环境材料、任何哈希输入或配置 inspect 响应 —— 连摘要、指纹或长度都没有；该载体只交给 exec，不流向别处 | 环境值绝不出现在 Run 证据里。ARS **不再**用本 Run 投射出的值去扫描 agent 自由文本，因此 agent 主动回显的任意投射值可能被保留在有界的 Run/Session 证据中，除非仍在生效的静态凭据形态/敏感键脱敏命中它 |
 | 确定性的脱敏工件：目录 `0700`、文件 `0600`、最终写入原子化，且只有两个可写面 —— supervisor root 与套接字路径 | **完整性或供应链校验。** ARS 不验证它启动的可执行文件是不是你想要的那个、来自哪个发布者 |
 | 终止其直接子进程，以及仍留在 ARS 所创建进程组内的全部后代 | **是完备的终止开关。** 离开该进程组的后代在保证之外 —— 若工作确实在别处继续，该 Run 会响亮地落到 `unknown` / `quarantined` |
 | 不确定即失败关闭：可能已派发的提示词不会被自动重试、重放或续跑，也不存在解除 quarantine 的工具 | **本身构成崩溃遏制。** 生产环境依赖用户级 service manager 的 cgroup（`Restart=on-failure`、`KillMode=control-group`） |

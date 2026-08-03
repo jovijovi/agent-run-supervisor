@@ -13,8 +13,9 @@ AGENTs, their ACP adapters, their homes, credential stores, plugin trees, caches
 are installed, configured, authenticated, upgraded, and removed by users and operators through their own
 package managers, entirely outside ARS.
 
-ARS v1 also does not discover, resolve, mint, refresh, or manage credentials, and never persists an
-environment value.
+ARS v1 also does not discover, resolve, mint, refresh, or manage credentials, and never itself serializes a
+projected environment value into durable structured material. What an AGENT chooses to echo back is a
+separate matter, bounded rather than erased — see *Environment and credential guarantee*.
 
 Process lifecycle ownership is not software-entity ownership. ARS owns the *process it started*; the user
 owns the *software it started*.
@@ -81,8 +82,10 @@ result verification.
    `session/load`; AGENT processes do not survive between Runs. A reuse request can never become
    `session/new` — not as a fallback, not after a failure, not under any error class.
 4. model/effort are immutable per Run, switchable only between completed Runs on the same external
-   AGENT Session: load → discovery → set model → rediscovery → set effort → exact readback → prompt.
-   The live-advertised option set is the domain authority; no source-frozen value domain gates it.
+   AGENT Session: load → discovery → set model → rediscovery → set effort → exact readback → prompt. A
+   profile whose declared fidelity mode is `model-only` stops at the exact model readback, dispatches no
+   effort set at all, and reports the shared `N/A` effort. The live-advertised option set is the domain
+   authority; no source-frozen value domain gates it.
 5. A prompt that may have been dispatched without a trustworthy terminal result ends as
    `Run=unknown`, `Session=quarantined`, `retryable=false`. It is never replayed, resumed, or retried
    automatically; successor work is a separate caller-authorized Run.
@@ -97,9 +100,9 @@ result verification.
    resends a prompt.
 9. A source profile freezes **ACP protocol and compatibility semantics only** — protocol major, required
    capabilities, a forbidden-capability floor, session semantics including required real `session/load`,
-   selector-id conventions, the base environment allowlist, permission-mediation semantics, and, only
-   where cited ACP-level evidence requires it, frozen ACP session metadata and a required permission-mode
-   selector. It contains no path, version, digest, model literal, agent name, value domain, launch kind,
+   the declared configuration-fidelity mode and its selector-id conventions, the base environment
+   allowlist, permission-mediation semantics, and, only where cited ACP-level evidence requires it, frozen
+   ACP session metadata and a required permission-mode selector. It contains no path, version, digest, model literal, agent name, value domain, launch kind,
    artifact identity, or deployment fact. Every AGENT is instead one **operator-owned registry entry**
    that carries the command and its argv, read once at daemon startup into an immutable snapshot. There
    is no ARS-owned artifact, ARS-managed AGENT home, or attestation of anything ARS does not own.
@@ -113,11 +116,27 @@ result verification.
 ## Environment and credential guarantee
 
 Every environment value is sensitive, regardless of key name, source class, length, or apparent shape. A
-value may exist at its operator- or source-owned origin, in `arsd` memory, and in the child environment.
-No complete projected literal — and no digest, fingerprint, length-by-value, or other metadata computed to
-represent that value — may flow into an ARS durable artifact, hash input, log, exception or error message,
-event stream, inspect response, or daemon API response. Durable environment evidence records the name, its
-source class, its precedence layer, and its redaction status, and nothing else.
+value may exist at its operator- or source-owned origin, in `arsd` memory, and in the child environment. The
+guarantee has exactly two parts, and they are deliberately unequal.
+
+**What ARS will not do.** ARS never serializes a projected value — and never a digest, fingerprint,
+length-by-value, or other metadata computed to represent one — out of the resolved carrier and into
+structured launch, Spec, or environment material, into any hash input, or into a configuration-inspection
+response. The carrier is non-serializable, has exactly one consumer, and is handed to exec and to nothing
+else; it is never rendered into a log line or an exception message. Durable environment evidence records the
+name, its source class, its precedence layer, and its redaction status, and nothing else.
+
+**What ARS does not attempt.** ARS does **not** scan free-form Run text against the set of values it
+projected. There is no per-Run exact-literal guard, and reintroducing one under another name is not the
+direction. An AGENT that echoes a projected value back through a final message, an event field, a tool-call
+id, `agentInfo`, usage metadata, stderr, or the external Session id it mints may therefore have that value
+**retained** in bounded Run and Session evidence, unless the value is caught by the controls that remain:
+static credential-shape and sensitive-key redaction, categorical containment of exception and dependency
+text, bounded evidence ceilings, and the value-blind structured projection above. That is a deliberate
+trade — exact-literal matching erased substantial ordinary evidence (`TERM`, `LANG`, `USER`, `HOME`, `PATH`
+elements, any one-character value) and refused otherwise-valid Session ids — and it means an operator who
+treats a projected value as a secret must reason about what the AGENT does with it, exactly as they already
+must for what the AGENT sends to its provider.
 
 ARS v1 does not discover, resolve, mint, refresh, store, or manage any credential. AGENTs authenticate
 through their own stores under their own `HOME`, exactly as they do interactively. `credential_refs` stay
@@ -131,7 +150,9 @@ value to the child process in memory, by their own declaration, recorded only by
 ## Filesystem boundary
 
 ARS-owned **writable** surfaces are exactly two: the supervisor root (`native-runs/`, `native-sessions/`)
-through the single storage seam, and the configured UDS runtime path. Nothing else.
+through the single storage seam, and the configured UDS runtime path. Nothing else. The private per-Run
+launch-permission material a profile may select is inside the first of the two — under that Run's own
+directory — and is removed once the child is proven reaped; it is not a third surface.
 
 Read-only access is permitted wherever the paths live, including below `$HOME` and through symlinks and
 PATH shims: the operator registry file once at startup, everything the kernel and loader need to resolve
@@ -189,15 +210,17 @@ expected to be recorded; that board is not restated here and does not, by itself
 operator agent registry, the four-way boundary, the environment-value sink boundary, total ordered
 reconciliation, and fail-closed load-only Session reuse — is merged. Stage 0/1 Native ACP and Stage 2
 `arsd` were already closed; the retired artifact/Binding implementation is deleted from source and
-preserved as cold history under `docs/archive/binding-era-2026-07/`, and the source registry now holds
-exactly `standard-native-acp-v1` and `claude-agent-acp-compat-v1`, with the three per-agent profiles
-deleted rather than aliased or disabled.
+preserved as cold history under `docs/archive/binding-era-2026-07/`, and the three per-agent profiles are
+deleted rather than aliased or disabled. The source registry is a closed set of three:
+`standard-native-acp-v1`, `claude-agent-acp-compat-v1`, and `cursor-native-acp-v1` — the last for the one
+evidenced configuration-fidelity deviation, a model selector that is the whole configuration.
 
-Merged is neither published nor live. Package metadata is prepared as `0.6.0`; nothing is tagged,
-released, uploaded to PyPI, deployed, restarted, or cut over, and the released `0.5.x` line still runs the
-retired architecture. Release and publication, production cutover, service restart, migration, `/opt` and
-Binding-root removal, Sachima integration, public ingress, and any Gateway/IM/live behavior each still
-require separate, explicit authorization, and no verification transfers approval to the next change.
+Publication, deployment, cutover, and the current running version are **volatile facts this document does
+not carry**: they live in `docs/roadmap/current-status.md`, which is their single owner. What is durable
+here is the authorization rule, which does not change with any of them — release and publication,
+production cutover, service restart, migration, `/opt` and Binding-root removal, Sachima integration,
+public ingress, and any Gateway/IM/live behavior each require separate, explicit authorization, and no
+verification and no prior release transfers approval to the next change.
 
 ## Non-goals
 

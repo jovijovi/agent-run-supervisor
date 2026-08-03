@@ -2,7 +2,7 @@
 title: "ARS agent registry — the operator contract"
 status: active
 created_at: 2026-07-30
-last_validated_at: 2026-08-02
+last_validated_at: 2026-08-03
 ---
 # ARS agent registry — the operator contract
 
@@ -10,12 +10,11 @@ This is the one document an operator needs in order to tell ARS which commands a
 normative contract for the registry file, its grammar and bounds, its refusal rules, the environment it
 projects into a child, and the restart semantics that follow from reading it exactly once.
 
-**Status.** This contract is **merged on `main`** as part of the V4 boundary reset, and package metadata is
-prepared as `0.6.0`. It is **not published and not deployed**: the released `0.5.x` line still runs the
-retired artifact/Binding architecture and reads no agents file. The board
-([`docs/roadmap/current-status.md`](../roadmap/current-status.md)) carries the exact position. Nothing here
+**Status.** This contract is **merged on `main`** as part of the V4 boundary reset. Which version is
+published and which is running are volatile facts this document does not carry: the board
+([`docs/roadmap/current-status.md`](../roadmap/current-status.md)) is their single owner. Nothing here
 authorizes writing a registry file against a live deployment, restarting a service, or cutting any caller
-over; each of those remains a separate operator decision.
+over; each of those remains a separate operator decision, whatever is already released.
 
 Every example below uses **placeholders**. A placeholder is never a supported version, a registered value
 domain, or an acceptance target.
@@ -119,7 +118,10 @@ key at any level is refused.
 **There is no secret-shaped-name heuristic.** Refusing keys that look like `*TOKEN*` or `*SECRET*` is unsound
 in both directions — `AUTH="…"` evades it while `SOME_AGENT_TOKEN_PATH=/path/to/dir` trips it falsely — and a
 name-shape test can never be a confidentiality boundary. The replacement is the universal rule of §6: every
-environment value is treated as potentially sensitive, and no value is ever persisted.
+environment value is treated as potentially sensitive, and ARS never serializes one out of the resolved
+carrier into structured launch/Spec/environment material, a hash input, or a configuration-inspection
+response. What an AGENT echoes back into free-form Run text is not scanned against those values and may be
+retained — §6 states that half exactly.
 
 ## 5. Grammar and bounds
 
@@ -171,6 +173,7 @@ a Run.
 | malformed | `REGISTRY_PARSE`, `REGISTRY_UNKNOWN_KEY`, `REGISTRY_SCHEMA_VERSION`, `REGISTRY_TOO_LARGE` |
 | entry defects | `AGENT_ID_INVALID`, `ENTRY_FIELD_MISSING`, `ENTRY_UNKNOWN_PROFILE`, `ENTRY_COMMAND_INVALID`, `ENTRY_ARG_TOKEN_INVALID`, `ENTRY_ENV_KEY_INVALID`, `ENTRY_ENV_VALUE_INVALID`, `ENTRY_SELECTOR_INVALID`, `ENTRY_CAPABILITY_INVALID`, `ENTRY_UNKNOWN_MEDIATION_ID`, `ENTRY_SESSION_EPOCH_INVALID` |
 | mediation authority | `MEDIATION_KEY_COLLISION` |
+| launch-permission authority | `LAUNCH_PERMISSION_KEY_COLLISION` |
 
 `AGENT_ID_INVALID` is deliberately the same rule at both layers: the table key is judged by exactly the
 grammar that judges a caller's `agent_id` at admission (§6.2), so the two can never drift. An overlay
@@ -209,7 +212,20 @@ default-deny claim would be decorative. Therefore:
 - **a collision refuses startup.** If any entry's `env_overlay` contains a reserved key, or its
   `env_passthrough` names one, the parse fails with `MEDIATION_KEY_COLLISION` and the daemon refuses to
   listen. `agents validate` applies the identical check offline, so you see it at authoring time;
-- **mediation is applied last anyway**, as defense in depth: a defect in the collision check cannot silently
+- **layer 5 is the launch-permission pair, and declaring its key refuses the file.** If the profile your
+  entry names selects a launch-permission policy, and your `env_passthrough` or `env_overlay` declares that
+  policy's key, the parse fails with `LAUNCH_PERMISSION_KEY_COLLISION` and the daemon refuses to listen —
+  `agents validate` applies the identical check offline. Layer 5 would otherwise overwrite your declaration
+  silently and leave a projection that looks consistent while hiding the conflict. Unlike the mediation
+  rule, this reservation follows the **selection**: a profile that selects no policy projects no layer 5, so
+  the key is not reserved for it here;
+- **layer 5 is the launch-permission pair.** Some agents complete a side effect without ever asking over
+  ACP, so where cited evidence shows that, the profile selects a policy and ARS writes a private per-Run
+  configuration before the process starts and points the agent at it. You do not select it and cannot author
+  or disable it: it is a profile fact, its key and value are source-owned, and it is applied after layer 4.
+  You will see the **name** in a Run's launch projection with source class `launch_permission`; the value is
+  an ephemeral local path and is withheld like every other value.
+- **mediation is applied last among the layers you can influence**, as defense in depth: a defect in the collision check cannot silently
   disable mediation.
 
 **Honest limit.** Mediation is cooperative. An agent that ignores the knob, or one with no registered
@@ -228,7 +244,8 @@ commands need those values, so you get an explicit way to supply them.
 | 1 — base allowlist | names taken from the daemon's own environment, only when present, values unchanged | no (source-owned, per profile) |
 | 2 — pass-through | additional names read from the daemon's environment | yes, `env_passthrough` |
 | 3 — overlay | literal values you author | yes, `env_overlay` |
-| 4 — mediation | source-owned pairs, applied **last** | selection only, `mediation` |
+| 4 — mediation | source-owned pairs | selection only, `mediation` |
+| 5 — launch permission | one source-owned pair, applied **last**, present only when the entry's profile selects a launch-permission policy | no (source-owned, per profile) |
 
 The layer-1 base set covers the ordinary interactive essentials: `HOME`, `PATH`, `USER`, `LOGNAME`, `SHELL`,
 `LANG`, `LC_ALL`, `TZ`, `TERM`, `TMPDIR`, the `XDG_*` directories, the lower- and upper-case proxy variables,
@@ -276,21 +293,16 @@ digest, keyed digest, length, prefix, suffix, equality token, or matcher table i
 transmitted value changed may therefore share a launch hash; the hash proves the declared projection, not the
 secret.
 
-Every non-empty projected value additionally creates an **ephemeral per-Run guard** that denies that literal
-at every ARS-owned text, event, log, error, storage, and API boundary, in both string and exec-byte form. When
-a safe replacement cannot be established, the whole field or record is withheld behind a stable categorical
-marker. Confidentiality wins over evidence completeness.
+**ARS does not scan free-form Run text for the values it projected (see also §12 item 6).** There is no
+per-Run exact-literal guard. Static shape redaction — API key, `Authorization: Bearer`, JWT, PEM — and the
+sensitive-env-**key** rule still apply, but an arbitrary value that matches none of those and that the AGENT
+echoes back into a final message, an event field, a tool-call id, `agentInfo`, usage metadata, stderr, or the
+external Session id it mints **may be retained** in that Run's evidence.
 
-**Consequence you will notice (see also §12 item 6).** Short, common base values — `TERM`, `LANG`, `TZ`,
-`USER`, `HOME`, and `PATH` elements — are in the guard's literal set, so guarding them **will erase
-substantial evidence** from Run text. There is no minimum secret length and no inconvenience waiver. Coarse
-suppression counters make the erasure measurable rather than invisible.
-
-**Deliberate exception (see also §12 item 7).** The canonical workspace root and the effective `cwd` remain
-complete literals in the sealed Spec and remain hash-covered, even when the workspace lives under `$HOME` and
-therefore contains the whole `HOME` value as a substring. They are independently derived authority facts, not
-environment-value flow, and guarding them would break workspace binding, reconciliation attribution, and
-audit.
+**The workspace root and the effective `cwd` remain complete literals (see also §12 item 7)** in the sealed
+Spec and remain hash-covered, even when the workspace lives under `$HOME` and therefore contains the whole
+`HOME` value as a substring. They are independently derived authority facts, and truncating or tokenising
+them would break workspace binding, reconciliation attribution, and audit.
 
 ## 8. Observations are evidence, never gates
 
@@ -305,12 +317,10 @@ be emitted as a policy-warning event — never a refusal. A self-report is not a
 a substituted agent can report any name it likes, and an operator-declared expected name would refuse Runs
 for cosmetic vendor renames.
 
-Recording drift across Runs means one observation outlives its Run, in the Session record. That is the one
-observation sink whose lifetime exceeds the guard's, and the self-report and the advertised capability
-*names* are child-chosen strings no contract check inspects — so what is stored is the **guard-produced**
-projection, not the raw text. An agent that echoes a projected environment value back through `agentInfo`
-or a capability key cannot seed that value into `session.json`, and drift is still detected: the guard
-replaces a matched literal with a fixed token, so two Runs reporting the same thing still compare equal.
+Recording drift across Runs means one observation outlives its Run, in the Session record. The self-report is
+child-chosen text that no contract check inspects, and it is stored as the agent reported it — so an agent
+that echoes a projected environment value through `agentInfo` will put that value into `session.json`, where
+it outlives the Run. If that matters for a particular agent, the remedy is not projecting the value to it.
 
 **The complete set of observation-based refusals** is: protocol major mismatch, a required capability absent,
 a forbidden capability present, an inexact or coerced configuration readback, and — on a compatibility profile
@@ -321,6 +331,12 @@ Model and effort domains are **live**: whatever the running agent advertises rig
 exact literal readback is the proof. A value the agent does not advertise yields zero Turn and no prompt. This
 is why "the agent added a model today" is a non-event for ARS, and why `model_selector` and `effort_selector`
 carry an id hint only.
+
+**`effort_selector` is refused on a `model-only` profile.** Such a profile declares that the agent advertises
+no independent effort selector, so ARS discovers none, sets none, and reports `N/A` as the effective effort.
+An id hint for a selector no Run ever sets would be a fiction in every launch snapshot, so the pairing is
+refused rather than ignored. A caller targeting such an agent must request effort `N/A`; any other value
+fails before the prompt.
 
 ## 9. The honest cost of read-once, and restart semantics
 
@@ -393,14 +409,14 @@ Seven, and each needs an explicit note in your own runbook:
    an unchanged registered command costs nothing at all.
 5. **Adding `session_epoch` to an entry for the first time cuts that agent's existing Sessions**, because
    absent ≠ 1. See §13.
-6. **Guarding short, common base values will erase substantial evidence.** `TERM`, `LANG`, `TZ`, `USER`,
-   `HOME`, and `PATH` elements are in the guard's literal set, so Run text that echoes them will be replaced
-   or withheld. Confidentiality wins over evidence completeness; there is no minimum secret length and no
-   inconvenience waiver. Coarse suppression counters make the loss measurable, and this is the tradeoff most
-   likely to surprise you when triaging a failed Run.
+6. **An AGENT that echoes a projected value into Run text may have ARS retain it.** ARS keeps values out of
+   its own sealed material and never renders the resolved mapping, but it does not scan free-form Run text
+   for the literals it projected. Static credential shapes are still redacted; an arbitrary value is not.
+   This is the tradeoff most likely to surprise you, and the remedy is deciding what you project to which
+   agent — not a per-value exemption.
 7. **The canonical workspace root and the effective `cwd` remain complete literals and remain hash-covered.**
-   They are independently derived authority facts, not environment-value flow, and are deliberately outside
-   the guarded sink set — so a workspace under `$HOME` will show that path in full in `spec.json`.
+   They are independently derived authority facts — so a workspace under `$HOME` will show that path in full
+   in `spec.json`.
 
 Additionally, at a cutover: every **live Session ends**. Legacy Sessions carrying the retired ARS-derived
 identity hashes are refused for `session/load` with a stable code while staying owner-scoped

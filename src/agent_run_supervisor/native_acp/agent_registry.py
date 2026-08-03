@@ -45,6 +45,7 @@ from .agent_registration import (
     refuse,
     validate_agent_id,
 )
+from .launch_permissions import reserved_keys_for_policy
 from .profile import (
     DEFAULT_REGISTRY,
     MEDIATION_BINDING_IDS,
@@ -257,6 +258,7 @@ def parse_registry_document(document: Any) -> AgentRegistrySnapshot:
             known_mediation_ids=MEDIATION_BINDING_IDS,
         )
     _refuse_mediation_key_collisions(entries)
+    _refuse_launch_permission_key_collisions(entries)
     return AgentRegistrySnapshot(entries)
 
 
@@ -281,6 +283,39 @@ def _refuse_mediation_key_collisions(entries: Mapping[str, AgentEntry]) -> None:
                     "MEDIATION_KEY_COLLISION",
                     f"agents.{agent_id} declares reserved mediation key {name}; "
                     "the mediation binding is source-owned in key and value",
+                )
+
+
+def _refuse_launch_permission_key_collisions(
+    entries: Mapping[str, AgentEntry]
+) -> None:
+    """A launch-permission key is refused **for the profile that selects it**.
+
+    Layer 5 is applied last, so a declaration of that key would be silently
+    overwritten and the resulting projection would look perfectly consistent
+    while hiding the conflict. An operator who wrote the key decided something,
+    so the refusal happens where they can still see it — at parse time, which
+    ``agents validate`` and the daemon reach through this same function.
+
+    Per-selection, unlike the mediation rule above: a profile that selects no
+    launch policy projects no layer 5 and materializes nothing, so there is
+    nothing here for the registry to protect. Which profile selects which
+    policy is registry data; nothing in this check knows an agent's name.
+    """
+    for agent_id in sorted(entries):
+        entry = entries[agent_id]
+        # The profile id already passed the closed-set check in ``parse_entry``.
+        profile = DEFAULT_REGISTRY.get(entry.profile_id)
+        reserved = reserved_keys_for_policy(profile.launch_permission_policy_id)
+        if not reserved:
+            continue
+        for name in declared_environment_names(entry):
+            if name in reserved:
+                raise refuse(
+                    "LAUNCH_PERMISSION_KEY_COLLISION",
+                    f"agents.{agent_id} declares {name}, which the launch "
+                    "permission policy its profile selects owns in key and "
+                    "value",
                 )
 
 

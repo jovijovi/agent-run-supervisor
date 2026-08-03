@@ -2,7 +2,7 @@
 title: "agent-run-supervisor Result / Event Schema"
 status: active
 created_at: 2026-06-01
-last_validated_at: 2026-08-02
+last_validated_at: 2026-08-03
 ---
 # agent-run-supervisor Result / Event Schema
 
@@ -28,11 +28,11 @@ last_validated_at: 2026-08-02
 > compatibility obligation, or to claim Native ACP is implemented.
 >
 > **Evidence rules for the reset line.** [§9](#9-native-reset-line-evidence-rules) records the
-> environment-value, guard, withholding, and policy-warning rules that every Native emitter on the V4
+> environment-value, withholding, and policy-warning rules that every Native emitter on the V4
 > boundary-reset line must obey, and the audit that found no launch, provenance, or attestation field in the
-> caller-stable contract above. Those rules are normative for the reset line and are **merged on `main`** —
-> but not published and not deployed, so no released artifact emits them yet. §1–§8 describe the
-> caller-stable contract, which the reset does not change.
+> caller-stable contract above. Those rules are normative for the reset line and are **merged on `main`**;
+> the board ([`docs/roadmap/current-status.md`](../roadmap/current-status.md)) carries which version is
+> published and running. §1–§8 describe the caller-stable contract, which the reset does not change.
 >
 > **Stability rule (read this first).** `business_verdict` is **always `null`**
 > and caller-owned — the supervisor never sets it. Schema evolution is
@@ -494,11 +494,11 @@ never deletes an open or live-locked session.
 
 ## 9. Native reset-line evidence rules
 
-Normative for every Native emitter on the V4 boundary-reset line, and **merged on `main`** — not published,
-not deployed; the board carries the exact position. Nothing in this section changes any key documented in
+Normative for every Native emitter on the V4 boundary-reset line, and **merged on `main`**; the board
+carries the published and running position. Nothing in this section changes any key documented in
 §1–§8: those keys keep their names, types, and meanings, and the additive-only rule still holds.
 
-### 9.1 Audit result — no launch, provenance, or attestation field, and no environment value
+### 9.1 Audit result — no launch, provenance, or attestation field, and no structured environment value
 
 The caller-stable contract in §1–§8 was audited field by field against the reset boundary. Result:
 
@@ -506,8 +506,8 @@ The caller-stable contract in §1–§8 was audited field by field against the r
 |---|---|
 | a launch/provenance/runtime-identity field (artifact path, version, digest, tree hash, interpreter identity, generation, slot hash, acceptance receipt) | **none.** No payload, projection, or event family above carries one |
 | an attestation or integrity field | **none** |
-| an environment key or value (`fixed_env`, `permission_env`, an overlay literal, a pass-through value, a mediation pair) | **none** |
-| a field that could carry one incidentally | `detail_code`, `final_message`, `stop_reason`, `usage`, `unknown_update.key_summary`, and the `doctor` `error_detail` fields — all free-form or agent-supplied, therefore all inside §9.2 |
+| a **structured** environment key or value field (`fixed_env`, `permission_env`, an overlay literal, a pass-through value, a mediation pair) | **none.** No payload, projection, or event family above carries one, and ARS never serializes one out of the resolved carrier |
+| a field that could carry one **incidentally**, because an AGENT put it there | `detail_code`, `final_message`, `stop_reason`, `usage`, `unknown_update.key_summary`, and the `doctor` `error_detail` fields — all free-form or agent-supplied. These are **not** scanned against this Run's projected values (§9.2), so an agent echo can appear in one |
 
 The retired Binding-era launch and attestation material lived in `launch.json` and `attestation.json`, which
 this document never described. It is retired with the architecture and preserved only under
@@ -516,50 +516,66 @@ this document never described. It is retired with the architecture and preserved
 On the reset line `launch.json` is a **value-blind launch snapshot** whose key set is closed by a schema-level
 allowlist: the declared `command`, the exact `argv`, profile identity, `agent_id`, the selector ids, the
 capability narrowing, the caller's `credential_refs`, the operator's `session_epoch`, the selected
-`mediation_id`, and one `env` block of the shape described in §9.2. `fixed_env`, `permission_env`,
-`env_allowlist`, `expected_runtime`, and `runtime_provenance` are not merely absent — a document carrying one
-is rejected as not a production record, so none can be reintroduced by an additive edit. `attestation.json` is
-not written at all; the post-`initialize` artifact is `initialize_evidence.json`, which records the
-observation with an explicit `authoritative: false` and carries no expected-identity block to compare against
-(§9.5).
+`mediation_id`, one `env` block of the shape described in §9.2, and — only when the resolved profile selected
+a launch-permission policy — the pair `launch_permission_policy_id` and `launch_permission_digest`.
+`fixed_env`, `permission_env`, `env_allowlist`, `expected_runtime`, and `runtime_provenance` are not merely
+absent — a document carrying one is rejected as not a production record, so none can be reintroduced by an
+additive edit. `attestation.json` is not written at all; the post-`initialize` artifact is
+`initialize_evidence.json`, which records the observation with an explicit `authoritative: false` and carries
+no expected-identity block to compare against (§9.5).
 
-### 9.2 All dynamic keys and free-form text are guard-produced
+**The launch-permission pair is bound, not merely carried.** It is one fact in three places, and both the
+writer and the reader enforce all three together, so an inconsistent record is refused rather than
+interpreted:
 
-On the reset line, every free-form or child-influenced string and **every dynamic key** in a persisted or
-projected Native payload is produced by the per-Run environment-value guard before it is serialized. That
-covers agent, thought, and final message text and the final-message accumulator; normalized update fields
-and dynamic tool, config, and permission keys; permission and filesystem evidence; discovery and effective
-state; terminal and failure detail; bounded stderr, byte-matched **before decode** and text-matched again
-after; exception projections; log records; and every live or completed API projection.
+| Rule | Meaning |
+|---|---|
+| all-or-none | `launch_permission_policy_id` and `launch_permission_digest` are absent together or present together. Half a pair is inconsistent evidence, not weaker evidence |
+| closed vocabulary | the policy id is one of the registered source-owned ids |
+| canonical digest | the digest must **equal** the SHA-256 of the registered policy's own canonical document bytes, not merely match `sha256:<64 lowercase hex>`. The document is fixed source bytes and capability validation gates the compile without editing them, so a correctly shaped but different digest is refused at every seam |
+| reserved-key ownership | a reserved launch-permission environment name belongs to source `launch_permission` and to no other. The check is name-first, so relabelling that name `base`, `passthrough`, `overlay`, or `mediation` does not launder it |
+| projection agreement | when the pair is present, the `env` block carries exactly one name with source `launch_permission`, and it is the reserved key that policy owns — no relabelled duplicate, and no other name on that layer. When the pair is absent, no reserved name appears under any source and nothing appears on that layer |
+
+The digest binds the document, not its location: neither the directory nor the document text is ever
+persisted. This is an internal-consistency contract over records ARS wrote, not a tamper-resistance or
+cryptographic-trust claim — an actor who can rewrite an ARS-owned Run artifact has already defeated every
+projection boundary downstream of it.
+
+### 9.2 Structured environment evidence is value-blind; free-form Run text is not scanned
 
 Structured environment evidence is value-blind by construction: per name, the name, its source class, its
 precedence layer, and its redaction status, plus a resolved count, the mediation id, and the
-declared-but-absent names. **No value, value digest, keyed digest, length, prefix, suffix, equality token, or
-matcher table is ever a field or a hash input.** Two Runs whose transmitted value changed may therefore share
-a launch hash: the hash proves the declared projection, not the secret.
+declared-but-absent names. **No value, value digest, keyed digest, length, prefix, suffix, or equality token
+is ever a field or a hash input.** Two Runs whose transmitted value changed may therefore share a launch
+hash: the hash proves the declared projection, not the secret.
 
-The canonical workspace root and the effective `cwd` are the deliberate exception. They remain complete
-literals and remain hash-covered — independently derived authority facts, not environment-value flow — and no
-emitter routes them through the guard.
+**There is no per-Run exact-literal guard over free-form text.** Agent, thought, and final-message text,
+normalized update fields, dynamic tool/config/permission keys, permission and filesystem evidence, discovery
+and effective state, usage metadata, bounded stderr, and the external Session id are emitted as the agent
+produced them, subject to the static shape redactor (API key, `Authorization: Bearer`, JWT, PEM) and to the
+existing byte/event/final-message ceilings. A caller must therefore treat this material as **agent-authored
+content**, not as a value-blind projection: an AGENT that echoes a projected environment value into any of
+those fields may have that value persisted.
+
+The canonical workspace root and the effective `cwd` remain complete literals and remain hash-covered —
+independently derived authority facts.
 
 ### 9.3 Categorical withholding metadata
 
-When safe replacement cannot be established, an emitter suppresses the whole field or record and emits a
-**stable categorical marker** instead of a partial value. Markers are fixed source literals that contain no
-input data, and they are the only thing a caller sees in place of the withheld content.
+Some emitters still withhold a whole field or record behind a **stable categorical marker** rather than
+emitting a partial value. Markers are fixed source literals that contain no input data.
 
 | Marker class | Meaning for a caller |
 |---|---|
-| withheld field or record | the emitter could not establish a safe projection, so it withheld the whole thing. Treat it as "not available", never as empty content |
-| unsanitized log record suppressed | a Run-tagged log record reached a handler without a guard in context and was replaced wholesale |
 | legacy text evidence withheld | the record predates the reset and carries value-bearing material (§9.4) |
 | legacy value-bearing launch seal not verified | the record predates the reset, so no hash was recomputed over it (§9.4) |
-| external session id sensitive collision | a child-generated session id matched a projected environment literal and was refused before persistence, exposure, or prompt |
+| launch permission cleanup failed | the private per-Run launch-permission material could not be removed after the child was proven reaped. Durable as `launch-permission-cleanup-failed.json` in the Run directory — `{"code", "run_id"}` and nothing else — and, when an event stream was still open, additionally as a `launch_permission_cleanup_failed` event carrying only `seq` and `type`. It is **hygiene, not a supervision verdict**: the Run's terminal status is unaffected. It is written once, so a later successful retry removes the leftover without erasing the fact that the in-order attempt failed |
 
-Counting rules: an emitter may record only **coarse sink-local integers** — matched occurrences, suppressed
-fields, suppressed records. Original or replaced byte and character lengths are **not** recorded, because a
-length is metadata about a value. The redaction/suppression report is therefore value-blind and remains safe
-to return to a caller.
+Two marker classes are **retired** with the per-Run literal guard: the generic "withheld field or record"
+suppression and the "unsanitized log record suppressed" replacement. Records written while that guard was
+live keep the markers they were written with — they remain readable, schema-valid, and are never rewritten —
+so a reader must still understand them, but no new emitter produces them. The external-Session-id
+sensitive-collision refusal is retired with them: an id is now recorded as the agent minted it.
 
 Callers should treat every marker as forward-compatible: new marker classes may be added, existing ones never
 change meaning.

@@ -1,17 +1,17 @@
-"""Reviewer note 5, encoded as a test rather than a comment.
+"""The workspace binding fields are complete literals, and hash-covered.
 
-The workspace canonical root and the effective ``cwd`` are **not** environment
-values. They are independently derived authority facts: the caller binds a
-workspace, ARS canonicalizes it, and reconciliation, audit, and Session
-identity all depend on the exact literal. They stay complete in ``spec.json``
-and stay covered by ``spec_hash`` — even when the workspace lives under
-``$HOME`` and therefore shares bytes with a projected environment value.
+The canonical workspace root and the effective ``cwd`` are independently
+derived authority facts: the caller binds a workspace, ARS canonicalizes it,
+and reconciliation, audit, and Session identity all depend on the exact
+literal. They stay complete in ``spec.json`` and stay covered by ``spec_hash``
+— including when the workspace lives under ``$HOME`` and therefore shares bytes
+with a projected environment value.
 
-Shared bytes are not shared provenance. The boundary is proven by taint-
-directed call paths, not by lexical coincidence: ``spec.json`` is sealed before
-the environment is ever resolved, so no guarded value can flow into it, while
-the *same* Run's child-authored final message is guarded in the same assertion
-block. One Run, both halves.
+This used to be an *exemption* from the per-Run literal guard. With that guard
+removed the property is no longer an exemption from anything, but it is still
+load-bearing and still worth a test: a future truncation, tokenisation, or
+"tidy up the paths" change would break workspace binding, reconciliation
+attribution, and the seal, and would break here first.
 """
 
 from __future__ import annotations
@@ -26,7 +26,6 @@ pytest.importorskip("acp")
 from agent_run_supervisor.exit_classifier import AgentRunStatus
 from agent_run_supervisor.native_acp.profile import ProfileRegistry
 from agent_run_supervisor.native_acp.spec import spec_hash_of_payload
-from agent_run_supervisor.redaction import ENV_VALUE_REPLACEMENT, RunTextGuard
 
 from .test_run_task import HAPPY_SCRIPT, Harness, _run, _test_profile
 
@@ -41,8 +40,6 @@ def home_rooted_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     home = str(tmp_path.resolve())
     monkeypatch.setenv("HOME", home)
     script = dict(HAPPY_SCRIPT)
-    # The contrast half: the child echoes the very same value back through a
-    # sink, in the same Run, from the same literal set.
     script["echo_env"] = "HOME"
     harness = Harness(tmp_path, monkeypatch, script)
     harness.registry = ProfileRegistry((_test_profile(base_allowlist=ALLOWLIST),))
@@ -62,19 +59,6 @@ def test_spec_workspace_fields_keep_their_complete_literal_under_home(
     assert workspace["cwd"] == str(harness.workspace.resolve())
     # Complete, not truncated and not tokenized.
     assert workspace["canonical_root"].startswith(home)
-    assert ENV_VALUE_REPLACEMENT not in json.dumps(workspace)
-
-
-def test_the_same_value_is_still_guarded_in_child_authored_text(
-    home_rooted_run,
-) -> None:
-    harness, home = home_rooted_run
-    payload = json.loads((harness.run_dir() / "result.json").read_text())
-
-    # Same Run, same literal set, opposite outcome — because the provenance is
-    # opposite, not because the bytes are.
-    assert payload["final_message"] == f"ENV:{ENV_VALUE_REPLACEMENT}"
-    assert home not in payload["final_message"]
 
 
 def test_workspace_fields_stay_covered_by_the_spec_hash(home_rooted_run) -> None:
@@ -90,16 +74,20 @@ def test_workspace_fields_stay_covered_by_the_spec_hash(home_rooted_run) -> None
         assert spec_hash_of_payload(mutated) != payload["spec_hash"], field
 
 
-def test_guarding_the_workspace_fields_would_have_been_visible() -> None:
-    """The exemption is load-bearing, not incidental.
+def test_environment_values_still_never_enter_the_sealed_material(
+    home_rooted_run,
+) -> None:
+    """The structural half of the environment boundary, which did not move.
 
-    If ``spec.json`` were routed through the guard, a workspace under ``$HOME``
-    would lose its root — this asserts the guard really would have destroyed
-    it, so the exemption above is a decision and not an accident of ordering.
+    ``launch.json`` records the projected **names**, their source class, their
+    precedence layer, and their redaction status. The workspace literal above
+    is in ``spec.json`` because it is a workspace fact, not because a value
+    leaked into the seal.
     """
-    home = "/home/someone"
-    guard = RunTextGuard.from_environment({"HOME": home})
+    harness, _home = home_rooted_run
+    launch = json.loads((harness.run_dir() / "launch.json").read_text())
 
-    assert guard.guard_text(f"{home}/project/src") == (
-        f"{ENV_VALUE_REPLACEMENT}/project/src"
-    )
+    assert launch["env"]["values_persisted"] is False
+    assert "HOME" in {item["name"] for item in launch["env"]["names"]}
+    for item in launch["env"]["names"]:
+        assert set(item) == {"name", "source", "precedence", "redacted"}

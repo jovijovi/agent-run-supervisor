@@ -11,7 +11,6 @@ from agent_run_supervisor.native_acp.permissions import (
     MediationEvent,
     PermissionBridge,
 )
-from agent_run_supervisor.redaction import ENV_VALUE_REPLACEMENT, RunTextGuard
 
 ALLOW_OPTION = {"optionId": "opt-allow", "name": "Allow", "kind": "allow_once"}
 REJECT_OPTION = {"optionId": "opt-reject", "name": "Reject", "kind": "reject_once"}
@@ -40,17 +39,16 @@ def _request(kind: str | None, *, options=None):
     }
 
 
-# -- WP2.3: mediation evidence is a projection boundary ---------------------
+# -- mediation evidence is legible and correlates with the call it answered --
 
 
-def test_mediation_evidence_and_wire_reason_are_guarded(tmp_path: Path) -> None:
-    """A refusal names what it refused, which is child text by construction.
+def test_mediation_evidence_names_the_call_it_refused(tmp_path: Path) -> None:
+    """A refusal names what it refused, and correlates by the child's own id.
 
-    The same guarded reason goes back over the wire: the child already holds
-    its own values, and a raw reason would travel on into the SDK's own
-    failure logging where no ARS matcher is positioned.
+    The same reason goes back over the wire, so the agent's error and the
+    operator's evidence are one text.
     """
-    sentinel = "mediation-sentinel-3f70"
+    tool_call_id = "call-mediation-3f70"
     events: list[MediationEvent] = []
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
@@ -58,14 +56,13 @@ def test_mediation_evidence_and_wire_reason_are_guarded(tmp_path: Path) -> None:
         capabilities=("read",),
         workspace_root=workspace,
         evidence_sink=events.append,
-        guard=RunTextGuard.from_environment({"SECRET": sentinel}),
     )
 
     decision = bridge.decide_permission_request(
         {
             "session_id": "external-1",
             "tool_call": {
-                "toolCallId": f"call-{sentinel}",
+                "toolCallId": tool_call_id,
                 "kind": "edit",
                 "status": "pending",
             },
@@ -74,25 +71,19 @@ def test_mediation_evidence_and_wire_reason_are_guarded(tmp_path: Path) -> None:
     )
 
     assert decision["decision"] == "deny"
-    assert sentinel not in decision["reason"]
-    assert events[0].tool_call_id == f"call-{ENV_VALUE_REPLACEMENT}"
-    assert sentinel not in events[0].reason
-    # The refusal is still legible: only the value went.
+    assert events[0].tool_call_id == tool_call_id
+    assert events[0].reason == decision["reason"]
     assert "not permitted" in events[0].reason
 
 
-def test_a_colliding_allow_option_id_denies_instead_of_returning_it(
-    tmp_path: Path,
-) -> None:
-    """B3: an option id is an exact child protocol identifier.
+def test_an_allow_option_id_travels_back_verbatim(tmp_path: Path) -> None:
+    """An option id is an exact child protocol identifier.
 
-    It has to go back over the wire byte-for-byte to select anything, so a
-    redacted copy selects nothing and a verbatim copy is a projected
-    environment value in an ARS-formulated response. There is no third option,
-    so the mediation fails closed — the same rule the external Session id
-    already follows.
+    It has to go back over the wire byte-for-byte to select anything. Mediation
+    decides on the frozen grant alone, so an id's bytes never make an otherwise
+    granted operation fail closed.
     """
-    sentinel = "option-id-sentinel-2b44"
+    option_id = "option-id-sentinel-2b44"
     events: list[MediationEvent] = []
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
@@ -100,7 +91,6 @@ def test_a_colliding_allow_option_id_denies_instead_of_returning_it(
         capabilities=("read",),
         workspace_root=workspace,
         evidence_sink=events.append,
-        guard=RunTextGuard.from_environment({"SECRET": sentinel}),
     )
 
     decision = bridge.decide_permission_request(
@@ -108,22 +98,18 @@ def test_a_colliding_allow_option_id_denies_instead_of_returning_it(
             "session_id": "external-1",
             "tool_call": {"toolCallId": "tool-1", "kind": "read", "status": "pending"},
             "options": [
-                {"optionId": sentinel, "name": "Allow", "kind": "allow_once"},
+                {"optionId": option_id, "name": "Allow", "kind": "allow_once"},
                 REJECT_OPTION,
             ],
         }
     )
 
-    assert decision["decision"] == "deny"
-    assert decision.get("option_id") != sentinel
-    assert sentinel not in json.dumps(decision)
-    assert sentinel not in json.dumps([event.to_event() for event in events])
+    assert decision["decision"] == "allow"
+    assert decision["option_id"] == option_id
 
 
-def test_a_colliding_reject_option_id_is_omitted_from_the_response(
-    tmp_path: Path,
-) -> None:
-    sentinel = "reject-id-sentinel-9c01"
+def test_a_deny_still_carries_the_reject_option_id(tmp_path: Path) -> None:
+    reject_id = "reject-id-sentinel-9c01"
     events: list[MediationEvent] = []
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
@@ -131,7 +117,6 @@ def test_a_colliding_reject_option_id_is_omitted_from_the_response(
         capabilities=("read",),
         workspace_root=workspace,
         evidence_sink=events.append,
-        guard=RunTextGuard.from_environment({"SECRET": sentinel}),
     )
 
     decision = bridge.decide_permission_request(
@@ -140,28 +125,19 @@ def test_a_colliding_reject_option_id_is_omitted_from_the_response(
             "tool_call": {"toolCallId": "tool-1", "kind": "edit", "status": "pending"},
             "options": [
                 ALLOW_OPTION,
-                {"optionId": sentinel, "name": "Reject", "kind": "reject_once"},
+                {"optionId": reject_id, "name": "Reject", "kind": "reject_once"},
             ],
         }
     )
 
     assert decision["decision"] == "deny"
-    assert sentinel not in json.dumps(decision)
+    assert decision["option_id"] == reject_id
 
 
 def test_an_ordinary_once_scoped_allow_still_returns_its_option_id(
     tmp_path: Path,
 ) -> None:
-    # Failing closed on a collision must not become failing closed always.
-    events: list[MediationEvent] = []
-    workspace = tmp_path / "workspace"
-    workspace.mkdir(exist_ok=True)
-    bridge = PermissionBridge(
-        capabilities=("read",),
-        workspace_root=workspace,
-        evidence_sink=events.append,
-        guard=RunTextGuard.from_environment({"SECRET": "unrelated-value-4d21"}),
-    )
+    bridge, _workspace, _events = _bridge(tmp_path, capabilities=("read",))
 
     decision = bridge.decide_permission_request(_request("read"))
 
@@ -169,22 +145,16 @@ def test_an_ordinary_once_scoped_allow_still_returns_its_option_id(
     assert decision["option_id"] == ALLOW_OPTION["optionId"]
 
 
-def test_grant_violation_evidence_is_guarded(tmp_path: Path) -> None:
-    sentinel = "violation-sentinel-91ab"
-    events: list[MediationEvent] = []
-    workspace = tmp_path / "workspace"
-    workspace.mkdir(exist_ok=True)
-    bridge = PermissionBridge(
-        capabilities=("read",),
-        workspace_root=workspace,
-        evidence_sink=events.append,
-        guard=RunTextGuard.from_environment({"SECRET": sentinel}),
-    )
+def test_grant_violation_evidence_names_the_kind_and_capability(
+    tmp_path: Path,
+) -> None:
+    tool_call_id = "call-violation-91ab"
+    bridge, _workspace, _events = _bridge(tmp_path, capabilities=("read",))
 
     bridge.observe_tool_update(
         {
             "sessionUpdate": "tool_call",
-            "toolCallId": f"call-{sentinel}",
+            "toolCallId": tool_call_id,
             "kind": "edit",
             "status": "pending",
         }
@@ -192,16 +162,16 @@ def test_grant_violation_evidence_is_guarded(tmp_path: Path) -> None:
     violation = bridge.observe_tool_update(
         {
             "sessionUpdate": "tool_call_update",
-            "toolCallId": f"call-{sentinel}",
+            "toolCallId": tool_call_id,
             "status": "completed",
         }
     )
 
     assert violation is not None
     assert bridge.grant_violation is True
-    assert sentinel not in str(violation)
-    assert sentinel not in (bridge.grant_violation_reason or "")
+    assert violation["tool_call_id"] == tool_call_id
     assert violation["required_capability"] == "write"
+    assert "edit" in (bridge.grant_violation_reason or "")
 
 
 # -- client capability declaration ------------------------------------------

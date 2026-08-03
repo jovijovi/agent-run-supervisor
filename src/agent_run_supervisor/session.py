@@ -35,7 +35,6 @@ from agent_run_supervisor.mcp_config import (
     resolve_mcp_config,
 )
 from agent_run_supervisor.policy import policy_hash
-from agent_run_supervisor.redaction import SafeText
 from agent_run_supervisor.role import (
     DEFAULT_SESSION_LEASE_SECONDS,
     AgentRoleSpec,
@@ -523,9 +522,9 @@ class SessionStore:
         self,
         session_id: str,
         *,
-        agent_info_name: SafeText,
-        agent_info_version: SafeText,
-        advertised_capabilities: tuple[SafeText, ...],
+        agent_info_name: str,
+        agent_info_version: str,
+        advertised_capabilities: tuple[str, ...],
         now: _dt.datetime | None = None,
     ) -> SessionRecord:
         """Record the ``initialize`` observation this Session last accepted.
@@ -539,27 +538,18 @@ class SessionStore:
         whatever the agent chose to say about itself, and the advertised
         capability *keys* are whatever it chose to advertise. ``judge_initialize``
         deliberately gates neither — a self-report is evidence, so there is
-        nothing to check it against — which is exactly why this seam cannot
-        accept a bare ``str``. An agent that echoes a projected environment value
-        back through either one would otherwise have ARS write that value into
-        ``session.json``, where it outlives the Run, the guard, and the process.
-
-        The parameter type is the boundary, the same one
-        :func:`~agent_run_supervisor.native_acp.storage.write_run_text` uses:
-        ``SafeText`` is minted only by ``RunTextGuard``, so "guarded" is a fact
-        about the value rather than a claim about the call site. Drift detection
-        survives it: the guard replaces a matched literal with a fixed token, so
-        two Runs that report the same thing still compare equal.
+        nothing to check it against. The seam still refuses a non-``str``,
+        because ``session.json`` is durable JSON and an object with a hostile
+        ``__str__`` is exactly what must not be serialized into it.
         """
         for label, candidate in (
             ("agent_info_name", agent_info_name),
             ("agent_info_version", agent_info_version),
             *(("advertised_capability", item) for item in advertised_capabilities),
         ):
-            if type(candidate) is not SafeText:
+            if type(candidate) is not str:
                 raise TypeError(
-                    f"native session observation {label} requires a "
-                    "guard-produced SafeText projection, not an unguarded str"
+                    f"native session observation {label} must be a str"
                 )
         session_dir = self._require_session_dir(session_id)
         with _session_lock_guard(session_dir):
@@ -577,11 +567,9 @@ class SessionStore:
             moment = _ensure_aware(now or _utc_now()).isoformat()
             updated = replace(
                 record,
-                native_last_agent_info_name=agent_info_name.text,
-                native_last_agent_info_version=agent_info_version.text,
-                native_last_advertised_capabilities=[
-                    item.text for item in advertised_capabilities
-                ],
+                native_last_agent_info_name=agent_info_name,
+                native_last_agent_info_version=agent_info_version,
+                native_last_advertised_capabilities=list(advertised_capabilities),
                 updated_at=moment,
             )
             atomic_write_json(session_dir / SESSION_JSON, _record_to_dict(updated))

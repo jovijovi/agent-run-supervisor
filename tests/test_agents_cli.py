@@ -735,14 +735,12 @@ def test_inspect_never_writes_anything(tmp_path, capsys):
     assert {item.name for item in run_dir.iterdir()} == before
 
 
-# -- B: the probe is bounded and guarded on every path ------------------------
+# -- B: the probe is bounded on every path ------------------------------------
 #
-# ``agents doctor`` is the one diagnostic that starts an external child. Three
+# ``agents doctor`` is the one diagnostic that starts an external child. Two
 # things therefore have to hold on *every* path, not the happy one: the child is
-# never leaked, cleanup is bounded at every step, and the whole boundary — guard
-# construction, SDK import, client creation, spawn, open, initialize, close,
-# TERM/KILL/reap, report — runs under the handler-level log guard, because the
-# SDK and its dependencies log through loggers ARS does not own.
+# never leaked, and cleanup is bounded at every step — SDK import, client
+# creation, spawn, open, initialize, close, TERM/KILL/reap, report.
 
 
 class _FakeProc:
@@ -961,7 +959,7 @@ def test_b1_an_unavailable_sdk_never_leaves_a_spawned_child(monkeypatch):
     monkeypatch.setattr(
         commands,
         "_probe_client",
-        lambda instance, guard: (_ for _ in ()).throw(
+        lambda instance: (_ for _ in ()).throw(
             NativeSdkUnavailableError("no sdk")
         ),
     )
@@ -972,29 +970,26 @@ def test_b1_an_unavailable_sdk_never_leaves_a_spawned_child(monkeypatch):
     assert spawned == []
 
 
-def test_b2_a_dependency_log_record_during_the_probe_is_contained(monkeypatch):
-    """B2 — the handler-level guard is bound across the whole probe boundary.
+def test_b2_an_sdk_exception_during_the_probe_stays_categorical(monkeypatch):
+    """The probe reports a stable code, never SDK or OS text.
 
-    A ``RunTextGuard`` handed only to the driver guards what the *driver*
-    projects. It does nothing about the SDK's own ``logging.exception`` calls or
-    any dependency that happens to be loaded — those reach a handler, and the
-    handler is where the Stage 2 filter lives.
+    The root SDK exception-detail redactor is the seam that keeps a dependency's
+    own ``logging.exception`` from putting a traceback on the root logger; the
+    probe's own report is categorical by construction.
     """
-    from agent_run_supervisor.arsd import safe_logging
-
     capture = _Capture()
     root = logging.getLogger()
     root.addHandler(capture)
     previous = root.level
     root.setLevel(logging.DEBUG)
 
-    async def logging_spawn(*args, **kwargs):
-        logging.getLogger("some_sdk.transport").error(
-            "connect failed for %s", PROBE_SENTINEL
+    async def failing_spawn(*args, **kwargs):
+        logging.getLogger().error(
+            "connect failed", exc_info=OSError(2, "no such file", PROBE_SENTINEL)
         )
         raise commands.ManagedProcessError("SPAWN_FAILED", "boom")
 
-    monkeypatch.setattr(commands, "spawn_managed_process", logging_spawn)
+    monkeypatch.setattr(commands, "spawn_managed_process", failing_spawn)
     try:
         report = asyncio.run(
             commands._probe_initialize(_probe_instance(), _probe_env())
@@ -1004,24 +999,11 @@ def test_b2_a_dependency_log_record_during_the_probe_is_contained(monkeypatch):
         root.setLevel(previous)
 
     assert report["outcome"] == commands.PROBE_FAILED
-    text = capture.text()
-    assert PROBE_SENTINEL not in text
-    assert safe_logging.DEPENDENCY_RECORD_REPLACED in text
-
-
-def test_b2_the_guard_binding_is_released_after_the_probe(monkeypatch):
-    """Bound before anything can log, unbound in the outer boundary."""
-    from agent_run_supervisor.arsd import safe_logging
-
-    async def failing_spawn(*args, **kwargs):
-        assert safe_logging.current_run_guard() is not None
-        raise commands.ManagedProcessError("SPAWN_FAILED", "boom")
-
-    monkeypatch.setattr(commands, "spawn_managed_process", failing_spawn)
-    asyncio.run(commands._probe_initialize(_probe_instance(), _probe_env()))
-
-    assert safe_logging.current_run_guard() is None
-    assert safe_logging.active_guards() == ()
+    assert PROBE_SENTINEL not in json.dumps(report)
+    # The SDK root-logging containment survives the guard removal: the record
+    # keeps its message and the exception class, and drops the detail.
+    assert PROBE_SENTINEL not in capture.text()
+    assert "[exception detail redacted: FileNotFoundError]" in capture.text()
 
 
 # -- A2: "reset" must mean the production writer's exact output ---------------

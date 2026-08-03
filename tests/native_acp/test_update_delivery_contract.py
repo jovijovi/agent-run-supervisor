@@ -3,7 +3,7 @@
 ``RunTask._update_sink`` assigns each session/update its delivery ordinal by
 invocation count and compares it against the driver's prompt wire boundary.
 That is sound only under two exact properties of the locked stack
-(agent-client-protocol 0.11.1 on CPython asyncio):
+(agent-client-protocol 0.12.0 on CPython asyncio):
 
 1. ``NativeAcpClient.session_update`` runs the synchronous sink before its
    first await, so the ordinal is assigned in the notification task's first
@@ -16,11 +16,15 @@ That is sound only under two exact properties of the locked stack
    domain: only session/update frames the SDK will actually dispatch to
    ``Client.session_update`` may be counted. The SDK drops a notification
    whose params fail ``SessionNotification`` validation (``_run_notification``
-   swallows handler exceptions — 0.11.0 silently, 0.11.1 with a root-logger
-   record; no callback runs either way) and routes a frame carrying an ``id``
-   to the request table (method-not-found, no callback) — counting such a
-   frame creates a phantom ordinal that shifts the frozen boundary past the
-   first genuine current-turn chunk.
+   swallows handler exceptions — 0.11.0 silently, 0.11.1/0.12.0 with a
+   root-logger record; no callback runs either way) and routes a frame
+   carrying an ``id`` to the request table (method-not-found, no callback) —
+   counting such a frame creates a phantom ordinal that shifts the frozen
+   boundary past the first genuine current-turn chunk. Schema v1.19's lenient
+   deserialization moves the line the other way for some frames: a salvaged
+   notification really does dispatch, so *not* counting it drops the boundary
+   one ordinal low. Both directions are the same rule — mirror the SDK's own
+   validation, never a frozen idea of it.
 
 These tests pin exactly those properties — no broader protocol ordering
 guarantee is claimed. An SDK/runtime upgrade that breaks any of them fails
@@ -321,6 +325,8 @@ async def _wire_agent(
 
 async def _ordinal_gap_case(
     phantom_frame: dict[str, Any],
+    *,
+    deliverable_updates: int = 2,
 ) -> tuple[str, int | None, str, int]:
     driver_sock, agent_sock = socket.socketpair()
     driver_reader, driver_writer = await asyncio.open_connection(sock=driver_sock)
@@ -375,9 +381,12 @@ async def _ordinal_gap_case(
         await agent_writer.drain()
 
         outcome = await asyncio.wait_for(prompt_task, 10)
-        # Both deliverable updates (chunk + late notification) complete their
-        # callbacks before teardown, so close never cancels a live runner.
-        await asyncio.wait_for(client.wait_for_updates_completed(2), 10)
+        # Every deliverable update completes its callback before teardown, so
+        # close never cancels a live runner and the ordinal snapshot below is
+        # taken after the last delivery rather than racing it.
+        await asyncio.wait_for(
+            client.wait_for_updates_completed(deliverable_updates), 10
+        )
         return (
             outcome.stop_reason,
             driver.prompt_wire_boundary,
@@ -427,3 +436,45 @@ def test_pre_prompt_phantom_update_must_not_shift_boundary_or_lose_chunk(
     )
     # Exactly the two deliverable updates produced callbacks.
     assert delivered == 2
+
+
+# v1.19 lenient deserialization (``x-deserialize-skip-invalid-items``): a
+# ``tool_call`` whose content array holds one unrecognised item is *salvaged* —
+# the bad item is dropped and the notification validates — where 0.11.1
+# rejected the whole frame. It therefore reaches a real callback, so it is a
+# genuine pre-prompt ordinal rather than a phantom, and both sides of the
+# ordinal domain have to agree about it.
+_SALVAGED_LENIENT_UPDATE = {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+        "sessionId": _SESSION_ID,
+        "update": {
+            "sessionUpdate": "tool_call",
+            "toolCallId": "tc-lenient",
+            "title": "salvaged",
+            "content": [{"type": "not-a-real-content-block"}],
+        },
+    },
+}
+
+
+def test_lenient_salvaged_pre_prompt_update_counts_on_both_sides() -> None:
+    # Lenient deserialization only widens what dispatches; it must not desync
+    # the driver's observed count from the sink's delivery ordinals. If the
+    # dispatch predicate stayed on the old strict reading, this frame would be
+    # delivered but uncounted, the boundary would sit one ordinal low, and the
+    # first genuine current-turn chunk would be excluded from final_message.
+    stop_reason, boundary, final_text, delivered = asyncio.run(
+        _ordinal_gap_case(_SALVAGED_LENIENT_UPDATE, deliverable_updates=3)
+    )
+    assert stop_reason == "end_turn"
+    assert final_text == "REAL_CHUNK", (
+        f"current-turn chunk lost from final message (got {final_text!r}); "
+        f"boundary={boundary} delivered={delivered}"
+    )
+    assert boundary == 1, (
+        f"salvaged pre-prompt update was not counted into the boundary: "
+        f"{boundary}"
+    )
+    assert delivered == 3

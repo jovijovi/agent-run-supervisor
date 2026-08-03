@@ -181,8 +181,8 @@ def scan_source_ast(root: Path) -> list[Finding]:
     return findings
 
 
-# V4 §6.3 environment-value sink boundary. Names that hold, or stand for, a
-# projected environment mapping anywhere in ``src/``.
+# Environment-value sink boundary. Names that hold, or stand for, a projected
+# environment mapping anywhere in ``src/``.
 ENV_MAPPING_NAMES = {
     "env",
     "spawn_env",
@@ -194,35 +194,14 @@ ENV_MAPPING_NAMES = {
     "resolved_env",
 }
 
-# The guard module. Hashing anything here would hash a sensitive value, since
-# the sensitive set is the only value-shaped input it holds.
-GUARD_MODULE = Path("src/agent_run_supervisor/redaction.py")
-DIGEST_MODULES = {"hashlib", "hmac"}
-
-# Free-form seams whose text parameter must be typed, not merely documented.
-SAFE_PROJECTION_SIGNATURES = (
-    (Path("src/agent_run_supervisor/native_acp/storage.py"), "write_run_text", "value"),
-    (Path("src/agent_run_supervisor/result.py"), "build_native_result_payload", "final_message"),
-)
-
-
-def _annotation_name(annotation: ast.AST | None) -> str | None:
-    if isinstance(annotation, ast.Name):
-        return annotation.id
-    if isinstance(annotation, ast.Attribute):
-        return annotation.attr
-    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
-        return annotation.value
-    return None
-
-
 def scan_environment_value_sinks(root: Path) -> list[Finding]:
-    """Three structural rules behind the per-Run literal guard.
+    """The structural rule that survives the removal of the per-Run guard.
 
-    They are structural on purpose: the guard can only remove what reaches it,
-    so the ways a value can *bypass* it — being rendered straight out of the
-    mapping, being digested instead of matched, or entering a durable seam as
-    an ordinary ``str`` — have to be unrepresentable rather than discouraged.
+    ARS keeps environment values out of its *structured* durable material and
+    hands the resolved mapping to exactly one consumer, process spawn. The way
+    that boundary is most easily lost is a value being rendered straight out of
+    the mapping into a log line or an exception message, so rendering it stays
+    unrepresentable rather than discouraged.
     """
     findings: list[Finding] = []
     src = root / "src"
@@ -235,9 +214,6 @@ def scan_environment_value_sinks(root: Path) -> list[Finding]:
             except SyntaxError:
                 continue  # scan_source_ast already reports it
             findings.extend(_scan_env_rendering(rel, text, tree))
-            if rel == GUARD_MODULE:
-                findings.extend(_scan_guard_digests(rel, text, tree))
-    findings.extend(_scan_safe_projection_signatures(root))
     return findings
 
 
@@ -266,62 +242,6 @@ def _scan_env_rendering(rel: Path, text: str, tree: ast.AST) -> list[Finding]:
                         _snippet(text, node.lineno),
                     )
                 )
-    return findings
-
-
-def _scan_guard_digests(rel: Path, text: str, tree: ast.AST) -> list[Finding]:
-    findings: list[Finding] = []
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            for module in _import_roots(node):
-                if module in DIGEST_MODULES:
-                    findings.append(
-                        Finding(
-                            str(rel),
-                            getattr(node, "lineno", 1),
-                            f"env_value:value_set_digest:{module}",
-                            _snippet(text, getattr(node, "lineno", 1)),
-                        )
-                    )
-    return findings
-
-
-def _scan_safe_projection_signatures(root: Path) -> list[Finding]:
-    findings: list[Finding] = []
-    for rel, function_name, parameter in SAFE_PROJECTION_SIGNATURES:
-        path = root / rel
-        if not path.is_file():
-            continue
-        text = _read(path)
-        try:
-            tree = ast.parse(text, filename=str(rel))
-        except SyntaxError:
-            continue
-        found = False
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            if node.name != function_name:
-                continue
-            found = True
-            arguments = [*node.args.args, *node.args.kwonlyargs]
-            annotations = {
-                argument.arg: _annotation_name(argument.annotation)
-                for argument in arguments
-            }
-            if annotations.get(parameter) != "SafeText":
-                findings.append(
-                    Finding(
-                        str(rel),
-                        node.lineno,
-                        f"env_value:unsafe_storage_signature:{function_name}",
-                        _snippet(text, node.lineno),
-                    )
-                )
-        if not found:
-            findings.append(
-                Finding(str(rel), 1, f"env_value:missing_safe_seam:{function_name}", "")
-            )
     return findings
 
 

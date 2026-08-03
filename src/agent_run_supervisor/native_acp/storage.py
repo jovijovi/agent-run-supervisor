@@ -25,7 +25,6 @@ from agent_run_supervisor.event_store import (
     exclusive_create_bytes,
 )
 from agent_run_supervisor.process_liveness import LivenessProbe
-from agent_run_supervisor.redaction import SafeText
 from agent_run_supervisor.result import (
     MAX_NATIVE_RESULT_SERIALIZED_BYTES,
     validate_native_terminal_result,
@@ -145,21 +144,17 @@ def write_once_json(path: Path, payload: Mapping[str, Any]) -> Path:
     return exclusive_create_bytes(Path(path), data)
 
 
-def write_run_text(handle: Any, name: str, value: SafeText) -> Path:
+def write_run_text(handle: Any, name: str, value: str) -> Path:
     """The only sanctioned Native writer for free-form Run text.
 
-    The parameter type is the boundary: a bare ``str`` has not crossed
-    :class:`~agent_run_supervisor.redaction.RunTextGuard` and is refused here
-    rather than trusted because a call site looked careful. ``SafeText`` is
-    constructible only inside ``redaction``, so the refusal cannot be talked
-    around at this seam.
+    One seam rather than scattered ``handle.write_text`` calls, so the places
+    that can create a free-form Run artifact stay enumerable. The text itself
+    is an ordinary bounded string: callers apply the static redactor and the
+    size ceilings before they get here.
     """
-    if type(value) is not SafeText:
-        raise TypeError(
-            "native free-form run text requires a guard-produced SafeText "
-            "projection, not an unguarded str"
-        )
-    return handle.write_text(name, value.text)
+    if type(value) is not str:
+        raise TypeError("native free-form run text must be a str")
+    return handle.write_text(name, value)
 
 
 _ABSENT = object()
