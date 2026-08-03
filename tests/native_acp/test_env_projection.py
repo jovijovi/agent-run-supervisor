@@ -2,14 +2,16 @@
 
 Every environment value is sensitive, regardless of key name, source class,
 length, or apparent shape. A value may exist at its operator- or source-owned
-origin, in ``arsd`` memory, and in the child environment. No complete projected
-literal — and no digest, fingerprint, length-by-value, or other metadata
-computed to represent that value — may flow into an ARS durable artifact, hash
-input, log, exception, event stream, inspect response, or daemon API response.
+origin, in ``arsd`` memory, and in the child environment. No projected value — and no digest,
+fingerprint, or length-by-value computed to represent one — may flow into an
+ARS **durable artifact or hash input**, and the resolved carrier itself may not
+be rendered into a log line or an exception message. What an AGENT chooses to
+echo back through free-form Run text is a separate matter, deliberately not
+policed here: see ``test_projected_value_retention``.
 
 Two types carry that split. :class:`ResolvedEnvironment` is the ephemeral,
-non-serializable value carrier accepted only by the process-spawn seam and the
-guard. :class:`EnvProjection` is the separate durable, value-blind shape:
+non-serializable value carrier accepted only by the process-spawn seam.
+:class:`EnvProjection` is the separate durable, value-blind shape:
 per name, the name, its source class, its precedence layer, and its redaction
 status, plus a resolved count, the mediation id, and the declared names that
 were absent from the daemon's environment. Nothing else.
@@ -29,7 +31,6 @@ import pytest
 from agent_run_supervisor.native_acp import profile as profile_mod
 from agent_run_supervisor.native_acp import spec
 from agent_run_supervisor.native_acp.agent_registration import AgentEntry
-from agent_run_supervisor.redaction import RunTextGuard
 
 SENTINEL = "SeNtInEl-env-value-9x7"
 MEDIATION_ID = "ask-privileged-tool-families-v1"
@@ -155,14 +156,25 @@ def test_carrier_never_reaches_an_exception_message():
         assert SENTINEL not in repr(exc)
 
 
-def test_guard_is_built_from_the_same_mapping_the_child_receives():
+def test_the_carrier_has_exactly_one_consumer():
+    """Process spawn, and nothing else.
+
+    The second consumer — a per-Run literal guard built from the same mapping —
+    is removed, so the carrier exposes no accessor that enumerates its values
+    for any other purpose.
+    """
     resolved = resolve(
         arsd_env={"HOME": "/home/svc", "TOKEN_NAME": SENTINEL},
         env_passthrough=("TOKEN_NAME",),
     )
-    guard = RunTextGuard.from_environment(resolved)
-    assert guard.matches(f"the value was {SENTINEL} here")
-    assert guard.matches("/home/svc")
+    assert resolved.exec_mapping["TOKEN_NAME"] == SENTINEL
+    assert not hasattr(resolved, "sensitive_values")
+    public_api = {
+        name
+        for name in dir(resolved)
+        if not name.startswith("_")
+    }
+    assert public_api == {"exec_mapping", "value_blind_projection"}
 
 
 # -- the durable projection is value-blind ----------------------------------

@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from agent_run_supervisor.exit_classifier import _RETRYABLE_DEFAULT, AgentRunStatus
-from agent_run_supervisor.redaction import EMPTY_SAFE_TEXT, SafeText
 
 # Native final-message UTF-8 budget at ingestion. Sized so worst-case JSON
 # escaping plus the result envelope stays below reconciliation's 1 MiB reader
@@ -110,7 +109,7 @@ def build_minimal_evidence_pipeline_result(
         signal=None,
         stop_reason=None,
         usage=None,
-        final_message=EMPTY_SAFE_TEXT,
+        final_message="",
         truncated=False,
         truncate_reason=None,
         run_dir=run_dir,
@@ -183,21 +182,17 @@ def build_result_payload(
     return payload
 
 
-def build_native_result_payload(*, final_message: SafeText, **fields: Any) -> dict[str, Any]:
-    """The Native terminal builder: ``final_message`` must be guard-produced.
+def build_native_result_payload(*, final_message: str, **fields: Any) -> dict[str, Any]:
+    """The Native terminal builder.
 
     Free-form Run text is the only field of a Native terminal a child can
-    author, so it is the one field whose *type* has to prove it crossed the
-    guard. Every other field of a Native terminal is a stable code, an
-    ARS-derived identity, or an already-guarded structure. The acpx-era
-    :func:`build_result_payload` keeps its ``str`` parameter and is untouched.
+    author. It arrives already statically redacted and already bounded by the
+    final-message ceiling; every other field is a stable code, an ARS-derived
+    identity, or a bounded structure.
     """
-    if type(final_message) is not SafeText:
-        raise TypeError(
-            "native final_message requires a guard-produced SafeText "
-            "projection, not an unguarded str"
-        )
-    return build_result_payload(final_message=final_message.text, **fields)
+    if type(final_message) is not str:
+        raise TypeError("native final_message must be a str")
+    return build_result_payload(final_message=final_message, **fields)
 
 
 _ERROR_CODE_FOR_STATUS: dict[AgentRunStatus, str | None] = {

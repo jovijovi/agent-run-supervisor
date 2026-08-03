@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,7 @@ pytest.importorskip("acp")
 from agent_run_supervisor.event_store import EventStore, RunHandle
 from agent_run_supervisor.exit_classifier import AgentRunStatus
 from agent_run_supervisor.native_acp import profile as profile_module
-from agent_run_supervisor.native_acp import storage
+from agent_run_supervisor.native_acp import launch_permissions, storage
 from agent_run_supervisor.native_acp.driver import NativeAcpDriver
 from agent_run_supervisor.native_acp.agent_registration import AgentEntry
 from agent_run_supervisor.native_acp.profile import (
@@ -38,7 +39,6 @@ from agent_run_supervisor.native_acp.spec import (
     RunSpecAssembler,
     resolve_run_environment,
 )
-from agent_run_supervisor.redaction import ENV_VALUE_REPLACEMENT
 from agent_run_supervisor.session import SessionNotFoundError, SessionStore
 
 FAKE_AGENT_PATH = Path(__file__).with_name("fake_agent.py")
@@ -161,16 +161,39 @@ def _seed_bound_session(kwargs: dict, external_id: str) -> None:
     assembler = RunSpecAssembler(request)
     instance = assembler.resolve_agent(entry, registry=kwargs["registry"])
     assembler.bind_workspace(root=kwargs["workspace_root"], cwd=kwargs.get("cwd"))
-    assembler.resolve_launch(
-        environment=resolve_run_environment(
-            arsd_env=dict(os.environ), profile=instance.profile, entry=entry
+    # A profile that selects a launch-permission policy requires its material
+    # before a launch can be sealed, so the seeder supplies real material —
+    # the same invariant production obeys, not a fixture exemption. The
+    # capabilities here are the seeder's own: no Session identity field derives
+    # from the launch snapshot, so this throwaway seal only has to be valid.
+    policy_id = instance.launch_permission_policy_id
+    seed_root: Path | None = None
+    material = None
+    if policy_id is not None:
+        seed_root = Path(tempfile.mkdtemp(prefix="ars-seed-launch-permission-"))
+        material = launch_permissions.materialize(
+            policy_id, capabilities=("read",), run_dir=seed_root
         )
-    )
-    spec = assembler.seal(
-        run_id="run-seed-0",
-        submitted_at="2026-07-21T00:00:00+00:00",
-        retry_of_run_id=None,
-    )
+    try:
+        assembler.resolve_launch(
+            environment=resolve_run_environment(
+                arsd_env=dict(os.environ),
+                profile=instance.profile,
+                entry=entry,
+                launch_permission=() if material is None else material.env_pairs,
+            ),
+            launch_permission=material,
+        )
+        spec = assembler.seal(
+            run_id="run-seed-0",
+            submitted_at="2026-07-21T00:00:00+00:00",
+            retry_of_run_id=None,
+        )
+    finally:
+        if material is not None:
+            launch_permissions.discard(material)
+        if seed_root is not None:
+            shutil.rmtree(seed_root, ignore_errors=True)
     storage.create_native_session(
         store,
         session_id=session_id,

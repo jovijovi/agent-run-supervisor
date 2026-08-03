@@ -18,6 +18,24 @@ mode is ``bypassPermissions``: a session that starts there would never consult
 the frozen grant. Profiles without the binding keep the exact legacy phases,
 snapshot labels, and wire sequence.
 
+Two **configuration-fidelity modes** exist, and a profile declares exactly one.
+
+``separate-selectors`` is the sequence above: an independent effort selector is
+rediscovered from the post-set-model set, set, and read back exactly.
+
+``model-only`` describes an agent whose model selector *is* the whole
+configuration. There is no independent effort selector to discover, so the
+sequence stops at the exact model readback: no effort option is discovered, no
+effort ``set_config_option`` is dispatched, and the effective effort is the
+shared :data:`EFFORT_NOT_APPLICABLE` sentinel. A request for such an agent must
+carry that sentinel; any other effort is refused before the prompt rather than
+silently ignored.
+
+The selector value stays **opaque** in both modes. A model literal such as
+``grok-4.5[effort=high,fast=true]`` is set and read back byte-for-byte: nothing
+parses it, infers an effort from it, maps a model name, or treats an agent's
+ACP ``mode`` selector as an effort.
+
 Option inputs are wire-shaped plain dicts (``id`` / ``currentValue`` /
 ``options``) — the SDK-facing driver dumps models by alias before they reach
 this stdlib-only module.
@@ -30,6 +48,53 @@ from typing import Any, Mapping, Sequence
 
 class ConfigFidelityError(RuntimeError):
     """Exact configuration could not be proven; the Run must not prompt."""
+
+
+# The one effective-effort value a model-only agent can honestly report, and
+# therefore the only requested effort such a Run may carry. Declared once: a
+# second spelling of it anywhere would be a second contract.
+EFFORT_NOT_APPLICABLE = "N/A"
+
+FIDELITY_SEPARATE_SELECTORS = "separate-selectors"
+FIDELITY_MODEL_ONLY = "model-only"
+FIDELITY_MODES: tuple[str, ...] = (
+    FIDELITY_SEPARATE_SELECTORS,
+    FIDELITY_MODEL_ONLY,
+)
+
+
+def validate_fidelity_pairing(
+    *,
+    fidelity_mode: str,
+    effort_selector_id: str | None,
+    requested_effort: str,
+) -> None:
+    """One rule, asked wherever a mode meets a selector and a request.
+
+    It lives here rather than in each caller so admission, the machine, and the
+    diagnostic probe cannot drift into three readings of the same contract.
+    """
+    if fidelity_mode not in FIDELITY_MODES:
+        raise ConfigFidelityError(
+            f"unknown configuration fidelity mode {fidelity_mode!r} "
+            f"(known: {list(FIDELITY_MODES)})"
+        )
+    if fidelity_mode == FIDELITY_MODEL_ONLY:
+        if effort_selector_id is not None:
+            raise ConfigFidelityError(
+                "model-only fidelity has no effort selector; declaring "
+                f"{effort_selector_id!r} would name a selector no Run ever sets"
+            )
+        if requested_effort != EFFORT_NOT_APPLICABLE:
+            raise ConfigFidelityError(
+                f"model-only fidelity requires effort {EFFORT_NOT_APPLICABLE!r}, "
+                f"requested {requested_effort!r}"
+            )
+        return
+    if not isinstance(effort_selector_id, str) or not effort_selector_id:
+        raise ConfigFidelityError(
+            "separate-selector fidelity requires an effort selector id"
+        )
 
 
 _PHASE_INIT = "init"
@@ -93,17 +158,24 @@ class ConfigFidelityMachine:
         self,
         *,
         model_selector_id: str,
-        effort_selector_id: str,
+        effort_selector_id: str | None,
         requested_model: str,
         requested_effort: str,
         permission_mode_selector_id: str | None = None,
         required_permission_mode: str | None = None,
+        fidelity_mode: str = FIDELITY_SEPARATE_SELECTORS,
     ) -> None:
         if (permission_mode_selector_id is None) != (required_permission_mode is None):
             raise ConfigFidelityError(
                 "a permission-mode selector and its required value must be "
                 "declared together"
             )
+        validate_fidelity_pairing(
+            fidelity_mode=fidelity_mode,
+            effort_selector_id=effort_selector_id,
+            requested_effort=requested_effort,
+        )
+        self._fidelity_mode = fidelity_mode
         self._model_selector_id = model_selector_id
         self._effort_selector_id = effort_selector_id
         self._requested_model = requested_model
@@ -129,6 +201,14 @@ class ConfigFidelityMachine:
     @property
     def requested_effort(self) -> str:
         return self._requested_effort
+
+    @property
+    def fidelity_mode(self) -> str:
+        return self._fidelity_mode
+
+    @property
+    def is_model_only(self) -> bool:
+        return self._fidelity_mode == FIDELITY_MODEL_ONLY
 
     @property
     def has_permission_mode(self) -> bool:
@@ -242,7 +322,13 @@ class ConfigFidelityMachine:
     def record_post_model_options(
         self, options: Sequence[Mapping[str, Any]] | None
     ) -> None:
-        """Consume the complete model-dependent option set."""
+        """Consume the complete model-dependent option set.
+
+        Under model-only fidelity this is also the *final* readback: there is
+        no effort leg after it, so a verified machine — and therefore a
+        reachable prompt — exists only once the exact model literal has been
+        read back here.
+        """
         self._expect_phase(_PHASE_MODEL_PLANNED, "record_post_model_options")
         parsed = _parse_options(options, phase="post-set-model")
         model = parsed.get(self._model_selector_id)
@@ -252,12 +338,24 @@ class ConfigFidelityMachine:
                 f"model readback mismatch: requested {self._requested_model!r}, "
                 f"effective {observed!r}"
             )
+        if self.is_model_only and self._permission_mode_selector_id is not None:
+            # The same re-proof the effort leg performs for the other mode: a
+            # mode restored as a side effect of the model switch must not reach
+            # a prompt.
+            self._require_permission_mode_exact(
+                parsed, "permission mode readback after model set"
+            )
         self._post_model_options = parsed
         self._record_snapshot("post_model", options or [])
-        self._phase = _PHASE_POST_MODEL
+        self._phase = _PHASE_VERIFIED if self.is_model_only else _PHASE_POST_MODEL
 
     def effort_plan(self) -> str:
         """Rediscover effort from the post-set-model set only."""
+        if self.is_model_only:
+            raise ConfigFidelityError(
+                "model-only fidelity discovers no effort selector; effort_plan "
+                "is unreachable"
+            )
         self._expect_phase(_PHASE_POST_MODEL, "effort_plan")
         assert self._post_model_options is not None
         option = self._post_model_options.get(self._effort_selector_id)
@@ -278,6 +376,11 @@ class ConfigFidelityMachine:
         self, options: Sequence[Mapping[str, Any]] | None
     ) -> None:
         """Consume the complete set and require the exact effective pair."""
+        if self.is_model_only:
+            raise ConfigFidelityError(
+                "model-only fidelity sets no effort option; there is no "
+                "post-set-effort set to consume"
+            )
         self._expect_phase(_PHASE_EFFORT_PLANNED, "record_post_effort_options")
         parsed = _parse_options(options, phase="post-set-effort")
         self._record_snapshot("post_effort", options or [])
@@ -308,7 +411,12 @@ class ConfigFidelityMachine:
         self._record_snapshot("option_update", options)
 
     def require_ready(self) -> tuple[str, str]:
-        """The prompt gate: only a verified machine releases the exact pair."""
+        """The prompt gate: only a verified machine releases the exact pair.
+
+        Under model-only fidelity the effort half is the ``N/A`` sentinel the
+        request had to carry, so what is returned and persisted is exactly what
+        was proven — never a value inferred from the model literal.
+        """
         if self._phase != _PHASE_VERIFIED:
             raise ConfigFidelityError(
                 f"prompt is unreachable: config fidelity phase is {self._phase!r}, "

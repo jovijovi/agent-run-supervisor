@@ -23,29 +23,20 @@ def test_static_safety_scan_passes_on_current_repository() -> None:
     }
 
 
-def test_static_safety_scan_detects_environment_value_sink_bypasses(
+def test_static_safety_scan_detects_environment_mapping_rendering(
     tmp_path: Path,
 ) -> None:
-    """The three ways a value can go around the guard instead of through it."""
+    """The two ways the resolved mapping stops being value-blind.
+
+    ``ResolvedEnvironment`` has exactly one consumer, process spawn. The way
+    that is most easily lost is a value rendered straight out of the mapping
+    into a log line or an exception message, so both rendering forms are
+    structurally refused.
+    """
     package = tmp_path / "src" / "agent_run_supervisor"
     (package / "native_acp").mkdir(parents=True)
     (package / "leaky.py").write_text(
         'def report(env):\n    return f"env={env}" + repr(env)\n', encoding="utf-8"
-    )
-    (package / "redaction.py").write_text(
-        "import hashlib\n\n\ndef fingerprint(value):\n"
-        "    return hashlib.sha256(value.encode()).hexdigest()\n",
-        encoding="utf-8",
-    )
-    (package / "result.py").write_text(
-        "def build_native_result_payload(*, final_message: str, **fields):\n"
-        "    return {'final_message': final_message}\n",
-        encoding="utf-8",
-    )
-    (package / "native_acp" / "storage.py").write_text(
-        "def write_run_text(handle, name: str, value: str):\n"
-        "    return handle.write_text(name, value)\n",
-        encoding="utf-8",
     )
 
     report = static_safety_scan.run_scan(tmp_path)
@@ -54,13 +45,6 @@ def test_static_safety_scan_detects_environment_value_sink_bypasses(
     kinds = {finding["kind"] for finding in report["findings"]}
     assert "env_value:raw_repr" in kinds
     assert "env_value:interpolated_mapping" in kinds
-    assert "env_value:value_set_digest:hashlib" in kinds
-    assert (
-        "env_value:unsafe_storage_signature:write_run_text" in kinds
-    )
-    assert (
-        "env_value:unsafe_storage_signature:build_native_result_payload" in kinds
-    )
 
 
 def test_static_safety_scan_detects_secret_danger_and_stale_phrase(tmp_path: Path) -> None:

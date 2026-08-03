@@ -60,6 +60,8 @@ Script keys (all optional):
 - ``usage``: the exact terminal ``usage`` object, replacing the default token
   counts — real adapters attach free-form vendor blocks there, so it is
   child-controlled text on the terminal path.
+- ``capture_config_path``: appends ``configId=value`` for every
+  ``session/set_config_option`` the agent receives.
 - ``capture_meta_path``: append one JSON line per session/new and
   session/load recording the exact ``_meta`` the client sent (``null`` when
   the argument was absent) — proves the frozen session metadata on the wire.
@@ -247,6 +249,19 @@ class FakeAgent:
             )
         _result(request_id, {"configOptions": self._options_list()})
 
+    def _capture_config(self, config_id: Any, value: Any) -> None:
+        """Append ``configId=value`` per set, when the script asks for it.
+
+        The method trace records only the method name, so it cannot answer
+        *which* selectors a Run actually set. A fidelity mode that must never
+        dispatch an effort RPC needs exactly that answer.
+        """
+        path = self.script.get("capture_config_path")
+        if not path:
+            return
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(f"{config_id}={value}\n")
+
     def _on_set_config(self, request_id: Any, params: dict[str, Any]) -> None:
         if self.script.get("hang_on_set_config"):
             return
@@ -254,6 +269,7 @@ class FakeAgent:
             sys.exit(1)
         config_id = params.get("configId")
         value = params.get("value")
+        self._capture_config(config_id, value)
         if value in self.script.get("reject_set_config_values", []):
             _error(request_id, -32602, f"value rejected by fake script: {value}")
             return

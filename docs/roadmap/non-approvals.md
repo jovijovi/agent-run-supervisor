@@ -2,16 +2,17 @@
 title: "ARS vNext Current Explicit Non-Approvals"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-02
+last_validated_at: 2026-08-03
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/non-approvals.md"
 ---
 # ARS vNext Current Explicit Non-Approvals
 
-Stage 0/1, Stage 2 A1–A5, and the V4 external-AGENT boundary reset are merged on `main`, operator-held
-local socket-path acceptance passed, and package metadata is prepared as `0.6.0`. None of that approves
-further work: merged source plus a prepared version number is not publication, not deployment approval, not
-Sachima integration, not public ingress, and not a reusable or transitive approval for the next change.
-This document does not approve:
+Stage 0/1, Stage 2 A1–A5, and the V4 external-AGENT boundary reset are merged on `main`, and operator-held
+local socket-path acceptance passed. Which version is currently released and running is a volatile fact this
+document does not carry: [`current-status.md`](current-status.md) owns it. None of it approves further work —
+merged source is not publication, a prior publication is not approval for the next one, and neither is
+deployment approval, Sachima integration, public ingress, or a reusable or transitive approval for the next
+change. This document does not approve:
 
 - any source expansion or repair beyond the currently authorized task scope, including source,
   test, script, dependency, lockfile, `pyproject.toml`, or CI/workflow changes;
@@ -24,11 +25,10 @@ This document does not approve:
   changes beyond the already-enabled local user service;
 - follow-on source work and Git/GitHub side effects, including commits, pushes, PR creation,
   merge, or other GitHub mutation, without separate operator authorization;
-- any release **act**: a release tag, a GitHub Release, or a PyPI publication. The local `0.6.0` version
-  metadata and CHANGELOG preparation in this repository **is** authorized and is already done; that
-  authorization covers exactly the version literals, the lockfile version, and the CHANGELOG section, and
-  it approves no tag, publication, deployment, restart, or cutover. Any *further* version bump or release
-  metadata change is again unapproved;
+- any release **act**: a release tag, a GitHub Release, or a PyPI publication. Past releases were taken
+  under their own separate authorizations and approve nothing further; the board records which version is
+  current. Any *further* version bump, release-metadata change, tag, publication, deployment, restart, or
+  cutover is again unapproved and needs its own decision;
 - Sachima `ArsdBackend`/UDS integration, supervisor pin changes, Gateway/IM/Feishu behavior, delivery, automatic replies, or live/default-on wiring;
 - public ingress, TCP/root service, distributed scheduling, multi-tenant control plane, participant UI, `@all`, or agent-to-agent auto-routing;
 - arbitrary executable/command/argv/env/JSON/config/credential passthrough **from the wire**;
@@ -52,9 +52,14 @@ production. This document specifically does not approve:
   required-absence check over an AGENT's auth or config surfaces, and no modelling of a path inside them;
 - **ARS credential resolution** — ARS discovers, resolves, mints, refreshes, stores, and manages no
   credential, and no schema may carry a placeholder for one;
-- **persisting an environment value** in any ARS artifact, hash input, log, exception, event, inspect
-  response, or API response, including any digest, keyed digest, length, prefix, suffix, equality token, or
-  matcher table computed to represent one;
+- **ARS itself projecting or serializing an environment value** — taking a value out of the resolved
+  carrier and writing it, or anything value-derived from it (a digest, keyed digest, length, prefix, suffix,
+  equality token, or matcher table), into structured launch/Spec/environment material, a hash input, a
+  configuration-inspection response, a log line, or an exception message. This is a rule about **what ARS
+  emits from the carrier**. It is deliberately *not* a claim that an environment value can never appear in
+  Run evidence: free-form text an AGENT authored is not scanned against this Run's projected values, so an
+  AGENT echo may be retained, and re-adding a per-Run exact-literal guard to prevent that is itself a
+  separate decision that this document does not take;
 - **any attestation, artifact-integrity, supply-chain, or isolation claim**, or any statement that ARS
   verifies what it launched, contains hostile code, unconditionally terminates every descendant, retroactively
   erases legacy bytes, prevents transformed disclosure, or ensures that no sensitive value reaches the child;
@@ -72,10 +77,17 @@ production. This document specifically does not approve:
 
 ## Threat-model scope: what the environment-value rule does and does not cover
 
-**Decided 2026-08-02, and settled.** The approved invariant is that **ARS production writers must not
-persist an environment value.** It is a rule about what ARS writes.
+**Decided 2026-08-02; narrowed 2026-08-03.** The approved invariant is that **ARS must not project or
+serialize an environment value out of the resolved carrier** — into structured material, a hash input, an
+inspection response, a log line, or an exception. It is a rule about what ARS *emits*, and it stands.
 
-It is **not** a tamper-resistance claim about artifacts ARS already wrote. Defending `run inspect` against
+The broader reading that once accompanied it — that no environment value may appear in any ARS artifact at
+all, enforced by a per-Run exact-literal guard over free-form Run text — is **retired**, under the decision
+that removed that guard. Retention of an AGENT-authored echo is therefore an accepted outcome, not a
+violation of this document, and the surviving controls over such text are static credential-shape and
+sensitive-key redaction, categorical exception containment, and bounded evidence.
+
+It is also **not** a tamper-resistance claim about artifacts ARS already wrote. Defending `run inspect` against
 an actor who can arbitrarily rewrite a field of an ARS-owned reset `launch.json` — planting a secret in
 `profile_id`, say, and then asking the inspector to catch it — is **outside this Stage 3 threat model**: an
 actor with arbitrary local write access to the Run root has already defeated every projection boundary
@@ -97,8 +109,8 @@ a value-blind production projection at all, which is what selects the digest pat
   chain that replaced it.
 - **Decided (2026-08-01): deleting the three registered per-agent profiles from source.** Introducing a
   retirement capability and using one were always two separate decisions; this is the second, taken in
-  writing, and it is narrow. It authorized exactly one source act, now merged: the source registry holds
-  exactly `standard-native-acp-v1` and `claude-agent-acp-compat-v1`. V4 retires profiles by **deleting**
+  writing, and it is narrow. It authorized exactly one source act, now merged: the three per-agent profiles
+  left the source registry. V4 retires profiles by **deleting**
   them — no alias, redirect, disable flag, field defaulting to `False`, unused rule constant, or marker was
   added, and a test asserts that no such mechanism exists. It authorized nothing else.
 - **Decided (2026-07-30, after the authority alignment merged): source implementation of V4 Stages 1–3.**
@@ -106,8 +118,10 @@ a value-blind production projection at all, which is what selects the digest pat
   nothing else: **release, publication, deployment, service restart, migration/cutover, the real-agent
   canary, and production changes all remain separately unapproved**, and a green verification transfers
   approval to none of them.
-- **Not approved: production cutover** (Decision 2, including the one-time legacy-Session load refusal) or
-  any decision about the **legacy `0.5.x` line lifetime** (Decision 3). Both remain open.
+- **Not approved: any further cutover, migration, or rollout act.** Decision 2 — production cutover with its
+  one-time legacy-Session load refusal — was taken by the operator; the board records the resulting running
+  version. Nothing about that transfers to the next deployment, restart, or migration, and the **legacy
+  line's lifetime** (Decision 3) remains an open operator decision.
 - **Not approved: touching the retired deployment.** The `/opt` artifact trees, the Binding roots, their
   promoted generations, and every historical Run and Session byte are untouched migration source. The reset
   stops referencing them; it deletes, migrates, re-hashes, and rewrites nothing, and their removal is a

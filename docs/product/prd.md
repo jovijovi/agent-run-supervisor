@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext PRD"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-02
+last_validated_at: 2026-08-03
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/prd.md"
 ---
 # agent-run-supervisor vNext PRD
@@ -90,8 +90,8 @@ initialize / capability discovery
 → discover current config options
 → set requested model
 → consume the model-dependent option set
-→ rediscover effort
-→ set requested effort
+→ [separate-selectors only] rediscover effort
+→ [separate-selectors only] set requested effort
 → exact requested == effective readback
 → persist EffectiveRunState
 → prompt
@@ -99,6 +99,16 @@ initialize / capability discovery
 
 Missing capability, unadvertised value, alias/coercion, stale option set, failed set, or inexact readback
 produces zero Turn and no prompt. Literal `max` must never be downgraded to `high` or another value.
+
+**Two configuration-fidelity modes exist, and a profile declares exactly one.** `separate-selectors` is the
+sequence above and is the default every existing profile keeps. `model-only` describes an agent whose model
+selector *is* the whole configuration: it advertises no independent effort selector, so the sequence stops at
+the exact model readback, **no effort option is discovered and no effort set is ever dispatched**, and the
+effective effort is one shared `N/A` sentinel. A `model-only` Run must request that sentinel; any other
+requested effort fails before the prompt rather than being silently ignored, because ignoring a requested
+effort is the coercion this requirement forbids. The selector value stays opaque in both modes — a literal
+such as `grok-4.5[effort=high,fast=true]` is set and read back byte-for-byte, and no code path parses it,
+infers an effort from it, maps a model name, or reads an agent's ACP `mode` selector as an effort.
 
 **The live-advertised option set is the domain authority.** No source-frozen `registered_models`,
 `allowed_efforts`, or selector value domain gates admission: "an unadvertised value ⇒ zero Turn, no
@@ -187,6 +197,16 @@ no unquarantine tool.
   binding; a colliding registry fails the startup parse and **the daemon refuses to listen**.
 - A real denied-action canary is mandatory per registered agent before that agent's use; zero permission
   events prove nothing about denial.
+- **A profile may additionally select one closed, source-owned launch-permission policy id.** ACP mediation
+  decides before a side effect only when the agent asks, and an agent that completes an edit without ever
+  emitting `session/request_permission` is detected only after the file exists. Where cited evidence shows
+  that, ARS compiles the selected policy from the Run's frozen grant, materializes it privately per Run under
+  the supervisor root before spawn, and points the agent at it, so the agent refuses the side effect itself.
+  The one registered policy is read-only: it denies write and shell execution explicitly and denies no read.
+  A grant the selected backend cannot faithfully enforce fails **before spawn and before any prompt** with a
+  stable code rather than being widened or narrowed silently. This is defense in depth — the permission
+  bridge and the completion backstop are unchanged — and it is not a permission framework: there is no
+  dynamic or per-tool approval, no path-level write policy, and no new write capability.
 - **Mediation is cooperative.** An agent that ignores the knob, or one with no registered binding, can
   execute in-process tools with no ACP permission event, and the permission bridge will never see them.
 
@@ -244,9 +264,11 @@ guarantees. ARS makes no isolation claim either way.
 
 ### R9 — Evidence and runtime ledger
 
-- Persist immutable Spec/launch material without secrets or environment values, observed effective state,
-  normalized events, bounded/redacted stderr, markers, result, permission evidence, and a value-blind
-  redaction/suppression report.
+- Persist immutable Spec/launch material — value-blind, with no secret and no environment value in it —
+  plus observed effective state, normalized events, bounded and statically redacted stderr, markers, result,
+  permission evidence, and a redaction report. The value-blind claim covers the **structured** material ARS
+  composes; the agent-authored text in the rest of that list is bounded and statically redacted, not matched
+  against this Run's projected values (R15).
 - One writer owns each Run event stream with monotonic sequence and bounded queue/bytes.
 - The ledger supports supervision, recovery, duplicate prevention, progress, config/result proof, and
   audit. It is not a second AGENT conversation database.
@@ -310,8 +332,9 @@ guarantees. ARS makes no isolation claim either way.
 
 ### R12 — Compatibility profiles: ACP semantics only
 
-- ARS remains Python and stdlib-only at runtime. The Native client pins and verifies the official Python
-  ACP SDK in the consuming environment before implementation.
+- ARS remains Python and stdlib-only at runtime apart from the optional `native` extra. The Native client
+  pins and verifies the official Python ACP SDK in the consuming environment before implementation, and
+  never installs that SDK's own HTTP/WS transport extra: ARS is stdio ACP only.
 - A profile is a small, source-owned, versioned value describing **how to speak ACP to a class of agent**:
   ACP protocol major; required capabilities; a forbidden-capability floor; session semantics including
   required real `session/load` and never `session/new` on a reuse path; default selector-id conventions;
@@ -320,10 +343,19 @@ guarantees. ARS makes no isolation claim either way.
 - A profile contains **no** path, version, digest, model literal, agent name, value domain, launch kind,
   artifact identity, or deployment fact. `profile_hash` therefore moves **only when ACP semantics move**,
   which is why an ordinary ARS release leaves every Session identity field untouched.
-- The target registry holds exactly two profiles: `standard-native-acp-v1` for every agent, native or
-  adapter-reached, and `claude-agent-acp-compat-v1` for one evidenced ACP-semantic deviation — frozen
-  session metadata sent on **both** `session/new` and `session/load`, plus a required permission-mode
-  selector proven by exact readback.
+- A profile also declares its **configuration-fidelity mode** (R3), because how an agent is configured is an
+  ACP semantic. It is the only place that fact may live.
+- The target registry is a closed set of three: `standard-native-acp-v1` for every agent, native or
+  adapter-reached; `claude-agent-acp-compat-v1` for one evidenced ACP-semantic deviation — frozen session
+  metadata sent on **both** `session/new` and `session/load`, plus a required permission-mode selector proven
+  by exact readback; and `cursor-native-acp-v1` for one evidenced configuration-fidelity deviation —
+  `model-only`, with no independent effort selector. Every other frozen term of the Cursor profile equals the
+  standard contract, and adding the mode moved no existing profile's `profile_hash`, so no live Session
+  identity changed.
+- A profile may also declare **one launch-permission policy id** (R7), because how an agent must be
+  configured to honour a permission decision before it acts is a permission-mediation semantic. It is an id
+  from a closed source-owned set, keyed by the capability family it enforces and never by an agent name; the
+  profile that selects it is where the agent-keyed choice lives.
 - A `-v<N>` suffix stays load-bearing: the id carries the ACP protocol generation, profile construction
   refuses a contract whose frozen major disagrees with it, and a future `…-v2` is a separate profile with
   its own registrations and Sessions, never a revision of this one.
@@ -423,13 +455,14 @@ them is a continuity comparison against a prior Run.
 An `agentInfo` self-report is not an identity in either direction: a substituted agent can report any name
 it likes, and an operator-declared expected name would refuse Runs for cosmetic vendor renames.
 
-### R15 — Environment projection and ARS sink non-persistence
+### R15 — Environment projection: what ARS will not write, and what it does not scan
 
 **Layers and precedence.** A filtered environment is not the interactive environment: it silently omits
 proxy, certificate, agent-socket, temp-directory, and provider variables, and the resulting failures look
 like agent bugs. Four layers resolve in order — a bounded source-owned base allowlist taken from the
 daemon's own environment when present; operator-declared pass-through names; an operator-authored overlay
-of literal values; and the source-owned mediation pairs, applied **last**. `HOME` unchanged is what makes
+of literal values; the source-owned mediation pairs; and, only for a profile that selected a
+launch-permission policy (R7), that policy's source-owned pair, applied **last**. `HOME` unchanged is what makes
 the AGENT's own credential store, plugin tree, cache, session store, and user config work exactly as they
 do interactively; that is necessary and not sufficient. `PATH` is the single most likely cause of "works in
 my shell, fails under ARS", and its remedies are an operator-owned overlay or an absolute `command`.
@@ -437,18 +470,19 @@ my shell, fails under ARS", and its remedies are an operator-owned overlay or an
 the operator's SSH keys — a real authority transfer that must be an explicit per-agent opt-in.
 
 **Resolution happens exactly once, in memory, before sealing and before spawn.** The resolved value
-carrier is ephemeral and non-serializable, accepted only by the process-spawn seam and by the per-Run text
-guard; the durable projection is a separate value-blind name/source/precedence shape. One resolution means
+carrier is ephemeral and non-serializable, accepted only by the process-spawn seam and consumed by nothing
+else; the durable projection is a separate value-blind name/source/precedence shape. One resolution means
 the sealed projection describes exactly which names and precedence were handed to exec, with no window in
 which the daemon's own environment could change between seal and spawn, and the exec mapping stays
 byte-identical if the ambient environment mutates afterwards.
 
 **The guarantee, stated exactly.** Every environment value is sensitive regardless of key name, source
-class, length, or apparent shape. No complete projected literal — and no digest, fingerprint,
-length-by-value, or other metadata computed to represent that value — may flow into an ARS durable
-artifact, hash input, log, exception or error message, event stream, inspect response, or daemon API
-response. There is no secret-shaped-name heuristic: name shape is unsound in both directions and can never
-be a confidentiality boundary.
+class, length, or apparent shape, so ARS never *chooses* to record one. No projected value — and no digest,
+fingerprint, or length-by-value computed to represent one — may flow into an ARS **durable structured
+artifact or hash input**, and the resolved value carrier may not be rendered into a log line or an exception
+message. There is no secret-shaped-name heuristic: name shape is unsound in both directions and can never be
+a confidentiality boundary. What the guarantee does **not** cover is free-form text the AGENT itself
+authored: see the accepted consequence below.
 
 - **Value-blind structured evidence.** Durable environment evidence records per name: the name, its source
   class, its precedence layer, and its redaction status. Mediation values are withheld too — the mediation
@@ -457,45 +491,39 @@ be a confidentiality boundary.
   keyed digest, length, prefix, suffix, equality token, or matcher table is hash material. Two Runs whose
   transmitted value changed may therefore share a launch hash; the hash proves the declared projection,
   not the secret.
-- **Ephemeral per-Run literal guard.** Every non-empty final projected value creates a per-Run guard that
-  denies that literal at every ARS-owned textual, event, log, error, storage, and API boundary, in both
-  the Python string form and the actual exec byte form. Overlapping values are matched longest-first and
-  the result is rescanned; dynamic keys and values in structured child-controlled data are guarded
-  recursively; a key collision suppresses the enclosing record rather than overwriting one. If safe
-  replacement cannot be established, the boundary suppresses the whole field or record and emits only a
-  stable categorical withholding marker. Only coarse sink-local counts may be recorded — matched
-  occurrences, suppressed fields, suppressed records — never a value, a hash of a value, or a
-  length-by-value. **Confidentiality wins over evidence completeness:** there is no minimum secret length
-  and no value is waived because redaction is inconvenient.
-- **The evidence cost is operator-visible and must be documented, not discovered.** Short, common layer-1
-  base values — `TERM`, `LANG`, `TZ`, `USER`, `HOME`, and `PATH` elements — are in the guard's literal set,
-  so guarding them **will erase substantial evidence** from Run text. That is accepted deliberately: the
-  coarse suppression counters make the loss measurable rather than invisible, and the remedy for
-  untriageable Runs is an evidence-model decision about which names belong in layer 1 — never a per-value
-  length hint, prefix, or "short value" exemption, which this requirement forbids.
-- **The external Session ID cannot be redacted**, because it must later be replayed unchanged. A collision
-  with a projected literal is therefore refused categorically before the ID is bound, persisted, exposed,
-  or prompted against.
+- **There is no per-Run exact-literal guard.** ARS does not scan free-form Run text for the complete values
+  it handed the child, and must not reintroduce such a scan under another name. Static **shape** redaction
+  (API key / Bearer / JWT / PEM) and the sensitive-env-**key** rule remain, because neither depends on a
+  per-Run value set. So do every byte/event/final-message ceiling and every categorical failure code.
+- **The accepted consequence, stated rather than discovered.** An AGENT that echoes an arbitrary projected
+  environment value back through a final message, an event field, a tool-call id, `agentInfo`, usage
+  metadata, stderr, or the external Session id it mints may have that value **retained** in ARS evidence
+  unless it matches a static credential pattern. Exact-literal matching was removed because its cost was
+  real and its benefit was not: short, common layer-1 base values — `TERM`, `LANG`, `TZ`, `USER`, `HOME`,
+  and `PATH` elements, and any one-character value — erased substantial ordinary evidence from Run text and
+  refused otherwise-valid external Session ids. Operators who treat a projected value as a secret must reason
+  about what the AGENT does with it, exactly as they already must for what the AGENT sends to its provider.
+- **The external Session ID is recorded as the agent minted it**, because it must later be replayed
+  unchanged. There is no sensitive-collision refusal on it.
 - **Legacy records are read value-blind.** Pre-reset launch records can contain environment values. They
   are immutable historical evidence: ARS neither rewrites nor deletes them. New readers classify the schema
   **before** selecting a verifier, return a strict categorical allowlist, mark environment values withheld,
   never return raw launch/spec documents or value-bearing seal material, and never recompute a hash over a
   value-bearing record. Legacy free-form text is withheld categorically.
-- **Startup and registry validation is structurally value-blind**, because it happens before a per-Run
-  guard exists: refusals name a stable rule and at most a field path or an environment **name**, never an
-  overlay value or a raw file fragment. Successful offline validation prints only entry ids, counts, names,
+- **Startup and registry validation is structurally value-blind**: refusals name a stable rule and at most a
+  field path or an environment **name**, never an overlay value or a raw file fragment. Successful offline validation prints only entry ids, counts, names,
   source classes, and rule outcomes.
-- **Workspace binding fields are deliberately outside the guarded set.** The canonical workspace root and
-  the effective `cwd` remain complete literals in the sealed Spec and remain hash-covered, even when the
-  workspace lives under `$HOME`. They are independently derived authority facts, not environment-value
-  flow, and guarding them would break workspace binding, reconciliation attribution, and audit.
+- **Workspace binding fields remain complete literals.** The canonical workspace root and the effective
+  `cwd` stay complete in the sealed Spec and stay hash-covered, even when the workspace lives under `$HOME`.
+  They are independently derived authority facts, and truncating or tokenising them would break workspace
+  binding, reconciliation attribution, and audit.
 
-**Exact scope and honest limits.** The guarantee covers ARS-owned persistence and every externally exposed
-ARS daemon/CLI/log/error/event projection. It does **not** erase the operator-authored value at its source,
-stop the child from writing its own logs or state, stop the child from transmitting a value to a remote
-service, prevent OS crash dumps or privileged process inspection, or detect a transformed disclosure such
-as a substring or partial value, base64, encryption, hashing, character-by-character fragmentation, or a
-semantic paraphrase. Those require containment or information-flow control and are **not claimed**.
+**Exact scope and honest limits.** The guarantee covers ARS-authored durable material and the resolved
+carrier. It does **not** cover what an AGENT echoes into free-form Run text, and it does **not** erase the
+operator-authored value at its source, stop the child from writing its own logs or state, stop the child from
+transmitting a value to a remote service, prevent OS crash dumps or privileged process inspection, or detect
+a transformed disclosure such as a substring or partial value, base64, encryption, hashing,
+character-by-character fragmentation, or a semantic paraphrase. Those require containment or information-flow control and are **not claimed**.
 Independently derived public facts that happen to have identical bytes are not treated as value-derived
 flow. No sandboxing or unrelated hostile-code hardening is introduced.
 
@@ -522,10 +550,10 @@ movement: every live Session identity field stays byte-identical.
 
 ### Stage 2 — Environment-value sink boundary (architecture-neutral)
 
-Install the ephemeral per-Run literal guard and route every child-controlled or exception-controlled text,
-event, log, error, storage, and API boundary through it. Strictly a confidentiality strengthening of the
-architecture that is live today. Sequencing it before the reset is deliberate: authority claims the
-boundary from Stage 0 onward, so the enforcement must not lag behind the claim any longer than necessary.
+Make the sealed launch material structurally value-blind and give the resolved carrier exactly one consumer.
+Strictly a confidentiality strengthening of the architecture that is live today. This stage originally also
+installed an ephemeral per-Run exact-literal guard over free-form Run text; that half was **removed later**
+under its own decision, for the reason recorded in R15, and the structural half is what remains.
 
 ### Stage 3 — The boundary reset
 
@@ -556,12 +584,12 @@ section records only the coarse position.
   eight-operation drain matrix, `--agents-file`, and the validate/doctor/inspect operator surface. The
   retired artifact/Binding implementation and the three per-agent profiles are deleted from source; the
   retired authority is preserved at `docs/archive/binding-era-2026-07/`.
-- **Merged is not published and not deployed.** Package metadata is prepared as `0.6.0`, which is not a
-  tag, a GitHub Release, a PyPI upload, a deployment, or an activation. The released `0.5.x` line still
-  implements the artifact/Binding architecture and reads no agents file, so authoring a registry file
-  against a live deployment changes nothing there and is not approved.
-- Production cutover with its one-time legacy-Session load refusal, and the lifetime of the legacy `0.5.x`
-  line, are open human decisions. Implementation status is never an approval for the next stage.
+- **Merge, publication, and deployment stay three separate facts.** Which version is published and which is
+  running are volatile and live on the board ([`docs/roadmap/current-status.md`](../roadmap/current-status.md)),
+  not here. A merge is not a publication, a publication is not a deployment, and none of them approves the
+  next one.
+- The lifetime of the pre-reset line is an open human decision. Implementation status is never an approval
+  for the next stage.
 
 ## 6. Non-goals
 

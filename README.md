@@ -91,7 +91,7 @@ operations, including `server_info`, are served at `api_version: 1` as well.
 | Need | Requirement |
 |---|---|
 | Runtime | **Python ≥ 3.11**, with **zero third-party runtime dependencies**. |
-| Driving a real agent | The `native` extra, pinning the official ACP client `agent-client-protocol==0.11.1`. A base install imports fine and fails only when the SDK is used. |
+| Driving a real agent | The `native` extra, pinning the official ACP client `agent-client-protocol==0.12.0`. A base install imports fine and fails only when the SDK is used. ARS is stdio ACP only and never installs the SDK's `http` extra. |
 | Running `arsd` | Linux with a POSIX user session for the AF_UNIX socket, plus a supervisor root, an agents file, and at least one caller mapping you supply. Crash containment additionally expects a user-level service manager cgroup and a CPython build with pidfd support. |
 | Running an agent | The agent installed by you, plus one registry entry naming its command. |
 
@@ -140,7 +140,10 @@ Every value above is a **placeholder**. The closed field set is `profile`, `comm
 `forbidden_capabilities`, and `session_epoch` — nothing else, and an unknown key at any level is
 refused. An agent whose CLI is not natively ACP is no different: point `command` at the ACP adapter you
 installed and use the same profile, because the adapter is a deployment fact, not a source constant.
-Only `claude-agent-acp-compat-v1` differs, and only for one evidenced ACP-level deviation.
+Two profiles differ, each for one evidenced deviation and nothing more:
+`claude-agent-acp-compat-v1` carries its ACP-level compatibility differences, and
+`cursor-native-acp-v1` uses model-only configuration fidelity plus a source-owned read-only
+startup permission policy. `standard-native-acp-v1` behaves ordinarily.
 
 - **Your command is launched exactly as declared.** `argv[0]` is the declared string byte-for-byte, and
   a bare name is found by ordinary PATH lookup over the *child's* projected `PATH`, so shims, symlink
@@ -258,7 +261,7 @@ closed: exceptions carry a stable code such as `PEER_UID_DENIED`, `OWNER_MISMATC
 | ARS guarantees | ARS does not claim |
 |---|---|
 | default-deny mediation against the caller's frozen grant, with redacted evidence for every decision; the mediation environment binding is source-owned in key *and* value, applied last, and never authored or disabled by an entry | **a sandbox.** This is cooperative-agent policy, not OS isolation: the agent runs as the daemon's UID with that UID's full authority |
-| no environment value in any ARS artifact, hash input, log, error, event, inspect response, or API response — not a digest, fingerprint, or length of one | that a value never reaches the child, or that a *transformed* disclosure (partial, encoded, hashed, paraphrased) is detected |
+| no projected environment value serialized out of the resolved carrier into structured launch/Spec/environment material, any hash input, or a configuration-inspection response — not a digest, fingerprint, or length of one; the carrier goes to exec and nowhere else | that an environment value never appears in Run evidence. ARS does **not** scan free-form agent text against the values it projected, so an agent that echoes one back may have it retained in bounded Run/Session evidence unless static credential-shape or sensitive-key redaction catches it |
 | deterministic redacted artifacts: `0700` directories, `0600` files, atomic final writes, and exactly two writable surfaces — the supervisor root and the socket path | **integrity or supply-chain verification.** ARS does not check that the executable it launched is the one you intended or came from a trusted publisher |
 | termination of its direct child and every descendant still in the process group ARS created | **a complete kill switch.** A descendant that leaves the group is outside it — and when work continues elsewhere, the run fails loudly as `unknown` / `quarantined` |
 | fail-closed uncertainty: no auto-retry, replay, or resume of a prompt that may already have been dispatched, and no unquarantine tool | **crash containment by itself.** Production expects a user-level service manager cgroup (`Restart=on-failure`, `KillMode=control-group`) |
