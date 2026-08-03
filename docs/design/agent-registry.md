@@ -338,6 +338,54 @@ An id hint for a selector no Run ever sets would be a fiction in every launch sn
 refused rather than ignored. A caller targeting such an agent must request effort `N/A`; any other value
 fails before the prompt.
 
+### Pinning an exact model through Claude Code / `claude-agent-acp`
+
+An operator who wants a *specific* Claude model — not "whatever is current" — has to know one thing about
+Claude Code's naming first: **`opus[1m]` is a rolling alias, not a fixed model id.** The official
+documentation defines an alias as the provider's currently recommended model — here Opus in the 1M-context
+lane — and states that aliases update over time, so the concrete generation behind one changes. It is
+therefore **not** a permanent synonym for `claude-opus-5[1m]`. Any mapping you observe today is a snapshot,
+never a definition; that aliases are documented as changing is the only durable fact about them.
+
+**A caller that needs a fixed model requests the full concrete model id** — `claude-opus-5[1m]`, for example —
+exactly as it expects to read it back. That is necessary but not sufficient: by the live-domain rule above,
+the value must also be one the running agent actually advertises, and the adapter advertises what the
+effective Claude Code settings allow. The operator makes the exact id available through `availableModels`:
+
+```json
+{
+  "availableModels": ["claude-opus-5[1m]"]
+}
+```
+
+`availableModels` is **Claude Code / adapter-owned configuration, not ARS configuration.** It is not a
+registry field (§4), not a registered model domain (§8), and it never appears in the operator's agents file.
+The operator places it in whichever Claude settings source is effective for the adapter's own `cwd` and
+config root — a deployment choice this document neither makes nor records.
+
+**Adapter behavior, bounded and version-sensitive.** `@agentclientprotocol/claude-agent-acp` resolves the
+user, project, local, and managed settings sources, uses the **exact** `availableModels` entries as the model
+option ids it surfaces over ACP, and passes that same canonical advertised value to `setModel`. That is an
+observed property of one adapter version, not a contract ARS owns. Revalidate it after any adapter or Claude
+Code upgrade: a change to the settings merge or to how ids are surfaced changes what ARS sees advertised.
+
+**ARS does not paper over the difference.** The caller supplies model and effort on every Run, live discovery
+is the domain authority, and the effective configuration is proved by exact literal readback before the
+prompt. So an exact request is never quietly satisfied by a rolling alias: if the adapter advertises or reads
+back an id that is not byte-for-byte the requested one — `opus[1m]` where `claude-opus-5[1m]` was asked for —
+the Run fails pre-dispatch with `CONFIG_FIDELITY`, before any prompt, rather than proceeding as though the
+pin had been proven.
+
+**Acceptance, minimally:** the exact id appears in the discovered option set; set and readback are
+byte-for-byte identical to the requested id; a real prompt on that Run succeeds; and a new process loads the
+same Session and continues at the same effective model and effort.
+
+**Sources.** Claude Code model aliases —
+<https://code.claude.com/docs/en/model-config#model-aliases>; restricting model selection —
+<https://code.claude.com/docs/en/model-config#restrict-model-selection>; the adapter —
+<https://github.com/agentclientprotocol/claude-agent-acp>. The first two are rolling documentation: read them
+as the current statement, not a fixed one.
+
 ## 9. The honest cost of read-once, and restart semantics
 
 A registry edit — a new `command`, changed `args`, a new overlay pair, an epoch bump, a new agent — takes
