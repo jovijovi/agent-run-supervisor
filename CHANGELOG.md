@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-08-03
+
+### Added
+
+- Model-only Native ACP configuration fidelity for agents whose complete model
+  selector carries the intended configuration without a separate effort control.
+- Per-Run Cursor startup permissions using private, source-owned configuration
+  material with fail-closed creation, evidence, cleanup, and environment ownership.
+
+### Changed
+
+- Upgraded the optional Native ACP Python SDK to `0.12.0` using its stdio transport.
+- Removed the full-value sensitive-literal guard while retaining categorical safe
+  projection, redaction, permission enforcement, and static safety checks.
+
+### Fixed
+
+- Cursor write and shell denials are sealed before launch; Cursor's deny-before-
+  allow precedence prevents project or ancestor `.cursor/cli.json` allow rules
+  from auto-approving those operations.
+
 ## [0.6.1] - 2026-08-02
 
 ### Added
