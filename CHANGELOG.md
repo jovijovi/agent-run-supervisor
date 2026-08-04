@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-08-04
+
+### Changed
+
+- Clarified exact Claude model selection: a fixed-model request uses a concrete
+  ID that the running agent must advertise and read back byte-for-byte before a
+  prompt is sent; rolling aliases are not treated as fixed IDs.
+- Refreshed contributor and product-goal documentation for the current ARS
+  external-AGENT supervision boundaries.
+
+### Fixed
+
+- Preserved Cursor Session continuity across Runs by keeping agent-owned
+  configuration and Session state outside per-Run material, so later Runs can
+  use real `session/load`.
+
 ## [0.6.2] - 2026-08-03
 
 ### Added
