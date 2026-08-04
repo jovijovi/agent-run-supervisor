@@ -11,7 +11,7 @@ supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 
 ```text
 base_branch: main
-active_plan: none — no plan is active
+active_plan: docs/plans/active/2026-08-03-cursor-cross-run-session-resume.md (defect repair, unmerged)
 ```
 
 ## Current position
@@ -19,7 +19,8 @@ active_plan: none — no plan is active
 - ARS vNext is the local supervision path: `trusted caller → arsd UDS → ars-core/Native ACP → one local process running the registered command`.
 - **The V4 external-AGENT boundary reset is merged on `main`**: one operator-owned agent registry read once at daemon startup, the four-way boundary, the environment-value sink boundary, total ordered reconciliation, and fail-closed load-only Session reuse. Operator contract: [`agent-registry.md`](../design/agent-registry.md).
 - **Authority and source are aligned.** The tracked authority chain describes merged source, so no authority-versus-source delta remains to track. The artifact/Binding-era authority and its retired implementation are cold history in [`docs/archive/binding-era-2026-07/`](../archive/binding-era-2026-07/README.md).
-- Three source profiles are registered: `standard-native-acp-v1`, `claude-agent-acp-compat-v1`, and `cursor-native-acp-v1` (model-only configuration fidelity, plus a selected read-only launch-permission policy). The three per-agent profiles are deleted from source, not aliased or disabled.
+- Three source profiles are registered: `standard-native-acp-v1`, `claude-agent-acp-compat-v1`, and `cursor-native-acp-v1` (model-only configuration fidelity, and that alone). The three per-agent profiles are deleted from source, not aliased or disabled.
+- **No registered profile selects a launch-permission policy.** `cursor-native-acp-v1` revision 2 removed the selection revision 1 carried: that backend's environment key names an agent's whole configuration root, so per-Run material relocated and then deleted the agent's own Session state and broke cross-Run `session/load` continuity. The mechanism stays registered and selectable; enforcement stays with ACP mediation, the completion backstop, and the mandatory per-agent canary. Repair is on a task branch, unmerged.
 - **The per-Run environment-value literal guard is removed** from source: `RunTextGuard`, `SafeText`, the withholding markers, `arsd/safe_logging.py`, the external-Session-id sensitive-collision refusal, and `ResolvedEnvironment.sensitive_values()` are all deleted. Structured launch material stays value-blind and the static shape/key redactor stays; free-form Run text an AGENT authored is no longer scanned for projected values. The stated consequence is in [PRD R15](../product/prd.md).
 - **Release and runtime, as of 2026-08-03.** GitHub's latest release is `v0.6.1`, published 2026-08-02; PyPI serves `0.6.1`; the enabled and active local `arsd` reports `0.6.1` and `arsd` API v2. The reset line is therefore published and running. This is the only place that fact is recorded.
 - Source pins the optional Python ACP SDK as `agent-client-protocol==0.12.0` (ACP schema v1.19). It is distinct from any adapter's own bundled JavaScript ACP SDK. The SDK's `http` extra stays uninstalled: ARS is stdio ACP only and adds no HTTP/WS transport.

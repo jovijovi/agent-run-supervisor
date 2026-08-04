@@ -1,11 +1,19 @@
-"""Profile-selected launch permission material, for the Cursor read-only slice.
+"""Profile-selected launch permission material, and its read-only slice.
 
-Cursor's `agent` mode can complete an edit **without** emitting
+An `agent`-mode edit can complete **without** emitting
 ``session/request_permission``, so ARS's completion backstop only ever sees the
-violation once the file already exists. Detection after the side effect is not
-prevention. A private per-Run Cursor config selected through
-``CURSOR_CONFIG_DIR``, denying ``Write(**)`` and ``Shell(*)`` before the process
-starts, is what actually stops it.
+violation once the file already exists, and detection after the side effect is
+not prevention. A private per-Run configuration denying ``Write(**)`` and
+``Shell(*)`` before the process starts is what would actually stop it.
+
+**No registered profile selects a policy**, because the one registered backend's
+environment key names an agent's whole configuration root rather than a
+permission-only file, and per-Run material under such a key relocates and then
+deletes the agent's own Session state — see
+``test_cursor_cross_run_session_resume.py``. Everything below therefore runs
+against explicitly selecting test profiles: the mechanism, its fail-closed
+materialization, its bounded cleanup, and its evidence binding are all unchanged
+and stay fully under test for a future profile that has evidence to select one.
 
 The seam is deliberately narrow. A **profile** — not an agent id — may select
 one closed, source-owned launch-permission policy id. Nothing here is a plugin
@@ -67,15 +75,26 @@ def _material_dir(run_dir: Path) -> Path:
     return run_dir / lp.LAUNCH_PERMISSION_DIRNAME
 
 
-# -- 1. only the Cursor profile selects the backend -------------------------
+# -- 1. no registered profile selects the backend ---------------------------
 
 
-def test_only_the_cursor_profile_selects_a_launch_permission_policy() -> None:
-    assert CURSOR_NATIVE_ACP_V1.launch_permission_policy_id == (
-        lp.POLICY_DENY_WRITE_AND_SHELL_V1
-    )
+def test_no_registered_profile_selects_a_launch_permission_policy() -> None:
+    """The mechanism is registered and selectable; nothing selects it.
+
+    The Cursor profile did, and that is what broke cross-Run continuity: this
+    backend's key names an agent's whole configuration root rather than a
+    permission-only file, so per-Run material relocated and then deleted the
+    agent's own Session state. See
+    ``test_cursor_cross_run_session_resume.py`` for the contract and the pinned
+    failure class.
+    """
+    assert CURSOR_NATIVE_ACP_V1.launch_permission_policy_id is None
     assert STANDARD_NATIVE_ACP_V1.launch_permission_policy_id is None
     assert CLAUDE_AGENT_ACP_COMPAT_V1.launch_permission_policy_id is None
+    # Still a closed, registered, selectable set — the seams below are unchanged.
+    assert lp.LAUNCH_PERMISSION_POLICY_IDS == frozenset(
+        {lp.POLICY_DENY_WRITE_AND_SHELL_V1}
+    )
 
 
 def test_the_instance_reports_the_profile_policy_without_naming_an_agent() -> None:
@@ -87,10 +106,11 @@ def test_the_instance_reports_the_profile_policy_without_naming_an_agent() -> No
 
 
 def test_the_profile_snapshot_and_hash_cover_the_policy_id() -> None:
-    cursor = CURSOR_NATIVE_ACP_V1.snapshot()
-    assert cursor["launch_permission_policy_id"] == lp.POLICY_DENY_WRITE_AND_SHELL_V1
     # Emitted only when it deviates, so a profile that selects nothing keeps the
-    # ``profile_hash`` it already has — that hash is Session identity.
+    # ``profile_hash`` it already has — that hash is Session identity. Dropping
+    # the Cursor selection therefore moved Cursor's hash and, as these two
+    # frozen values prove, nobody else's.
+    assert "launch_permission_policy_id" not in CURSOR_NATIVE_ACP_V1.snapshot()
     assert "launch_permission_policy_id" not in STANDARD_NATIVE_ACP_V1.snapshot()
     assert "launch_permission_policy_id" not in CLAUDE_AGENT_ACP_COMPAT_V1.snapshot()
     assert STANDARD_NATIVE_ACP_V1.profile_hash() == (
@@ -99,7 +119,11 @@ def test_the_profile_snapshot_and_hash_cover_the_policy_id() -> None:
     assert CLAUDE_AGENT_ACP_COMPAT_V1.profile_hash() == (
         "c9e9258bfcc01e2962b87466c803d0a3ae25a1676936864bdbd78b75a544a241"
     )
-    # Selecting it really does move the selecting profile's own hash.
+    # Selecting it really does move the selecting profile's own hash, which is
+    # why removing a selection is a revision rather than a silent edit.
+    assert _policy_profile().snapshot()["launch_permission_policy_id"] == (
+        lp.POLICY_DENY_WRITE_AND_SHELL_V1
+    )
     assert _policy_profile().profile_hash() != _model_only_profile().profile_hash()
 
 
@@ -1571,6 +1595,23 @@ def _registry_text(profile: str, **declarations) -> str:
 # -- 1. the registry refuses a declaration the selected policy owns ---------
 
 
+def _selecting_registry(monkeypatch) -> None:
+    """Put a *selecting* profile behind the id the parser resolves.
+
+    No registered profile selects a policy any more, so the parser's
+    per-selection rule would otherwise have no positive case left to exercise.
+    The rule is what is under test here, not which profile happens to select —
+    which is exactly the split the check itself is written to preserve.
+    """
+    from agent_run_supervisor.native_acp import agent_registry
+
+    monkeypatch.setattr(
+        agent_registry,
+        "DEFAULT_REGISTRY",
+        ProfileRegistry((_policy_profile(profile_id="cursor-native-acp-v1"),)),
+    )
+
+
 @pytest.mark.parametrize(
     "declaration",
     [
@@ -1580,7 +1621,7 @@ def _registry_text(profile: str, **declarations) -> str:
     ids=["env_passthrough", "env_overlay"],
 )
 def test_a_declaration_the_selected_policy_owns_refuses_the_registry(
-    declaration,
+    declaration, monkeypatch
 ) -> None:
     """Layer 5 wins silently, which is exactly why the parser must not stay quiet.
 
@@ -1592,6 +1633,7 @@ def test_a_declaration_the_selected_policy_owns_refuses_the_registry(
     from agent_run_supervisor.native_acp.agent_registration import RegistryRefusal
     from agent_run_supervisor.native_acp.agent_registry import parse_registry_text
 
+    _selecting_registry(monkeypatch)
     text = _registry_text("cursor-native-acp-v1", **declaration)
 
     with pytest.raises(RegistryRefusal) as excinfo:
@@ -1604,9 +1646,12 @@ def test_a_declaration_the_selected_policy_owns_refuses_the_registry(
     assert "/tmp/operator-owned" not in message
 
 
-def test_an_unrelated_declaration_on_a_selecting_profile_still_parses() -> None:
+def test_an_unrelated_declaration_on_a_selecting_profile_still_parses(
+    monkeypatch,
+) -> None:
     from agent_run_supervisor.native_acp.agent_registry import parse_registry_text
 
+    _selecting_registry(monkeypatch)
     snapshot = parse_registry_text(
         _registry_text("cursor-native-acp-v1", env_passthrough='["SOME_OTHER_NAME"]')
     )

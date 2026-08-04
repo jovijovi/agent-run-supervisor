@@ -142,8 +142,11 @@ refused. An agent whose CLI is not natively ACP is no different: point `command`
 installed and use the same profile, because the adapter is a deployment fact, not a source constant.
 Two profiles differ, each for one evidenced deviation and nothing more:
 `claude-agent-acp-compat-v1` carries its ACP-level compatibility differences, and
-`cursor-native-acp-v1` uses model-only configuration fidelity plus a source-owned read-only
-startup permission policy. `standard-native-acp-v1` behaves ordinarily.
+`cursor-native-acp-v1` uses model-only configuration fidelity — its model selector *is* the whole
+configuration, with no separate effort selector. That is its only deviation: like every other
+profile, it adds no startup permission policy and never repoints your agent's own configuration
+root, so agent-owned Session state stays where the agent put it and resumes through a real
+`session/load`. `standard-native-acp-v1` behaves ordinarily.
 
 - **Your command is launched exactly as declared.** `argv[0]` is the declared string byte-for-byte, and
   a bare name is found by ordinary PATH lookup over the *child's* projected `PATH`, so shims, symlink

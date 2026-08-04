@@ -60,6 +60,15 @@ Script keys (all optional):
 - ``usage``: the exact terminal ``usage`` object, replacing the default token
   counts — real adapters attach free-form vendor blocks there, so it is
   child-controlled text on the terminal path.
+- ``config_home_env``: list of environment variable names tried in order; the
+  first one that is set names the directory this agent treats as its **whole**
+  configuration root. Models a CLI with an override variable and a
+  home-relative default, whose configuration directory is also where its own
+  session state lives. The agent writes each session's option set and prompt
+  history under that directory and restores them on ``session/load``. A load
+  whose state is not in the configuration root the process was started with
+  still *answers* — the id is not rejected — but reports no config options,
+  because this root has no such configured session.
 - ``capture_config_path``: appends ``configId=value`` for every
   ``session/set_config_option`` the agent receives.
 - ``capture_meta_path``: append one JSON line per session/new and
@@ -150,6 +159,46 @@ class FakeAgent:
     def _options_list(self) -> list[dict[str, Any]]:
         return [dict(option) for option in self.options.values()]
 
+    # -- the agent's own configuration home --------------------------------
+
+    def _session_state_path(self, session_id: str) -> str | None:
+        """Where this session's state lives, or ``None`` when unmodelled.
+
+        Keyed off the environment so a client that repoints the configuration
+        directory repoints the session store with it — which is the whole point
+        of the shape being modelled. The first name that is set wins, so an
+        override variable beats the home-relative default exactly as a real CLI
+        resolves it.
+        """
+        for name in self.script.get("config_home_env") or ():
+            home = os.environ.get(name)
+            if home:
+                return os.path.join(home, "sessions", session_id + ".json")
+        return None
+
+    def _save_session_state(self, session_id: str) -> None:
+        path = self._session_state_path(session_id)
+        if path is None:
+            return
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {"options": self._options_list(), "prompts": self.remembered}, handle
+            )
+
+    def _restore_session_state(self, session_id: str) -> bool:
+        path = self._session_state_path(session_id)
+        if path is None:
+            return True
+        try:
+            with open(path, encoding="utf-8") as handle:
+                state = json.load(handle)
+        except FileNotFoundError:
+            return False
+        self.options = {option["id"]: dict(option) for option in state["options"]}
+        self.remembered = list(state["prompts"])
+        return True
+
     def _notify_update(self, update: dict[str, Any]) -> None:
         _emit(
             {
@@ -226,11 +275,18 @@ class FakeAgent:
         config_options = (
             None if self.script.get("omit_initial_options") else self._options_list()
         )
+        self._save_session_state(self.session_id)
         _result(request_id, {"sessionId": self.session_id, "configOptions": config_options})
 
     def _on_load(self, request_id: Any, params: dict[str, Any]) -> None:
         if self.script.get("load_fails"):
             _error(request_id, -32603, "session load rejected by fake script")
+            return
+        if not self._restore_session_state(params.get("sessionId") or self.session_id):
+            # The load answers — the id is not rejected — but this configuration
+            # root has never seen the session, so there is no configured session
+            # to report options for.
+            _result(request_id, {"configOptions": None})
             return
         if self.script.get("silent_new_on_load"):
             # Model a silent recreation: updates start carrying a new external
@@ -289,6 +345,7 @@ class FakeAgent:
                 }
         if config_id in self.options:
             self.options[config_id]["currentValue"] = readback
+        self._save_session_state(params.get("sessionId") or self.session_id)
         _result(request_id, {"configOptions": self._options_list()})
 
     def _on_prompt(self, request_id: Any, params: dict[str, Any]) -> None:
@@ -298,6 +355,7 @@ class FakeAgent:
             text = block.get("text")
             if isinstance(text, str):
                 self.remembered.append(text)
+        self._save_session_state(params.get("sessionId") or self.session_id)
         for update in self.script.get("prompt_tool_updates", []):
             self._notify_update(update)
         if self.script.get("ask_permission"):
