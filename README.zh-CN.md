@@ -134,8 +134,10 @@ forbidden_capabilities = ["terminal"]
 `session_epoch` —— 除此以外没有别的，任何层级上的未知键都会被拒绝。CLI 本身不讲 ACP 的 agent 也没有
 区别：把 `command` 指向你安装的那个 ACP 适配器，profile 照旧，因为适配器是部署事实而不是源码常量。
 有两个 profile 不同，各自只对应一处有据可查的偏差：`claude-agent-acp-compat-v1` 保留它既有的
-ACP 层兼容性差异；`cursor-native-acp-v1` 使用 model-only 配置保真，外加一份源码拥有的只读启动
-权限策略。`standard-native-acp-v1` 的行为一如往常。
+ACP 层兼容性差异；`cursor-native-acp-v1` 使用 model-only 配置保真 —— 它的 model 选择器**就是**
+全部配置，没有独立的 effort 选择器。这也是它唯一的偏差：和其他 profile 一样，它不附加任何启动
+权限策略，也从不改指你 agent 自己的配置根目录，因此 agent 自己拥有的 Session 状态仍留在 agent
+放置它的地方，并通过真实的 `session/load` 复用。`standard-native-acp-v1` 的行为一如往常。
 
 - **你的命令按声明原样启动。** `argv[0]` 逐字节就是你声明的那个字符串；裸名字由**子进程**投影出的
   `PATH` 按普通查找定位，因此 shim、符号链接农场以及 agent 自更新都照常可用。这里没有任何预检解析；

@@ -2,10 +2,11 @@
 
 # Documentation Index
 
-Total: 78 documents tracked across 2 statuses.
+Total: 79 documents tracked across 2 statuses.
 
-## Active (16)
+## Active (17)
 
+- [Cursor cross-Run Session resume — restore process-per-Run continuity](plans/active/2026-08-03-cursor-cross-run-session-resume.md) — created 2026-08-03
 - [ARS agent registry — the operator contract](design/agent-registry.md) — created 2026-07-30
 - [agent-run-supervisor vNext System Architecture](design/architecture.md) — created 2026-07-21
 - [agent-run-supervisor vNext Technical Solution](design/technical-solution.md) — created 2026-07-21

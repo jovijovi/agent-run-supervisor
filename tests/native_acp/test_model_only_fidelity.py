@@ -179,7 +179,6 @@ def test_the_cursor_profile_deviates_only_in_effort_fidelity() -> None:
     standard = STANDARD_NATIVE_ACP_V1.snapshot()
     cursor = CURSOR_NATIVE_ACP_V1.snapshot()
     for shared in (
-        "revision",
         "acp_protocol_version",
         "required_capabilities",
         "forbidden_capabilities",
@@ -191,10 +190,16 @@ def test_the_cursor_profile_deviates_only_in_effort_fidelity() -> None:
     assert cursor["profile_id"] == "cursor-native-acp-v1"
     assert cursor["effort_selector_id"] is None
     assert cursor["config_fidelity_mode"] == FIDELITY_MODEL_ONLY
-    # No frozen session metadata, no required permission mode: the deviation is
-    # effort fidelity, full stop.
+    # No frozen session metadata, no required permission mode, and no
+    # launch-permission policy: the deviation is effort fidelity, full stop.
     assert "session_meta" not in cursor
     assert "permission_mode_selector_id" not in cursor
+    assert "launch_permission_policy_id" not in cursor
+    # Revision 2 is the record of removing the launch-permission selection that
+    # revision 1 carried. It is the only frozen term that no longer equals the
+    # standard contract's, and it is not a deviation in ACP semantics.
+    assert cursor["revision"] == 2
+    assert standard["revision"] == 1
 
 
 def test_existing_profiles_declare_separate_selectors_unchanged() -> None:

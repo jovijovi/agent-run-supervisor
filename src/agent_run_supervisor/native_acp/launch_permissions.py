@@ -1,10 +1,9 @@
 """Profile-selected launch permission material, compiled from the frozen grant.
 
-ACP mediation decides *before* a side effect only when the agent asks. Some
-agents do not always ask: Cursor's `agent` mode can complete an edit without
-emitting ``session/request_permission``, so ARS's completion backstop sees the
-violation only once the file already exists. Detection after the fact is not
-prevention.
+ACP mediation decides *before* a side effect only when the agent asks, and some
+agents do not always ask: an `agent`-mode edit can complete without emitting
+``session/request_permission``, so ARS's completion backstop sees the violation
+only once the file already exists. Detection after the fact is not prevention.
 
 This module is the earlier line. A **profile** — never an agent id — may select
 one closed, source-owned policy id. Before the child is spawned, ARS compiles a
@@ -12,6 +11,19 @@ deterministic document from that Run's frozen grant, writes it into a private
 per-Run directory under the supervisor root, and hands the child one
 source-owned environment pair pointing at it. The agent then refuses the side
 effect itself, before ARS ever has to notice one.
+
+**No registered profile selects a policy today, and the reason is a hard
+constraint on any future selection.** The pair this module projects points the
+child at *per-Run* material that is removed once the child is reaped, so the key
+a policy owns must name a **permission surface only**. The one registered
+backend's key names an agent's whole configuration root instead, which is where
+that agent keeps its own Session state — so selecting it relocated that state
+into the Run directory and deleted it with the Run, and the next Run's real
+``session/load`` had no configured Session to answer with. That breaks the
+process-per-Run continuity contract (GOAL contract 3, PRD R4) and crosses the
+PRD R8 boundary against ARS managing AGENT state. A future selection needs cited
+evidence that its key is permission-scoped; the seams below are unchanged and
+ready for one.
 
 Deliberately narrow, and it stays narrow:
 
@@ -49,6 +61,12 @@ POLICY_DENY_WRITE_AND_SHELL_V1 = "deny-write-and-shell-v1"
 # The environment key each backend owns, in key **and** value: an operator may
 # neither author nor shadow it. Projection applies this layer last, so source
 # wins structurally even if the collision check below is ever wrong.
+#
+# This particular name is the agent's *whole* configuration root rather than a
+# permission-only file, which is why no profile selects the policy that owns it:
+# see the module docstring. Because layer 5 is applied last, selecting it also
+# silently overrides an operator's own declaration of the same name — which the
+# registry refuses at parse time for exactly that reason.
 CURSOR_CONFIG_DIR_ENV = "CURSOR_CONFIG_DIR"
 
 # The environment layer this material projects through. Applied last, after

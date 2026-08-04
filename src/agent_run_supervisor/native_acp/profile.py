@@ -59,7 +59,6 @@ from .config_fidelity import (
 )
 from .launch_permissions import (
     LAUNCH_PERMISSION_POLICY_IDS,
-    POLICY_DENY_WRITE_AND_SHELL_V1,
     RESERVED_LAUNCH_PERMISSION_KEYS,
 )
 
@@ -639,21 +638,31 @@ CLAUDE_AGENT_ACP_COMPAT_V1 = AcpCompatProfile(
 # exact-reads-back that one opaque literal and reports ``N/A`` as the effective
 # effort. It does not parse the literal, infer an effort from it, map a model
 # name, or read the agent's unrelated ACP ``mode`` selector as an effort. Every
-# other frozen term equals ``standard-native-acp-v1``.
-# The second cited deviation is a *permission* one, and it is why this profile
-# selects a launch-permission policy: the agent's `agent` mode can complete an
-# edit without emitting ``session/request_permission``, so ACP mediation alone
-# would only ever detect the side effect after the file exists.
+# other frozen term equals ``standard-native-acp-v1``, and configuration
+# fidelity is this profile's **only** deviation.
+#
+# Revision 2 removed the launch-permission policy revision 1 selected. That
+# backend's environment key is the agent's *whole* configuration root, not a
+# permission-file override, so pointing it at per-Run material relocated the
+# agent's own Session state into the Run directory and deleted it with the Run.
+# Cited ACP-level evidence: Run 1 opened the external Session and prompted, and
+# Run 2 — a new process, a new empty root — reached a real ``session/load`` that
+# had no configured Session to answer with and failed pre-dispatch with
+# ``CONFIG_FIDELITY``. That breaks GOAL contract 3 and PRD R4 continuity and
+# crosses the PRD R8 boundary against managing AGENT state, and no permission-only
+# injection surface exists that ARS is permitted to write. Enforcement stays with
+# the ACP ``PermissionBridge``, the frozen-grant default-deny mediation, the
+# post-completion violation detector, and the mandatory per-agent denied-action
+# canary. See ``launch_permissions`` for the constraint on any future selection.
 CURSOR_NATIVE_ACP_V1 = AcpCompatProfile(
     profile_id="cursor-native-acp-v1",
-    revision=1,
+    revision=2,
     acp_protocol_version="1",
     required_capabilities=("loadSession",),
     forbidden_capabilities=(),
     requires_session_load=True,
     config_fidelity_mode=FIDELITY_MODEL_ONLY,
     effort_selector_id=None,
-    launch_permission_policy_id=POLICY_DENY_WRITE_AND_SHELL_V1,
 )
 
 DEFAULT_REGISTRY = ProfileRegistry(
