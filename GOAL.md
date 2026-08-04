@@ -1,6 +1,6 @@
-# agent-run-supervisor — vNext Goal
+# agent-run-supervisor — Product Goal
 
-## Product identity
+## What ARS is
 
 **ARS is a local, unprivileged, caller-authenticated execution supervisor for external ACP AGENTs.** It
 accepts a structured, caller-authorized Run request; starts one operator-registered external command
@@ -13,7 +13,7 @@ AGENTs, their ACP adapters, their homes, credential stores, plugin trees, caches
 are installed, configured, authenticated, upgraded, and removed by users and operators through their own
 package managers, entirely outside ARS.
 
-ARS v1 also does not discover, resolve, mint, refresh, or manage credentials, and never itself serializes a
+ARS also does not discover, resolve, mint, refresh, or manage credentials, and never itself serializes a
 projected environment value into durable structured material. What an AGENT chooses to echo back is a
 separate matter, bounded rather than erased — see *Environment and credential guarantee*.
 
@@ -22,32 +22,35 @@ owns the *software it started*.
 
 ARS is not a business orchestrator and never converts process/ACP completion into business success.
 
-## Only production shape for new development
+## Production shape
 
 ```text
-Hermes / FlowWeaver / trusted local CLI
-        │  AgentRunRequest + frozen execution_grant
+trusted local caller (local AGENT or CLI)
+        │  AgentRunRequest + frozen execution grant
         │  agent_id · model · effort · grant · limits
         │  NO command / argv / env / path / secret value
         ▼
 arsd — local Unix domain socket; sole production ingress
         │  startup: parse the agents file once → immutable snapshot → reconcile → then bind
         ▼
-ars-core / RunTask / Native ACP Driver
-        │  one ARS-owned local ManagedProcess per Run, ACP JSON-RPC over stdio
+ars-core / RunTask / Native ACP driver
+        │  one ARS-owned local supervised process per Run, ACP JSON-RPC over stdio
         ▼
 external ACP AGENT — the operator-registered command, launched exactly as declared
         ▼
 model / provider
 ```
 
-- `arsd` is a thin, unprivileged local service host, not a root daemon, network service, scheduler,
+The **caller-side local AGENT** is a client that submits Runs on a user's behalf; it is never the thing
+being supervised. The **external ACP AGENT** is the operator-registered command ARS starts and supervises.
+The two are separate roles and are never conflated.
+
+- `arsd` is a thin, unprivileged local service host — not a root daemon, network service, scheduler,
   multi-tenant platform, or second runtime.
 - Direct `ars-core` use is test/dev-only. Production fails closed when `arsd` is unavailable.
 - There is no durable per-Run Worker. One `arsd` directly owns each in-process `RunTask`, Native ACP
   connection, and external AGENT process tree.
-- Native ACP never falls back to acpx. acpx is not a product, runtime, or compatibility surface; it
-  is retained only as a bounded differential/comparison test reference.
+- Native ACP never falls back to acpx.
 
 ## Authority split
 
@@ -66,193 +69,160 @@ External AGENTs own their actual conversation/context state. ARS stores only the
 and runtime ledger needed for supervision, recovery, duplicate prevention, progress, configuration, and
 result verification.
 
-## vNext load-bearing contracts
+## Load-bearing contracts
 
 1. Four authority layers stay separate and are never merged, and no fifth layer exists: a source-owned
-   **ACP compatibility profile** (how to speak ACP to a class of agent), an **operator-owned agent
-   registry snapshot** (which command is that agent, here), a **per-Run sealed `AgentRunSpec` plus launch
-   snapshot** (what was requested, sealed before spawn), and **observed evidence** (what was resolved and
-   observed, non-authoritative). A profile never learns from operator data or from an observation; the
-   per-Run seal is a projection of profile × registry entry × request taken exactly once; observations
-   never flow backward; and the wire never reaches the registry's value space.
-2. A supervised `ManagedProcess` owns PID/PGID/identity, bounded stderr, timeout, terminate/kill/reap;
-   the ACP SDK exclusively owns the live stdin/stdout JSON-RPC wire. Every Run owns exactly one such
-   local process, from spawn to reap, and it is non-optional after spawn.
-3. v1 uses process-per-Run. Same-Session continuity uses one external session ID and real
-   `session/load`; AGENT processes do not survive between Runs. A reuse request can never become
-   `session/new` — not as a fallback, not after a failure, not under any error class.
-4. model/effort are immutable per Run, switchable only between completed Runs on the same external
-   AGENT Session: load → discovery → set model → rediscovery → set effort → exact readback → prompt. A
-   profile whose declared fidelity mode is `model-only` stops at the exact model readback, dispatches no
-   effort set at all, and reports the shared `N/A` effort. The live-advertised option set is the domain
-   authority; no source-frozen value domain gates it.
-5. A prompt that may have been dispatched without a trustworthy terminal result ends as
-   `Run=unknown`, `Session=quarantined`, `retryable=false`. It is never replayed, resumed, or retried
-   automatically; successor work is a separate caller-authorized Run.
-6. Permission mediation is default-deny and must be proven by a real denied-action canary. It is
-   cooperative-agent policy enforcement, not an OS sandbox. The mediation environment binding is
-   source-owned in key and value, applied last, and a registry entry may select one or none but can
-   never author, replace, or disable it.
-7. Native state uses isolated `native-runs/` and `native-sessions/` roots. Native code never reads,
-   writes, imports, mirrors, or migrates acpx/legacy session storage.
-8. Production crash containment uses a user-level service manager/cgroup: an `arsd` crash terminates
-   all AGENT descendants that remain in its cgroup; restart performs reconciliation only and never
-   resends a prompt.
-9. A source profile freezes **ACP protocol and compatibility semantics only** — protocol major, required
-   capabilities, a forbidden-capability floor, session semantics including required real `session/load`,
-   the declared configuration-fidelity mode and its selector-id conventions, the base environment
-   allowlist, permission-mediation semantics, and, only where cited ACP-level evidence requires it, frozen
-   ACP session metadata and a required permission-mode selector. It contains no path, version, digest, model literal, agent name, value domain, launch kind,
-   artifact identity, or deployment fact. Every AGENT is instead one **operator-owned registry entry**
-   that carries the command and its argv, read once at daemon startup into an immutable snapshot. There
-   is no ARS-owned artifact, ARS-managed AGENT home, or attestation of anything ARS does not own.
-   Therefore an AGENT or adapter upgrade behind an unchanged registered command costs no ARS action at
-   all, while any registry edit costs exactly one drain-and-restart. That restart invalidates no Session
-   by itself, because no Session identity field derives from registry bytes, mtimes, digests, command
-   paths, or observed runtime facts: an identity-preserving edit keeps reuse. Continuity is cut only by a
-   deliberate change to a semantic identity choice — the operator's `session_epoch`, the entry's
-   `agent_id`, or its selected profile.
+   **ACP compatibility profile** (how to speak ACP to a class of agent), an **operator-owned agent registry
+   snapshot** (which command is that agent, here), a **per-Run sealed request plus launch snapshot** (what
+   was requested, sealed before spawn), and **observed evidence** (what was resolved and observed,
+   non-authoritative). A profile never learns from operator data or from an observation; the per-Run seal
+   is a projection of profile × registry entry × request taken exactly once; observations never flow
+   backward; and the wire never reaches the registry's value space.
+2. Every Run owns exactly one supervised local process, from spawn to reap, and it is non-optional after
+   spawn. Supervision owns process identity, bounded stderr, timeout, and terminate/kill/reap; the ACP
+   client exclusively owns the live stdin/stdout JSON-RPC wire.
+3. One process per Run. Same-Session continuity uses one external session id and a real `session/load`;
+   AGENT processes do not survive between Runs. A reuse request can never become `session/new` — not as a
+   fallback, not after a failure, not under any error class.
+4. Model and effort are immutable within a Run, switchable only between completed Runs on the same external
+   AGENT Session, and proved by exact literal readback before any prompt. An unadvertised value, an alias,
+   a coercion, or an inexact readback yields zero Turn and no prompt. The live-advertised option set is the
+   domain authority; no source-frozen value domain gates it. A profile may declare that its class of agent
+   exposes no independent effort selector, in which case no effort is discovered or set and the effective
+   effort is a shared `N/A` sentinel.
+5. A prompt that may have been dispatched without a trustworthy terminal result ends as `Run=unknown`,
+   `Session=quarantined`, `retryable=false`. It is never replayed, resumed, or retried automatically;
+   successor work is a separate caller-authorized Run.
+6. Permission mediation is default-deny and must be proven by a real denied-action canary per registered
+   agent, before that agent's use. It is cooperative-agent policy enforcement, **not** an OS sandbox. The
+   mediation environment binding is source-owned in key and value, applied last, and a registry entry may
+   select one or none but can never author, replace, or disable it.
+7. Native ACP state uses its own isolated run and session roots. Native code never reads, writes, imports,
+   mirrors, or migrates acpx/legacy session storage.
+8. Crash containment depends on a user-level service manager cgroup, which is real, load-bearing, and
+   **external** to ARS: an `arsd` crash terminates the AGENT descendants that remain in its cgroup, and
+   restart performs reconciliation only — it never resends a prompt.
+9. A source profile freezes **ACP protocol and compatibility semantics only**, and carries no path,
+   version, digest, model literal, agent name, value domain, artifact identity, or deployment fact. Every
+   AGENT is instead one **operator-owned registry entry** carrying the command and its argv, read once at
+   daemon startup into an immutable snapshot. An AGENT or adapter upgrade behind an unchanged registered
+   command therefore costs no ARS action at all, while any registry edit costs exactly one
+   drain-and-restart. That restart invalidates no Session by itself, because no Session identity field
+   derives from registry bytes, mtimes, digests, command paths, or observed runtime facts: an
+   identity-preserving edit keeps reuse. Continuity is cut only by a deliberate change to a semantic
+   identity choice — the operator's continuity epoch, the entry's `agent_id`, or its selected profile.
 
 ## Environment and credential guarantee
 
-Every environment value is sensitive, regardless of key name, source class, length, or apparent shape. A
-value may exist at its operator- or source-owned origin, in `arsd` memory, and in the child environment. The
+Every environment value is sensitive, regardless of key name, source class, length, or apparent shape. The
 guarantee has exactly two parts, and they are deliberately unequal.
 
 **What ARS will not do.** ARS never serializes a projected value — and never a digest, fingerprint,
 length-by-value, or other metadata computed to represent one — out of the resolved carrier and into
 structured launch, Spec, or environment material, into any hash input, or into a configuration-inspection
 response. The carrier is non-serializable, has exactly one consumer, and is handed to exec and to nothing
-else; it is never rendered into a log line or an exception message. Durable environment evidence records the
-name, its source class, its precedence layer, and its redaction status, and nothing else.
+else; it is never rendered into a log line or an exception message. Durable environment evidence is
+value-blind: per name, the name, its source class, its precedence layer, and its redaction status, and
+nothing else.
 
 **What ARS does not attempt.** ARS does **not** scan free-form Run text against the set of values it
-projected. There is no per-Run exact-literal guard, and reintroducing one under another name is not the
-direction. An AGENT that echoes a projected value back through a final message, an event field, a tool-call
-id, `agentInfo`, usage metadata, stderr, or the external Session id it mints may therefore have that value
-**retained** in bounded Run and Session evidence, unless the value is caught by the controls that remain:
-static credential-shape and sensitive-key redaction, categorical containment of exception and dependency
-text, bounded evidence ceilings, and the value-blind structured projection above. That is a deliberate
-trade — exact-literal matching erased substantial ordinary evidence (`TERM`, `LANG`, `USER`, `HOME`, `PATH`
-elements, any one-character value) and refused otherwise-valid Session ids — and it means an operator who
-treats a projected value as a secret must reason about what the AGENT does with it, exactly as they already
-must for what the AGENT sends to its provider.
+projected. An AGENT that echoes a projected value back — through a final message, an event field, a
+tool-call id, agent self-report metadata, usage metadata, stderr, or the external Session id it mints —
+may therefore have that value **retained** in bounded Run and Session evidence, unless it is caught by the
+controls that remain: static credential-shape and sensitive-key redaction, categorical containment of
+exception and dependency text, bounded evidence ceilings, and the value-blind structured projection above.
+That is a deliberate trade, and it means an operator who treats a projected value as a secret must reason
+about what the AGENT does with it, exactly as they already must for what the AGENT sends to its provider.
 
-ARS v1 does not discover, resolve, mint, refresh, store, or manage any credential. AGENTs authenticate
+ARS does not discover, resolve, mint, refresh, store, or manage any credential. AGENTs authenticate
 through their own stores under their own `HOME`, exactly as they do interactively. `credential_refs` stay
 caller-supplied **references** recorded as admission evidence and grant material; they are never resolved
 to values and never reach the child environment.
 
 **ARS does not claim that no sensitive value reaches the child.** An operator who declares a provider
-token, a proxy URL with embedded credentials, an SSH agent socket, or any overlay literal transmits that
-value to the child process in memory, by their own declaration, recorded only by name and source class.
+token, a proxy URL with embedded credentials, an agent socket, or any overlay literal transmits that value
+to the child process in memory, by their own declaration, recorded only by name and source class.
 
 ## Filesystem boundary
 
-ARS-owned **writable** surfaces are exactly two: the supervisor root (`native-runs/`, `native-sessions/`)
-through the single storage seam, and the configured UDS runtime path. Nothing else. The private per-Run
-launch-permission material a profile may select is inside the first of the two — under that Run's own
+ARS-owned **writable** surfaces are exactly two: the supervisor root holding Run and Session state, through
+a single storage seam, and the configured UDS runtime path. Nothing else. The private per-Run
+launch-permission material a profile may select lives inside the first of the two — under that Run's own
 directory — and is removed once the child is proven reaped; it is not a third surface.
 
-Read-only access is permitted wherever the paths live, including below `$HOME` and through symlinks and
-PATH shims: the operator registry file once at startup, everything the kernel and loader need to resolve
-and launch the declared command, `/proc/<pid>/exe` and liveness reads for its own child, and the
-caller-bound workspace.
+Read-only access is permitted wherever the paths live, including below a user's home directory and through
+symlinks and PATH shims: the operator registry file once at startup, everything the kernel and loader need
+to resolve and launch the declared command, liveness reads for its own child, and the caller-bound
+workspace.
 
 ARS never creates, writes, populates, stages, mirrors, repairs, deletes, or otherwise **manages** AGENT
 auth, configuration, cache, plugin, or Session state, and never **inspects** those surfaces as a control
 surface — no stat audit, no mode or ownership enforcement, no digest, no required-absence check. The child
-AGENT may mutate its own `HOME` and state normally, and such a Run completes normally.
+AGENT may mutate its own home and state normally, and such a Run completes normally.
 
 ## Process boundary
 
-ARS guarantees a new POSIX session and process group for the child, `ProcessIdentity` recorded immediately
-after spawn, signals delivered to the process group on terminate and kill, and `wait()` plus reap of its
-direct child before releasing a lease or returning a terminal that permits deregistration.
+ARS guarantees a new POSIX session and process group for the child, process identity recorded immediately
+after spawn, signals delivered to the process group on terminate and kill, and wait plus reap of its direct
+child before releasing a lease or returning a terminal that permits deregistration.
 
-ARS therefore reliably terminates the direct child and every descendant that **remains in the process
-group ARS created**. It does not control a wrapper or descendant that calls `setsid()`/`setpgid()` and
-leaves the group, a payload handed to a service manager in a separate transient unit, a container runtime
-that relocates the payload to another namespace and cgroup, or an agent that double-forks and daemonizes
-itself. Crash containment through the user-level service manager cgroup is a real, load-bearing dependency
-that is **external** to ARS. When work continues elsewhere anyway, the uncertainty rules apply and the Run
-fails loudly as `unknown`/`quarantined`/`retryable=false`.
+ARS therefore reliably terminates the direct child and every descendant that **remains in the process group
+ARS created**. It does not control a payload that leaves that group or is relocated to another supervisor,
+namespace, or cgroup. When work continues elsewhere anyway, the uncertainty rules apply and the Run fails
+loudly as `unknown`/`quarantined`/`retryable=false`.
 
 ARS claims no isolation or containment of hostile code. An operator who wants isolation registers the
 isolation wrapper as the command; a wrapper that `exec`s into the payload composes cleanly, while one that
 relocates the payload to another supervisor breaks ARS's termination and timeout guarantees. That is the
 operator's knowing choice, and ARS makes no claim about it.
 
-## acpx removal direction
+## acpx boundary
 
-acpx is not a supported product, runtime, or compatibility baseline. The product direction is to
-**remove all acpx product, runtime, and compatibility content from ARS** and to retain acpx only as a
-bounded differential/comparison test reference.
+acpx is not a supported product, runtime, fallback, or compatibility baseline, and is never a Native ACP
+driver or degraded path. The product direction is to **remove all acpx product, runtime, and compatibility
+content from ARS** and to retain acpx only as a bounded differential/comparison test reference.
 
-That removal has not landed. acpx code paths still exist in source, and removing them — together with
-the user-facing and design documentation that describes them — is separately authorized source/docs
-work that this document does not perform or approve. Until it lands, acpx receives no new capability,
-is never a Native ACP driver, fallback, or degraded path, and never directs vNext development. Its
-old requirements, architecture, plans, and phase vocabulary are archived.
+That removal is separately authorized source and documentation work that this document neither performs
+nor approves. Until it lands, acpx receives no new capability and never directs development, and its
+archived requirements never reopen as product direction.
 
-The cold snapshots are `docs/archive/pre-vnext-reset-2026-07-21/` and, for the retired artifact/Binding
-era, `docs/archive/binding-era-2026-07/`. Closed plans and phases remain under their archive
-directories. Git history remains the implementation audit trail.
+## Authority and approval boundary
 
-## Current status and authorization
+This goal, the PRD, the architecture, the technical solution, and the operator-facing agent-registry
+contract are documentation authority. They describe the target and do not authorize work by their
+existence. Volatile implementation, publication, and deployment status belongs to the roadmap board, which
+is its single owner and is not restated here.
 
-This goal, the PRD, architecture, technical solution, and the operator-facing agent-registry document are
-documentation authority. They describe the target and do not authorize work by their existence. Volatile
-implementation status belongs in `docs/roadmap/current-status.md`, which is where each merged change is
-expected to be recorded; that board is not restated here and does not, by itself, evidence source facts.
-
-**Authority and source are aligned on `main`.** The V4 boundary reset this document describes — the
-operator agent registry, the four-way boundary, the environment-value sink boundary, total ordered
-reconciliation, and fail-closed load-only Session reuse — is merged. Stage 0/1 Native ACP and Stage 2
-`arsd` were already closed; the retired artifact/Binding implementation is deleted from source and
-preserved as cold history under `docs/archive/binding-era-2026-07/`, and the three per-agent profiles are
-deleted rather than aliased or disabled. The source registry is a closed set of three:
-`standard-native-acp-v1`, `claude-agent-acp-compat-v1`, and `cursor-native-acp-v1` — the last for the one
-evidenced configuration-fidelity deviation, a model selector that is the whole configuration.
-
-Publication, deployment, cutover, and the current running version are **volatile facts this document does
-not carry**: they live in `docs/roadmap/current-status.md`, which is their single owner. What is durable
-here is the authorization rule, which does not change with any of them — release and publication,
-production cutover, service restart, migration, `/opt` and Binding-root removal, Sachima integration,
-public ingress, and any Gateway/IM/live behavior each require separate, explicit authorization, and no
-verification and no prior release transfers approval to the next change.
+Release and publication, production cutover, service install/enable/restart, migration, integration with
+any caller platform, public ingress, and live or default-on behavior each require separate, explicit
+authorization. Approvals are narrow and non-transitive: a merge is not a release, a release is not a
+deployment, and no green verification and no prior approval transfers to the next change.
 
 ## Non-goals
 
 Public ingress, TCP/root service, distributed scheduling, multi-tenant cloud control plane, broad RBAC,
-per-Run Worker, runtime plugin platform, remote transport, attach-to-running-agent, plugin loading,
+durable per-Run Worker, runtime plugin platform, remote transport, attach-to-running-agent, plugin loading,
 containers, sandboxing, ARS credential resolution, acpx fallback, shared or imported acpx session storage,
 generalized Session rebind, cross-AGENT Session reuse, automatic replay, workspace content-digest service,
 filesystem watcher, second conversation database, hostile-process sandbox claims, and embedding
-Feishu/Gateway/business semantics in ARS.
+caller-side business, messaging, or delivery semantics in ARS.
 
-The agent registry adds no exception. The caller still supplies no command, argv, environment key or
-value, path, digest, version, or secret — those are not fields on the request. A registry entry still
-declares no capability, permission, protocol version, mediation pair, or transport: `transport` is refused
-as an unknown key, because v1 is stdio by definition and a one-valued key is remote scaffolding. Remote
-transport and attach remain future scope with their own design and their own approval, and no seam, key,
-field, dependency, or branch anticipating them exists in v1.
+The agent registry adds no exception. The caller supplies no command, argv, environment key or value,
+path, digest, version, or secret — those are not fields on the request. A registry entry declares no
+capability, permission, protocol version, mediation pair, or transport: stdio is the transport, and an
+unknown key is refused. Remote transport and attach remain future scope with their own design and their own
+approval, and no seam, key, field, dependency, or branch anticipating them exists.
 
 Artifact identity, promotion, attestation, ARS-hosted artifact trees, ARS-managed AGENT homes, and
 credential-store inspection are non-goals, not deferred work.
 
-## Development source of truth
+## Related authority
 
-New work reads, in order:
-
-1. `GOAL.md`
-2. `docs/product/prd.md`
-3. `docs/design/architecture.md`
-4. `docs/design/technical-solution.md`
-5. `docs/roadmap/features.md`
-6. `docs/roadmap/current-status.md`
-7. `docs/plans/active/`
-
-`docs/design/agent-registry.md` is the operator-facing registry contract and is read with the design
-layer. `docs/design/result-event-schema.md` describes emitted JSON shapes and is derivative, never a
-source of product scope. Archive documents are never default development context.
+- [`docs/product/prd.md`](docs/product/prd.md) — product requirements
+- [`docs/design/architecture.md`](docs/design/architecture.md) — system shape and ownership
+- [`docs/design/technical-solution.md`](docs/design/technical-solution.md) — module design
+- [`docs/design/agent-registry.md`](docs/design/agent-registry.md) — the operator registry contract
+- [`docs/roadmap/features.md`](docs/roadmap/features.md),
+  [`docs/roadmap/current-status.md`](docs/roadmap/current-status.md),
+  [`docs/roadmap/non-approvals.md`](docs/roadmap/non-approvals.md) — current roadmap, status, and explicit
+  non-approvals
