@@ -190,8 +190,10 @@ archived requirements never reopen as product direction.
 
 This goal, the PRD, the architecture, the technical solution, and the operator-facing agent-registry
 contract are documentation authority. They describe the target and do not authorize work by their
-existence. Volatile implementation, publication, and deployment status belongs to the roadmap board, which
-is its single owner and is not restated here.
+existence. Source/main capability state comes from repository/source and the feature tracker where
+applicable. Published package/release facts come from live GitHub Releases and PyPI; deployed/running facts
+come from operator-held runtime/live checks. `docs/roadmap/current-status.md` is limited to lean task state,
+the active plan, and open gates.
 
 Release and publication, production cutover, service install/enable/restart, migration, integration with
 any caller platform, public ingress, and live or default-on behavior each require separate, explicit

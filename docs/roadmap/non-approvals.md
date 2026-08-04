@@ -2,17 +2,18 @@
 title: "ARS vNext Current Explicit Non-Approvals"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-03
+last_validated_at: 2026-08-04
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/non-approvals.md"
 ---
 # ARS vNext Current Explicit Non-Approvals
 
 Stage 0/1, Stage 2 A1–A5, and the V4 external-AGENT boundary reset are merged on `main`, and operator-held
-local socket-path acceptance passed. Which version is currently released and running is a volatile fact this
-document does not carry: [`current-status.md`](current-status.md) owns it. None of it approves further work —
-merged source is not publication, a prior publication is not approval for the next one, and neither is
-deployment approval, Sachima integration, public ingress, or a reusable or transitive approval for the next
-change. This document does not approve:
+local socket-path acceptance passed. Published package/release facts come from live GitHub Releases and PyPI;
+deployed/running facts come from operator-held runtime/live checks.
+[`current-status.md`](current-status.md) carries only lean task state, the active plan, and open gates. None
+of it approves further work — merged source is not publication, a prior publication is not approval for the
+next one, and neither is deployment approval, Sachima integration, public ingress, or a reusable or
+transitive approval for the next change. This document does not approve:
 
 - any source expansion or repair beyond the currently authorized task scope, including source,
   test, script, dependency, lockfile, `pyproject.toml`, or CI/workflow changes;
@@ -26,9 +27,9 @@ change. This document does not approve:
 - follow-on source work and Git/GitHub side effects, including commits, pushes, PR creation,
   merge, or other GitHub mutation, without separate operator authorization;
 - any release **act**: a release tag, a GitHub Release, or a PyPI publication. Past releases were taken
-  under their own separate authorizations and approve nothing further; the board records which version is
-  current. Any *further* version bump, release-metadata change, tag, publication, deployment, restart, or
-  cutover is again unapproved and needs its own decision;
+  under their own separate authorizations and approve nothing further; live GitHub Releases and PyPI
+  establish published package/release facts. Any *further* version bump, release-metadata change, tag,
+  publication, deployment, restart, or cutover is again unapproved and needs its own decision;
 - Sachima `ArsdBackend`/UDS integration, supervisor pin changes, Gateway/IM/Feishu behavior, delivery, automatic replies, or live/default-on wiring;
 - public ingress, TCP/root service, distributed scheduling, multi-tenant control plane, participant UI, `@all`, or agent-to-agent auto-routing;
 - arbitrary executable/command/argv/env/JSON/config/credential passthrough **from the wire**;
@@ -119,9 +120,9 @@ a value-blind production projection at all, which is what selects the digest pat
   canary, and production changes all remain separately unapproved**, and a green verification transfers
   approval to none of them.
 - **Not approved: any further cutover, migration, or rollout act.** Decision 2 — production cutover with its
-  one-time legacy-Session load refusal — was taken by the operator; the board records the resulting running
-  version. Nothing about that transfers to the next deployment, restart, or migration, and the **legacy
-  line's lifetime** (Decision 3) remains an open operator decision.
+  one-time legacy-Session load refusal — was taken by the operator; deployed/running facts remain
+  operator-held runtime/live checks. Nothing about that transfers to the next deployment, restart, or
+  migration, and the **legacy line's lifetime** (Decision 3) remains an open operator decision.
 - **Not approved: touching the retired deployment.** The `/opt` artifact trees, the Binding roots, their
   promoted generations, and every historical Run and Session byte are untouched migration source. The reset
   stops referencing them; it deletes, migrates, re-hashes, and rewrites nothing, and their removal is a

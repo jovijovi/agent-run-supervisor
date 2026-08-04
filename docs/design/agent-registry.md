@@ -2,7 +2,7 @@
 title: "ARS agent registry — the operator contract"
 status: active
 created_at: 2026-07-30
-last_validated_at: 2026-08-03
+last_validated_at: 2026-08-04
 ---
 # ARS agent registry — the operator contract
 
@@ -10,11 +10,12 @@ This is the one document an operator needs in order to tell ARS which commands a
 normative contract for the registry file, its grammar and bounds, its refusal rules, the environment it
 projects into a child, and the restart semantics that follow from reading it exactly once.
 
-**Status.** This contract is **merged on `main`** as part of the V4 boundary reset. Which version is
-published and which is running are volatile facts this document does not carry: the board
-([`docs/roadmap/current-status.md`](../roadmap/current-status.md)) is their single owner. Nothing here
-authorizes writing a registry file against a live deployment, restarting a service, or cutting any caller
-over; each of those remains a separate operator decision, whatever is already released.
+**Status.** This contract is **merged on `main`** as part of the V4 boundary reset. Published
+package/release facts come from live GitHub Releases and PyPI; deployed/running facts come from
+operator-held runtime/live checks. [`docs/roadmap/current-status.md`](../roadmap/current-status.md) carries
+only lean task state, the active plan, and open gates. Nothing here authorizes writing a registry file
+against a live deployment, restarting a service, or cutting any caller over; each of those remains a
+separate operator decision, whatever is already released.
 
 Every example below uses **placeholders**. A placeholder is never a supported version, a registered value
 domain, or an acceptance target.

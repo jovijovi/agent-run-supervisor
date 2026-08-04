@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext Technical Solution"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-03
+last_validated_at: 2026-08-04
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/technical-solution.md"
 ---
 # agent-run-supervisor vNext Technical Solution
@@ -30,10 +30,11 @@ registry is a closed set of three. The retired Binding-era module design is pres
 [`docs/archive/binding-era-2026-07/`](../archive/binding-era-2026-07/architecture-3.1-3.3.md) as cold
 history.
 
-Merge, publication, and deployment stay three separate facts, and which version is published or running is
-a volatile fact the board ([`docs/roadmap/current-status.md`](../roadmap/current-status.md)) owns rather than
-this document. No tag, GitHub Release, PyPI upload, deployment, service restart, or cutover follows from a
-merge. This document grants no approval, and a green verification transfers approval to nothing.
+Merge, publication, and deployment stay three separate facts. Published package/release facts come from
+live GitHub Releases and PyPI; deployed/running facts come from operator-held runtime/live checks.
+[`docs/roadmap/current-status.md`](../roadmap/current-status.md) carries only lean task state, the active
+plan, and open gates. No tag, GitHub Release, PyPI upload, deployment, service restart, or cutover follows
+from a merge. This document grants no approval, and a green verification transfers approval to nothing.
 
 ## 1. Package shape
 

@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext PRD"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-03
+last_validated_at: 2026-08-04
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/prd.md"
 ---
 # agent-run-supervisor vNext PRD
@@ -569,8 +569,9 @@ Sachima integration is a later, separately approved integration after ARS produc
 
 ## 5. Current implementation status
 
-Volatile status truth lives in [`docs/roadmap/current-status.md`](../roadmap/current-status.md); this
-section records only the coarse position.
+Lean task state, the active plan, and open gates live in
+[`docs/roadmap/current-status.md`](../roadmap/current-status.md); this section records only the coarse
+source position.
 
 - Legacy source without product authority: the v0.1.7 acpx one-shot/persistent paths are still implemented
   on `main`. Their product, runtime, and compatibility authority is retired; removing that code and the
@@ -584,10 +585,9 @@ section records only the coarse position.
   eight-operation drain matrix, `--agents-file`, and the validate/doctor/inspect operator surface. The
   retired artifact/Binding implementation and the three per-agent profiles are deleted from source; the
   retired authority is preserved at `docs/archive/binding-era-2026-07/`.
-- **Merge, publication, and deployment stay three separate facts.** Which version is published and which is
-  running are volatile and live on the board ([`docs/roadmap/current-status.md`](../roadmap/current-status.md)),
-  not here. A merge is not a publication, a publication is not a deployment, and none of them approves the
-  next one.
+- **Merge, publication, and deployment stay three separate facts.** Published package/release facts come
+  from live GitHub Releases and PyPI; deployed/running facts come from operator-held runtime/live checks. A
+  merge is not a publication, a publication is not a deployment, and none of them approves the next one.
 - The lifetime of the pre-reset line is an open human decision. Implementation status is never an approval
   for the next stage.
 

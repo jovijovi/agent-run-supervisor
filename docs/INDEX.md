@@ -4,9 +4,8 @@
 
 Total: 79 documents tracked across 2 statuses.
 
-## Active (17)
+## Active (16)
 
-- [Cursor cross-Run Session resume — restore process-per-Run continuity](plans/active/2026-08-03-cursor-cross-run-session-resume.md) — created 2026-08-03
 - [ARS agent registry — the operator contract](design/agent-registry.md) — created 2026-07-30
 - [agent-run-supervisor vNext System Architecture](design/architecture.md) — created 2026-07-21
 - [agent-run-supervisor vNext Technical Solution](design/technical-solution.md) — created 2026-07-21
@@ -24,8 +23,9 @@ Total: 79 documents tracked across 2 statuses.
 - [Engineering practices](practices/README.md) — created 2026-05-28
 - [Verification gates for implementation PRs](roadmap/verification.md) — created 2026-05-28
 
-## Archived (62)
+## Archived (63)
 
+- [Cursor cross-Run Session resume — restore process-per-Run continuity](plans/archive/2026-08-03-cursor-cross-run-session-resume.md) — created 2026-08-03
 - [Binding-era authority archive (2026-07)](archive/binding-era-2026-07/README.md) — created 2026-07-30
 - [Binding-era architecture sections 3.1-3.3 (retired)](archive/binding-era-2026-07/architecture-3.1-3.3.md) — created 2026-07-30
 - [Binding-era implementation plans (retired architecture)](archive/binding-era-2026-07/binding-era-plans.md) — created 2026-07-30
