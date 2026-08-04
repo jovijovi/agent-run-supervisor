@@ -2,7 +2,7 @@
 title: "agent-run-supervisor Result / Event Schema"
 status: active
 created_at: 2026-06-01
-last_validated_at: 2026-08-03
+last_validated_at: 2026-08-04
 ---
 # agent-run-supervisor Result / Event Schema
 
@@ -31,8 +31,9 @@ last_validated_at: 2026-08-03
 > environment-value, withholding, and policy-warning rules that every Native emitter on the V4
 > boundary-reset line must obey, and the audit that found no launch, provenance, or attestation field in the
 > caller-stable contract above. Those rules are normative for the reset line and are **merged on `main`**;
-> the board ([`docs/roadmap/current-status.md`](../roadmap/current-status.md)) carries which version is
-> published and running. §1–§8 describe the caller-stable contract, which the reset does not change.
+> published package/release facts come from live GitHub Releases and PyPI, and deployed/running facts come
+> from operator-held runtime/live checks. §1–§8 describe the caller-stable contract, which the reset does
+> not change.
 >
 > **Stability rule (read this first).** `business_verdict` is **always `null`**
 > and caller-owned — the supervisor never sets it. Schema evolution is
@@ -494,9 +495,10 @@ never deletes an open or live-locked session.
 
 ## 9. Native reset-line evidence rules
 
-Normative for every Native emitter on the V4 boundary-reset line, and **merged on `main`**; the board
-carries the published and running position. Nothing in this section changes any key documented in
-§1–§8: those keys keep their names, types, and meanings, and the additive-only rule still holds.
+Normative for every Native emitter on the V4 boundary-reset line, and **merged on `main`**; published
+package/release facts come from live GitHub Releases and PyPI, and deployed/running facts come from
+operator-held runtime/live checks. Nothing in this section changes any key documented in §1–§8: those keys
+keep their names, types, and meanings, and the additive-only rule still holds.
 
 ### 9.1 Audit result — no launch, provenance, or attestation field, and no structured environment value
 

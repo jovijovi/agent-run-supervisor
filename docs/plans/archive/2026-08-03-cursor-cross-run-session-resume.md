@@ -1,7 +1,8 @@
 ---
 title: "Cursor cross-Run Session resume — restore process-per-Run continuity"
-status: active
+status: archived
 created_at: 2026-08-03
+archived_at: 2026-08-04
 plan_kind: defect-repair-plan
 base_branch: main
 task_branch: fix/cursor-cross-run-session-resume

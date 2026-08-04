@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext System Architecture"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-03
+last_validated_at: 2026-08-04
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/architecture.md"
 ---
 # agent-run-supervisor vNext System Architecture
@@ -34,9 +34,10 @@ Two later decisions are folded in: the per-Run exact-literal guard over free-for
 registered for the one evidenced model-only deviation (PRD R3/R12).
 
 Merge, publication, deployment, and activation stay separate facts; a merge implies none of the others, and
-each is its own explicit decision. Which version is published and which is running are volatile facts the
-board ([`docs/roadmap/current-status.md`](../roadmap/current-status.md)) owns, together with the open
-decisions. No marker here is an approval.
+each is its own explicit decision. Published package/release facts come from live GitHub Releases and PyPI;
+deployed/running facts come from operator-held runtime/live checks.
+[`docs/roadmap/current-status.md`](../roadmap/current-status.md) carries only lean task state, the active
+plan, and open gates. No marker here is an approval.
 
 ## 1. System context and ownership
 
