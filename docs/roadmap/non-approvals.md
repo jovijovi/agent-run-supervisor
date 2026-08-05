@@ -2,7 +2,7 @@
 title: "ARS vNext Current Explicit Non-Approvals"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-04
+last_validated_at: 2026-08-06
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/non-approvals.md"
 ---
 # ARS vNext Current Explicit Non-Approvals
@@ -131,8 +131,10 @@ a value-blind production projection at all, which is what selects the digest pat
   per registered agent before that agent's use, and a registry entry's existence is not evidence that it ran.
 
 The standing rule is unchanged: **an active plan is not approval to land source, to publish, to deploy, or
-to run a real provider.** Activating a plan records only that it is the board-linked planning artifact. No
-plan is active right now, and an archived plan authorizes strictly less than an active one — nothing.
+to run a real provider.** Activating a plan records only that it is the board-linked planning artifact.
+`docs/plans/active/2026-08-06-session-no-close-model.md` is active now and authorizes no source
+implementation, runtime-data reset, service restart, release, deployment, real-agent canary, or caller
+integration. An archived plan authorizes strictly less than an active one — nothing.
 
 The legacy v0.1.7 acpx path holds no product, runtime, or compatibility authority, and while its code exists
 it may receive separately approved compatibility/security maintenance. Such maintenance does not reopen its

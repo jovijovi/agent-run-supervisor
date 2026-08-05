@@ -2,10 +2,11 @@
 
 # Documentation Index
 
-Total: 79 documents tracked across 2 statuses.
+Total: 80 documents tracked across 2 statuses.
 
-## Active (16)
+## Active (17)
 
+- [ARS Session No-Close Model Implementation Plan](plans/active/2026-08-06-session-no-close-model.md) — created 2026-08-06
 - [ARS agent registry — the operator contract](design/agent-registry.md) — created 2026-07-30
 - [agent-run-supervisor vNext System Architecture](design/architecture.md) — created 2026-07-21
 - [agent-run-supervisor vNext Technical Solution](design/technical-solution.md) — created 2026-07-21
