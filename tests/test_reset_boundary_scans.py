@@ -365,24 +365,56 @@ def test_a_child_that_mutates_its_own_home_completes_normally(tmp_path):
     assert (home / ".agent-cache" / "state").read_text() == "x"
 
 
-# -- no acpx runtime path in the reset line ----------------------------------
+# -- the removed runtime is gone from the tree, not merely unreferenced -------
+#
+# The "no reset module reaches the acpx runtime" scan that lived here has moved
+# into ``tools/static_safety_scan.py``, which applies the same shape rule to the
+# whole repository rather than to the reset line alone, and runs inside
+# ``make verify``. One scanner, so the two cannot disagree about what counts as
+# reaching it. What stays here is the tombstone: the modules themselves are
+# absent, which is a fact about the tree that no import scan can express.
 
 
-def test_no_reset_module_reaches_the_acpx_runtime():
-    """Naming acpx in prose to say "not this" is not reaching it.
+@pytest.mark.parametrize(
+    "name",
+    [
+        "runner.py",
+        "parser.py",
+        "preflight.py",
+        "session_runtime.py",
+        "live_stream.py",
+        "policy.py",
+        "role.py",
+        "mcp_config.py",
+        "workspace.py",
+        "goal.py",
+        "caller.py",
+        "session_inspect.py",
+        "retention.py",
+    ],
+)
+def test_the_removed_runtime_module_is_absent_from_the_tree(name):
+    assert not (SRC / name).exists(), f"{name} still exists"
 
-    The structural question is whether any reset module *imports* or *calls*
-    into the acpx line, which is what ``test_no_acpx_coupling`` also pins.
-    """
-    banned_calls = ("runner.execute_subprocess", "parse_acpx_stdout", "session_runtime")
-    banned_imports = ("runner", "parser", "session_runtime", "caller", "hermes_caller")
-    scope = (*sorted(NATIVE.glob("*.py")), *sorted(ARSD.glob("*.py")))
-    for path in scope:
-        text = path.read_text(encoding="utf-8")
-        for name in banned_calls:
-            assert name not in text, f"{path.name} calls into acpx via {name!r}"
-        tree = ast.parse(text)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module:
-                tail = node.module.rsplit(".", 1)[-1]
-                assert tail not in banned_imports, f"{path.name} imports {node.module}"
+
+@pytest.mark.parametrize("name", ["hermes_caller", "fixtures"])
+def test_the_removed_package_directory_is_absent_from_the_tree(name):
+    assert not (SRC / name).exists(), f"{name}/ still exists"
+
+
+def test_the_removed_leaves_are_not_re_exported_under_another_name():
+    """Deleted, not relocated: no surviving module offers the same entry point."""
+    banned = (
+        "SupervisorRunner",
+        "SessionRuntime",
+        "parse_acpx_stdout",
+        "AgentRoleSpec",
+        "load_role",
+        "resolve_mcp_config",
+        "plan_cleanup",
+        "compile_goal_prompt",
+        "CallerResult",
+    )
+    for path, text in reset_sources():
+        for name in banned:
+            assert name not in text, f"{path.name} still carries {name!r}"

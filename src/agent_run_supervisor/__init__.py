@@ -1,4 +1,4 @@
-"""agent-run-supervisor local ACP/acpx run and session supervision toolkit."""
+"""agent-run-supervisor: local supervision of external ACP AGENT runs and sessions."""
 
 __version__ = "0.6.3"
 

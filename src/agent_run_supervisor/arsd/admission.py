@@ -220,7 +220,6 @@ def finalize_registration_failure(handle: RunHandle, run_id: str) -> None:
         origin="supervisor",
         detail_code="REGISTRATION_FAILED",
         retryable=False,
-        exit_code=None,
         signal=None,
         stop_reason=None,
         usage=None,
@@ -228,6 +227,7 @@ def finalize_registration_failure(handle: RunHandle, run_id: str) -> None:
         truncated=False,
         truncate_reason=None,
         run_dir=handle.run_dir,
+        raw_event_path="events.jsonl",
     )
     storage.write_once_json(handle.run_dir / "result.json", payload)
 

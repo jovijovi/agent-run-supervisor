@@ -131,30 +131,47 @@ a value-blind production projection at all, which is what selects the digest pat
   per registered agent before that agent's use, and a registry entry's existence is not evidence that it ran.
 
 - **Decided (2026-08-06): source implementation of the Session no-close model**,
-  `docs/plans/active/2026-08-06-session-no-close-model.md` stages D0–D4, including the targeted removal of
-  Session-close and Session-kind logic from the still-present acpx source. It authorizes **source, tests,
-  and documentation only**, and it exhausts itself there.
+  `docs/plans/archive/2026-08-06-session-no-close-model.md` stages D0–D4, including the targeted removal of
+  Session-close and Session-kind logic from the then-present retired runtime. It authorizes **source,
+  tests, and documentation only**, and it exhausts itself there.
 - **Not approved by that decision, and not implied by a green gate or a merge:** runtime-data reset or
   archival, `arsd` restart or any service action, runtime cutover, release, publication, deployment,
   real Claude/Codex canaries, push, pull request, merge, tag, and Sachima integration. Because the change
   deliberately adds no dual-schema compatibility, cutover must be one operator-controlled action pairing the
   v3 package and caller with the operator-selected development-data decision — never a side effect of
   landing source.
-- **Not approved: expanding the acpx cleanup.** Only Session-close concepts, Session-lifetime
-  classification, and their direct dependencies leave the acpx source. Complete acpx removal remains its own
-  separately authorized decision, no acpx capability is added, and ordinary resource-level `close()` for
-  sockets, streams, ACP connections, files, and process teardown is preserved.
+- **Not approved by that decision: expanding the acpx cleanup.** Under the no-close decision only
+  Session-close concepts, Session-lifetime classification, and their direct dependencies left the retired
+  runtime; complete removal needed, and later received, its own decision below. Ordinary resource-level
+  `close()` for sockets, streams, ACP connections, files, and process teardown is preserved throughout.
+
+- **Decided (2026-08-06).** Source removal of the acpx product, runtime, and compatibility content. The
+  runtime and its package modules, the CLI leaves outside `agents validate` / `agents doctor` /
+  `run inspect`, the fixture trees, and the unreleased API v3 process-exit result field leave the
+  repository. The differential/comparison keep set was audited and found **empty**.
+  No acpx fixture was retained.
+  It authorizes **source, tests, and documentation only**, and it exhausts itself there.
+- **Not approved by that decision, and not implied by a green gate:** push, pull request, merge, tag,
+  release, publication, deployment, install, `arsd` restart or any service action, runtime cutover,
+  runtime-data migration/reset/archival, a real-agent canary, or Sachima integration. Records already
+  written by the retired line stay on disk untouched: nothing rewrites, migrates, re-hashes, or deletes
+  them. **Superseded 2026-08-06 by the operator's single-contract decision:** API v3 is the only contract,
+  there is no historical persisted data to keep readable, and a persisted terminal carrying an undefined key
+  is untrusted evidence rather than a tolerated extension. No tolerant reader, passthrough, projection,
+  alias, migration, or dual format is authorized. No shim, alias, flag, bridge, dual runtime, dual-format writer, or renamed replacement field is
+  authorized, now or later.
 
 The standing rule is unchanged: **an active plan is not approval to land source, to publish, to deploy, or
 to run a real provider.** Activating a plan records only that it is the board-linked planning artifact, and
 an approval of one stage is not an approval of the next. An archived plan authorizes strictly less than an
 active one — nothing.
 
-The legacy v0.1.7 acpx path holds no product, runtime, or compatibility authority, and while its code exists
-it may receive separately approved compatibility/security maintenance. Such maintenance does not reopen its
-archived requirements as the vNext product direction and creates no V4 compatibility obligation. **Removing
-the acpx product, runtime, and compatibility content** — the code and the documentation that describes it —
-is likewise its own separately authorized decision, and nothing in this reset approves it.
+acpx is not a product, runtime, or compatibility surface.
+Its code, and the documentation describing it as available, are removed under the 2026-08-06 decision
+above. Its archived
+requirements do not reopen as the vNext product direction and create no V4 compatibility obligation.
+Reintroducing any part of it — as a driver, fallback, compatibility layer, shared Session store, renamed
+field, or re-added capability — would need a new explicit decision that says so.
 
 Every implementation, publication, production-enablement, and integration stage requires its own explicit
 operator approval. Approvals are narrow and non-transitive.

@@ -102,8 +102,8 @@ plan, and open gates. No marker here is an approval.
 | Conversation/context state | external AGENT | store the external session id + observations | become a second conversation database |
 
 `arsd` is unprivileged, local, single-trust-domain infrastructure. It is not root, TCP/public, distributed,
-multi-tenant, or a business scheduler. Direct ars-core is test/dev-only; production has no in-process or
-acpx fallback.
+multi-tenant, or a business scheduler. Direct ars-core is test/dev-only; production has no in-process
+fallback and no second runtime to fall back to.
 
 ## 2. Single supervision authority
 
@@ -125,9 +125,9 @@ business state.
 | ACP SDK connection / `NativeAcpDriver` | live stdin/stdout JSON-RPC wire and ACP state machine | process identity, Run authority, profile selection |
 | `RunTask` | admission products, process/driver coordination, markers, events, finalization, Session switching | a second process/runtime layer |
 
-The released `execute_subprocess → SubprocessOutcome` is ✅ legacy acpx-only code the reset leaves untouched,
-not a compatibility surface this architecture owes anything to; its `stdin=DEVNULL`, stdout-drain threads,
-and wait-before-return shape cannot carry Native ACP.
+The released `execute_subprocess → SubprocessOutcome` shape is ✅ **gone**: its `stdin=DEVNULL`,
+stdout-drain threads, and wait-before-return contract could not carry Native ACP, and it left with the
+runtime it served. `ManagedProcess` is the only supervision layer.
 
 ## 3. Admission, spawn, and the ACP flow 🟦
 
@@ -646,8 +646,8 @@ The workspace canonical root and effective `cwd` in `spec.json` remain complete 
 hash-covered even when the workspace lives under `$HOME`. They are independently derived authority facts,
 and truncating or tokenising them would break workspace binding, reconciliation attribution, and audit.
 
-`native_acp/storage.py` is the only constructor seam for Native roots. Legacy `runs/`/`sessions/` and acpx
-storage are never read, written, imported, mirrored, or migrated by Native code.
+`native_acp/storage.py` is the only constructor seam for Native roots. Pre-existing legacy `runs/` and
+`sessions/` storage is never read, written, imported, mirrored, or migrated by Native code.
 
 The runtime ledger records supervision facts, not AGENT conversation memory. v1 no-change acceptance uses a
 disposable known-empty workspace and direct pre/post directory listing; `workspace_hash` is only a binding
@@ -679,17 +679,22 @@ per agent → re-render the service unit → restart `arsd` → registry parse �
 submits. Restarts recur only when the registry itself changes, never for an agent upgrade behind an
 unchanged registered command.
 
-## 10. Legacy coexistence and rollback
+## 10. One runtime, and rollback
 
-The legacy v0.1.7 acpx paths are ✅ still present in source and are **not** compatibility surfaces: not a
-product, runtime, fallback, or Session store, and nothing on the reset line owes them compatibility. They do
-not define vNext modules, Session semantics, status vocabulary, or production ingress; Native failure never
-routes to them; and their storage stays isolated from the Native roots (§8). Removing that code, and the
-documentation that describes it, is separately authorized work this architecture does not perform. Until
-then the only acpx material it retains is a bounded differential/comparison-test reference.
+There is one production architecture: `arsd` + ars-core + Native ACP.
+The retired acpx path was removed from source. That removal took runtime, package modules, CLI leaves, and
+the result field named after that process exit ✅. "Coexistence" named a dual surface that no longer exists,
+and none may be reintroduced.
+acpx was never a product, runtime, fallback, driver, compatibility layer, or Session store.
+Nothing here owes it compatibility. A structural gate in `tools/static_safety_scan.py`, plus exact wheel and sdist
+manifest allowlists, refuse its return in source, in a shipped artifact, and in a current-authority document.
 
-Rollback disables Native/`arsd` ingress and stops new submissions. It never converts failures into acpx
-fallback and never rewrites terminal Run facts.
+Rollback disables Native/`arsd` ingress and stops new submissions. There is no second runtime to fall back
+to, no bridge, and no dual-format writer; rollback never rewrites terminal Run facts. Reverting the removal
+before deployment is an ordinary revert of the merge. **After a deployment it is not implicitly safe:** API
+v3 may already have written valid records without the retired process-exit key, while a reverted validator
+would require it and classify those records as corrupt. A deployed rollback therefore needs its own
+authorized runtime-data decision.
 
 🟦 **Reset-line migration and rollback.** The supervisor root is shared, so reconciliation and evidence
 history stay continuous. Old Run directories are immutable historical files: the new runtime never rewrites,

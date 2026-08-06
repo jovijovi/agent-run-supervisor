@@ -50,7 +50,7 @@ The two are separate roles and are never conflated.
 - Direct `ars-core` use is test/dev-only. Production fails closed when `arsd` is unavailable.
 - There is no durable per-Run Worker. One `arsd` directly owns each in-process `RunTask`, Native ACP
   connection, and external AGENT process tree.
-- Native ACP never falls back to acpx.
+- Native ACP has nothing to fall back to: there is one runtime.
 
 ## Authority split
 
@@ -106,7 +106,7 @@ result verification.
    mediation environment binding is source-owned in key and value, applied last, and a registry entry may
    select one or none but can never author, replace, or disable it.
 7. Native ACP state uses its own isolated run and session roots. Native code never reads, writes, imports,
-   mirrors, or migrates acpx/legacy session storage.
+   mirrors, or migrates any pre-existing legacy session storage.
 8. Crash containment depends on a user-level service manager cgroup, which is real, load-bearing, and
    **external** to ARS: an `arsd` crash terminates the AGENT descendants that remain in its cgroup, and
    restart performs reconciliation only — it never resends a prompt.
@@ -186,13 +186,18 @@ operator's knowing choice, and ARS makes no claim about it.
 
 ## acpx boundary
 
-acpx is not a supported product, runtime, fallback, or compatibility baseline, and is never a Native ACP
-driver or degraded path. The product direction is to **remove all acpx product, runtime, and compatibility
-content from ARS** and to retain acpx only as a bounded differential/comparison test reference.
+acpx is not a supported product, runtime, fallback, or compatibility baseline.
+The acpx runtime was removed from ARS.
+That removal took its package modules, its CLI leaves, its fixtures, and the result field named after its
+process exit. The audited differential-test keep set was empty.
+No acpx fixture was retained.
 
-That removal is separately authorized source and documentation work that this document neither performs
-nor approves. Until it lands, acpx receives no new capability and never directs development, and its
-archived requirements never reopen as product direction.
+There is one production architecture: `arsd` + ars-core + Native ACP. Nothing reintroduces a second one:
+no shim, alias, flag, bridge, dual runtime, or renamed replacement field, and no re-added capability. A
+structural gate refuses an import of a removed module, an argv naming that binary, a reference to a removed
+repository surface, and a present-tense capability claim in a current-authority document; exact wheel and
+sdist manifest allowlists refuse its return in a shipped artifact. Its archived requirements never reopen
+as product direction.
 
 ## Authority and approval boundary
 
@@ -212,7 +217,7 @@ deployment, and no green verification and no prior approval transfers to the nex
 
 Public ingress, TCP/root service, distributed scheduling, multi-tenant cloud control plane, broad RBAC,
 durable per-Run Worker, runtime plugin platform, remote transport, attach-to-running-agent, plugin loading,
-containers, sandboxing, ARS credential resolution, acpx fallback, shared or imported acpx session storage,
+containers, sandboxing, ARS credential resolution, any second runtime or fallback, imported legacy session storage,
 generalized Session rebind, cross-AGENT Session reuse, automatic replay, Session close/revoke, one-shot or
 ephemeral Sessions, standalone empty-Session creation, automatic Session expiry by age or silence,
 destructive Session purge, workspace content-digest service,

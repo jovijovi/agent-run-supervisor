@@ -1,10 +1,11 @@
-"""Native ACP core (vNext Stage 1) — additive to the released acpx baseline.
+"""Native ACP core — the one runtime that speaks ACP to an external AGENT.
 
 No eager SDK import: the stdlib modules of this package import cleanly
 without the ``native`` extra; only SDK-needing modules (driver/client) call
 :func:`require_sdk` and surface :class:`NativeSdkUnavailableError` on use.
-Nothing in this package may construct acpx invocations or read legacy
-stores — structurally pinned by the native_acp test suites.
+Nothing in this package may reintroduce the retired runtime's invocations or
+read a legacy store — structurally pinned by the native_acp test suites and by
+the containment category of ``tools/static_safety_scan.py``.
 """
 
 from __future__ import annotations

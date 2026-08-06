@@ -658,7 +658,6 @@ def _write_terminal_result(
         origin="supervisor",
         detail_code=detail_code,
         retryable=_RETRYABLE_DEFAULT[status],
-        exit_code=None,
         signal=None,
         stop_reason=None,
         usage=None,

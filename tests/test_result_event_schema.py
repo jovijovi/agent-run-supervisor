@@ -57,7 +57,6 @@ def _actual_result_keys() -> set[str]:
         origin="cli",
         detail_code=None,
         retryable=False,
-        exit_code=0,
         signal=None,
         stop_reason="end_turn",
         usage=None,
@@ -65,6 +64,7 @@ def _actual_result_keys() -> set[str]:
         truncated=False,
         truncate_reason=None,
         run_dir=Path("/tmp/run_probe"),
+        raw_event_path="events.jsonl",
     )
     return set(payload.keys())
 
@@ -120,7 +120,6 @@ def _native_payload(
         origin=defaults["origin"],
         detail_code=defaults["detail_code"],
         retryable=_RETRYABLE_DEFAULT[status],
-        exit_code=None,
         signal=None,
         stop_reason=defaults["stop_reason"],
         usage=None,
@@ -156,7 +155,8 @@ def test_validate_native_terminal_accepts_legal_per_status_payloads(
     status: AgentRunStatus,
 ) -> None:
     payload = _native_payload(status)
-    # Optional Native extension fields may remain.
+    # ``session_id`` is a *declared* optional of the closed set, not an
+    # extension the validator tolerates.
     payload["session_id"] = "sess-ext"
     validated = validate_native_terminal_result(payload, run_id="run_probe")
     assert validated is not None
@@ -214,9 +214,10 @@ def test_validate_native_terminal_accepts_legal_emitter_variants() -> None:
     )
 
 
-def test_validate_native_terminal_rejects_runner_error_compat_status() -> None:
+def test_validate_native_terminal_rejects_a_retired_status() -> None:
+    """``runner_error`` is a string a stale record can still carry, not a member."""
     payload = _native_payload(AgentRunStatus.FAILED)
-    payload["status"] = AgentRunStatus.RUNNER_ERROR.value
+    payload["status"] = "runner_error"
     payload["error_code"] = "RUNNER_ERROR"
     payload["retryable"] = True
     assert validate_native_terminal_result(payload, run_id="run_probe") is None
@@ -236,7 +237,7 @@ def test_validate_native_terminal_rejects_bool_as_int_and_wrong_types() -> None:
     payload["truncated"] = 1
     assert validate_native_terminal_result(payload, run_id="run_probe") is None
     payload = _native_payload(AgentRunStatus.FAILED)
-    payload["acpx_exit_code"] = True
+    payload["signal"] = True
     assert validate_native_terminal_result(payload, run_id="run_probe") is None
 
 
@@ -527,7 +528,6 @@ def _native_builder_fields(tmp_path):
         origin="acp",
         detail_code=None,
         retryable=False,
-        exit_code=0,
         signal=None,
         stop_reason="end_turn",
         usage=None,
@@ -572,6 +572,106 @@ def test_native_result_builder_refuses_a_non_string_final_message(tmp_path) -> N
             build_native_result_payload(
                 final_message=candidate, **_native_builder_fields(tmp_path)
             )
+
+
+# -- API v3 carries no process-exit field ------------------------------------
+#
+# Both directions of one decision, and neither is a compatibility path. Forward:
+# a v3 result does not carry the retired key, and nothing writes one. Backward:
+# there is no backward — API v3 is the only contract, so a record carrying that
+# key, or any key this version does not define, is untrusted evidence and is
+# refused whole. No tolerant reader, projection, alias, or migration exists for
+# it, and no stored record is rewritten.
+
+_RETIRED_EXIT_FIELD = "acpx" + "_exit_code"
+
+
+def test_v3_results_carry_no_process_exit_field() -> None:
+    for status in _NATIVE_STATUSES:
+        payload = _native_payload(status)
+        assert _RETIRED_EXIT_FIELD not in payload
+        assert "exit_code" not in payload
+        assert validate_native_terminal_result(payload, run_id="run_probe") is not None
+
+
+def test_the_builder_refuses_a_process_exit_argument() -> None:
+    """Not renamed and not re-added under a neutral spelling — removed."""
+    for keyword in (_RETIRED_EXIT_FIELD, "exit_code"):
+        with pytest.raises(TypeError):
+            build_result_payload(
+                run_id="run_probe",
+                status=AgentRunStatus.COMPLETED,
+                origin="acp",
+                detail_code=None,
+                retryable=False,
+                signal=None,
+                stop_reason="end_turn",
+                usage=None,
+                final_message="",
+                truncated=False,
+                truncate_reason=None,
+                run_dir=Path("/tmp/run_probe"),
+                raw_event_path="events.jsonl",
+                **{keyword: 0},
+            )
+
+
+def test_the_required_field_set_no_longer_demands_a_process_exit_field() -> None:
+    from agent_run_supervisor.result import _REQUIRED_NATIVE_RESULT_FIELDS
+
+    assert _RETIRED_EXIT_FIELD not in _REQUIRED_NATIVE_RESULT_FIELDS
+    assert "exit_code" not in _REQUIRED_NATIVE_RESULT_FIELDS
+
+
+@pytest.mark.parametrize(
+    "legacy_value", [0, 3, 137, None, "137", True, {"unexpected": "type"}, []]
+)
+def test_a_record_carrying_the_retired_key_is_untrusted(legacy_value) -> None:
+    """API v3 is the only contract, so the retired key makes a record invalid.
+
+    There is no tolerant reader and no projection: a projection is itself a way
+    of reading a record this version does not define, and it is exactly how the
+    field reached a wire response before. The field set is closed, so the record
+    is refused whole — and refused for *any* value, because consulting the value
+    would be the reading the decision forbids.
+    """
+    payload = _native_payload(AgentRunStatus.COMPLETED)
+    payload[_RETIRED_EXIT_FIELD] = legacy_value
+
+    assert validate_native_terminal_result(payload, run_id="run_probe") is None
+
+
+@pytest.mark.parametrize("unknown", ["exit_code", "acpx_code", "future_extension"])
+def test_a_record_carrying_any_unknown_field_is_untrusted(unknown: str) -> None:
+    """The rule is the closed field set, not a blocklist of one retired name."""
+    payload = _native_payload(AgentRunStatus.COMPLETED)
+    payload[unknown] = "whatever"
+
+    assert validate_native_terminal_result(payload, run_id="run_probe") is None
+
+
+def test_the_recognized_optional_fields_still_validate() -> None:
+    """Closing the set must not refuse what current emitters actually write."""
+    payload = _native_payload(AgentRunStatus.FAILED)
+    payload["session_id"] = "sess-ext"
+    payload["failure_reason"] = "spawn failed"
+
+    validated = validate_native_terminal_result(payload, run_id="run_probe")
+
+    assert validated is not None
+    assert validated["session_id"] == "sess-ext"
+    assert validated["failure_reason"] == "spawn failed"
+
+
+def test_the_retired_key_is_not_reachable_from_any_current_source_path() -> None:
+    """No current module reads, types, branches on, copies, or re-emits it."""
+    src = _REPO_ROOT / "src"
+    offenders = [
+        str(path.relative_to(_REPO_ROOT))
+        for path in sorted(src.rglob("*.py"))
+        if _RETIRED_EXIT_FIELD in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == []
 
 
 def test_run_text_storage_refuses_a_non_string() -> None:

@@ -105,7 +105,6 @@ def build_minimal_evidence_pipeline_result(
         origin="supervisor",
         detail_code="EVIDENCE_PIPELINE",
         retryable=False,
-        exit_code=None,
         signal=None,
         stop_reason=None,
         usage=None,
@@ -142,7 +141,6 @@ def build_result_payload(
     origin: str,
     detail_code: str | None,
     retryable: bool,
-    exit_code: int | None,
     signal: int | None,
     stop_reason: str | None,
     usage: dict[str, Any] | None,
@@ -150,12 +148,24 @@ def build_result_payload(
     truncated: bool,
     truncate_reason: str | None,
     run_dir: Path,
+    raw_event_path: str,
     stderr_path: str = "stderr.log",
-    raw_event_path: str = "acpx-stdout.ndjson",
     redaction_report_path: str = "redaction-report.json",
     error_code: str | None = None,
     observed_effect: bool | None = None,
 ) -> dict[str, Any]:
+    """The single API v3 ``result.json`` emitter.
+
+    There is no process-exit field. The removed runtime's exit code was the one
+    thing in a terminal that described *the child process* rather than the Run,
+    and it left with the runtime that produced it — not renamed, not replaced by
+    a neutral ``exit_code``. What survives about an abnormal end is the Run-level
+    vocabulary: ``status``, ``detail_code``, ``signal``, and ``stop_reason``.
+
+    ``raw_event_path`` is required rather than defaulted, because the default it
+    used to carry named that runtime's stdout file and was inherited silently by
+    a caller that never meant to record it.
+    """
     payload: dict[str, Any] = {
         "run_id": run_id,
         "status": status.value,
@@ -164,15 +174,14 @@ def build_result_payload(
         "detail_code": detail_code,
         "origin": origin,
         "retryable": retryable,
-        "acpx_exit_code": exit_code,
         "signal": signal,
         "stop_reason": stop_reason,
         "usage": usage,
         "final_message": final_message,
         "truncated": truncated,
         "truncate_reason": truncate_reason,
-        # Whether the parsed stream showed real agent output/tool activity
-        # (parser.has_observed_effect); null when nothing was parsed (dry run).
+        # Whether the observed stream showed real agent output/tool activity;
+        # null when nothing was observed.
         "observed_effect": observed_effect,
         "run_dir": str(run_dir),
         "stderr_path": stderr_path,
@@ -197,16 +206,7 @@ def build_native_result_payload(*, final_message: str, **fields: Any) -> dict[st
 
 _ERROR_CODE_FOR_STATUS: dict[AgentRunStatus, str | None] = {
     AgentRunStatus.COMPLETED: None,
-    AgentRunStatus.NO_OP: "NO_OP",
-    AgentRunStatus.RUNNER_ERROR: "RUNNER_ERROR",
-    AgentRunStatus.INVALID_INVOCATION: "INVALID_INVOCATION",
     AgentRunStatus.TIMED_OUT: "TIMED_OUT",
-    AgentRunStatus.NO_SESSION: "NO_SESSION",
-    AgentRunStatus.PERMISSION_DENIED: "PERMISSION_DENIED",
-    AgentRunStatus.INTERRUPTED: "INTERRUPTED",
-    AgentRunStatus.PROTOCOL_ERROR: "PROTOCOL_ERROR",
-    AgentRunStatus.INFRASTRUCTURE_ERROR: "INFRASTRUCTURE_ERROR",
-    AgentRunStatus.POLICY_ERROR: "POLICY_ERROR",
     AgentRunStatus.FAILED: "FAILED",
     AgentRunStatus.CANCELLED: "CANCELLED",
     AgentRunStatus.UNKNOWN: "UNKNOWN",
@@ -224,7 +224,8 @@ COMPLETED_ACP_STOP_REASONS = frozenset(
 )
 _EMERGENCY_FINALIZE_DETAIL = "EMERGENCY_FINALIZE"
 
-# Native ACP terminal vocabulary (PRD R5). Compat/acpx statuses are never trusted here.
+# Native ACP terminal vocabulary (PRD R5). A retired status string that is no
+# longer an ``AgentRunStatus`` member fails the enum lookup and is untrusted.
 _NATIVE_TERMINAL_STATUSES = frozenset(
     {
         AgentRunStatus.COMPLETED,
@@ -243,7 +244,6 @@ _REQUIRED_NATIVE_RESULT_FIELDS = (
     "detail_code",
     "origin",
     "retryable",
-    "acpx_exit_code",
     "signal",
     "stop_reason",
     "usage",
@@ -255,6 +255,18 @@ _REQUIRED_NATIVE_RESULT_FIELDS = (
     "stderr_path",
     "raw_event_path",
     "redaction_report_path",
+)
+#: The only keys a Native emitter adds beyond the required set: ``session_id``
+#: from RunTask/reconcile, ``failure_reason`` from the categorical failure paths.
+_OPTIONAL_NATIVE_RESULT_FIELDS = ("session_id", "failure_reason")
+#: The field set is **closed**. API v3 is the only contract, so a key this
+#: version does not define is not an extension to tolerate — it is evidence the
+#: record was not written by a current emitter, and the terminal is untrusted.
+#: Closing the set is what removes the last reader of the retired process-exit
+#: field: there is no tolerant path, no projection, and no alias. A projection
+#: would be a reader too, and it is how that field reached a wire response.
+_KNOWN_NATIVE_RESULT_FIELDS = frozenset(
+    _REQUIRED_NATIVE_RESULT_FIELDS + _OPTIONAL_NATIVE_RESULT_FIELDS
 )
 
 
@@ -282,10 +294,16 @@ def validate_native_terminal_result(
     Requires the complete base shape emitted by :func:`build_result_payload`,
     exact ``run_id``, supported Native statuses only, exact status-derived
     ``error_code``, exact retryability, trusted status/origin/stop/detail
-    grammar from Native emitters, and strict types (``bool`` is not ``int``).
-    Optional Native extension fields may remain. Returns the validated
-    payload, or ``None`` when evidence is untrusted. Fail-closed: never
-    raises with raw field values.
+    grammar from Native emitters, strict types (``bool`` is not ``int``), and a
+    **closed field set**. Returns the validated payload, or ``None`` when
+    evidence is untrusted. Fail-closed: never raises with raw field values.
+
+    API v3 is the only contract. A key this version does not define makes the
+    record untrusted rather than tolerated: there is no reader for it, no
+    projection that strips it, and no alias. Nothing here rewrites or migrates a
+    stored record — an untrusted terminal simply never becomes trusted evidence,
+    which is the same fail-closed outcome every other malformed field already
+    produces.
     """
     try:
         return _validate_native_terminal_result_inner(payload, run_id=run_id)
@@ -301,6 +319,11 @@ def _validate_native_terminal_result_inner(
     for key in _REQUIRED_NATIVE_RESULT_FIELDS:
         if key not in payload:
             return None
+    # Closed set: an undefined key is untrusted evidence, never an extension.
+    # The value is not consulted — consulting it would be the reading that the
+    # single-contract decision removes.
+    if not _KNOWN_NATIVE_RESULT_FIELDS.issuperset(payload):
+        return None
     if payload.get("run_id") != run_id or not isinstance(payload.get("run_id"), str):
         return None
     status_raw = payload.get("status")
@@ -328,8 +351,6 @@ def _validate_native_terminal_result_inner(
         return None
     detail_code = payload.get("detail_code")
     if not _is_optional_str(detail_code):
-        return None
-    if not _is_optional_int(payload.get("acpx_exit_code")):
         return None
     if not _is_optional_int(payload.get("signal")):
         return None

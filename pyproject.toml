@@ -5,13 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agent-run-supervisor"
 version = "0.6.3"
-description = "Supervise external AGENT runs through acpx/ACP with auditable artifacts"
+description = "Supervise external ACP AGENT runs with auditable, redacted local artifacts"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "agent-run-supervisor authors" }]
-keywords = ["agent", "acp", "acpx", "supervisor", "audit", "local-first"]
+keywords = ["agent", "acp", "supervisor", "audit", "local-first"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -43,9 +43,9 @@ agent-run-supervisor = "agent_run_supervisor.cli:main"
 where = ["src"]
 include = ["agent_run_supervisor*"]
 
-
-[tool.setuptools.package-data]
-agent_run_supervisor = ["fixtures/acpx-0.12.0/success-codex-sentinel/stdout.ndjson"]
+# No [tool.setuptools.package-data]: the distribution ships Python modules only.
+# The single packaged data file was a replay fixture for a command that no
+# longer exists, and the wheel/sdist manifest gates assert its absence.
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

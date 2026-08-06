@@ -149,7 +149,7 @@ def test_capability_drift_between_two_runs_warns_and_never_refuses():
 
 # -- B3: one caller-facing policy-warning shape -------------------------------
 #
-# ``docs/design/result-event-schema.md`` §9.5 is the caller-facing authority for
+# ``docs/design/result-event-schema.md`` §5.5 is the caller-facing authority for
 # this family, and a caller parses what the schema documents. The emitted record
 # and the documented record therefore have to be the same record — one field
 # vocabulary, closed categorical values, and nothing that says what an observed
@@ -232,7 +232,7 @@ def test_b3_a_warning_never_gates_or_refuses():
 
 
 def test_b3_the_documented_schema_and_the_emitted_record_agree():
-    """The living schema §9.5 field table is the contract; read it and check."""
+    """The living schema §5.5 field table is the contract; read it and check."""
     schema = (
         Path(observation.__file__).parents[3]
         / "docs"
@@ -240,7 +240,7 @@ def test_b3_the_documented_schema_and_the_emitted_record_agree():
         / "result-event-schema.md"
     )
     text = schema.read_text(encoding="utf-8")
-    section = text.split("### 9.5")[1].split("### 9.6")[0]
+    section = text.split("### 5.5")[1].split("### 5.6")[0]
     documented = {
         line.split("|")[1].strip().strip("`")
         for line in section.splitlines()

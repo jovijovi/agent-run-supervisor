@@ -1,0 +1,48 @@
+# Exact manifest of the built wheel. Compared as a SET by
+# tools/check_dist_manifest.py, which runs inside scripts/verify_local.sh.
+# The distribution version is normalized out, so a version bump is not a diff.
+# Edit this file on purpose: there is no regeneration mode, because
+# regenerating it from whatever the build produced is the failure the gate
+# exists to prevent.
+<dist-info>/METADATA
+<dist-info>/RECORD
+<dist-info>/WHEEL
+<dist-info>/entry_points.txt
+<dist-info>/licenses/LICENSE
+<dist-info>/top_level.txt
+agent_run_supervisor/__init__.py
+agent_run_supervisor/__main__.py
+agent_run_supervisor/arsd/__init__.py
+agent_run_supervisor/arsd/__main__.py
+agent_run_supervisor/arsd/admission.py
+agent_run_supervisor/arsd/client.py
+agent_run_supervisor/arsd/handlers.py
+agent_run_supervisor/arsd/operand.py
+agent_run_supervisor/arsd/protocol.py
+agent_run_supervisor/arsd/reconcile.py
+agent_run_supervisor/arsd/server.py
+agent_run_supervisor/arsd/service_unit.py
+agent_run_supervisor/cli.py
+agent_run_supervisor/commands.py
+agent_run_supervisor/event_store.py
+agent_run_supervisor/exit_classifier.py
+agent_run_supervisor/managed_process.py
+agent_run_supervisor/native_acp/__init__.py
+agent_run_supervisor/native_acp/agent_registration.py
+agent_run_supervisor/native_acp/agent_registry.py
+agent_run_supervisor/native_acp/client.py
+agent_run_supervisor/native_acp/config_fidelity.py
+agent_run_supervisor/native_acp/driver.py
+agent_run_supervisor/native_acp/event_writer.py
+agent_run_supervisor/native_acp/events.py
+agent_run_supervisor/native_acp/launch_permissions.py
+agent_run_supervisor/native_acp/observation.py
+agent_run_supervisor/native_acp/permissions.py
+agent_run_supervisor/native_acp/profile.py
+agent_run_supervisor/native_acp/run_task.py
+agent_run_supervisor/native_acp/spec.py
+agent_run_supervisor/native_acp/storage.py
+agent_run_supervisor/process_liveness.py
+agent_run_supervisor/redaction.py
+agent_run_supervisor/result.py
+agent_run_supervisor/session.py
