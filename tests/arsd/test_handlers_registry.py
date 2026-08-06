@@ -19,7 +19,7 @@ import pytest
 
 from agent_run_supervisor.arsd import admission, handlers, protocol, server
 from agent_run_supervisor.native_acp import storage
-from agent_run_supervisor.session import STATE_OPEN, SessionLockError
+from agent_run_supervisor.session import QUARANTINE_DISPATCH_OBSERVATION_LOST, SessionLockError
 
 from tests.arsd.test_admission import (
     Harness,
@@ -65,6 +65,7 @@ def seed_session(store, *, session_id: str, owner="hermes", namespace="hermes/do
         workspace_hash="b" * 64,
         effective_cwd="/tmp/ws",
         matched_root="/tmp/ws",
+        agent_session_id=f"external-{session_id}",
     )
 
 
@@ -150,7 +151,7 @@ class CancelFake:
                 if self.session_store is not None and self.session_id is not None:
                     self.session_store.mark_quarantined(
                         self.session_id,
-                        reason="cancel_without_trustworthy_terminal",
+                        reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST,
                         run_id=run_id,
                     )
             raise
@@ -164,7 +165,7 @@ class CancelFactory:
         self.runners: list[CancelFake] = []
 
     def __call__(self, *, command, run_id, prepared_handle, submitted_at):
-        session_id = command.request.ars_session_id
+        session_id = command.request.session_id
         runner = CancelFake(
             prepared_handle=prepared_handle,
             mode=self.mode,
@@ -191,7 +192,7 @@ def test_max_concurrent_runs_capacity_exhausted(tmp_path: Path) -> None:
                 "cap-2",
                 protocol.CAPACITY_EXHAUSTED,
                 submit_payload(
-                    request=valid_wire_request(ars_session_id="sess-cap-2")
+                    request=valid_wire_request(session_id="sess-cap-2")
                 ),
             )
         finally:
@@ -213,7 +214,7 @@ def test_second_distinct_key_on_active_session_is_busy(tmp_path: Path) -> None:
                 "busy-2",
                 protocol.SESSION_BUSY,
                 submit_payload(
-                    request=valid_wire_request(ars_session_id="sess-arsd-1")
+                    request=valid_wire_request(session_id="sess-arsd-1")
                 ),
             )
             assert len(harness.factory.calls) == 1
@@ -260,7 +261,7 @@ def test_session_lease_remains_authoritative_for_real_runtask(
     event_store = storage.native_event_store(root)
     seed_session(session_store, session_id="sess-lease-1")
     held = session_store.acquire_lock(
-        "sess-lease-1", "hermes", reclaimable=False, required_state=STATE_OPEN
+        "sess-lease-1", "hermes", reclaimable=False, refuse_quarantined=True
     )
     try:
         with pytest.raises(SessionLockError):
@@ -268,7 +269,7 @@ def test_session_lease_remains_authoritative_for_real_runtask(
                 "sess-lease-1",
                 "hermes",
                 reclaimable=False,
-                required_state=STATE_OPEN,
+                refuse_quarantined=True,
             )
         run_id = admission.derive_run_id(
             admission.AdmissionKey(
@@ -279,7 +280,7 @@ def test_session_lease_remains_authoritative_for_real_runtask(
         command = parse_submit(
             submit_payload(
                 workspace_root=str(workspace),
-                request=valid_wire_request(ars_session_id="sess-lease-1"),
+                request=valid_wire_request(session_id="sess-lease-1"),
             )
         )
         task = RunTask(
@@ -590,7 +591,6 @@ def test_payload_field_sets_closed_without_echo(tmp_path: Path) -> None:
                     {"run_id": "run-" + "a" * 32, "from_seq": 0, secret: 1},
                 ),
                 ("session_status", {"session_id": "sess-x", secret: 1}),
-                ("session_close", {"session_id": "sess-x", secret: 1}),
             ]
             for op, payload in cases:
                 with pytest.raises(protocol.ProtocolError) as err:
@@ -650,14 +650,14 @@ def test_disconnect_does_not_close_unrelated_follow_stream(tmp_path: Path) -> No
                 caller,
                 "life-1",
                 submit_payload(
-                    request=valid_wire_request(ars_session_id="sess-life-1")
+                    request=valid_wire_request(session_id="sess-life-1")
                 ),
             )
             second = await harness.submit(
                 caller,
                 "life-2",
                 submit_payload(
-                    request=valid_wire_request(ars_session_id="sess-life-2")
+                    request=valid_wire_request(session_id="sess-life-2")
                 ),
             )
             stream_a = await call(
@@ -849,8 +849,7 @@ def test_authorize_run_rejects_symlinked_run_dir(tmp_path: Path) -> None:
                 "peer": {"pid": 1, "uid": 1, "gid": 1},
                 "owner": "hermes",
                 "namespace": "hermes/doc-check",
-                "session_reuse": "reuse",
-                "ars_session_id": "sess-arsd-1",
+                "session_id": "sess-arsd-1",
                 "agent_id": "fake-agent",
                 "request_digest": digest.value,
                 "prompt_sha256": digest.prompt_sha256,
@@ -969,7 +968,7 @@ def test_cancel_pre_dispatch_failed_reusable(tmp_path: Path) -> None:
             assert result["status"] == "failed"
             assert not h.registry.is_registered(run_id)
             record = session_store.open_session("sess-arsd-1")
-            assert record.state == STATE_OPEN  # reusable, not quarantined
+            assert record.quarantine is None  # reusable, not quarantined
         finally:
             await h.aclose()
 
@@ -1014,7 +1013,7 @@ def test_cancel_trustworthy_cancelled_terminal(tmp_path: Path) -> None:
             assert result["status"] == "cancelled"
             assert result["stop_reason"] == "cancelled"
             assert not h.registry.is_registered(run_id)
-            assert session_store.open_session("sess-arsd-1").state == STATE_OPEN
+            assert session_store.open_session("sess-arsd-1").quarantine is None
         finally:
             await h.aclose()
 
@@ -1060,7 +1059,7 @@ def test_cancel_without_terminal_unknown_quarantined(tmp_path: Path) -> None:
             assert result["retryable"] is False
             assert not h.registry.is_registered(run_id)
             record = session_store.open_session("sess-arsd-1")
-            assert record.state == "quarantined"
+            assert record.quarantine is not None
         finally:
             await h.aclose()
 
@@ -1086,7 +1085,7 @@ def test_session_ops_authorized_filtered_and_quarantine_refused(
         )
         seed_session(harness.session_store, session_id="sess-q")
         harness.session_store.mark_quarantined(
-            "sess-q", reason="test", run_id="run-seed"
+            "sess-q", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-seed"
         )
         try:
             listed = await call(harness, caller_a, "session_list", "list-1", {})
@@ -1094,11 +1093,17 @@ def test_session_ops_authorized_filtered_and_quarantine_refused(
             assert "sess-a" in ids
             assert "sess-q" in ids
             assert "sess-b" not in ids
+            # No lifecycle state is projected, for either Session: what
+            # distinguishes them is quarantine evidence, and nothing else.
             for item in listed["sessions"]:
+                assert "state" not in item
                 if item["session_id"] == "sess-a":
-                    assert item["state"] == "active"  # native API vocabulary
+                    assert item["quarantine"] is None
                 if item["session_id"] == "sess-q":
-                    assert item["state"] == "quarantined"
+                    assert item["quarantine"]["reason_code"] == (
+                        QUARANTINE_DISPATCH_OBSERVATION_LOST
+                    )
+                    assert item["quarantine"]["source_run_id"] == "run-seed"
 
             status = await call(
                 harness,
@@ -1108,7 +1113,10 @@ def test_session_ops_authorized_filtered_and_quarantine_refused(
                 {"session_id": "sess-a"},
             )
             assert status["session_id"] == "sess-a"
-            assert status["state"] == "active"
+            assert "state" not in status
+            assert status["quarantine"] is None
+            # The external AGENT session id is never projected.
+            assert "agent_session_id" not in status
 
             await expect_code(
                 harness,
@@ -1126,22 +1134,15 @@ def test_session_ops_authorized_filtered_and_quarantine_refused(
                 protocol.UNKNOWN_SESSION,
                 {"session_id": "sess-missing"},
             )
+            # There is no Session-close operation to reach at all.
             await expect_code(
                 harness,
                 caller_a,
                 "session_close",
-                "sc-q",
-                protocol.INVALID_REQUEST,
-                {"session_id": "sess-q"},
-            )
-            closed = await call(
-                harness,
-                caller_a,
-                "session_close",
-                "sc-ok",
+                "sc-gone",
+                protocol.UNKNOWN_OP,
                 {"session_id": "sess-a"},
             )
-            assert closed["state"] == "closed"
         finally:
             await harness.aclose()
 
@@ -1210,7 +1211,7 @@ def test_registry_always_deregisters_on_task_exception(tmp_path: Path) -> None:
                     op="submit",
                     request_id="boom-1",
                     payload=submit_payload(
-                        request=valid_wire_request(ars_session_id="sess-boom")
+                        request=valid_wire_request(session_id="sess-boom")
                     ),
                 ),
             )
@@ -1725,7 +1726,7 @@ def test_r7_b2_run_status_rejects_symlink_oversize_malformed_compat(
                 protocol.INTERNAL,
                 {"run_id": run_id},
             )
-            assert harness.session_store.open_session("sess-arsd-1").state == "quarantined"
+            assert harness.session_store.open_session("sess-arsd-1").quarantine is not None
         finally:
             await harness.aclose()
 
@@ -1745,7 +1746,7 @@ def test_r7_b2_run_status_rejects_symlink_oversize_malformed_compat(
                 protocol.INTERNAL,
                 {"run_id": run_id},
             )
-            assert harness.session_store.open_session("sess-arsd-1").state == "quarantined"
+            assert harness.session_store.open_session("sess-arsd-1").quarantine is not None
         finally:
             await harness.aclose()
 
@@ -1771,7 +1772,7 @@ def test_r7_b2_run_status_rejects_symlink_oversize_malformed_compat(
                 protocol.INTERNAL,
                 {"run_id": run_id},
             )
-            assert harness.session_store.open_session("sess-arsd-1").state == "quarantined"
+            assert harness.session_store.open_session("sess-arsd-1").quarantine is not None
         finally:
             await harness.aclose()
 
@@ -1822,7 +1823,7 @@ def test_r7_b2_cancel_invalid_terminal_quarantines_registered(
                     break
                 await asyncio.sleep(0.01)
             assert not harness.handlers.registry.is_registered(run_id)
-            assert harness.session_store.open_session("sess-arsd-1").state == "quarantined"
+            assert harness.session_store.open_session("sess-arsd-1").quarantine is not None
         finally:
             await harness.aclose()
 
@@ -1901,7 +1902,7 @@ def test_r8_b2_submit_registered_invalid_cancels_then_quarantines(
                 await asyncio.sleep(0.01)
             assert not harness.handlers.registry.is_registered(run_id)
             assert (
-                harness.session_store.open_session("sess-arsd-1").state == "quarantined"
+                harness.session_store.open_session("sess-arsd-1").quarantine is not None
             )
         finally:
             await harness.aclose()
@@ -1935,7 +1936,7 @@ def test_r8_b2_submit_invalid_cancel_failure_still_refuses(
                 submit_payload(),
             )
             assert (
-                harness.session_store.open_session("sess-arsd-1").state == "quarantined"
+                harness.session_store.open_session("sess-arsd-1").quarantine is not None
             )
         finally:
             await harness.aclose()
@@ -2237,7 +2238,7 @@ def test_r9_b1_invalid_terminal_waits_for_unregistration_before_refusal(
             )
             assert harness.handlers.registry.is_registered(run_id)
             assert (
-                harness.session_store.open_session("sess-arsd-1").state == "quarantined"
+                harness.session_store.open_session("sess-arsd-1").quarantine is not None
             )
 
             reg_task = harness.handlers.registry.task_for(run_id)
@@ -2320,7 +2321,7 @@ def test_r10_b1_follow_invalid_waits_for_unregistration_before_refusal(
             assert harness.handlers.registry.is_registered(run_id)
             assert contain_calls == [run_id]
             assert (
-                harness.session_store.open_session("sess-arsd-1").state == "quarantined"
+                harness.session_store.open_session("sess-arsd-1").quarantine is not None
             )
 
             reg_task = harness.handlers.registry.task_for(run_id)
@@ -2430,7 +2431,7 @@ def test_r10b_b1a_aclose_awaits_active_containment_without_cancelling(
             await asyncio.sleep(0.2)
             assert harness.handlers.registry.is_registered(run_id)
             assert (
-                harness.session_store.open_session("sess-arsd-1").state == "quarantined"
+                harness.session_store.open_session("sess-arsd-1").quarantine is not None
             )
             # Containment is in the post-timeout wait-for-unregistration phase.
             assert getattr(stream, "_containment_active", False) is True
@@ -2519,7 +2520,7 @@ def test_r10c_b1a_cancel_aclose_during_containment_keeps_containment_alive(
             await asyncio.sleep(0.2)
             assert harness.handlers.registry.is_registered(run_id)
             assert (
-                harness.session_store.open_session("sess-arsd-1").state == "quarantined"
+                harness.session_store.open_session("sess-arsd-1").quarantine is not None
             )
             assert getattr(stream, "_containment_active", False) is True
 
@@ -2544,7 +2545,7 @@ def test_r10c_b1a_cancel_aclose_during_containment_keeps_containment_alive(
                 "close-caller cancel must not cancel active containment"
             )
             assert (
-                harness.session_store.open_session("sess-arsd-1").state == "quarantined"
+                harness.session_store.open_session("sess-arsd-1").quarantine is not None
             )
 
             reg_task = harness.handlers.registry.task_for(run_id)
@@ -3043,5 +3044,145 @@ def test_r12_register_vs_close_admission_atomic_no_orphan_dispatch(
                 await registry.cancel_all(wait_seconds=0.05)
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(registry.wait_until_idle(), 1.0)
+
+    run_async(case())
+
+
+# --- an unsafe Session id is a caller mistake, not a daemon fault ------------
+#
+# ``../x`` is not a Session that happens to be missing — it is not a Session id
+# at all, and the store refuses it before it will touch a path. That refusal
+# used to escape the handler as an unhandled exception, so the caller saw
+# ``INTERNAL`` and lost the connection: a request problem reported as a server
+# problem, with a reconnect as the only way forward. It must be a stable
+# ``INVALID_REQUEST`` on a live connection, and it must still not echo the
+# offending text back.
+
+UNSAFE_SESSION_IDS = (
+    "../escape",
+    "..",
+    "a/b",
+    "with space",
+    ".hidden",
+    "-leading",
+    "sess\x00null",
+    # A trailing newline is the quiet one: a regex anchored with ``$`` accepts
+    # it, so an id the store cannot use would reach the store and come back as
+    # "unknown session" — a caller mistake answered as a lookup miss.
+    "sess-ok\n",
+    "sess-ok\r\n",
+    "sess-ok\nsess-evil",
+)
+
+
+@pytest.mark.parametrize("session_id", UNSAFE_SESSION_IDS)
+def test_an_unsafe_session_id_is_invalid_request_not_internal(
+    tmp_path: Path, session_id: str
+) -> None:
+    async def case():
+        harness = Harness(tmp_path)
+        caller = caller_for(principal_a())
+        try:
+            for op in ("session_status",):
+                err = await expect_code(
+                    harness,
+                    caller,
+                    op,
+                    f"unsafe-{op}",
+                    protocol.INVALID_REQUEST,
+                    {"session_id": session_id},
+                )
+                # The offending value never comes back, and neither does the
+                # store's own path-shaped diagnostic.
+                assert session_id not in err.message
+                assert "/" not in err.message
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+@pytest.mark.parametrize("session_id", UNSAFE_SESSION_IDS)
+def test_an_unsafe_session_id_creates_no_session_and_no_run(
+    tmp_path: Path, session_id: str
+) -> None:
+    async def case():
+        harness = Harness(tmp_path)
+        caller = caller_for(principal_a())
+        try:
+            await expect_code(
+                harness,
+                caller,
+                "session_status",
+                "unsafe-side-effects",
+                protocol.INVALID_REQUEST,
+                {"session_id": session_id},
+            )
+            assert harness.session_store.list_records() == []
+            runs_root = Path(harness.event_store.base_dir)
+            assert not runs_root.exists() or list(runs_root.iterdir()) == []
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_an_unknown_but_well_formed_session_id_stays_unknown_session(
+    tmp_path: Path,
+) -> None:
+    """The other side of the line: a real id that names nothing is not invalid."""
+
+    async def case():
+        harness = Harness(tmp_path)
+        caller = caller_for(principal_a())
+        try:
+            await expect_code(
+                harness,
+                caller,
+                "session_status",
+                "well-formed-missing",
+                protocol.UNKNOWN_SESSION,
+                {"session_id": "sess-nothing-here"},
+            )
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_an_unsafe_session_id_never_reaches_the_session_store(
+    tmp_path: Path,
+) -> None:
+    """The refusal is a wire fact, so nothing may touch storage to discover it.
+
+    This is what separates ``INVALID_REQUEST`` from ``UNKNOWN_SESSION``: an id
+    that is not an id has no lookup to miss.
+    """
+
+    async def case():
+        harness = Harness(tmp_path)
+        caller = caller_for(principal_a())
+        reached: list[str] = []
+        real_open = harness.session_store.open_session
+
+        def spy(session_id):
+            reached.append(session_id)
+            return real_open(session_id)
+
+        harness.session_store.open_session = spy  # type: ignore[method-assign]
+        try:
+            for index, unsafe in enumerate(UNSAFE_SESSION_IDS):
+                await expect_code(
+                    harness,
+                    caller,
+                    "session_status",
+                    f"no-store-{index}",
+                    protocol.INVALID_REQUEST,
+                    {"session_id": unsafe},
+                )
+            assert reached == [], reached
+        finally:
+            harness.session_store.open_session = real_open  # type: ignore[method-assign]
+            await harness.aclose()
 
     run_async(case())

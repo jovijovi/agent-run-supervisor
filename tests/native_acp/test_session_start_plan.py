@@ -34,10 +34,11 @@ from agent_run_supervisor.native_acp.profile import (  # noqa: E402
     AcpCompatProfile,
     ProfileRegistry,
 )
+from agent_run_supervisor.session import derive_session_id_for_run
 from agent_run_supervisor.native_acp.run_task import (  # noqa: E402
     DISPATCH_STARTED_MARKER,
     LoadSessionPlan,
-    NewSessionPlan,
+    CreateSessionPlan,
     RunTask,
     SessionStartPlan,
 )
@@ -116,8 +117,7 @@ def _request(**overrides) -> AgentRunRequest:
         owner="hermes",
         namespace="hermes/doc-check",
         agent_id="fake-agent",
-        session_reuse="reuse",
-        ars_session_id="sess-plan-1",
+        session_id="sess-plan-1",
         expected_binding_hash=None,
         input_refs=(InputRef(ref="prompt:inline", content_hash="sha256:" + "a" * 64),),
         requested_model="kimi-for-coding/k3",
@@ -207,9 +207,16 @@ class Harness:
             matched_root=binding.canonical_root,
             agent_id=instance.agent_id,
             session_epoch=instance.session_epoch,
+            # Creation is atomic and fully bound. A record with no external id
+            # cannot be produced, so a "missing external id" case is simulated
+            # by rewriting the committed record, never by creating an unbound one.
+            agent_session_id=external_id or "external-placeholder",
         )
-        if external_id is not None:
-            storage.bind_agent_session(store, session_id, agent_session_id=external_id)
+        if external_id is None:
+            record_path = Path(store.base_dir) / session_id / "session.json"
+            payload = json.loads(record_path.read_text(encoding="utf-8"))
+            del payload["agent_session_id"]
+            record_path.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
         return Path(store.base_dir) / session_id
 
 
@@ -293,14 +300,14 @@ def _detail_code(harness: Harness, run_id: str = "run-plan-1") -> str:
 def test_plan_types_are_closed() -> None:
     """The union has exactly two frozen members with exactly their fields."""
     members = typing.get_args(SessionStartPlan)
-    assert set(members) == {NewSessionPlan, LoadSessionPlan}
+    assert set(members) == {CreateSessionPlan, LoadSessionPlan}
     assert len(members) == 2
 
-    for plan_type in (NewSessionPlan, LoadSessionPlan):
+    for plan_type in (CreateSessionPlan, LoadSessionPlan):
         assert dataclasses.is_dataclass(plan_type)
         assert plan_type.__dataclass_params__.frozen is True
 
-    assert [f.name for f in dataclasses.fields(NewSessionPlan)] == ["ar_session_id"]
+    assert [f.name for f in dataclasses.fields(CreateSessionPlan)] == ["ar_session_id"]
     assert [f.name for f in dataclasses.fields(LoadSessionPlan)] == [
         "ar_session_id",
         "external_session_id",
@@ -313,7 +320,7 @@ def test_plan_types_are_closed() -> None:
     ]
     assert external.repr is False
 
-    new_plan = NewSessionPlan(ar_session_id="sess-new-1")
+    new_plan = CreateSessionPlan(ar_session_id="sess-new-1")
     load_plan = LoadSessionPlan(
         ar_session_id="sess-load-1", external_session_id="external-1"
     )
@@ -437,7 +444,7 @@ def test_new_session_plan_comes_only_from_non_reuse_intent(
     new_sessions = _new_session_spy(monkeypatch)
 
     result = _run(
-        harness.task(request=_request(session_reuse="none", ars_session_id=None))
+        harness.task(request=_request(session_id=None))
     )
 
     assert result.status is AgentRunStatus.COMPLETED
@@ -446,7 +453,9 @@ def test_new_session_plan_comes_only_from_non_reuse_intent(
     assert "session/new" in methods
     assert "session/load" not in methods
     records = harness.session_store().list_records()
-    assert [record.session_id for record in records] == ["run-plan-1-ephemeral"]
+    assert [record.session_id for record in records] == [
+        derive_session_id_for_run("run-plan-1")
+    ]
     assert records[0].agent_session_id == EXTERNAL_ID
 
 
@@ -567,10 +576,10 @@ def test_startup_sequence_has_disjoint_arms_and_no_default_arm() -> None:
         assert isinstance(pattern, ast.MatchClass), "no wildcard / capture arm"
         assert isinstance(pattern.cls, ast.Name)
         matched.append(pattern.cls.id)
-    assert matched == ["NewSessionPlan", "LoadSessionPlan"]
+    assert matched == ["CreateSessionPlan", "LoadSessionPlan"]
 
     # No conversion between plan types anywhere inside the sequence.
-    assert _construction_sites(startup, "NewSessionPlan") == []
+    assert _construction_sites(startup, "CreateSessionPlan") == []
     assert _construction_sites(startup, "LoadSessionPlan") == []
 
 
@@ -593,23 +602,27 @@ def test_new_session_is_reachable_only_from_the_new_session_arm() -> None:
 
 def test_plan_constructors_are_reachable_only_from_their_admission_branch() -> None:
     tree = _module_ast()
-    new_sites = _construction_sites(tree, "NewSessionPlan")
+    new_sites = _construction_sites(tree, "CreateSessionPlan")
     load_sites = _construction_sites(tree, "LoadSessionPlan")
     assert len(new_sites) == 1
     assert len(load_sites) == 1
 
-    new_builder = _function(tree, "_plan_new_session")
+    new_builder = _function(tree, "_plan_create_session")
     reuse_builder = _function(tree, "_plan_reuse_session")
     assert new_sites[0] in list(ast.walk(new_builder))
     assert load_sites[0] in list(ast.walk(reuse_builder))
 
-    # ... and the builders are selected by the immutable reuse intent alone.
+    # ... and the builders are selected by the sealed Session intent alone.
+    # The first ``if`` in ``_bind_session`` is that selection; a later one
+    # decides only whether a lease can be taken yet, and builds nothing.
     bind = _function(tree, "_bind_session")
     branches = [node for node in ast.walk(bind) if isinstance(node, ast.If)]
-    assert len(branches) == 1
     branch = branches[0]
+    for later in branches[1:]:
+        assert _construction_sites(later, "CreateSessionPlan") == []
+        assert _construction_sites(later, "LoadSessionPlan") == []
     assert isinstance(branch.test, ast.Compare)
-    assert ast.unparse(branch.test) == "spec.session.reuse == 'reuse'"
+    assert ast.unparse(branch.test) == "spec.session.session_id is not None"
     reuse_called = [
         call
         for node in branch.body
@@ -618,7 +631,7 @@ def test_plan_constructors_are_reachable_only_from_their_admission_branch() -> N
     new_called = [
         call
         for node in branch.orelse
-        for call in _attribute_calls(node, "_plan_new_session")
+        for call in _attribute_calls(node, "_plan_create_session")
     ]
     assert len(reuse_called) == 1
     assert len(new_called) == 1

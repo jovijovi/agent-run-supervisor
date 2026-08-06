@@ -23,15 +23,17 @@ Status markers:
 - ⏸ separately approved later integration.
 
 **Authority and source are aligned on `main`.** The boundary reset described here — the operator agent
-registry read once at startup, the four-way boundary, value-blind sealed launch material, `api_version` 2,
+registry read once at startup, the four-way boundary, value-blind sealed launch material, `api_version` 3,
 fail-closed load-only reuse, and total ordered reconciliation — is merged, and the retired Binding reader,
 attestation module, and three per-agent profiles are deleted from source. The former 🟨 "target, not yet in
 source" marker is therefore retired; `docs/archive/binding-era-2026-07/` holds the retired architecture as
 cold history.
 
-Two later decisions are folded in: the per-Run exact-literal guard over free-form Run text is **removed**
-(PRD R15), and a profile now declares a **configuration-fidelity mode**, with `cursor-native-acp-v1`
-registered for the one evidenced model-only deviation (PRD R3/R12).
+Three later decisions are folded in: the per-Run exact-literal guard over free-form Run text is **removed**
+(PRD R15); a profile now declares a **configuration-fidelity mode**, with `cursor-native-acp-v1`
+registered for the one evidenced model-only deviation (PRD R3/R12); and the artificial Session closing
+lifecycle is **deleted** in favour of one durable, resumable Session kind on `api_version` 3 (PRD R4/R5/R11)
+— Runs terminate, Sessions do not close.
 
 Merge, publication, deployment, and activation stay separate facts; a merge implies none of the others, and
 each is its own explicit decision. Published package/release facts come from live GitHub Releases and PyPI;
@@ -137,7 +139,7 @@ and wait-before-return shape cannot carry Native ACP.
 
   1 caller connects; SO_PEERCRED → peer uid/gid/pid
   2 caller-UID policy → principal_id, owner, namespace        ✗ PEER_UID_DENIED
-  3 decode bounded frame; api_version checked per operation    ✗ UNSUPPORTED_API_VERSION
+  3 decode bounded frame; api_version must be exactly 3        ✗ UNSUPPORTED_API_VERSION
   4 parse AgentRunRequest (bounded plain values only)         ✗ INVALID_REQUEST
   5 idempotency: run_id = f(principal_id, request_id); keyed
     admission lock; write-once submission record              ✗ IDEMPOTENCY_CONFLICT
@@ -162,11 +164,14 @@ and wait-before-return shape cannot carry Native ACP.
       b. write-once launch.json (+ launch_hash)
     ── nothing is re-read, re-resolved, or re-derived after 13a
  14 derive one closed session start plan (§4):
-      · non-reuse only → new-session plan
-      · reuse only → open the existing record, validate it for
-        load, require its external id → load plan
+      · session_id absent → create plan, on the deterministic
+        prospective id; NO Session record is written yet
+      · session_id present → open the existing record, validate
+        it for load, require its external id → load plan
     BEFORE the lease; no reuse failure can create a Session   ✗ SESSION_*
  15 acquire the Session lease (one active Run per Session)     ✗ SESSION_BUSY / QUARANTINED
+    (a create plan leases the prospective id; a lease is not
+     a Session record and outlives no Run)
  16 SPAWN: new POSIX session + process group; exec the declared
     command through declared PATH/shim/symlink semantics with
     declared argv[0]; hand it the in-memory environment from
@@ -182,8 +187,9 @@ and wait-before-return shape cannot carry Native ACP.
       · forbidden capabilities absent (floor ∪ entry)         ✗ CAPABILITY_FORBIDDEN
       · record agentInfo{name,version} — EVIDENCE, gates nothing
  19 execute the closed start plan:
-      · new-session plan  → session/new
-      · load plan         → session/load with the stored id, and
+      · create plan → session/new, then atomically persist ONE
+        fully bound Session record, then take its lease
+      · load plan   → session/load with the stored id, and
         never session/new under any return or exception        ✗ SESSION_LOAD_FAILED
  20 read the complete config option set (live discovery)
  21 set requested model → exact                               ✗ CONFIG_*
@@ -194,6 +200,9 @@ and wait-before-return shape cannot carry Native ACP.
  24 exact readback: requested == effective, literal, no coercion ✗ CONFIG_INEXACT
     (a compatibility profile additionally proves its required mode)
  25 persist observed runtime state; ready to prompt
+ 25b marker: config-switch-started       ← before the FIRST config set
+     ... and marker: config-proven          after exact readback succeeds
+     (or marker: config-rollback-proven     after a proven exact rollback)
  26 marker: prompt-dispatch-started      ← THE UNCERTAINTY BOUNDARY
  27 write the prompt frame
  28 marker: prompt-accepted
@@ -202,8 +211,9 @@ and wait-before-return shape cannot carry Native ACP.
     mediate every permission / fs / terminal request
     default-deny against the frozen grant
  30 terminal ACP event | turn timeout | cancel | child exit
- 31 finalize: one irreversible result.json; Session state;
-    lease release; ACP close; terminate_group → grace →
+ 31 finalize: one irreversible result.json; quarantine only if
+    continuity is disproven — a terminal Run never ends its
+    Session; lease release; ACP close; terminate_group → grace →
     kill_group; wait; reap; bounded statically-redacted stderr
     plus the redaction report
 ```
@@ -346,9 +356,9 @@ Reuse is proven when all four hold:
 
 The start plan is a closed union derived from the immutable request: a load plan exists only after an
 existing record is opened existing-only, passes the load-time binding validation, and supplies its stored
-external ID; a new-session plan is constructible only from a request whose reuse intent is "none". The
+external ID; a create plan is constructible only from a request that carries no `session_id`. The
 startup sequence dispatches on the plan with disjoint arms, no default arm, and no conversion between plan
-types, so the load arm may only load and the new arm may only create. Every reuse failure — missing or
+types, so the load arm may only load and the create arm may only create. Every reuse failure — missing or
 corrupt record, missing external ID, binding mismatch, busy or quarantined lease, initialize or load
 capability failure, load RPC failure, callback identity violation, option-discovery failure, config
 inexactness, cancellation, timeout, child exit, cleanup failure — terminates without reaching the
@@ -363,9 +373,42 @@ callbacks racing with `session/load` are covered; before a new session's ID is b
 callback is an unbound-identity violation.
 
 Failure handling is unchanged in terminal meaning: a failed load or a pre-dispatch identity violation yields
-`failed` with a stable code and `retryable=false`, and the Session stays `active` and readable, because a
+`failed` with a stable code and `retryable=false`, and the Session stays reusable and readable, because a
 clean pre-dispatch refusal is not uncertainty. An identity violation *after* the dispatch marker yields
 `unknown` plus quarantine.
+
+### 4.3 Atomic creation and the prospective Session id
+
+A create plan owns a **prospective** `session_id` derived deterministically from the same authenticated
+`(principal_id, request_id)` identity that derives `run_id`. Nothing durable about the Session is written
+under it before `session/new`: the sealed submission and Spec are the whole reservation, and the
+process-local keyed admission lock is what serializes two live attempts at the same request. There is no
+provisional record, no record with a missing external ID bound later, and no second durable reservation.
+
+```text
+persist submission with deterministic Run/Session identity
+→ seal Spec and launch
+→ hold the process-local keyed admission lock for the create path
+→ spawn and initialize
+→ ACP session/new
+→ atomically persist ONE fully bound Session record with the external session id
+→ acquire the Session lease on the now-existing record
+→ exact configuration fidelity
+→ mark config-switch-started, configure, mark config-proven
+→ create prompt-dispatch-started marker
+→ dispatch prompt
+```
+
+A crash anywhere before the record commit leaves a terminal failed Run and **no** Session: `session_status`
+for the prospective ID returns the stable unknown/not-found result, so a failed creation can never be
+mistaken for a resumable Session. A provider context that `session/new` created but ARS never bound may
+become an unreachable provider-side orphan; ARS does not guess its ID, scan AGENT-owned storage, or convert
+it into a Session, and the ordering makes that safe because the prompt was not sent.
+
+Repeating the same authenticated `request_id` returns the same Run and Session facts from the durable
+submission and dispatches nothing a second time — including while the original attempt is still in flight,
+where the keyed lock serializes the duplicate onto the same durable submission and exactly one `session/new`
+and one prompt dispatch occur.
 
 Between completed Runs on the same Session, model/effort may change:
 
@@ -377,7 +420,7 @@ previous Run terminal → acquire lease → spawn → initialize
 ```
 
 model/effort never change during an active Run. Failed partial switching sends no prompt; exact rollback
-reopens the Session, otherwise it becomes `quarantined`. Changing AGENT type requires a new Session and
+leaves the Session reusable, otherwise it is quarantined. Changing AGENT type requires a new Session and
 caller-owned explicit context handoff.
 
 ## 5. Technical state and uncertainty
@@ -388,7 +431,14 @@ Native Run terminal states are irreversible:
 completed | failed | cancelled | timed_out | unknown
 ```
 
-Session states include persistent `active | closed | quarantined`.
+**Those five values are Run terminals only.** A Session has no lifecycle state at all: it exists, it is
+durable, and it is indefinitely resumable. Every trustworthy Run terminal releases the Session lease and
+leaves the Session reusable; `run_cancel` ends the current Run and never the Session; daemon restart
+reconciles and never resends a prompt.
+
+Quarantine is independent safety evidence, not a state in a lifecycle — optionally present on a Session as
+a reason code, the source Run id, and when it was recorded. A quarantined Session still exists, stays
+queryable, and refuses new Runs, and no operation un-quarantines it.
 
 Before wire dispatch, `RunTask` exclusively creates `prompt-dispatch-started`; after the write succeeds,
 it creates `prompt-accepted`. The conservative uncertainty boundary depends on the first marker:
@@ -400,6 +450,33 @@ it creates `prompt-accepted`. The conservative uncertainty boundary depends on t
 | dispatch may have occurred; supervisor stayed present and proves abnormal matched-child exit | `failed` | no; quarantine |
 | dispatch may have occurred; observation was lost | `unknown`, `retryable=false` | no; quarantine |
 | external session identity violation observed after dispatch | `unknown`, `retryable=false` | no; quarantine |
+
+### 5.1 The configuration-switch window
+
+Between publishing the bound Session record and writing the dispatch marker, ARS mutates the agent's
+configuration. A crash inside that window leaves a Session whose configuration nobody proved, and
+reconciliation cannot ask the dead process what it was doing — so the Run directory says it.
+
+`RunTask` writes `config-switch-started` immediately **before** the first `session/set_config_option`,
+`config-proven` after the exact readback succeeds, and `config-rollback-proven` after a proven exact
+rollback. Each marker records that one boundary was crossed and nothing else: no model literal, no option
+value, no readback, no child text.
+
+| Markers present | Meaning | Session after a crash here |
+|---|---|---|
+| none | no set was dispatched | reusable |
+| started only | a set may have landed, unproven | **quarantined** |
+| started + proven | exact readback proved the state | reusable |
+| started + rollback-proven | the switch was exactly undone | reusable |
+
+The asymmetry is deliberate: *started* is believed on any evidence at all — a symlink, a directory, an
+unreadable byte — because a set that may have been written moved the agent. A *proof* is believed only on a
+clean present marker, because claiming proof from an unreadable byte is how an unproven Session gets handed
+to a prompt.
+
+This window exists on the create path too, and for the same reason: a create publishes its bound record
+*before* it configures. A create has no previously proven pair to roll back to, so an unprovable switch
+there can only be quarantined.
 
 An `unknown` Run is never retried, replayed, resumed, or rewritten. Caller-authorized successor work is a
 new Run linked by `retry_of_run_id`. There is no unquarantine tool.
@@ -444,15 +521,17 @@ irrelevant.
 ### 6.2 Attribution authority and outcome vocabulary 🟦
 
 Owner/namespace/Session attribution has one priority order: a **valid Spec is authoritative** and supplies
-owner, namespace, reuse intent, and Session id, with the submission ignored for attribution even when
+owner, namespace, and Session id, with the submission ignored for attribution even when
 absent, corrupt, or conflicting; a **valid submission is a fallback** only when the Spec is not valid, and
 is sufficient only to fence a possibly dispatched Run or safely scope a terminal record; and launch records,
-result fields, directory names other than the deterministic ephemeral derivation, progress, events, locks,
-and marker contents are **never** attribution authority.
+result fields, directory names, progress, events, locks, and marker contents are **never** attribution
+authority. A create submission attributes the deterministic prospective Session id derived from its own
+`(principal_id, request_id)`; a reuse submission attributes the `session_id` it carries.
 
 For any outcome that requires quarantine, attribution is **actionable** only when the chosen identity
 resolves to an already-existing, strictly readable Session record whose id, owner, and namespace match and
-whose state is open/active or already quarantined. Reconciliation never creates, reopens, or repairs a
+— quarantine evidence on it does not make it less actionable, because converging quarantine on an
+already-quarantined Session is a no-op. Reconciliation never creates, reopens, or repairs a
 Session; non-actionable attribution means startup is refused rather than guessed.
 
 One exhaustive first-match table covers every combination of the five classified inputs, and its whole
@@ -527,6 +606,8 @@ repository stores no production mapping value.
 │   ├── effective.json             # observed identity/capabilities/config
 │   ├── events.jsonl               # single writer; monotonic seq; bounded
 │   ├── result.json                # one terminal fact
+│   ├── config-switch-started
+│   ├── config-proven            (or config-rollback-proven)
 │   ├── prompt-dispatch-started
 │   ├── prompt-accepted
 │   └── evidence / redaction / bounded stderr
@@ -613,7 +694,7 @@ fallback and never rewrites terminal Run facts.
 🟦 **Reset-line migration and rollback.** The supervisor root is shared, so reconciliation and evidence
 history stay continuous. Old Run directories are immutable historical files: the new runtime never rewrites,
 migrates, deletes, or re-hashes them, and readers project them value-blind. Old Sessions stay owner-scoped
-`status`/`list`/`close`-readable through a value-blind categorical projection, while those carrying retired
+`status`/`list`-readable through a value-blind categorical projection, while those carrying retired
 ARS-derived identity hashes are **refused for `session/load`** with a stable code — the new runtime cannot
 honor identities it no longer models and must not pretend it can, and there is no silent `session/new`. The
 `/opt` artifact trees and Binding roots simply stop being referenced; they are **not deleted**, and their

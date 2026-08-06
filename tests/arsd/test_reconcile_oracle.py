@@ -123,7 +123,7 @@ def test_p1_every_case_gets_exactly_one_row_and_one_outcome(tmp_path: Path) -> N
 
     cases = 0
     seen_outcomes: set[reconcile.Outcome] = set()
-    for index, (combination, session_state) in enumerate(
+    for index, (combination, session_quarantined) in enumerate(
         itertools.product(COMBINATIONS, rf.SESSION_STATES)
     ):
         terminal, dispatch, spec, launch, submission = combination
@@ -137,9 +137,9 @@ def test_p1_every_case_gets_exactly_one_row_and_one_outcome(tmp_path: Path) -> N
             spec=spec,
             launch=launch,
             submission=submission,
-            ars_session_id=session_id,
+            session_id=session_id,
         )
-        rf.build_session(sessions, state=session_state, session_id=session_id)
+        rf.build_session(sessions, state=session_quarantined, session_id=session_id)
 
         facts = reconcile.classify_run(
             runs_root / run_id, session_store=sessions
@@ -147,8 +147,8 @@ def test_p1_every_case_gets_exactly_one_row_and_one_outcome(tmp_path: Path) -> N
         decision = reconcile.select_row(facts)
 
         attributable = spec == "valid" or (spec != "valid" and submission == "valid")
-        actionable = attributable and session_state in rf.ACTIONABLE_SESSION_STATES
-        assert facts.actionable is actionable, (combination, session_state)
+        actionable = attributable and session_quarantined in rf.ACTIONABLE_SESSION_STATES
+        assert facts.actionable is actionable, (combination, session_quarantined)
 
         row = expected_row(
             terminal=terminal,
@@ -158,15 +158,15 @@ def test_p1_every_case_gets_exactly_one_row_and_one_outcome(tmp_path: Path) -> N
             submission=submission,
             actionable=actionable,
         )
-        assert decision.row == row, (combination, session_state)
+        assert decision.row == row, (combination, session_quarantined)
         assert decision.outcome is expected_outcome(row, submission), (
             combination,
-            session_state,
+            session_quarantined,
         )
         seen_outcomes.add(decision.outcome)
         cases += 1
 
-    assert cases == 216 * 9 == 1944
+    assert cases == 216 * len(rf.SESSION_STATES) == 1728
     # Every case landed in the four-value vocabulary and nothing else exists.
     assert seen_outcomes <= {AUTHORITATIVE, UNKNOWN_QUARANTINE, PRE_DISPATCH, REFUSE}
     assert set(reconcile.Outcome) == {
@@ -264,12 +264,12 @@ def test_p2_actionability_is_irrelevant_outside_its_135_combinations() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("session_state", rf.SESSION_STATES)
+@pytest.mark.parametrize("session_quarantined", rf.SESSION_STATES)
 @pytest.mark.parametrize(
     "identity_source", ["spec_valid", "submission_fallback", "neither"]
 )
 def test_p3_actionability_requires_an_existing_matching_readable_record(
-    tmp_path: Path, session_state: str, identity_source: str
+    tmp_path: Path, session_quarantined: str, identity_source: str
 ) -> None:
     root = tmp_path / "sv"
     sessions = storage.native_session_store(root)
@@ -292,14 +292,14 @@ def test_p3_actionability_requires_an_existing_matching_readable_record(
         spec=spec_state,
         launch="absent",
         submission=submission_state,
-        ars_session_id=session_id,
+        session_id=session_id,
     )
-    rf.build_session(sessions, state=session_state, session_id=session_id)
+    rf.build_session(sessions, state=session_quarantined, session_id=session_id)
 
     facts = reconcile.classify_run(runs_root / run_id, session_store=sessions)
 
     attributable = identity_source in ("spec_valid", "submission_fallback")
-    expected = attributable and session_state in rf.ACTIONABLE_SESSION_STATES
+    expected = attributable and session_quarantined in rf.ACTIONABLE_SESSION_STATES
     assert facts.actionable is expected
     if attributable:
         assert facts.attribution is not None
@@ -324,12 +324,12 @@ def test_p3_spec_attribution_wins_over_a_conflicting_submission(
     rf.write_document(
         run_dir / "spec.json",
         state="valid",
-        payload=rf.spec_payload(run_id=run_id, ars_session_id="sess-from-spec"),
+        payload=rf.spec_payload(run_id=run_id, session_id="sess-from-spec"),
     )
     rf.write_document(
         run_dir / "submission.json",
         state="valid",
-        payload=rf.submission_payload(run_id=run_id, ars_session_id="sess-from-submission"),
+        payload=rf.submission_payload(run_id=run_id, session_id="sess-from-submission"),
     )
     rf.build_session(sessions, state="matching_open", session_id="sess-from-spec")
     rf.build_session(sessions, state="matching_open", session_id="sess-from-submission")
@@ -354,7 +354,7 @@ def test_p3_submission_is_a_fallback_only_when_the_spec_is_not_valid(
         "run-fallback",
         spec="corrupt",
         submission="valid",
-        ars_session_id="sess-fallback",
+        session_id="sess-fallback",
     )
     rf.build_session(sessions, state="matching_open", session_id="sess-fallback")
     facts = reconcile.classify_run(fallback, session_store=sessions)
@@ -367,7 +367,7 @@ def test_p3_submission_is_a_fallback_only_when_the_spec_is_not_valid(
         "run-ignored",
         spec="valid",
         submission="corrupt",
-        ars_session_id="sess-ignored",
+        session_id="sess-ignored",
     )
     rf.build_session(sessions, state="matching_open", session_id="sess-ignored")
     facts = reconcile.classify_run(ignored, session_store=sessions)

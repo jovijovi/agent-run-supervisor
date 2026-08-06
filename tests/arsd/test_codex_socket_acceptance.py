@@ -104,6 +104,7 @@ from agent_run_supervisor.native_acp.run_task import (  # noqa: E402
     DISPATCH_STARTED_MARKER,
     PROMPT_ACCEPTED_MARKER,
 )
+from agent_run_supervisor.session import derive_session_id_for_run
 
 RUN_TIMEOUT_SECONDS = 900
 POLL_INTERVAL = 0.5
@@ -127,13 +128,13 @@ P4_EXPECTED_OUTCOMES: dict[str, dict[str, object]] = {
         "status": "unknown",
         "detail_code": "SUPERVISOR_CANCELLED",
         "retryable": False,
-        "session_state": "quarantined",
+        "session_quarantined": True,
     },
     P4_TIMEOUT_LEG: {
         "status": "unknown",
         "detail_code": "TURN_TIMEOUT",
         "retryable": False,
-        "session_state": "quarantined",
+        "session_quarantined": True,
     },
 }
 # Short enough that a real model Turn cannot finish inside it, and applied only
@@ -423,22 +424,39 @@ def _run_event_types(client, run_id: str) -> set:
     return families
 
 
-def _session_state(client, session_id: str) -> str | None:
-    """The daemon's own view of a Session, or ``None`` when it has none."""
+def _session_quarantined(client, session_id: str) -> bool | None:
+    """Whether the daemon reports quarantine evidence, else ``None``.
+
+    A Session has no lifecycle state to read: it exists and is resumable, or it
+    carries quarantine evidence, or the daemon does not know it at all.
+    """
     try:
-        return client.session_status(session_id).get("state")
+        return client.session_status(session_id).get("quarantine") is not None
     except Exception:
         return None
 
 
-def _submit(client, leg: str, workspace: Path, *, request_id: str, **overrides) -> str:
-    """One submit over the real client contract; returns the accepted run id."""
+def _submit_ack(
+    client, leg: str, workspace: Path, *, request_id: str, **overrides
+) -> dict:
+    """One submit over the real client contract; returns the whole ack.
+
+    The ack names both facts a caller needs next: the Run to await, and the
+    Session to name on the following submit.
+    """
     accepted = client.submit(
         request_id=request_id, payload=_submit_payload(leg, workspace, **overrides)
     )
-    run_id = accepted["run_id"]
-    assert run_id, "submit must return the accepted run id"
-    return run_id
+    assert accepted["run_id"], "submit must return the accepted run id"
+    assert accepted["session_id"], "submit must return the Session it bound"
+    return accepted
+
+
+def _submit(client, leg: str, workspace: Path, *, request_id: str, **overrides) -> str:
+    """One submit; returns the accepted run id."""
+    return _submit_ack(
+        client, leg, workspace, request_id=request_id, **overrides
+    )["run_id"]
 
 
 @pytest.mark.parametrize("leg", list(POSITIVE_LEGS))
@@ -469,7 +487,7 @@ def test_positive_legs(tmp_path: Path, leg: str) -> None:
         assert outcome["status"] == expected["status"]
         assert outcome["detail_code"] == expected["detail_code"]
         assert outcome["retryable"] is expected["retryable"]
-        assert outcome["session_state"] == expected["session_state"]
+        assert outcome["session_quarantined"] == expected["session_quarantined"]
     else:
         assert outcome["status"] == "completed"
     _record(leg, binding, {"status": outcome["status"], "stage": outcome["stage"]})
@@ -507,49 +525,13 @@ def _outcome(client, run_id: str, result: dict) -> dict:
         "status": result.get("status"),
         "detail_code": result.get("detail_code"),
         "retryable": result.get("retryable"),
-        # Session state is not a field of the terminal payload: it is the
+        # Quarantine is not a field of the terminal payload: it is the
         # daemon's own view of the Session, asked for over the same wire.
-        "session_state": _session_state(client, f"{run_id}-ephemeral"),
+        "session_quarantined": _session_quarantined(
+            client, derive_session_id_for_run(run_id)
+        ),
         "stage": "acp",
     }
-
-
-def _adopt_session(daemon: EphemeralDaemon, run_id: str) -> str:
-    """Carry the external ACP session a finished Run created onto a durable record.
-
-    Needed because the two facts do not otherwise meet. A ``session_reuse:
-    "none"`` Run is the only path that performs a real ``session/new`` and binds
-    the external id the agent returned — and its record is *ephemeral*, closed at
-    that Run's own terminal, so resubmitting against it is refused. The wire has
-    no create-a-durable-Session operation, so the harness assembles the record
-    the reuse path requires, through the production store seam and only from
-    what the first Run's own admission produced.
-
-    Nothing here is fabricated: the external session id is the agent's, and every
-    identity field is copied from the record the daemon wrote. What follows is a
-    real ``session/load`` against a real agent thread.
-    """
-    store = storage.native_session_store(daemon.supervisor_root)
-    origin = store.open_session(f"{run_id}-ephemeral")
-    external_id = origin.agent_session_id
-    assert external_id, "run 1 performed no real session/new: nothing to continue"
-    session_id = f"{run_id}-continuity"
-    storage.create_native_session(
-        store,
-        session_id=session_id,
-        profile_id=origin.native_profile_id,
-        profile_revision=origin.native_profile_revision,
-        profile_hash=origin.native_profile_hash,
-        owner=origin.owner,
-        namespace=origin.namespace,
-        workspace_hash=origin.workspace_hash,
-        effective_cwd=origin.effective_cwd,
-        matched_root=origin.matched_root,
-        agent_id=origin.native_agent_id,
-        session_epoch=origin.native_session_epoch,
-    )
-    storage.bind_agent_session(store, session_id, agent_session_id=external_id)
-    return session_id
 
 
 def _drive_continuity_leg(
@@ -558,28 +540,35 @@ def _drive_continuity_leg(
     """Two ordered Runs over one agent thread: real ``session/new``, real load.
 
     One Run cannot express this leg. The first Run creates the external ACP
-    session; the second must reach it again through ``session/load`` on the
+    session **and the durable ARS Session that binds it**; the second names that
+    Session id and must reach the same agent thread through ``session/load`` on the
     *same* workspace, and the proof is the ACP path the second Run actually
     took — ``session_load_requested`` present and ``session_new_requested``
     absent. A silent re-creation would otherwise look identical from the
     outside, which is exactly the failure this leg exists to catch.
     """
-    first_run = _submit(client, leg, workspace, request_id=f"{leg}-1")
+    first_ack = _submit_ack(client, leg, workspace, request_id=f"{leg}-1")
+    first_run = first_ack["run_id"]
     first = _await_terminal(client, first_run)
     assert first.get("status") == "completed", "run 1 must complete to be continued"
     assert "session_new_requested" in _run_event_types(client, first_run), (
         "run 1 did not create an external ACP session"
     )
 
-    session_id = _adopt_session(daemon, first_run)
+    # No adoption step: run 1 already left one durable, fully bound Session,
+    # and its terminal did not end it. The caller simply names it again.
+    session_id = first_ack["session_id"]
+    store = storage.native_session_store(daemon.supervisor_root)
+    origin = store.open_session(session_id)
+    assert origin.agent_session_id, "run 1 performed no real session/new"
+    assert origin.quarantine is None, "a completed Run must leave a reusable Session"
 
     second_run = _submit(
         client,
         leg,
         workspace,
         request_id=f"{leg}-2",
-        session_reuse="reuse",
-        ars_session_id=session_id,
+        session_id=session_id,
     )
     second = _await_terminal(client, second_run)
 
@@ -594,7 +583,7 @@ def _drive_continuity_leg(
         "runs": 2,
         "session_loaded": loaded,
         "session_recreated": recreated,
-        "session_state": _session_state(client, session_id) or "unknown",
+        "session_quarantined": _session_quarantined(client, session_id),
     }
     return outcome
 
@@ -603,15 +592,12 @@ def _submit_payload(
     leg: str,
     workspace: Path,
     *,
-    session_reuse: str = "none",
-    ars_session_id: str | None = None,
+    session_id: str | None = None,
 ) -> dict:
     request = {
         "owner": _env("ARS_ACP_ACCEPTANCE_OWNER"),
         "namespace": _env("ARS_ACP_ACCEPTANCE_NAMESPACE"),
         "agent_id": _env("ARS_ACP_ACCEPTANCE_AGENT_ID"),
-        "session_reuse": session_reuse,
-        "ars_session_id": ars_session_id,
         "expected_binding_hash": None,
         "input_refs": [],
         "requested_model": _env("ARS_ACP_ACCEPTANCE_MODEL"),
@@ -630,6 +616,10 @@ def _submit_payload(
         "evidence_policy_hash": "sha256:" + "2" * 64,
         "recovery_policy_hash": "sha256:" + "3" * 64,
     }
+    if session_id is not None:
+        # Present only for a reuse. A create omits the field entirely: an
+        # explicit null is a different statement and the wire refuses it.
+        request["session_id"] = session_id
     return {
         "request": request,
         "prompt_text": f"acceptance leg {leg}",

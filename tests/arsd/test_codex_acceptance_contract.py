@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 
 from agent_run_supervisor.native_acp.agent_registration import AgentEntry
+from agent_run_supervisor.session import derive_session_id_for_run
 
 _ACCEPTANCE_PATH = Path(__file__).resolve().parent / "test_codex_socket_acceptance.py"
 
@@ -183,7 +184,7 @@ def test_p4_declares_both_sublegs_distinctly():
         # trustworthy ACP terminal — never harness opinion.
         assert row["status"] == "unknown"
         assert row["retryable"] is False
-        assert row["session_state"] == "quarantined"
+        assert row["session_quarantined"] is True
 
 
 def test_the_timeout_bound_cannot_fire_before_dispatch():
@@ -382,7 +383,16 @@ class _RecordingClient:
                 "run_id": run_id,
             }
         )
-        return {"run_id": run_id, "accepted_at": "2026-08-02T00:00:00+00:00"}
+        # The real ack shape: the Session a create bound, or the one a reuse
+        # named. A caller reads it to name the Session on the next submit.
+        session_id = command.request.session_id
+        if session_id is None:
+            session_id = derive_session_id_for_run(run_id)
+        return {
+            "run_id": run_id,
+            "session_id": session_id,
+            "accepted_at": "2026-08-02T00:00:00+00:00",
+        }
 
     def run_status(self, run_id: str, *, request_id: str | None = None) -> dict:
         _REAL_RUN_STATUS_SIGNATURE.bind(self, run_id, request_id=request_id)
@@ -401,7 +411,12 @@ class _RecordingClient:
 
     def session_status(self, session_id: str, *, request_id: str | None = None) -> dict:
         self._guard("session_status")
-        return self.sessions.get(session_id, {"session_id": session_id, "state": "open"})
+        # The real projection: identity plus optional quarantine evidence, and
+        # no lifecycle state — a stub that invents one would let a caller that
+        # still reads `state` pass against a daemon that never sends it.
+        return self.sessions.get(
+            session_id, {"session_id": session_id, "quarantine": None}
+        )
 
     def run_cancel(self, run_id: str, *, request_id: str | None = None) -> dict:
         self._guard("run_cancel")
@@ -512,7 +527,7 @@ def test_l3_01_a_positive_leg_submits_the_real_client_envelope(
         "cwd",
         "retry_of_run_id",
     }
-    assert submitted["command"].request.session_reuse == "none"
+    assert submitted["command"].request.session_id is None  # a create
     assert outcome["status"] == "completed"
     recording_client.__init__ = original_init
 
@@ -574,7 +589,7 @@ def _seed_first_run_session(daemon: _StubDaemon, run_id: str, workspace: Path) -
     external = "external-acp-session-from-the-agent"
     storage.create_native_session(
         store,
-        session_id=f"{run_id}-ephemeral",
+        session_id=derive_session_id_for_run(run_id),
         profile_id="standard-native-acp-v1",
         profile_revision=1,
         profile_hash="0" * 64,
@@ -584,8 +599,8 @@ def _seed_first_run_session(daemon: _StubDaemon, run_id: str, workspace: Path) -
         effective_cwd=binding.effective_cwd,
         matched_root=binding.canonical_root,
         agent_id=ACCEPTANCE_ENV["ARS_ACP_ACCEPTANCE_AGENT_ID"],
+        agent_session_id=external,
     )
-    storage.bind_agent_session(store, f"{run_id}-ephemeral", agent_session_id=external)
     return external
 
 
@@ -615,11 +630,10 @@ def _drive_p2(tmp_path, recording_client, *, second_run_events):
 def test_l3_02_the_continuity_leg_drives_two_ordered_runs(
     tmp_path, acceptance_env, recording_client
 ):
-    """RED before the repair: p2 submits once and can only create a Session.
+    """The leg needs two ordered Runs: one create, then one reuse.
 
-    ``_submit_payload`` always emitted ``session_reuse: "none"`` with a null
-    ``ars_session_id``, so the leg could not reach ``session/load`` at all — the
-    one thing it exists to prove.
+    A single submit could only ever create a Session, so it could not reach
+    ``session/load`` at all — the one thing this leg exists to prove.
     """
     _daemon, client, _outcome = _drive_p2(
         tmp_path,
@@ -629,12 +643,12 @@ def test_l3_02_the_continuity_leg_drives_two_ordered_runs(
 
     assert len(client.submits) == 2, "continuity needs two ordered Runs"
     first, second = client.submits
-    assert first["command"].request.session_reuse == "none"
-    assert second["command"].request.session_reuse == "reuse"
+    assert first["command"].request.session_id is None  # a create
+    assert second["command"].request.session_id is not None  # existing-only reuse
     # The second Run reuses the identity the *first* Run produced, not a
     # constant the harness invented before either Run existed.
-    reused = second["command"].request.ars_session_id
-    assert reused and first["run_id"] in reused
+    reused = second["command"].request.session_id
+    assert reused == derive_session_id_for_run(first["run_id"])
     assert first["request_id"] != second["request_id"]
 
 
@@ -697,7 +711,7 @@ def test_l3_02_the_continuity_evidence_is_recorded_structurally(
         "runs",
         "session_loaded",
         "session_recreated",
-        "session_state",
+        "session_quarantined",
     }
     assert all(isinstance(value, (int, bool, str)) for value in continuity.values())
     # No external session id, no model text, no agent self-report.

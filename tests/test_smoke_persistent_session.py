@@ -38,11 +38,11 @@ def test_smoke_session_names_are_unique_per_invocation(monkeypatch) -> None:
     assert first != second
 
 
-def test_smoke_closes_created_session_after_create_validation_failure(
+def test_smoke_fails_on_a_create_result_carrying_a_lifecycle_state(
     monkeypatch, tmp_path
 ) -> None:
+    """A create result that carries a lifecycle state is itself the failure."""
     calls: list[list[str]] = []
-    raw_close_calls: list[dict] = []
 
     def fake_run_cli(args: list[str], *, timeout: int) -> dict:
         calls.append(args)
@@ -56,39 +56,26 @@ def test_smoke_closes_created_session_after_create_validation_failure(
                     "business_verdict": None,
                 }
             )
-        if args[:2] == ["session", "close"]:
-            return _result(
-                {
-                    "session_id": smoke.SESSION_ID,
-                    "state": "closed",
-                    "closed": True,
-                    "business_verdict": None,
-                }
-            )
         raise AssertionError(f"unexpected CLI args: {args!r}")
 
     monkeypatch.setattr(smoke, "run_cli", fake_run_cli)
-    monkeypatch.setattr(
-        smoke,
-        "best_effort_close_acpx_session",
-        lambda **kwargs: raw_close_calls.append(kwargs),
-    )
 
-    with pytest.raises(smoke.SmokeError, match="unexpected"):
+    with pytest.raises(smoke.SmokeError, match="no lifecycle state"):
         smoke.run_smoke(
             acpx_timeout_seconds=1,
             scratch=tmp_path / "scratch",
             sessions_dir=tmp_path / "sessions",
         )
 
-    assert calls[-1][:2] == ["session", "close"]
-    assert sum(1 for args in calls if args[:2] == ["session", "close"]) == 1
-    assert raw_close_calls == []
+    # Nothing ends a Session on the failure path, by any route.
+    assert not any(args[:2] == ["session", "close"] for args in calls)
+    assert not hasattr(smoke, "teardown_real_acpx_session")
 
 
-def test_smoke_raw_closes_after_create_command_failure(monkeypatch, tmp_path) -> None:
+def test_smoke_ends_no_session_after_create_command_failure(
+    monkeypatch, tmp_path
+) -> None:
     calls: list[list[str]] = []
-    raw_close_calls: list[dict] = []
 
     def fake_run_cli(args: list[str], *, timeout: int) -> dict:
         calls.append(args)
@@ -104,11 +91,6 @@ def test_smoke_raw_closes_after_create_command_failure(monkeypatch, tmp_path) ->
         raise AssertionError(f"unexpected CLI args: {args!r}")
 
     monkeypatch.setattr(smoke, "run_cli", fake_run_cli)
-    monkeypatch.setattr(
-        smoke,
-        "best_effort_close_acpx_session",
-        lambda **kwargs: raw_close_calls.append(kwargs),
-    )
 
     with pytest.raises(smoke.SmokeError, match="session create: exit 1"):
         smoke.run_smoke(
@@ -117,12 +99,13 @@ def test_smoke_raw_closes_after_create_command_failure(monkeypatch, tmp_path) ->
             sessions_dir=tmp_path / "sessions",
         )
 
-    assert raw_close_calls
-    assert raw_close_calls[0]["session_name"].startswith(smoke.SESSION_NAME_PREFIX + "-")
-    assert raw_close_calls[0]["cwd"] == tmp_path / "scratch" / "work"
+    # A create that failed leaves nothing for the smoke to end, and the smoke
+    # has no way to end one: each invocation names a fresh session instead.
+    assert not any(args[:2] == ["session", "close"] for args in calls)
+    assert not hasattr(smoke, "teardown_real_acpx_session")
 
 
-def test_smoke_closes_created_session_best_effort_after_marker_failure(
+def test_smoke_ends_no_session_after_marker_failure(
     monkeypatch, tmp_path
 ) -> None:
     calls: list[list[str]] = []
@@ -133,11 +116,7 @@ def test_smoke_closes_created_session_best_effort_after_marker_failure(
             return _result({"valid": True})
         if args[:2] == ["session", "create"]:
             return _result(
-                {
-                    "session_id": smoke.SESSION_ID,
-                    "state": "open",
-                    "business_verdict": None,
-                }
+                {"session_id": smoke.SESSION_ID, "business_verdict": None}
             )
         if args[:2] == ["session", "send"]:
             return _result(
@@ -146,15 +125,6 @@ def test_smoke_closes_created_session_best_effort_after_marker_failure(
                     "status": "completed",
                     "turn_id": "turn-1",
                     "final_message": "WRONG_MARKER",
-                    "business_verdict": None,
-                }
-            )
-        if args[:2] == ["session", "close"]:
-            return _result(
-                {
-                    "session_id": smoke.SESSION_ID,
-                    "state": "closed",
-                    "closed": True,
                     "business_verdict": None,
                 }
             )
@@ -169,5 +139,5 @@ def test_smoke_closes_created_session_best_effort_after_marker_failure(
             sessions_dir=tmp_path / "sessions",
         )
 
-    assert calls[-1][:2] == ["session", "close"]
-    assert sum(1 for args in calls if args[:2] == ["session", "close"]) == 1
+    assert not any(args[:2] == ["session", "close"] for args in calls)
+    assert not hasattr(smoke, "teardown_real_acpx_session")

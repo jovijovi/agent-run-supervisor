@@ -38,7 +38,7 @@ def _exec_role(
     payload["workspace"]["default_cwd"] = str(work_dir)
     payload["workspace"]["allowed_roots"] = [str(work_dir)]
     payload["runner"]["acpx_binary"] = str(work_dir / "fake-acpx")
-    payload["session"] = {"strategy": "exec"}
+    payload["session"] = {"lease_seconds": 900}
     if max_output_bytes is not None:
         payload["limits"] = dict(payload["limits"])
         payload["limits"]["max_output_bytes"] = max_output_bytes
@@ -55,7 +55,7 @@ def _persistent_role(
     payload["workspace"]["default_cwd"] = str(work_dir)
     payload["workspace"]["allowed_roots"] = [str(work_dir)]
     payload["runner"]["acpx_binary"] = None
-    payload["session"] = {"strategy": "persistent"}
+    payload["session"] = {"lease_seconds": 900}
     if max_output_bytes is not None:
         payload["limits"] = dict(payload["limits"])
         payload["limits"]["max_output_bytes"] = max_output_bytes

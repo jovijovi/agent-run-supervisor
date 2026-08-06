@@ -91,7 +91,7 @@ def _exec_role(valid_role_dict: dict[str, Any], work_dir: Path):
     payload["workspace"]["default_cwd"] = str(work_dir)
     payload["workspace"]["allowed_roots"] = [str(work_dir)]
     payload["runner"]["acpx_binary"] = str(work_dir / "fake-acpx")
-    payload["session"] = {"strategy": "exec"}
+    payload["session"] = {"lease_seconds": 900}
     return load_role(payload)
 
 
@@ -100,7 +100,7 @@ def _persistent_role(valid_role_dict: dict[str, Any], work_dir: Path):
     payload["workspace"]["default_cwd"] = str(work_dir)
     payload["workspace"]["allowed_roots"] = [str(work_dir)]
     payload["runner"]["acpx_binary"] = str(work_dir / "fake-acpx")
-    payload["session"] = {"strategy": "persistent"}
+    payload["session"] = {"lease_seconds": 900}
     return load_role(payload)
 
 
@@ -161,7 +161,7 @@ def test_validation_requires_prompt_for_prompt_modes(
 
 @pytest.mark.parametrize(
     "mode",
-    ["session_create", "session_send", "session_status", "session_close"],
+    ["session_create", "session_send", "session_status"],
 )
 def test_validation_requires_session_id_for_session_modes(
     mode: str,
@@ -297,7 +297,6 @@ def test_session_modes_delegate_to_session_runtime_and_preserve_null_business_ve
             _outcome((fixtures_root / "session-new-named" / "stdout.json").read_bytes()),
             _outcome((fixtures_root / "session-prompt-turn1" / "stdout.ndjson").read_bytes()),
             _outcome((fixtures_root / "session-status-after-turns" / "stdout.json").read_bytes()),
-            _outcome((fixtures_root / "session-close-named" / "stdout.json").read_bytes()),
         ]
     )
     runtime = SessionRuntime(sessions_dir=sessions_dir, executor=fake)
@@ -332,31 +331,20 @@ def test_session_modes_delegate_to_session_runtime_and_preserve_null_business_ve
         ),
         session_runtime=runtime,
     )
-    closed = invoke_caller(
-        CallerInvocationSpec(
-            mode="session_close",
-            role=role,
-            session_id="sess-a",
-            sessions_dir=sessions_dir,
-        ),
-        session_runtime=runtime,
-    )
-
     assert [call["argv"][-5:] for call in fake.calls[:2]] == [
         ["codex", "sessions", "new", "--name", "nightly"],
         ["codex", "prompt", "-s", "nightly", "caller context\n\nturn 1"],
     ]
     assert fake.calls[2]["argv"][-4:] == ["codex", "status", "-s", "nightly"]
-    assert fake.calls[3]["argv"][-4:] == ["codex", "sessions", "close", "nightly"]
+    # Three calls, and no fourth: there is no close to delegate.
+    assert len(fake.calls) == 3
 
     assert created.result["business_verdict"] is None
     assert sent.result["business_verdict"] is None
     assert status.result["business_verdict"] is None
-    assert closed.result["business_verdict"] is None
     assert created.business_verdict is None
     assert sent.business_verdict is None
     assert status.business_verdict is None
-    assert closed.business_verdict is None
 
     assert created.session_dir == str(sessions_dir / "sess-a")
     assert created.artifact_dir == created.session_dir
@@ -366,8 +354,6 @@ def test_session_modes_delegate_to_session_runtime_and_preserve_null_business_ve
     assert sent.session_dir == str(sessions_dir / "sess-a")
     assert status.result["ok"] is True
     assert status.session_dir == str(sessions_dir / "sess-a")
-    assert closed.result["state"] == "closed"
-    assert closed.session_dir == str(sessions_dir / "sess-a")
 
 
 def test_session_abort_and_list_delegate_to_session_runtime(

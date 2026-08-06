@@ -9,17 +9,14 @@ import pytest
 
 from agent_run_supervisor.mcp_config import McpConfigError, resolve_mcp_config
 from agent_run_supervisor.policy import (
-    ExecStrategyError,
     compile_command,
     compile_permission_policy,
     compile_session_cancel_command,
-    compile_session_close_command,
     compile_session_create_command,
     compile_session_ensure_command,
     compile_session_prompt_command,
     compile_session_show_command,
     compile_session_status_command,
-    ensure_persistent_strategy,
     policy_hash,
 )
 from agent_run_supervisor.role import load_role, role_hash
@@ -35,7 +32,6 @@ def _role_with(**overrides: dict) -> dict:
 
 def _persistent_role(**overrides: dict):
     spec = copy.deepcopy(VALID_ROLE)
-    spec["session"] = {"strategy": "persistent"}
     # Default to the pinned ``npx`` fetch path so the compiled prefix matches the
     # S1a fixtures (npx -y acpx@0.12.0); the binary path has its own test.
     spec["runner"] = {**spec["runner"], "acpx_binary": None}
@@ -230,18 +226,6 @@ def test_compile_permission_policy_does_not_include_terminal_in_kinds_list() -> 
 _MANAGEMENT_PREFIX = ["npx", "-y", "acpx@0.12.0", "--format", "json", "--json-strict"]
 
 
-def test_ensure_persistent_strategy_refuses_exec_role() -> None:
-    role = load_role(VALID_ROLE)
-    with pytest.raises(ExecStrategyError):
-        ensure_persistent_strategy(role)
-
-
-def test_ensure_persistent_strategy_accepts_persistent_role() -> None:
-    role = _persistent_role()
-    # Should not raise.
-    ensure_persistent_strategy(role)
-
-
 def test_compile_session_create_command_matches_fixture_grammar() -> None:
     role = _persistent_role()
     argv = compile_session_create_command(role, cwd="/tmp/work", session_name="nightly")
@@ -377,30 +361,10 @@ def test_compile_session_prompt_command_keeps_prompt_as_single_argv_element() ->
 
 # --- S1d close / cancel command compilation -------------------------------
 #
-# Fixture-proven (fixtures/acpx-0.12.0/session-close-named,
-# session-cancel-no-active). Both are management commands: they carry only the
-# ``--format json --json-strict --cwd`` block plus a management tail, never the
-# exec/turn authorization flags, and never a shell string.
-
-
-def test_compile_session_close_command_matches_fixture_grammar() -> None:
-    role = _persistent_role()
-    argv = compile_session_close_command(role, cwd="/tmp/work", session_name="nightly")
-
-    assert argv[:6] == _MANAGEMENT_PREFIX
-    cwd_index = argv.index("--cwd")
-    assert argv[cwd_index + 1] == "/tmp/work"
-    assert argv[-4:] == ["codex", "sessions", "close", "nightly"]
-    for forbidden in (
-        "--permission-policy",
-        "--timeout",
-        "--max-turns",
-        "--suppress-reads",
-        "--deny-all",
-        "--no-terminal",
-    ):
-        assert forbidden not in argv, forbidden
-    assert all(isinstance(part, str) for part in argv)
+# Fixture-proven (fixtures/acpx-0.12.0/session-cancel-no-active). A management
+# command: it carries only the ``--format json --json-strict --cwd`` block plus
+# a management tail, never the exec/turn authorization flags, and never a shell
+# string. There is no close counterpart — Runs terminate, Sessions do not.
 
 
 def test_compile_session_cancel_command_matches_fixture_grammar() -> None:
@@ -424,32 +388,19 @@ def test_compile_session_cancel_command_matches_fixture_grammar() -> None:
     assert all(isinstance(part, str) for part in argv)
 
 
-def test_compile_session_close_cancel_refuse_exec_strategy_role() -> None:
-    role = load_role(VALID_ROLE)  # strategy == "exec"
-    with pytest.raises(ExecStrategyError):
-        compile_session_close_command(role, cwd="/tmp/work", session_name="n")
-    with pytest.raises(ExecStrategyError):
-        compile_session_cancel_command(role, cwd="/tmp/work", session_name="n")
-
-
-def test_compile_session_close_cancel_reject_empty_session_name() -> None:
+def test_compile_session_cancel_rejects_empty_session_name() -> None:
     role = _persistent_role()
-    with pytest.raises(ValueError):
-        compile_session_close_command(role, cwd="/tmp/work", session_name="")
     with pytest.raises(ValueError):
         compile_session_cancel_command(role, cwd="/tmp/work", session_name="")
 
 
-def test_compile_session_close_cancel_use_role_binary_when_present() -> None:
+def test_compile_session_cancel_uses_role_binary_when_present() -> None:
     role = _persistent_role(
         runner={**copy.deepcopy(VALID_ROLE)["runner"], "acpx_binary": "/opt/acpx/bin/acpx"}
     )
-    for argv in (
-        compile_session_close_command(role, cwd="/tmp/work", session_name="n"),
-        compile_session_cancel_command(role, cwd="/tmp/work", session_name="n"),
-    ):
-        assert argv[0] == "/opt/acpx/bin/acpx"
-        assert "npx" not in argv
+    argv = compile_session_cancel_command(role, cwd="/tmp/work", session_name="n")
+    assert argv[0] == "/opt/acpx/bin/acpx"
+    assert "npx" not in argv
 
 
 def test_compile_session_commands_use_role_binary_when_present() -> None:
@@ -474,45 +425,54 @@ def test_compile_session_commands_default_cwd_to_role_default() -> None:
     assert argv[cwd_index + 1] == VALID_ROLE["workspace"]["default_cwd"]
 
 
-def test_compile_session_commands_refuse_exec_strategy_role() -> None:
-    role = load_role(VALID_ROLE)  # strategy == "exec"
-    for compile_fn in (
-        lambda: compile_session_create_command(role, cwd="/tmp/work", session_name="n"),
-        lambda: compile_session_ensure_command(role, cwd="/tmp/work", session_name="n"),
-        lambda: compile_session_show_command(role, cwd="/tmp/work", session_name="n"),
-        lambda: compile_session_status_command(role, cwd="/tmp/work", session_name="n"),
-        lambda: compile_session_prompt_command(role, cwd="/tmp/work", session_name="n", prompt="hi"),
-    ):
-        with pytest.raises(ExecStrategyError):
-            compile_fn()
-
-
 def test_compile_session_commands_reject_empty_session_name() -> None:
     role = _persistent_role()
     with pytest.raises(ValueError):
         compile_session_create_command(role, cwd="/tmp/work", session_name="")
 
 
-def test_exec_compile_command_still_refuses_persistent_role() -> None:
-    # Regression: the exec compiler must keep failing closed for persistent roles.
+def test_every_command_shape_compiles_from_one_role() -> None:
+    """No Session-lifetime classification stands between a role and a shape.
+
+    The exec compiler and the session compilers both accept the same role. The
+    shapes still differ — that difference is a Run command shape — but nothing
+    declares a role to be one kind and then refuses the other.
+    """
     role = _persistent_role()
-    with pytest.raises(ExecStrategyError):
-        compile_command(role, cwd="/tmp/work", prompt="hello")
+    assert compile_command(role, cwd="/tmp/work", prompt="hello")[-2] == "exec"
+    for compile_fn in (
+        compile_session_create_command,
+        compile_session_ensure_command,
+        compile_session_show_command,
+        compile_session_status_command,
+        compile_session_cancel_command,
+    ):
+        assert compile_fn(role, cwd="/tmp/work", session_name="n")[-1] == "n"
+    assert compile_session_prompt_command(
+        role, cwd="/tmp/work", session_name="n", prompt="hi"
+    )[-1] == "hi"
 
 
-# --- S2 hash-stability goldens (zero-migration invariant) -------------------
+# --- hash-stability goldens -------------------------------------------------
 #
-# Cross-checked on 2026-07-08 against the installed agent-run-supervisor==0.1.3
-# distribution (sachima .venv, dist-info verified): ``role_hash``,
-# ``policy_hash`` and the canonical policy JSON below are byte-identical
-# between 0.1.3 and this branch, so existing ``SessionRecord`` bindings
-# survive the S2 upgrade with zero migration. These goldens guard future
-# drift: adding ANY AgentRoleSpec field (even with a default) or touching the
-# ``compile_permission_policy`` serialization breaks all stored bindings — see
-# the S2 solution doc §1.2 role_hash trap and §5 hard invariants.
+# ``policy_hash`` and the canonical policy JSON are still the 0.1.3 values,
+# cross-checked on 2026-07-08 against the installed agent-run-supervisor==0.1.3
+# distribution: permission compilation has not moved, so a stored binding's
+# policy identity has not moved either.
+#
+# ``role_hash`` **deliberately moved** at the Session no-close model, and this
+# golden is re-baselined to the new value on purpose. ``AgentSessionSpec`` lost
+# its ``strategy`` field, because a Session has no lifetime to declare, and any
+# AgentRoleSpec field change moves ``role_hash`` by construction. The plan
+# authorizes exactly this: no online migration, no dual-read, no shim — a
+# pre-change ``SessionRecord`` binding simply fails closed against the new
+# identity, and development state is rebuilt at cutover as an operator action.
+# The golden still does its job: it turns any *further* AgentRoleSpec or
+# permission-serialization drift into a failing test rather than a silent
+# invalidation of every stored binding.
 
-_GOLDEN_013_ROLE_HASH = (
-    "sha256:1dd9ea20a0e266d4d34f5102f88baed70748c015e679c41170976a4e9fabb752"
+_GOLDEN_ROLE_HASH = (
+    "sha256:aef7dde974ca837088259962f5c252770079d804011dc61af76662570a4434b5"
 )
 _GOLDEN_013_POLICY_HASH = (
     "sha256:5fd162e8c1fb9064d01f5721d1f181dc3d0a3e82129fa33b1a0234abcaae018d"
@@ -524,10 +484,10 @@ _GOLDEN_013_POLICY_JSON = (
 )
 
 
-def test_role_hash_stable_against_0_1_3_golden() -> None:
+def test_role_hash_stable_against_golden() -> None:
     role = load_role(VALID_ROLE)
 
-    assert role_hash(role) == _GOLDEN_013_ROLE_HASH
+    assert role_hash(role) == _GOLDEN_ROLE_HASH
 
 
 def test_policy_hash_unchanged_by_prompt_flag_shape() -> None:
@@ -542,19 +502,24 @@ def test_policy_hash_unchanged_by_prompt_flag_shape() -> None:
     assert canonical == _GOLDEN_013_POLICY_JSON
 
 
-def test_policy_hash_identical_for_exec_and_persistent_strategy() -> None:
-    # policy_hash derives from permissions only; the session strategy flip and
-    # the S2 session flag shape must not enter the policy identity.
-    exec_role = load_role(VALID_ROLE)
-    persistent = _persistent_role()
+def test_policy_hash_is_unaffected_by_the_lease_bound() -> None:
+    """policy_hash derives from permissions only.
 
-    assert policy_hash(exec_role) == policy_hash(persistent)
+    The Session-lifetime flip this used to compare is gone, so the remaining
+    session-block value — the lease bound — is what must stay outside the policy
+    identity. A concurrency bound is not an authorization fact.
+    """
+    default_lease = load_role(VALID_ROLE)
+    long_lease = _persistent_role(session={"lease_seconds": 3600})
+
+    assert long_lease.session.lease_seconds != default_lease.session.lease_seconds
+    assert policy_hash(default_lease) == policy_hash(long_lease)
 
 
 # --- native role-bound --mcp-config insertion --------------------------------
 #
 # Preflight-proven: acpx@0.12.0 accepts a global ``--mcp-config`` (exit 0) for
-# exec and for sessions new/ensure/show, status, cancel, and close. The flag is
+# exec and for sessions new/ensure/show, status, and cancel. The flag is
 # inserted immediately after the acpx invocation prefix, before every other
 # global flag, on ALL compiled commands, and it always carries the VERIFIED
 # canonical config path — never the raw declared path. Compiling the declared
@@ -574,7 +539,6 @@ def _mcp_exec_role(config: Path):
 
 def _mcp_persistent_role(config: Path):
     spec = copy.deepcopy(VALID_ROLE)
-    spec["session"] = {"strategy": "persistent"}
     spec["runner"] = {
         **spec["runner"],
         "acpx_binary": None,
@@ -590,7 +554,6 @@ def _all_session_commands(role) -> list[list[str]]:
         compile_session_show_command(role, cwd="/tmp/work", session_name="s"),
         compile_session_status_command(role, cwd="/tmp/work", session_name="s"),
         compile_session_cancel_command(role, cwd="/tmp/work", session_name="s"),
-        compile_session_close_command(role, cwd="/tmp/work", session_name="s"),
         compile_session_prompt_command(
             role, cwd="/tmp/work", session_name="s", prompt="hi"
         ),

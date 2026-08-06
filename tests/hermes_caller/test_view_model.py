@@ -106,7 +106,7 @@ def test_result_view_model_carries_evidence_verdict_and_findings(
     events = load_events(events_run_dir)
     decision = derive_verdict(result)
 
-    vm = build_result_view_model(result, events, decision, session_lifecycle="closed")
+    vm = build_result_view_model(result, events, decision, session_lifecycle="durable")
 
     assert isinstance(vm, CardViewModel)
     assert vm.phase in {CardPhase.COMPLETED, CardPhase.VERDICT}
@@ -124,8 +124,9 @@ def test_result_view_model_carries_evidence_verdict_and_findings(
     # Evidence reference is a local artifact dir — never an upload/delivery handle.
     assert vm.evidence_ref == str(events_run_dir)
 
-    # Session lifecycle chip is carried through.
-    assert vm.session_lifecycle == "closed"
+    # The Session chip is carried through unchanged. A finished check leaves a
+    # Session that is still there: "durable", never a terminal state.
+    assert vm.session_lifecycle == "durable"
 
 
 def test_result_view_model_error_phase_on_non_success(

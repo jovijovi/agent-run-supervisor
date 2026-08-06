@@ -7,41 +7,12 @@ from agent_run_supervisor.mcp_config import McpConfigBinding, resolve_mcp_config
 from agent_run_supervisor.role import AgentRoleSpec
 
 
-class ExecStrategyError(ValueError):
-    """Raised when exec compilation/launch is attempted for a non-exec role.
-
-    Once a role declares ``session.strategy='persistent'`` the one-shot exec
-    path must fail closed instead of silently launching ``acpx exec``. Persistent
-    roles use the separate session runtime/CLI surface instead.
-    """
-
-
-def ensure_exec_strategy(role: AgentRoleSpec) -> None:
-    """Fail closed unless the role is an exec-strategy role."""
-    strategy = role.session.strategy
-    if strategy != "exec":
-        raise ExecStrategyError(
-            f"role {role.role_id!r} uses session.strategy={strategy!r}; exec "
-            "compilation/launch is refused for non-exec strategies "
-            "(use the session runtime/CLI for persistent roles)."
-        )
-
-
-def ensure_persistent_strategy(role: AgentRoleSpec) -> None:
-    """Fail closed unless the role is a persistent-session role.
-
-    The mirror of :func:`ensure_exec_strategy`: an exec-strategy role must never
-    reach the persistent-session command compilers or runtime, just as a
-    persistent role must never launch a one-shot ``acpx exec``.
-    """
-    strategy = role.session.strategy
-    if strategy != "persistent":
-        raise ExecStrategyError(
-            f"role {role.role_id!r} uses session.strategy={strategy!r}; "
-            "persistent-session compilation/launch is refused for "
-            "non-persistent strategies."
-        )
-
+# There is no Session-lifetime gate here any more. The compilers below still
+# differ — a one-shot ``exec`` argv and a ``prompt -s <name>`` turn argv are
+# genuinely different Run command shapes — but nothing declares a role to be an
+# "exec role" or a "persistent role", because a Session has no lifetime: Runs
+# terminate and Sessions do not close. A caller selects the command shape it
+# needs; no source-frozen classification selects it for them.
 
 ACPX_PERMISSION_KIND_FOR_ROLE: dict[str, str] = {
     "read": "read",
@@ -200,7 +171,6 @@ def compile_command(
     prompt: str,
     mcp_binding: McpConfigBinding | None = None,
 ) -> list[str]:
-    ensure_exec_strategy(role)
     argv = _acpx_prefix(role, mcp_binding)
     argv.extend(_exec_turn_flags(role, _resolve_cwd(role, cwd)))
     argv.extend([role.runner.adapter_agent, "exec", prompt])
@@ -214,7 +184,6 @@ def compile_session_create_command(
     mcp_binding: McpConfigBinding | None = None,
 ) -> list[str]:
     """``<adapter> sessions new --name <session_name>`` (creates a named session)."""
-    ensure_persistent_strategy(role)
     name = _require_session_name(session_name)
     argv = _acpx_prefix(role, mcp_binding)
     argv.extend(_management_flags(_resolve_cwd(role, cwd)))
@@ -229,7 +198,6 @@ def compile_session_ensure_command(
     mcp_binding: McpConfigBinding | None = None,
 ) -> list[str]:
     """``<adapter> sessions ensure --name <session_name>`` (idempotent open)."""
-    ensure_persistent_strategy(role)
     name = _require_session_name(session_name)
     argv = _acpx_prefix(role, mcp_binding)
     argv.extend(_management_flags(_resolve_cwd(role, cwd)))
@@ -244,7 +212,6 @@ def compile_session_show_command(
     mcp_binding: McpConfigBinding | None = None,
 ) -> list[str]:
     """``<adapter> sessions show <session_name>`` (durable session record query)."""
-    ensure_persistent_strategy(role)
     name = _require_session_name(session_name)
     argv = _acpx_prefix(role, mcp_binding)
     argv.extend(_management_flags(_resolve_cwd(role, cwd)))
@@ -259,31 +226,10 @@ def compile_session_status_command(
     mcp_binding: McpConfigBinding | None = None,
 ) -> list[str]:
     """``<adapter> status -s <session_name>`` (live status snapshot query)."""
-    ensure_persistent_strategy(role)
     name = _require_session_name(session_name)
     argv = _acpx_prefix(role, mcp_binding)
     argv.extend(_management_flags(_resolve_cwd(role, cwd)))
     argv.extend([role.runner.adapter_agent, "status", "-s", name])
-    return argv
-
-
-def compile_session_close_command(
-    role: AgentRoleSpec,
-    cwd: str | None,
-    session_name: str,
-    mcp_binding: McpConfigBinding | None = None,
-) -> list[str]:
-    """``<adapter> sessions close <session_name>`` (terminal session close).
-
-    Fixture-proven by ``fixtures/acpx-0.12.0/session-close-named``. A management
-    command: it carries only the output/cwd block, never an exec/turn
-    authorization block, and the session name is always a single argv element.
-    """
-    ensure_persistent_strategy(role)
-    name = _require_session_name(session_name)
-    argv = _acpx_prefix(role, mcp_binding)
-    argv.extend(_management_flags(_resolve_cwd(role, cwd)))
-    argv.extend([role.runner.adapter_agent, "sessions", "close", name])
     return argv
 
 
@@ -299,7 +245,6 @@ def compile_session_cancel_command(
     grammar is ``cancel -s <name>`` (not ``sessions cancel``). A management
     command: output/cwd block only, no exec/turn authorization, single argv name.
     """
-    ensure_persistent_strategy(role)
     name = _require_session_name(session_name)
     argv = _acpx_prefix(role, mcp_binding)
     argv.extend(_management_flags(_resolve_cwd(role, cwd)))
@@ -323,7 +268,6 @@ def compile_session_prompt_command(
     and is revalidated before each turn. The prompt is always a single argv
     element; the compiler never uses a shell.
     """
-    ensure_persistent_strategy(role)
     name = _require_session_name(session_name)
     argv = _acpx_prefix(role, mcp_binding)
     argv.extend(_session_prompt_flags(role, _resolve_cwd(role, cwd)))

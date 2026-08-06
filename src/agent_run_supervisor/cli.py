@@ -137,14 +137,16 @@ def _add_run_inspect_parser(run: argparse.ArgumentParser) -> None:
 
 
 def _add_cleanup_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Confined, dry-run-first run/session artifact retention/cleanup."""
+    """Confined, dry-run-first Run evidence retention/pruning."""
     cleanup = subparsers.add_parser(
         "cleanup",
-        help="Plan (dry-run) or apply confined retention cleanup of local run/session artifacts.",
+        help="Plan (dry-run) or apply confined pruning of local Run evidence.",
         description=(
-            "List run/session artifacts under a .agent-run-supervisor root that a "
-            "retention policy would remove. Dry-run by default; --apply deletes only "
-            "the planned, confined, non-live entries."
+            "List Run artifacts under a .agent-run-supervisor root whose bulky "
+            "evidence a retention policy would prune. Dry-run by default; --apply "
+            "prunes only the planned, confined, terminated Runs, and always keeps "
+            "each Run's idempotency/attribution spine. Session records are durable "
+            "and are never removed."
         ),
     )
     cleanup.add_argument(
@@ -161,27 +163,27 @@ def _add_cleanup_parser(subparsers: argparse._SubParsersAction) -> None:
         "--max-age-days",
         type=int,
         default=None,
-        help="Delete artifacts strictly older than this many days.",
+        help="Prune Run evidence strictly older than this many days.",
     )
     cleanup.add_argument(
         "--max-count",
         type=int,
         default=None,
-        help="Keep only the newest N eligible artifacts; delete the rest.",
+        help="Keep only the newest N eligible Runs; prune the rest.",
     )
     cleanup.add_argument(
         "--apply",
         action="store_true",
-        help="Actually delete the planned entries (default is a read-only dry-run).",
+        help="Actually prune the planned Runs (default is a read-only dry-run).",
     )
 
 
 def _add_session_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Persistent-session lifecycle: ``session create|send|status|close|abort|list``."""
+    """Durable-Session surface: ``session create|send|status|abort|list``."""
     session = subparsers.add_parser(
         "session",
-        help="Persistent session lifecycle (create / send / status / close / abort / list).",
-        description="Create/open a role-bound persistent session, send a prompt turn, query status, close, abort/cancel, or list local session records.",
+        help="Durable session surface (create / send / status / abort / list).",
+        description="Create a role-bound durable session, send a prompt turn, query status, abort/cancel active work, or list local session records. Sessions are durable and resumable; there is no close.",
     )
     session_sub = session.add_subparsers(dest="session_command", metavar="session_command")
 
@@ -195,7 +197,7 @@ def _add_session_parser(subparsers: argparse._SubParsersAction) -> None:
             help="Directory that holds session records (defaults to .agent-run-supervisor/sessions).",
         )
 
-    create = session_sub.add_parser("create", help="Create/open a local persistent session.")
+    create = session_sub.add_parser("create", help="Create a local durable session.")
     _add_common(create)
     create.add_argument(
         "--session-name",
@@ -218,9 +220,6 @@ def _add_session_parser(subparsers: argparse._SubParsersAction) -> None:
 
     status = session_sub.add_parser("status", help="Query a session's status/show record.")
     _add_common(status)
-
-    close = session_sub.add_parser("close", help="Close an open local persistent session.")
-    _add_common(close)
 
     abort = session_sub.add_parser("abort", help="Cooperatively cancel/abort active session work.")
     _add_common(abort)

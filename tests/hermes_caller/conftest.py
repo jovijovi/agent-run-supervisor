@@ -137,7 +137,7 @@ def _role(valid_role_dict: dict[str, Any], work_dir: Path, strategy: str) -> Age
     payload["workspace"]["default_cwd"] = str(work_dir)
     payload["workspace"]["allowed_roots"] = [str(work_dir)]
     payload["runner"]["acpx_binary"] = str(work_dir / "fake-acpx")
-    payload["session"] = {"strategy": strategy}
+    payload["session"] = {"lease_seconds": 900}
     return load_role(payload)
 
 
@@ -255,7 +255,8 @@ class FakeSessionRuntime:
 
     ``invoke_caller`` only reads ``.result`` plus a ``.session_dir`` / ``.turn_dir``
     off each outcome, so lightweight namespaces suffice. Call order is recorded
-    so the orchestration flow can be asserted: create -> send xN -> status -> close.
+    so the orchestration flow can be asserted: create -> send xN -> status.
+    There is no close step, because a Session does not close.
     """
 
     def __init__(
@@ -267,7 +268,6 @@ class FakeSessionRuntime:
         create_result: dict[str, Any],
         turn_results: list[dict[str, Any]],
         status_result: dict[str, Any],
-        close_result: dict[str, Any],
     ) -> None:
         self.sessions_dir = Path(sessions_dir)
         self._session_dir = session_dir
@@ -275,7 +275,6 @@ class FakeSessionRuntime:
         self._create_result = create_result
         self._turn_results = list(turn_results)
         self._status_result = status_result
-        self._close_result = close_result
         self.calls: list[str] = []
         self._sent = 0
 
@@ -295,9 +294,7 @@ class FakeSessionRuntime:
         self.calls.append("status")
         return SimpleNamespace(result=dict(self._status_result))
 
-    def close(self, *, role: AgentRoleSpec, session_id: str, **_: Any) -> SimpleNamespace:
-        self.calls.append("close")
-        return SimpleNamespace(result=dict(self._close_result))
+
 
 
 @pytest.fixture()
@@ -312,7 +309,6 @@ def fake_session_runtime(
         "session_id": "[REDACTED]",
         "acpx_session_id": "[REDACTED]",
         "session_name": "[REDACTED]",
-        "state": "open",
         "kind": "session_ensured",
         "created": True,
         "session_dir": str(session_dir),
@@ -328,14 +324,6 @@ def fake_session_runtime(
         "summary": {"kind": "status_snapshot", "status": "alive"},
         "business_verdict": None,
     }
-    close_result = {
-        "session_id": "[REDACTED]",
-        "state": "closed",
-        "closed": True,
-        "kind": "session_closed",
-        "acpx_session_id": "[REDACTED]",
-        "business_verdict": None,
-    }
     return FakeSessionRuntime(
         sessions_dir=sessions_dir,
         session_dir=session_dir,
@@ -343,5 +331,4 @@ def fake_session_runtime(
         create_result=create_result,
         turn_results=[turn_result, turn_result],
         status_result=status_result,
-        close_result=close_result,
     )

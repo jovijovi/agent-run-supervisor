@@ -17,6 +17,7 @@ import pytest
 
 from agent_run_supervisor.role import AgentRoleSpec, load_role
 from agent_run_supervisor.session import (
+    QUARANTINE_DISPATCH_OBSERVATION_LOST,
     InvalidSessionIdError,
     SessionNotFoundError,
     SessionStore,
@@ -39,7 +40,7 @@ def _role_at(valid_role_dict: dict[str, Any], work: Path) -> AgentRoleSpec:
     payload["workspace"]["default_cwd"] = str(work)
     payload["workspace"]["allowed_roots"] = [str(work)]
     payload["workspace"]["allowed_roots_security_boundary"] = False
-    payload["session"] = {"strategy": "persistent"}
+    payload["session"] = {"lease_seconds": 900}
     return load_role(payload)
 
 
@@ -111,7 +112,7 @@ def test_inspect_missing_session_reports_not_exists(sessions_dir: Path) -> None:
     assert isinstance(inspection, SessionInspection)
     assert inspection.session_id == "sess-none"
     assert inspection.exists is False
-    assert inspection.state is None
+    assert inspection.quarantined is None
     assert inspection.lease_held is False
     assert inspection.holder_liveness is None
     assert inspection.lease_recoverable is False
@@ -135,7 +136,7 @@ def test_inspect_open_session_without_turns(sessions_dir: Path, open_session) ->
     inspection = inspect_session(sessions_dir, "sess-inspect")
 
     assert inspection.exists is True
-    assert inspection.state == "open"
+    assert inspection.quarantined is False
     assert inspection.lease_held is False
     assert inspection.holder_liveness is None
     assert inspection.lease_recoverable is False
@@ -145,13 +146,19 @@ def test_inspect_open_session_without_turns(sessions_dir: Path, open_session) ->
     assert inspection.progress is None
 
 
-def test_inspect_closed_session_reports_closed(
+def test_inspect_quarantined_session_reports_quarantined(
     sessions_dir: Path, store: SessionStore, open_session
 ) -> None:
-    store.mark_closed("sess-inspect", now=T0 + timedelta(minutes=5))
+    """The one refusal a Session can carry, and it still exists afterwards."""
+    store.mark_quarantined(
+        "sess-inspect",
+        reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST,
+        run_id="run-prior",
+        now=T0 + timedelta(minutes=5),
+    )
     inspection = inspect_session(sessions_dir, "sess-inspect")
     assert inspection.exists is True
-    assert inspection.state == "closed"
+    assert inspection.quarantined is True
 
 
 def test_inspect_latest_turn_status_and_progress(
@@ -405,27 +412,30 @@ def test_inspect_unknown_holder_within_ttl_blocks_recovery(
 # --------------------------------------------------------------------------- #
 
 
-def test_inspect_corrupt_session_record_reports_state_none(
+def test_inspect_corrupt_session_record_reports_quarantine_unknown(
     sessions_dir: Path, open_session
 ) -> None:
+    """Never fabricate health: an unreadable record is not "not quarantined"."""
     (sessions_dir / "sess-inspect" / "session.json").write_text(
         "{broken", encoding="utf-8"
     )
     inspection = inspect_session(sessions_dir, "sess-inspect")
     assert inspection.exists is True
-    assert inspection.state is None
+    assert inspection.quarantined is None
 
 
-def test_inspect_off_vocabulary_record_state_reports_none(
+def test_inspect_ignores_an_off_contract_lifecycle_key(
     sessions_dir: Path, open_session
 ) -> None:
+    """A stray ``state`` key is not a lifecycle: nothing reads it any more."""
     record_path = sessions_dir / "sess-inspect" / "session.json"
     payload = json.loads(record_path.read_text(encoding="utf-8"))
     payload["state"] = "weird_state_token"
     record_path.write_text(json.dumps(payload), encoding="utf-8")
     inspection = inspect_session(sessions_dir, "sess-inspect")
     assert inspection.exists is True
-    assert inspection.state is None
+    assert inspection.quarantined is False
+    assert not hasattr(inspection, "state")
 
 
 def test_inspect_corrupt_result_json_reports_status_none(

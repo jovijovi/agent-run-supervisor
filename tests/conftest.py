@@ -74,7 +74,7 @@ def valid_role_dict() -> dict[str, Any]:
             "switch_mode": False,
             "other": False,
         },
-        "session": {"strategy": "exec"},
+        "session": {"lease_seconds": 900},
         "limits": {
             "timeout_seconds": 60,
             "max_turns": 1,

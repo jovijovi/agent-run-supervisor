@@ -30,6 +30,7 @@ from agent_run_supervisor.native_acp.spec import (
     resolve_run_environment,
 )
 from agent_run_supervisor.session import SessionNotFoundError
+from agent_run_supervisor.session import QUARANTINE_DISPATCH_OBSERVATION_LOST
 
 FAKE_AGENT_PATH = Path(__file__).with_name("fake_agent.py")
 
@@ -127,8 +128,7 @@ def _request(model: str, effort: str, session_id: str = "sess-switch-1", **overr
         owner="hermes",
         namespace="hermes/doc-check",
         agent_id="fake-agent",
-        session_reuse="reuse",
-        ars_session_id=session_id,
+        session_id=session_id,
         expected_binding_hash=None,
         input_refs=(InputRef(ref="prompt:inline", content_hash="sha256:" + "a" * 64),),
         requested_model=model,
@@ -168,9 +168,9 @@ class SwitchHarness:
         refusal rather than a fixture convenience. A record that already exists
         (including one a test quarantined on purpose) is left untouched.
         """
-        if request.session_reuse != "reuse":
+        if request.session_id is None:
             return
-        session_id = request.ars_session_id
+        session_id = request.session_id
         store = storage.native_session_store(self.root)
         try:
             store.open_session(session_id)
@@ -203,9 +203,7 @@ class SwitchHarness:
             matched_root=spec.workspace.canonical_root,
             agent_id=spec.agent.agent_id,
             session_epoch=spec.agent.session_epoch,
-        )
-        storage.bind_agent_session(
-            store, session_id, agent_session_id=EXTERNAL_SESSION_ID
+            agent_session_id=EXTERNAL_SESSION_ID,
         )
 
     def run(self, run_id: str, script: dict, request: AgentRunRequest, **overrides):
@@ -458,6 +456,7 @@ def test_a11_the_persisted_observation_is_never_identity(
     untouched.
     """
     from agent_run_supervisor.session import (
+    QUARANTINE_DISPATCH_OBSERVATION_LOST,
         LEGACY_SESSION_IDENTITY_FIELDS,
         validate_native_binding,
     )
@@ -524,7 +523,7 @@ def test_load_reuse_happy_path_keeps_external_id_and_switches(
     assert record.agent_session_id == "fake-external-session-1"  # unchanged
     assert record.last_effective_model == "kimi-for-coding/k3"
     assert record.last_effective_effort == "max"
-    assert record.state == "open"
+    assert record.quarantine is None
 
     payload = json.loads(
         (harness.root / "native-runs" / "run-0002" / "result.json").read_text()
@@ -691,7 +690,7 @@ def test_silent_new_on_load_is_detected_and_fails(
     )
     assert payload["detail_code"] == "SILENT_SESSION_RECREATION"
     record = harness.record()
-    assert record.state == "open"  # the real session was never prompted
+    assert record.quarantine is None  # the real session was never prompted
     assert record.last_effective_model == "provider/base"
 
 
@@ -716,7 +715,7 @@ def test_load_capability_missing_fails_and_escalates(
     assert payload["detail_code"] == "CAPABILITY_MISSING"
     assert "session/load" not in harness.methods("run-0002")
     assert "session/prompt" not in harness.methods("run-0002")
-    assert harness.record().state == "open"
+    assert harness.record().quarantine is None
 
 
 def test_set_model_rejected_rolls_back_and_reopens(
@@ -732,7 +731,7 @@ def test_set_model_rejected_rolls_back_and_reopens(
     assert result.status is AgentRunStatus.FAILED
     assert "session/prompt" not in harness.methods("run-0002")
     record = harness.record()
-    assert record.state == "open"  # rollback proven ⇒ session re-opened
+    assert record.quarantine is None  # rollback proven ⇒ session re-opened
     assert record.last_effective_model == "provider/base"
     assert record.last_effective_effort == "high"
 
@@ -752,7 +751,7 @@ def test_effort_missing_post_model_rolls_back_and_reopens(
 
     assert result.status is AgentRunStatus.FAILED
     record = harness.record()
-    assert record.state == "open"
+    assert record.quarantine is None
     assert record.last_effective_model == "provider/base"
     events = (harness.root / "native-runs" / "run-0002" / "events.jsonl").read_text()
     assert "config_rollback_proven" in events
@@ -779,7 +778,7 @@ def test_inexact_readback_rolls_back_and_reopens(
     assert result.status is AgentRunStatus.FAILED
     assert "session/prompt" not in harness.methods("run-0002")
     record = harness.record()
-    assert record.state == "open"
+    assert record.quarantine is None
     assert record.last_effective_effort == "high"
 
 
@@ -799,8 +798,8 @@ def test_unprovable_rollback_quarantines(
 
     assert result.status is AgentRunStatus.FAILED
     record = harness.record()
-    assert record.state == "quarantined"
-    assert record.quarantined_by_run_id == "run-0002"
+    assert record.quarantine is not None
+    assert record.quarantine["source_run_id"] == "run-0002"
     events = (harness.root / "native-runs" / "run-0002" / "events.jsonl").read_text()
     assert "config_rollback_failed" in events
 
@@ -811,7 +810,7 @@ def test_quarantined_session_refuses_new_runs(
     harness = SwitchHarness(tmp_path, monkeypatch)
     harness.prepare_session()
     storage.native_session_store(harness.root).mark_quarantined(
-        "sess-switch-1", reason="prior uncertainty", run_id="run-0002"
+        "sess-switch-1", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-0002"
     )
 
     result = harness.run(
@@ -820,7 +819,7 @@ def test_quarantined_session_refuses_new_runs(
     assert result.status is AgentRunStatus.FAILED
     # Refused before any agent spawn: the fake never ran.
     assert harness.methods("run-0003") == []
-    assert harness.record().state == "quarantined"
+    assert harness.record().quarantine is not None
 
 
 def test_retry_of_run_id_leaves_original_records_untouched(

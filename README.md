@@ -81,10 +81,17 @@ local artifacts.
 
 **Two protocols, two version lines — neither implies the other.** *Downstream*, ARS speaks **ACP
 Protocol v1** over stdio JSON-RPC to the agent. *Upstream*, your application speaks the ARS-owned
-**`arsd` API v2**: every *request* envelope your client sends carries `api_version`, and an unknown one
-is refused rather than guessed. Result and error frames carry the correlating `request_id`, not a
-version. `submit` is served only at `api_version: 2`, where `agent_id` names the launch; the other seven
-operations, including `server_info`, are served at `api_version: 1` as well.
+**`arsd` API v3**: every *request* envelope your client sends carries `api_version`, and anything other
+than `3` is refused rather than guessed — for every operation, including `server_info`. Result and error
+frames carry the correlating `request_id`, not a version. There is no drain window, dual protocol, or
+alias: v3 is a clean cutover.
+
+**Runs terminate; Sessions do not close.** A `submit` without `session_id` atomically creates one durable
+Session and runs its first Run; a `submit` carrying `session_id` reuses that existing Session and can never
+fall back to creating one. A Session has no open/active/closed state, no one-shot variant, and no close
+operation — a Run reaching a terminal never ends it. What can stop reuse is narrower and honest:
+a live lease means one Run at a time, and *quarantine* is durable evidence that continuity was proven
+unsafe.
 
 ## Requirements
 
@@ -219,8 +226,12 @@ with ArsdClient(socket_path) as client:
                 "owner": "my-team",
                 "namespace": "my-team/docs",
                 "agent_id": "native-agent",           # an agent_id in your registry
-                "session_reuse": "none",              # "none" starts a new Session
-                "ars_session_id": None,               # set with session_reuse="reuse"
+                # "session_id": "<a Session id>",     # OMIT it to create a new
+                                                      # durable Session; name one
+                                                      # to reuse it, existing-only.
+                                                      # A present null is refused:
+                                                      # absent and null are not
+                                                      # the same statement.
                 "expected_binding_hash": None,
                 "input_refs": [
                     {"ref": "prompt:inline", "content_hash": "sha256:" + "a" * 64},
@@ -252,7 +263,9 @@ with ArsdClient(socket_path) as client:
             ...
 ```
 
-`session_list()`, `session_status(id)`, and `session_close(id)` round out the surface, all owner-scoped.
+The terminal result carries the `session_id` this Run used — the one to pass back on the next `submit`.
+`session_list()` and `session_status(id)` round out the surface, both owner-scoped, and both project
+identity, last-use observations, and optional quarantine evidence rather than any lifecycle state.
 The `request` key set above is closed and complete: unknown keys are refused, and there is no shell text,
 argv, environment value, executable path, or credential material on it — those fields do not exist on the
 wire, and `credential_refs` are *references* ARS never resolves to values. Errors are typed and fail

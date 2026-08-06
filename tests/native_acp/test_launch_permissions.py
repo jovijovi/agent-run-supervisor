@@ -389,7 +389,7 @@ def test_a_non_read_only_grant_fails_before_spawn_and_before_prompt(
     assert harness.methods_seen() == []
     assert not _material_dir(harness.run_dir()).exists()
     # A clean pre-dispatch refusal leaves the Session reusable.
-    assert harness.session_store().open_session("sess-native-1").state == "open"
+    assert harness.session_store().open_session("sess-native-1").quarantine is None
 
 
 def test_material_is_cleaned_after_a_completed_run(

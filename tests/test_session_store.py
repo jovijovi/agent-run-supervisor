@@ -24,7 +24,8 @@ from agent_run_supervisor.role import AgentRoleSpec, load_role, role_hash
 from agent_run_supervisor.session import (
     InvalidSessionIdError,
     SessionBindingError,
-    SessionClosedError,
+    QUARANTINE_DISPATCH_OBSERVATION_LOST,
+    SessionQuarantinedError,
     SessionExistsError,
     SessionLockError,
     SessionNotFoundError,
@@ -47,7 +48,7 @@ def _role_at(valid_role_dict: dict[str, Any], work: Path, **overrides: Any) -> A
     payload["workspace"]["default_cwd"] = str(work)
     payload["workspace"]["allowed_roots"] = [str(work)]
     payload["workspace"]["allowed_roots_security_boundary"] = False
-    payload["session"] = {"strategy": "persistent"}
+    payload["session"] = {"lease_seconds": 900}
     for key, value in overrides.items():
         payload[key] = value
     return load_role(payload)
@@ -120,7 +121,9 @@ def test_create_session_persists_binding_and_state(store, role, workspace) -> No
     assert data["adapter_agent"] == role.runner.adapter_agent
     assert data["effective_cwd"] == str(workspace.effective_cwd)
     assert data["matched_root"] == str(workspace.matched_root)
-    assert data["state"] == "open"
+    # No lifecycle state is persisted; a fresh Session carries no quarantine.
+    assert "state" not in data
+    assert "quarantine" not in data
     assert data["created_at"] == T0.isoformat()
     assert data["updated_at"] == T0.isoformat()
 
@@ -290,75 +293,105 @@ def test_validate_binding_refuses_each_tampered_field(
         store.validate_binding(record, role=role, workspace_result=workspace)
 
 
-# --- S1d lifecycle state: mark closed / ensure open / list ----------------
+# --- quarantine evidence and list ------------------------------------------
+#
+# A Session has no lifecycle to transition. The only refusal it can carry is
+# quarantine evidence, and these pin that it is durable, idempotent, and the one
+# thing ``ensure_usable`` fails closed on.
 
 
-def test_mark_closed_transitions_state_and_preserves_created_at(store, role, workspace) -> None:
+def test_mark_quarantined_records_evidence_and_preserves_created_at(
+    store, role, workspace
+) -> None:
     store.create_session(
-        session_id="sess-close", role=role, workspace_result=workspace, now=T0
+        session_id="sess-q", role=role, workspace_result=workspace, now=T0
     )
 
-    closed = store.mark_closed("sess-close", now=T1)
+    quarantined = store.mark_quarantined(
+        "sess-q", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-1", now=T1
+    )
 
-    assert closed.state == "closed"
-    assert closed.created_at == T0.isoformat()
-    assert closed.updated_at == T1.isoformat()
-    # Persisted to disk and observable through a fresh open.
+    assert quarantined.quarantine == {
+        "reason_code": QUARANTINE_DISPATCH_OBSERVATION_LOST,
+        "source_run_id": "run-1",
+        "recorded_at": T1.isoformat(),
+    }
+    assert quarantined.created_at == T0.isoformat()
+    assert quarantined.updated_at == T1.isoformat()
+    # Persisted to disk and observable through a fresh open, on a legacy record
+    # too: quarantine is the one refusal, so it is never kind-specific.
     data = json.loads(
-        (store.base_dir / "sess-close" / "session.json").read_text(encoding="utf-8")
+        (store.base_dir / "sess-q" / "session.json").read_text(encoding="utf-8")
     )
-    assert data["state"] == "closed"
-    assert data["updated_at"] == T1.isoformat()
-    assert store.open_session("sess-close").state == "closed"
+    assert data["quarantine"]["reason_code"] == QUARANTINE_DISPATCH_OBSERVATION_LOST
+    assert "state" not in data
+    assert store.open_session("sess-q").quarantine is not None
 
 
-def test_mark_closed_writes_atomically_with_0600_and_no_tmp(store, role, workspace) -> None:
+def test_mark_quarantined_writes_atomically_with_0600_and_no_tmp(
+    store, role, workspace
+) -> None:
     store.create_session(
-        session_id="sess-atomic-close", role=role, workspace_result=workspace, now=T0
+        session_id="sess-atomic-q", role=role, workspace_result=workspace, now=T0
     )
 
-    store.mark_closed("sess-atomic-close", now=T1)
+    store.mark_quarantined(
+        "sess-atomic-q", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-1", now=T1
+    )
 
-    session_dir = store.base_dir / "sess-atomic-close"
+    session_dir = store.base_dir / "sess-atomic-q"
     assert _mode_octal(session_dir / "session.json") == 0o600
     names = [p.name for p in session_dir.iterdir()]
     assert not any(n.startswith(".tmp") or n.endswith(".tmp") for n in names)
 
 
-def test_mark_closed_refuses_double_close(store, role, workspace) -> None:
+def test_mark_quarantined_is_idempotent_and_keeps_the_first_fact(
+    store, role, workspace
+) -> None:
+    """Second quarantine is a no-op, not an error: reconciliation reruns."""
     store.create_session(
-        session_id="sess-double", role=role, workspace_result=workspace, now=T0
+        session_id="sess-twice", role=role, workspace_result=workspace, now=T0
     )
-    store.mark_closed("sess-double", now=T1)
+    first = store.mark_quarantined(
+        "sess-twice", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-1", now=T1
+    )
 
-    with pytest.raises(SessionClosedError):
-        store.mark_closed("sess-double", now=T1)
+    again = store.mark_quarantined(
+        "sess-twice",
+        reason_code="UNTRUSTED_TERMINAL_EVIDENCE",
+        run_id="run-2",
+        now=T1,
+    )
+
+    assert again.quarantine == first.quarantine
 
 
-def test_mark_closed_requires_existing_session(store) -> None:
+def test_mark_quarantined_requires_existing_session(store) -> None:
     with pytest.raises(SessionNotFoundError):
-        store.mark_closed("sess-missing", now=T1)
+        store.mark_quarantined(
+            "sess-missing", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-1", now=T1
+        )
 
 
-def test_ensure_open_accepts_open_record(store, role, workspace) -> None:
+def test_ensure_usable_accepts_an_unquarantined_record(store, role, workspace) -> None:
     store.create_session(
-        session_id="sess-open", role=role, workspace_result=workspace, now=T0
+        session_id="sess-usable", role=role, workspace_result=workspace, now=T0
     )
-    record = store.open_session("sess-open")
+    record = store.open_session("sess-usable")
 
-    # Should not raise.
-    store.ensure_open(record)
+    # Should not raise: a Session exists and is resumable.
+    store.ensure_usable(record)
 
 
-def test_ensure_open_refuses_closed_record(store, role, workspace) -> None:
+def test_ensure_usable_refuses_a_quarantined_record(store, role, workspace) -> None:
     store.create_session(
-        session_id="sess-eo", role=role, workspace_result=workspace, now=T0
+        session_id="sess-eu", role=role, workspace_result=workspace, now=T0
     )
-    store.mark_closed("sess-eo", now=T1)
-    record = store.open_session("sess-eo")
+    store.mark_quarantined("sess-eu", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-1", now=T1)
+    record = store.open_session("sess-eu")
 
-    with pytest.raises(SessionClosedError):
-        store.ensure_open(record)
+    with pytest.raises(SessionQuarantinedError):
+        store.ensure_usable(record)
 
 
 def test_list_records_returns_empty_when_root_missing(tmp_path) -> None:
@@ -370,14 +403,15 @@ def test_list_records_returns_empty_when_root_missing(tmp_path) -> None:
 def test_list_records_lists_all_records_sorted_by_id(store, role, workspace) -> None:
     store.create_session(session_id="sess-b", role=role, workspace_result=workspace, now=T0)
     store.create_session(session_id="sess-a", role=role, workspace_result=workspace, now=T0)
-    store.mark_closed("sess-a", now=T1)
+    store.mark_quarantined("sess-a", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-1", now=T1)
 
     records = store.list_records()
 
     assert [r.session_id for r in records] == ["sess-a", "sess-b"]
     by_id = {r.session_id: r for r in records}
-    assert by_id["sess-a"].state == "closed"
-    assert by_id["sess-b"].state == "open"
+    # A quarantined Session still exists and stays listable.
+    assert by_id["sess-a"].quarantine is not None
+    assert by_id["sess-b"].quarantine is None
 
 
 def test_list_records_ignores_dirs_without_session_json(store, role, workspace) -> None:
@@ -549,7 +583,7 @@ def test_detect_stale_locks_flags_expired_lease(store, role, workspace) -> None:
     report = store.detect_stale_locks(now=T0 + timedelta(seconds=101))
 
     entry = {row["session_id"]: row for row in report}["sess-stale"]
-    assert entry["state"] == "open"
+    assert entry["quarantined"] is False
     assert entry["lock_present"] is True
     assert entry["lease_expired"] is True
     assert entry["tmp_debris"] == []
@@ -1270,3 +1304,215 @@ def test_validate_binding_fails_closed_when_mcp_config_unreadable(
 
     with pytest.raises(SessionBindingError):
         store.validate_binding(record, role=role, workspace_result=workspace)
+
+
+# -- D1: the no-close Session record ----------------------------------------
+#
+# Runs terminate; Sessions do not close. A record therefore carries identity and
+# continuity evidence and **no lifecycle state**: no ``state``, no ``closed_at``,
+# no close reason/source, no ephemeral/persistent flag. Quarantine is separate,
+# optional, categorical safety evidence — never a lifecycle value.
+
+
+def _native_record(store: SessionStore, session_id: str = "sess-nc-1"):
+    return store.create_native_session(
+        session_id=session_id,
+        profile_id="prof-1",
+        profile_revision=1,
+        profile_hash="e" * 64,
+        owner="hermes",
+        namespace="hermes/ns",
+        workspace_hash="b" * 64,
+        effective_cwd="/work/project",
+        matched_root="/work",
+        agent_id="native-agent",
+        agent_session_id="external-abc",
+        now=T0,
+    )
+
+
+def test_session_record_has_no_lifecycle_or_close_fields(tmp_path: Path) -> None:
+    from agent_run_supervisor.session import SessionRecord as _Record
+
+    fields = set(_Record.__dataclass_fields__)
+    for retired in (
+        "state",
+        "closed_at",
+        "close_reason",
+        "close_source",
+        "ephemeral",
+        "session_lifetime",
+        "quarantine_reason",
+        "quarantined_by_run_id",
+    ):
+        assert retired not in fields, retired
+
+
+def test_session_json_never_serializes_a_lifecycle_state(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    record = _native_record(store)
+    on_disk = json.loads(
+        (tmp_path / "sessions" / record.session_id / "session.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "state" not in on_disk
+    assert "closed_at" not in on_disk
+    assert on_disk["session_id"] == record.session_id
+    assert on_disk["agent_session_id"] == "external-abc"
+
+
+def test_no_session_close_api_survives_on_the_store() -> None:
+    import agent_run_supervisor.session as session_module
+
+    assert not hasattr(SessionStore, "mark_closed")
+    assert not hasattr(SessionStore, "ensure_open")
+    assert not hasattr(session_module, "SessionClosedError")
+    assert not hasattr(session_module, "STATE_OPEN")
+    assert not hasattr(session_module, "STATE_CLOSED")
+    assert not hasattr(session_module, "STATE_QUARANTINED")
+
+
+def test_quarantine_evidence_is_a_bounded_categorical_structure(tmp_path: Path) -> None:
+    from agent_run_supervisor.session import QUARANTINE_DISPATCH_OBSERVATION_LOST
+
+    store = SessionStore(tmp_path / "sessions")
+    record = _native_record(store)
+    assert record.quarantine is None
+
+    quarantined = store.mark_quarantined(
+        record.session_id,
+        reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST,
+        run_id="run-1",
+        now=T1,
+    )
+    assert quarantined.quarantine == {
+        "reason_code": QUARANTINE_DISPATCH_OBSERVATION_LOST,
+        "source_run_id": "run-1",
+        "recorded_at": T1.isoformat(),
+    }
+    on_disk = json.loads(
+        (tmp_path / "sessions" / record.session_id / "session.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert set(on_disk["quarantine"]) == {
+        "reason_code",
+        "source_run_id",
+        "recorded_at",
+    }
+
+
+def test_quarantine_reason_code_must_come_from_the_closed_vocabulary(
+    tmp_path: Path,
+) -> None:
+    """No raw exception text, no remote text, no path can become evidence."""
+    from agent_run_supervisor.session import QUARANTINE_REASON_CODES
+
+    store = SessionStore(tmp_path / "sessions")
+    record = _native_record(store)
+    for hostile in (
+        "Traceback (most recent call last): ValueError: /home/user/secret",
+        # Concatenated so the repository holds no scannable secret literal.
+        "agent said: " + "sk-live-" + "LEAKCANARY",
+        "",
+        "dispatch_observation_lost",
+    ):
+        with pytest.raises(ValueError):
+            store.mark_quarantined(
+                record.session_id, reason_code=hostile, run_id="run-1"
+            )
+    assert all(
+        code == code.upper() and code.replace("_", "").isalnum()
+        for code in QUARANTINE_REASON_CODES
+    )
+
+
+def test_quarantine_pending_fence_is_categorical_too(tmp_path: Path) -> None:
+    from agent_run_supervisor.session import (
+        QUARANTINE_PENDING_JSON,
+        QUARANTINE_DISPATCH_OBSERVATION_LOST,
+    )
+
+    store = SessionStore(tmp_path / "sessions")
+    record = _native_record(store)
+    with pytest.raises(ValueError):
+        store.write_quarantine_pending(
+            record.session_id, reason_code="boom: /etc/passwd", run_id="run-1"
+        )
+    store.write_quarantine_pending(
+        record.session_id,
+        reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST,
+        run_id="run-1",
+    )
+    fence = json.loads(
+        (tmp_path / "sessions" / record.session_id / QUARANTINE_PENDING_JSON).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert fence["reason_code"] == QUARANTINE_DISPATCH_OBSERVATION_LOST
+    assert "reason" not in fence
+
+
+def test_a_terminal_run_never_ends_the_session(tmp_path: Path) -> None:
+    """The lease is released; the Session is still there and still loadable."""
+    store = SessionStore(tmp_path / "sessions")
+    record = _native_record(store)
+    lock = store.acquire_lock(record.session_id, "hermes", refuse_quarantined=True)
+    store.release_lock(record.session_id, lock.token)
+
+    reopened = store.open_session(record.session_id)
+    assert reopened.session_id == record.session_id
+    assert reopened.quarantine is None
+    again = store.acquire_lock(record.session_id, "hermes", refuse_quarantined=True)
+    assert again.token != lock.token
+
+
+# -- the grammar is exact, including at the very end of the string -----------
+#
+# ``re.match`` with a trailing ``$`` accepts one trailing newline: ``$`` matches
+# at the end of the string *or* just before a final ``\n``. A Session id is a
+# directory name, so "almost the whole string" is not the rule — the whole
+# string is. Accepting ``"sess-ok\n"`` here would let an id the store cannot
+# use reach the store, and turn a caller mistake into a not-found answer.
+
+
+NEWLINE_SESSION_IDS = (
+    "sess-ok\n",
+    "sess-ok\r\n",
+    "sess-ok\n\n",
+    "sess-ok\nsess-evil",
+    "\nsess-ok",
+    "sess-ok\r",
+)
+
+
+@pytest.mark.parametrize("candidate", NEWLINE_SESSION_IDS)
+def test_a_session_id_carrying_a_newline_is_not_valid(candidate: str) -> None:
+    from agent_run_supervisor.session import is_valid_session_id
+
+    assert is_valid_session_id(candidate) is False
+
+
+@pytest.mark.parametrize("candidate", NEWLINE_SESSION_IDS)
+def test_the_store_refuses_a_newline_session_id_before_touching_a_path(
+    tmp_path: Path, candidate: str
+) -> None:
+    """The store's own guard agrees with the shared predicate, exactly."""
+    from agent_run_supervisor.session import InvalidSessionIdError
+
+    store = SessionStore(tmp_path / "sessions")
+    with pytest.raises(InvalidSessionIdError):
+        store.open_session(candidate)
+    # Nothing was created on the way to refusing.
+    assert not (tmp_path / "sessions").exists() or list(
+        (tmp_path / "sessions").iterdir()
+    ) == []
+
+
+def test_a_well_formed_id_is_still_valid() -> None:
+    """The control: tightening the end of the string changed nothing else."""
+    from agent_run_supervisor.session import is_valid_session_id
+
+    for good in ("sess-ok", "s", "S3ss_id-1", "sess-" + "a" * 64):
+        assert is_valid_session_id(good) is True

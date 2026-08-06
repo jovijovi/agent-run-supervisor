@@ -27,8 +27,10 @@ from agent_run_supervisor.native_acp.profile import (
     ProfileRegistry,
     UnknownProfileError,
 )
+from agent_run_supervisor.native_acp import spec as spec_module
 from agent_run_supervisor.native_acp.spec import (
     LAUNCH_SCHEMA_VERSION,
+    NativeSpecError,
     SPEC_SCHEMA_VERSION,
     AgentRunRequest,
     AgentRunSpec,
@@ -63,8 +65,7 @@ def _request(**overrides) -> AgentRunRequest:
         owner="hermes",
         namespace="hermes/doc-check",
         agent_id=AGENT_ID,
-        session_reuse="none",
-        ars_session_id=None,
+        session_id=None,
         expected_binding_hash=None,
         input_refs=(InputRef(ref="prompt:inline", content_hash="sha256:" + "a" * 64),),
         requested_model="provider/model",
@@ -127,8 +128,8 @@ def test_schema_version_must_be_exactly_the_current_one():
 
 def test_reuse_requires_a_session_id():
     with pytest.raises(SpecValidationError):
-        _request(session_reuse="reuse", ars_session_id=None)
-    _request(session_reuse="reuse", ars_session_id="sess-1")
+        _request(session_id="../escape")
+    _request(session_id="sess-1")
 
 
 def test_expected_binding_hash_is_carried_unchanged_and_undisposed():
@@ -394,3 +395,31 @@ def test_an_acp_compat_profile_freezes_no_deployment_fact():
     fields = {field.name for field in dataclasses.fields(AcpCompatProfile)}
     for banned in ("command", "argv", "path", "digest", "version", "executable_key"):
         assert banned not in fields
+
+
+# -- D1: the no-close Session contract on the sealed Spec --------------------
+
+
+def test_request_carries_one_optional_session_id_and_no_reuse_mode() -> None:
+    fields = {f.name for f in dataclasses.fields(AgentRunRequest)}
+    assert "session_id" in fields
+    assert "session_reuse" not in fields
+    assert "ars_session_id" not in fields
+    assert not hasattr(spec_module, "_REUSE_MODES")
+
+
+def test_spec_session_block_is_exactly_session_id_and_binding_hash() -> None:
+    from agent_run_supervisor.native_acp.spec import SpecSession
+
+    assert [f.name for f in dataclasses.fields(SpecSession)] == [
+        "session_id",
+        "expected_binding_hash",
+    ]
+
+
+def test_request_validates_session_id_grammar() -> None:
+    for bad in ("../escape", "a/b", "a b", ".hidden", "-lead", ""):
+        with pytest.raises(NativeSpecError):
+            _request(session_id=bad)
+    accepted = _request(session_id="sess-ok_1")
+    assert accepted.session_id == "sess-ok_1"

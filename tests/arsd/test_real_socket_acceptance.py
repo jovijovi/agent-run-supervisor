@@ -95,6 +95,15 @@ def _namespace() -> str:
     return _env("ARS_ARSD_ACCEPTANCE_NAMESPACE")
 
 
+def _agent_id() -> str:
+    """The operator-registered agent this acceptance drives.
+
+    v3 selects an agent, never a source profile. The default names the entry a
+    local acceptance registry is expected to carry; an operator overrides it.
+    """
+    return os.environ.get("ARS_ARSD_ACCEPTANCE_AGENT_ID", "opencode")
+
+
 def _caller_mapping() -> str:
     return _env("ARS_ARSD_ACCEPTANCE_CALLER_MAPPING")
 
@@ -195,17 +204,21 @@ def _wire_request(
     *,
     model: str,
     effort: str,
-    session_id: str,
+    session_id: str | None = None,
     grant_capabilities: tuple[str, ...] = ("read",),
     credential_refs: tuple[str, ...] = ("kimi-for-coding", "deepseek"),
-    profile_id: str = "opencode-1.18.4",
+    agent_id: str | None = None,
 ) -> dict:
-    return {
+    """One v3 request.
+
+    ``session_id=None`` **omits** the field, which is how a caller creates a
+    Session; a value names an existing one. An explicit null is neither, and
+    the wire refuses it — so this builder never emits one.
+    """
+    request = {
         "owner": _owner(),
         "namespace": _namespace(),
-        "profile_id": profile_id,
-        "session_reuse": "reuse",
-        "ars_session_id": session_id,
+        "agent_id": agent_id if agent_id is not None else _agent_id(),
         "expected_binding_hash": None,
         "input_refs": [
             {"ref": "prompt:inline", "content_hash": "sha256:" + "0" * 64},
@@ -222,6 +235,16 @@ def _wire_request(
         "evidence_policy_hash": "sha256:" + "3" * 64,
         "recovery_policy_hash": "sha256:" + "4" * 64,
     }
+    if session_id is not None:
+        request["session_id"] = session_id
+    return request
+
+
+def _request_payload(
+    *, model: str, effort: str, session_id: str | None = None, **overrides
+) -> dict:
+    """The public name the contract tests exercise by default."""
+    return _wire_request(model=model, effort=effort, session_id=session_id, **overrides)
 
 
 def _submit_payload(
@@ -334,12 +357,10 @@ def test_s1_readonly_success_through_socket() -> None:
     _assert_workspace_empty(workspace)
     marker = "ARS_ARSD_S1_OK"
     request_id = "arsd-s1-" + secrets.token_hex(4)
-    session_id = "arsd-accept-s1-" + secrets.token_hex(4)
     payload = _submit_payload(
         request=_wire_request(
             model=REQUIRED_MODEL,
             effort=REQUIRED_EFFORT,
-            session_id=session_id,
         ),
         prompt_text=(
             f"Reply with exactly {marker} and nothing else. "
@@ -426,7 +447,6 @@ def test_s2_denied_action_canary_through_socket() -> None:
     target_name = "a4-s2-" + secrets.token_hex(6) + ".txt"
     target = workspace / target_name
     request_id = "arsd-s2-" + secrets.token_hex(4)
-    session_id = "arsd-accept-s2-" + secrets.token_hex(4)
     with arsd_client.ArsdClient(_socket_path()) as cli:
         accepted = cli.submit(
             request_id=request_id,
@@ -434,7 +454,6 @@ def test_s2_denied_action_canary_through_socket() -> None:
                 request=_wire_request(
                     model=REQUIRED_MODEL,
                     effort=REQUIRED_EFFORT,
-                    session_id=session_id,
                     grant_capabilities=("read",),
                 ),
                 prompt_text=(
@@ -489,7 +508,6 @@ def test_s3_session_continuity_and_model_switch_through_socket() -> None:
     workspace = _workspace()
     _assert_workspace_empty(workspace)
     nonce = "NONCE-" + secrets.token_hex(8)
-    session_id = "arsd-accept-s3-" + secrets.token_hex(6)
     store = storage.native_session_store(_supervisor_root())
 
     with arsd_client.ArsdClient(_socket_path()) as cli:
@@ -500,7 +518,6 @@ def test_s3_session_continuity_and_model_switch_through_socket() -> None:
                 request=_wire_request(
                     model=REQUIRED_MODEL,
                     effort=REQUIRED_EFFORT,
-                    session_id=session_id,
                 ),
                 prompt_text=(
                     f"Remember this token exactly: {nonce}. "
@@ -509,6 +526,9 @@ def test_s3_session_continuity_and_model_switch_through_socket() -> None:
             ),
         )
         run_a = a["run_id"]
+        # Runs B and C continue the Session run A actually created.
+        session_id = a["session_id"]
+        assert session_id
         result_a = _wait_result(cli, run_a)
         assert result_a["status"] == "completed"
         assert "STORED" in str(result_a.get("final_message", ""))
@@ -648,7 +668,6 @@ def test_s5_malformed_failing_isolation_then_success() -> None:
     # Outside-domain model: durable submit ACK precedes RunTask profile/config
     # admission, so expect accepted then pre-prompt terminal failed/unknown.
     bad_req = "arsd-s5-bad-" + secrets.token_hex(4)
-    bad_sess = "arsd-accept-s5-bad-" + secrets.token_hex(4)
     with arsd_client.ArsdClient(sock) as cli:
         accepted = cli.submit(
             request_id=bad_req,
@@ -656,7 +675,6 @@ def test_s5_malformed_failing_isolation_then_success() -> None:
                 request=_wire_request(
                     model="not-a-registered-model/zzz",
                     effort=REQUIRED_EFFORT,
-                    session_id=bad_sess,
                 ),
                 prompt_text="should not run",
             ),
@@ -670,18 +688,21 @@ def test_s5_malformed_failing_isolation_then_success() -> None:
     assert not (bad_run_dir / DISPATCH_STARTED_MARKER).exists()
 
     key = "arsd-s5-idem-" + secrets.token_hex(4)
-    idem_sess = "arsd-accept-s5-idem-" + secrets.token_hex(4)
     idem_payload = _submit_payload(
         request=_wire_request(
             model=REQUIRED_MODEL,
             effort=REQUIRED_EFFORT,
-            session_id=idem_sess,
         ),
         prompt_text="Reply with exactly S5_IDEM_A and nothing else.",
     )
     with arsd_client.ArsdClient(sock) as cli:
         first = cli.submit(request_id=key, payload=idem_payload)
         run_id = first["run_id"]
+        # The Session that create actually bound. Naming it is what makes the
+        # second frame a *different* request under the same key, which is the
+        # conflict this leg exists to provoke.
+        idem_sess = first["session_id"]
+        assert idem_sess
     with arsd_client.ArsdClient(sock) as cli:
         with pytest.raises(arsd_client.ArsdIdempotencyConflictError):
             cli.submit(
@@ -713,8 +734,9 @@ def test_s5_malformed_failing_isolation_then_success() -> None:
                 request=_wire_request(
                     model=REQUIRED_MODEL,
                     effort=REQUIRED_EFFORT,
-                    session_id="arsd-accept-s5-fail-" + secrets.token_hex(4),
-                    profile_id="profile-absent-for-acceptance",
+                    # A selector that names nothing the operator registered:
+                    # v3 selects an agent, so that is where the refusal lives.
+                    agent_id="agent-absent-for-acceptance",
                 ),
                 prompt_text="should fail closed before prompt",
             ),
@@ -734,7 +756,6 @@ def test_s5_malformed_failing_isolation_then_success() -> None:
                 request=_wire_request(
                     model=REQUIRED_MODEL,
                     effort=REQUIRED_EFFORT,
-                    session_id="arsd-accept-s5-ok-" + secrets.token_hex(4),
                 ),
                 prompt_text=(
                     f"Reply with exactly {ok_marker} and nothing else. "
@@ -750,7 +771,7 @@ def test_s5_malformed_failing_isolation_then_success() -> None:
 
     with arsd_client.ArsdClient(sock) as probe:
         info = probe.server_info(request_id="s5-alive-" + secrets.token_hex(2))
-        assert info["api_version"] == 1
+        assert info["api_version"] == protocol.ARSD_API_VERSION
 
     _evidence(
         "s5-isolation",

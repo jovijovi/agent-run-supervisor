@@ -26,7 +26,9 @@ from agent_run_supervisor.native_acp.profile import (
 from agent_run_supervisor.native_acp.run_task import RunTask
 from agent_run_supervisor.native_acp.spec import LIMIT_MAX_EVENT_BYTES_MAX
 from agent_run_supervisor.session import (
+    QUARANTINE_UNTRUSTED_TERMINAL_EVIDENCE,
     SessionNotFoundError,
+    is_valid_session_id,
     SessionQuarantinedError,
     SessionStore,
 )
@@ -57,9 +59,6 @@ MAX_EVENT_LINE_BYTES = LIMIT_MAX_EVENT_BYTES_MAX + _EVENT_LINE_ENVELOPE_HEADROOM
 MAX_EVENTS_RESPONSE_BYTES = 768 * 1024
 _READ_CHUNK_BYTES = 65_536
 _UNTRUSTED_TERMINAL_MESSAGE = "untrusted or corrupt terminal evidence"
-_UNTRUSTED_TERMINAL_QUARANTINE_REASON = (
-    "live path: untrusted or corrupt Native terminal evidence"
-)
 
 _PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
     "server_info": frozenset(),
@@ -70,7 +69,6 @@ _PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
         {"run_id", "from_seq", "limit", "follow", "follow_idle_seconds"}
     ),
     "session_status": frozenset({"session_id"}),
-    "session_close": frozenset({"session_id"}),
 }
 
 RunTaskFactory = Callable[..., Any]
@@ -94,12 +92,12 @@ def _quarantine_bound_session(
     try:
         session_store.write_quarantine_pending(
             session_id,
-            reason=_UNTRUSTED_TERMINAL_QUARANTINE_REASON,
+            reason_code=QUARANTINE_UNTRUSTED_TERMINAL_EVIDENCE,
             run_id=run_id,
         )
         session_store.mark_quarantined(
             session_id,
-            reason=_UNTRUSTED_TERMINAL_QUARANTINE_REASON,
+            reason_code=QUARANTINE_UNTRUSTED_TERMINAL_EVIDENCE,
             run_id=run_id,
         )
     except SessionNotFoundError:
@@ -901,8 +899,6 @@ class ArsdHandlers:
             return await self._session_status(caller, request.payload)
         if op == "session_list":
             return await self._session_list(caller)
-        if op == "session_close":
-            return await self._session_close(caller, request.payload)
         raise protocol.ProtocolError(protocol.UNKNOWN_OP, "unknown v1 op")
 
     async def disconnect(self, caller: server.AuthenticatedCaller) -> None:
@@ -928,10 +924,11 @@ class ArsdHandlers:
         return {
             "version": PACKAGE_VERSION,
             "api_version": protocol.ARSD_API_VERSION,
-            # Reported so a v1 caller can see the drain window it is inside
-            # without having to probe an operation to discover it.
+            # One served version, reported as a list so a caller reads the same
+            # shape whatever the set contains. There is no per-operation matrix
+            # to report, because there is no drain window to be inside.
             "supported_api_versions": list(protocol.SUPPORTED_API_VERSIONS),
-            "v2_only_operations": sorted(protocol.V2_ONLY_OPERATIONS),
+            "operations": sorted(protocol.OPERATIONS),
             "limits": {
                 "max_concurrent_runs": self.registry.max_concurrent_runs,
                 "max_frame_bytes": protocol.MAX_FRAME_BYTES,
@@ -991,7 +988,7 @@ class ArsdHandlers:
         if resolved is not None:
             return resolved
 
-        session_id = self._tracked_session_id(command)
+        session_id = self._tracked_session_id(command, run_id=run_id)
         reservation = await self.registry.reserve(session_id=session_id)
         handle = None
         consumed = False
@@ -1089,7 +1086,11 @@ class ArsdHandlers:
                     protocol.INTERNAL, "run registration failed"
                 ) from None
             consumed = True
-            return {"run_id": run_id, "accepted_at": accepted_at}
+            return {
+                "run_id": run_id,
+                "session_id": session_id,
+                "accepted_at": accepted_at,
+            }
         finally:
             if not consumed:
                 await self.registry.release(reservation)
@@ -1138,8 +1139,14 @@ class ArsdHandlers:
                 run_id=run_id, run_dir=run_dir, submission=submission
             )
         if registered or terminal.kind is storage.NativeTerminalKind.TRUSTED:
+            # The same facts the original attempt returned, read back from the
+            # durable submission — a duplicate never re-derives them and never
+            # dispatches anything a second time.
             return {
                 "run_id": run_id,
+                "session_id": admission.bound_session_id_for_run(
+                    run_id=run_id, submission=submission
+                ),
                 "accepted_at": submission["accepted_at"],
             }
         raise protocol.ProtocolError(
@@ -1147,10 +1154,19 @@ class ArsdHandlers:
             "submission is durable but run registration is incomplete",
         )
 
-    def _tracked_session_id(self, command: protocol.SubmitCommand) -> str | None:
-        if command.request.session_reuse == "reuse":
-            return command.request.ars_session_id
-        return None
+    def _tracked_session_id(
+        self, command: protocol.SubmitCommand, *, run_id: str
+    ) -> str:
+        """The Session this Run occupies — existing, or about to exist.
+
+        A create is tracked under its **prospective** id, so a concurrent Run
+        naming that Session is refused with ``SESSION_BUSY`` from the moment the
+        create is admitted rather than only once its record lands. Nothing
+        durable is written under the id here; tracking is in-process.
+        """
+        if command.request.session_id is not None:
+            return command.request.session_id
+        return admission.derive_session_id_for_run(run_id)
 
     def _authorize_run(
         self, caller: server.AuthenticatedCaller, run_id: Any
@@ -1231,10 +1247,18 @@ class ArsdHandlers:
             )
             return {
                 "run_id": run_id,
+                "session_id": admission.bound_session_id_for_run(
+                    run_id=run_id, submission=submission
+                ),
                 "state": "accepted",
                 "accepted_at": accepted_at,
             }
-        body: dict[str, Any] = {"run_id": run_id}
+        body: dict[str, Any] = {
+            "run_id": run_id,
+            "session_id": admission.bound_session_id_for_run(
+                run_id=run_id, submission=submission
+            ),
+        }
         if progress is not None:
             body["progress"] = progress
         if result is not None:
@@ -1396,6 +1420,16 @@ class ArsdHandlers:
             raise protocol.ProtocolError(
                 protocol.INVALID_REQUEST, "session_id is required"
             )
+        if not is_valid_session_id(session_id):
+            # Not a Session that happens to be missing — not a Session id at
+            # all. The store refuses it before it will touch a path, and its
+            # diagnostic quotes both the offending value and the pattern, so
+            # the grammar is judged here instead: a caller mistake reported as
+            # one, on a live connection, naming nothing the caller sent.
+            raise protocol.ProtocolError(
+                protocol.INVALID_REQUEST,
+                "session_id is not a safe session-store path component",
+            )
         try:
             record = self._session_store.open_session(session_id)
         except SessionNotFoundError:
@@ -1414,14 +1448,24 @@ class ArsdHandlers:
         return record
 
     def _session_view(self, record) -> dict[str, Any]:
+        """Identity, last-use observations, and optional quarantine evidence.
+
+        There is no Session lifecycle state to project, because none exists.
+        The external AGENT session id is never projected, and the quarantine
+        block is the store's own bounded categorical structure — never an
+        exception message, agent text, or a path.
+        """
         return {
             "session_id": record.session_id,
-            "state": storage.to_native_state(record.state),
             "owner": record.owner,
             "namespace": record.namespace,
             "agent_id": record.native_agent_id,
             "profile_id": record.native_profile_id,
+            "created_at": record.created_at,
             "updated_at": record.updated_at,
+            "last_effective_model": record.last_effective_model,
+            "last_effective_effort": record.last_effective_effort,
+            "quarantine": record.quarantine,
         }
 
     async def _session_status(
@@ -1442,20 +1486,3 @@ class ArsdHandlers:
                 continue
             sessions.append(self._session_view(record))
         return {"sessions": sessions}
-
-    async def _session_close(
-        self, caller: server.AuthenticatedCaller, payload: Mapping[str, Any]
-    ) -> dict[str, Any]:
-        record = self._authorize_session(caller, payload.get("session_id"))
-        try:
-            closed = self._session_store.mark_closed(record.session_id)
-        except SessionQuarantinedError:
-            raise protocol.ProtocolError(
-                protocol.INVALID_REQUEST,
-                "quarantined session cannot be closed",
-            ) from None
-        except Exception:
-            raise protocol.ProtocolError(
-                protocol.INVALID_REQUEST, "session cannot be closed"
-            ) from None
-        return self._session_view(closed)

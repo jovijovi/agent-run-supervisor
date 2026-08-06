@@ -5,7 +5,8 @@ This stdlib-only helper drives the existing supervisor CLI through the two Codex
 surfaces that matter for local orchestration confidence:
 
 1. one-shot exec: ``run --role <exec-role> --prompt-file <prompt>``;
-2. persistent session: ``session create -> send turn1 -> send turn2 -> status -> close``.
+2. durable session: ``session create -> send turn1 -> send turn2 -> status``.
+   There is no close step: Runs terminate, Sessions do not close.
 
 It intentionally uses ``runner.acpx_binary = null`` so the supervisor compiler takes
 the pinned ``npx -y acpx@0.12.0`` path. The default model is the concrete Codex ACP
@@ -97,13 +98,16 @@ def build_role(
     work_dir: Path,
     *,
     role_id: str,
-    strategy: str,
     model: str,
     acpx_timeout_seconds: int,
 ) -> dict[str, Any]:
-    """Build a minimal no-tool Codex role for exec or persistent-session smoke."""
-    if strategy not in {"exec", "persistent"}:
-        raise ValueError("strategy must be 'exec' or 'persistent'")
+    """Build one minimal no-tool Codex role.
+
+    One role shape serves both smoke arms. A role no longer declares a Session
+    lifetime, because a Session has none — the one-shot ``exec`` arm and the
+    session ``prompt -s`` arm differ in the Run command they compile, not in how
+    long anything is supposed to live.
+    """
     model = validate_model_id(model)
     permissions = {
         "read": False,
@@ -135,7 +139,6 @@ def build_role(
             "allowed_roots_security_boundary": False,
         },
         "permissions": permissions,
-        "session": {"strategy": strategy},
         "limits": {
             "timeout_seconds": acpx_timeout_seconds,
             "max_turns": 1,
@@ -194,38 +197,6 @@ def run_cli(args: list[str], *, timeout: int) -> dict[str, Any]:
         "stderr": completed.stderr,
         "json": payload,
     }
-
-
-def best_effort_close_acpx_session(
-    *, session_name: str, cwd: Path, timeout: int
-) -> None:
-    """Close a named acpx session after a create failure, without masking errors."""
-    argv = [
-        "npx",
-        "-y",
-        f"acpx@{ACPX_VERSION}",
-        "--format",
-        "json",
-        "--json-strict",
-        "--cwd",
-        str(cwd),
-        ADAPTER_AGENT,
-        "sessions",
-        "close",
-        session_name,
-    ]
-    try:
-        subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            check=False,
-            env=_cli_env(),
-            cwd=str(REPO),
-            timeout=timeout,
-        )
-    except Exception:
-        pass
 
 
 def _require(condition: bool, message: str) -> None:
@@ -309,7 +280,6 @@ def run_smoke(
         build_role(
             work_dir,
             role_id="codex-smoke-exec",
-            strategy="exec",
             model=model,
             acpx_timeout_seconds=acpx_timeout_seconds,
         ),
@@ -319,7 +289,6 @@ def run_smoke(
         build_role(
             work_dir,
             role_id="codex-smoke-session",
-            strategy="persistent",
             model=model,
             acpx_timeout_seconds=acpx_timeout_seconds,
         ),
@@ -331,29 +300,6 @@ def run_smoke(
     launch_timeout = acpx_timeout_seconds + LAUNCH_BUFFER_SECONDS
     sessions_arg = ["--sessions-dir", str(sessions_dir)]
     session_common = ["--role", str(session_role_path), "--session-id", SESSION_ID]
-    created = False
-    closed = False
-    create_attempted = False
-
-    def best_effort_close() -> None:
-        if closed:
-            return
-        if created:
-            try:
-                cleanup = run_cli(
-                    ["session", "close", *session_common, *sessions_arg],
-                    timeout=launch_timeout,
-                )
-                if cleanup.get("returncode") == 0:
-                    return
-            except Exception:
-                pass
-        if create_attempted:
-            best_effort_close_acpx_session(
-                session_name=session_name,
-                cwd=work_dir,
-                timeout=launch_timeout,
-            )
 
     try:
         for role_path, step in (
@@ -389,7 +335,6 @@ def run_smoke(
         _check_business_verdict_null(one, "one-shot run")
 
         # 2. persistent session create ------------------------------------
-        create_attempted = True
         res = run_cli(
             [
                 "session",
@@ -402,9 +347,9 @@ def run_smoke(
             timeout=launch_timeout,
         )
         _require(res["returncode"] == 0, f"session create: exit {res['returncode']}: {res['stderr'].strip()!r}")
-        created = True
         create = _require_json(res, "session create")
-        _require(create.get("state") == "open", f"session create: state={create.get('state')!r}, want 'open'")
+        _require("state" not in create, "session create: a Session has no lifecycle state")
+        _require(bool(create.get("session_id")), "session create: no session_id reported")
         _check_business_verdict_null(create, "session create")
 
         # 3. send two turns ------------------------------------------------
@@ -436,20 +381,13 @@ def run_smoke(
         )
         _check_business_verdict_null(turn2, "session send #2")
 
-        # 4. status + close -----------------------------------------------
+        # 4. status ---------------------------------------------------------
         res = run_cli(["session", "status", *session_common, *sessions_arg], timeout=launch_timeout)
         _require(res["returncode"] == 0, f"session status: exit {res['returncode']}: {res['stderr'].strip()!r}")
         status = _require_json(res, "session status")
         _require(status.get("ok") is True, f"session status: ok={status.get('ok')!r}")
         _check_business_verdict_null(status, "session status")
 
-        res = run_cli(["session", "close", *session_common, *sessions_arg], timeout=launch_timeout)
-        _require(res["returncode"] == 0, f"session close: exit {res['returncode']}: {res['stderr'].strip()!r}")
-        close = _require_json(res, "session close")
-        _require(close.get("state") == "closed", f"session close: state={close.get('state')!r}, want 'closed'")
-        _require(close.get("closed") is True, "session close: closed flag not true")
-        _check_business_verdict_null(close, "session close")
-        closed = True
 
         return {
             "smoke": "codex-acpx-one-shot-and-session",
@@ -465,12 +403,15 @@ def run_smoke(
                 "turn1": {"status": turn1.get("status"), "marker": observed1, "turn_id": turn1.get("turn_id")},
                 "turn2": {"status": turn2.get("status"), "marker": observed2, "turn_id": turn2.get("turn_id")},
                 "status_ok": status.get("ok"),
-                "closed_state": close.get("state"),
             },
             "business_verdict_null_all_steps": True,
         }
     finally:
-        best_effort_close()
+        # Nothing here ends the external Session. The smoke names a fresh
+        # session per invocation (``make_session_name``), so it leaks nothing by
+        # leaving one behind — and ending one is the mechanism this product
+        # removed, not a form of resource cleanup.
+        pass
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -268,12 +268,10 @@ SESSION_MANAGEMENT_TAILS: dict[str, list[str]] = {
     "session-ensure-existing": ["codex", "sessions", "ensure", "--name", SESSION_NAME],
     "session-show-open": ["codex", "sessions", "show", SESSION_NAME],
     "session-show-after-turns": ["codex", "sessions", "show", SESSION_NAME],
-    "session-show-closed": ["codex", "sessions", "show", SESSION_NAME],
     "session-history-after-turns": ["codex", "sessions", "history", "--limit", "8", SESSION_NAME],
     "session-read-tail-after-turns": ["codex", "sessions", "read", "--tail", "8", SESSION_NAME],
     "session-status-after-turns": ["codex", "status", "-s", SESSION_NAME],
     "session-cancel-no-active": ["codex", "cancel", "-s", SESSION_NAME],
-    "session-close-named": ["codex", "sessions", "close", SESSION_NAME],
 }
 
 SESSION_PROMPT_FIXTURES: tuple[str, ...] = ("session-prompt-turn1", "session-prompt-turn2")
@@ -430,17 +428,6 @@ def _validate_management_semantics(name: str, payload: dict[str, Any]) -> list[s
     elif name == "session-show-open":
         if payload.get("schema") != "acpx.session.v1":
             errors.append(f"{name}: session show must use schema acpx.session.v1")
-        if payload.get("closed") is not False:
-            errors.append(f"{name}: an open session must report closed=false")
-    elif name == "session-show-closed":
-        if payload.get("schema") != "acpx.session.v1":
-            errors.append(f"{name}: session show must use schema acpx.session.v1")
-        if payload.get("closed") is not True:
-            errors.append(f"{name}: a closed session must report closed=true")
-        else:
-            closed_at = payload.get("closedAt")
-            if not isinstance(closed_at, str) or not closed_at:
-                errors.append(f"{name}: a closed session must record a non-empty closedAt timestamp")
     elif name == "session-show-after-turns":
         if payload.get("schema") != "acpx.session.v1":
             errors.append(f"{name}: session show must use schema acpx.session.v1")
@@ -459,10 +446,7 @@ def _validate_management_semantics(name: str, payload: dict[str, Any]) -> list[s
         if payload.get("action") != "cancel_result":
             errors.append(f"{name}: cancel command must report action=cancel_result")
         if payload.get("cancelled") is not False:
-            errors.append(f"{name}: idle cancel must report cancelled=false (cancel is not close)")
-    elif name == "session-close-named":
-        if payload.get("action") != "session_closed":
-            errors.append(f"{name}: close command must report action=session_closed")
+            errors.append(f"{name}: idle cancel must report cancelled=false")
     elif name in {"session-history-after-turns", "session-read-tail-after-turns"}:
         entries = payload.get("entries")
         if not isinstance(entries, list) or not entries:

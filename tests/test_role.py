@@ -5,6 +5,7 @@ import copy
 import pytest
 
 from agent_run_supervisor.role import (
+    DEFAULT_SESSION_LEASE_SECONDS,
     AgentRoleSpec,
     RoleValidationError,
     load_role,
@@ -42,7 +43,7 @@ VALID_ROLE: dict = {
         "switch_mode": False,
         "other": False,
     },
-    "session": {"strategy": "exec"},
+    "session": {"lease_seconds": 900},
     "limits": {
         "timeout_seconds": 900,
         "max_turns": 1,
@@ -113,70 +114,47 @@ def test_load_role_rejects_bad_schema_version() -> None:
         load_role(spec)
 
 
-def test_load_role_defaults_session_to_exec_without_lease() -> None:
+def test_load_role_defaults_session_to_a_bounded_lease() -> None:
+    """An absent session block still yields a finite lease to recover against."""
     spec = copy.deepcopy(VALID_ROLE)
     spec.pop("session", None)
 
     role = load_role(spec)
 
-    assert role.session.strategy == "exec"
-    assert role.session.lease_seconds is None
+    assert role.session.lease_seconds == DEFAULT_SESSION_LEASE_SECONDS
 
 
-def test_load_role_accepts_persistent_session_strategy() -> None:
+def test_load_role_accepts_explicit_lease_seconds() -> None:
     spec = copy.deepcopy(VALID_ROLE)
-    spec["session"] = {"strategy": "persistent"}
+    spec["session"] = {"lease_seconds": 120}
 
     role = load_role(spec)
 
-    assert role.session.strategy == "persistent"
-    # Persistent sessions get a bounded default lease so concurrency control
-    # always has a finite expiry to work with.
-    assert isinstance(role.session.lease_seconds, int)
-    assert role.session.lease_seconds > 0
-
-
-def test_load_role_accepts_explicit_persistent_lease_seconds() -> None:
-    spec = copy.deepcopy(VALID_ROLE)
-    spec["session"] = {"strategy": "persistent", "lease_seconds": 120}
-
-    role = load_role(spec)
-
-    assert role.session.strategy == "persistent"
     assert role.session.lease_seconds == 120
 
 
-def test_load_role_rejects_unknown_session_strategy() -> None:
+def test_load_role_rejects_a_session_strategy_as_an_unknown_key() -> None:
+    """The Session-lifetime declaration is deleted, not defaulted or ignored."""
     spec = copy.deepcopy(VALID_ROLE)
-    spec["session"] = {"strategy": "daemon"}
+    spec["session"] = {"strategy": "persistent"}
 
     with pytest.raises(RoleValidationError) as excinfo:
         load_role(spec)
     assert "strategy" in str(excinfo.value)
-    assert "daemon" in str(excinfo.value)
 
 
-def test_load_role_rejects_nonpositive_persistent_lease_seconds() -> None:
+def test_load_role_rejects_nonpositive_lease_seconds() -> None:
     spec = copy.deepcopy(VALID_ROLE)
-    spec["session"] = {"strategy": "persistent", "lease_seconds": 0}
+    spec["session"] = {"lease_seconds": 0}
 
     with pytest.raises(RoleValidationError) as excinfo:
         load_role(spec)
     assert "lease_seconds" in str(excinfo.value)
 
 
-def test_load_role_rejects_oversized_persistent_lease_seconds() -> None:
+def test_load_role_rejects_oversized_lease_seconds() -> None:
     spec = copy.deepcopy(VALID_ROLE)
-    spec["session"] = {"strategy": "persistent", "lease_seconds": 10_000_000}
-
-    with pytest.raises(RoleValidationError) as excinfo:
-        load_role(spec)
-    assert "lease_seconds" in str(excinfo.value)
-
-
-def test_load_role_rejects_lease_seconds_for_exec_strategy() -> None:
-    spec = copy.deepcopy(VALID_ROLE)
-    spec["session"] = {"strategy": "exec", "lease_seconds": 120}
+    spec["session"] = {"lease_seconds": 10_000_000}
 
     with pytest.raises(RoleValidationError) as excinfo:
         load_role(spec)
@@ -185,7 +163,7 @@ def test_load_role_rejects_lease_seconds_for_exec_strategy() -> None:
 
 def test_load_role_rejects_unknown_session_keys() -> None:
     spec = copy.deepcopy(VALID_ROLE)
-    spec["session"] = {"strategy": "persistent", "shell_access": True}
+    spec["session"] = {"lease_seconds": 120, "shell_access": True}
 
     with pytest.raises(RoleValidationError) as excinfo:
         load_role(spec)

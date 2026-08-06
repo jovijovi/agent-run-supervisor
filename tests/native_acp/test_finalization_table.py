@@ -31,13 +31,13 @@ def test_terminal_event_without_result_rebuilds() -> None:
         persisted_terminal_event="end_turn", dispatch_started=True
     )
     assert status is AgentRunStatus.COMPLETED
-    assert disposition == "active"
+    assert disposition == "reusable"
 
 
 def test_pre_dispatch_failure_is_failed_and_session_stays_active() -> None:
     status, disposition = _finalize(dispatch_started=False)
     assert status is AgentRunStatus.FAILED
-    assert disposition == "active"
+    assert disposition == "reusable"
 
 
 def test_pre_dispatch_failure_with_unproven_rollback_quarantines() -> None:
@@ -51,7 +51,7 @@ def test_pre_dispatch_failure_with_unproven_rollback_quarantines() -> None:
 def test_reliable_acp_terminal_completes() -> None:
     status, disposition = _finalize(dispatch_started=True, acp_stop_reason="end_turn")
     assert status is AgentRunStatus.COMPLETED
-    assert disposition == "active"
+    assert disposition == "reusable"
 
 
 @pytest.mark.parametrize("stop_reason", ["max_tokens", "max_turn_requests", "refusal"])
@@ -60,13 +60,13 @@ def test_other_agent_terminals_are_completed_class(stop_reason: str) -> None:
         dispatch_started=True, acp_stop_reason=stop_reason
     )
     assert status is AgentRunStatus.COMPLETED
-    assert disposition == "active"
+    assert disposition == "reusable"
 
 
 def test_agent_side_cancel_terminal_is_cancelled_active() -> None:
     status, disposition = _finalize(dispatch_started=True, acp_stop_reason="cancelled")
     assert status is AgentRunStatus.CANCELLED
-    assert disposition == "active"
+    assert disposition == "reusable"
 
 
 def test_supervisor_cancel_with_acp_terminal_is_cancelled_active() -> None:
@@ -74,7 +74,7 @@ def test_supervisor_cancel_with_acp_terminal_is_cancelled_active() -> None:
         dispatch_started=True, acp_stop_reason="cancelled", supervisor_cancelled=True
     )
     assert status is AgentRunStatus.CANCELLED
-    assert disposition == "active"
+    assert disposition == "reusable"
 
 
 def test_supervisor_timeout_with_acp_terminal_is_timed_out_active() -> None:
@@ -82,7 +82,7 @@ def test_supervisor_timeout_with_acp_terminal_is_timed_out_active() -> None:
         dispatch_started=True, acp_stop_reason="cancelled", supervisor_timed_out=True
     )
     assert status is AgentRunStatus.TIMED_OUT
-    assert disposition == "active"
+    assert disposition == "reusable"
 
 
 def test_permission_violation_fails_the_turn_despite_terminal() -> None:
@@ -90,7 +90,7 @@ def test_permission_violation_fails_the_turn_despite_terminal() -> None:
         dispatch_started=True, acp_stop_reason="end_turn", permission_violation=True
     )
     assert status is AgentRunStatus.FAILED
-    assert disposition == "active"
+    assert disposition == "reusable"
 
 
 @pytest.mark.parametrize(
@@ -148,7 +148,7 @@ def test_trustworthy_cancel_terminal_wins_over_escalated_kill() -> None:
         supervisor_cancelled=True,
     )
     assert status is AgentRunStatus.CANCELLED
-    assert disposition == "active"
+    assert disposition == "reusable"
 
 
 def test_child_exit_without_terminal_is_failed_quarantined() -> None:
@@ -182,7 +182,7 @@ def test_reliable_terminal_wins_over_interrupted_observation() -> None:
         observation_interrupted=True,
     )
     assert status is AgentRunStatus.COMPLETED
-    assert disposition == "active"
+    assert disposition == "reusable"
 
 
 def test_result_exists_wins_over_everything() -> None:
@@ -204,7 +204,7 @@ def test_r4_b2_evidence_pipeline_overrides_completed_to_failed_active() -> None:
         evidence_pipeline_failure=True,
     )
     assert status is AgentRunStatus.FAILED
-    assert disposition == "active"
+    assert disposition == "reusable"
     assert _RETRYABLE_DEFAULT[status] is False
 
 
@@ -215,7 +215,7 @@ def test_r4_b2_evidence_pipeline_overrides_cancelled_to_failed() -> None:
         evidence_pipeline_failure=True,
     )
     assert status is AgentRunStatus.FAILED
-    assert disposition == "active"
+    assert disposition == "reusable"
 
 
 def test_r4_b2_evidence_pipeline_overrides_terminal_backed_timed_out() -> None:
@@ -228,7 +228,7 @@ def test_r4_b2_evidence_pipeline_overrides_terminal_backed_timed_out() -> None:
         evidence_pipeline_failure=True,
     )
     assert status is AgentRunStatus.FAILED
-    assert disposition == "active"
+    assert disposition == "reusable"
     assert _RETRYABLE_DEFAULT[status] is False
 
 
@@ -273,4 +273,4 @@ def test_r4_b2_pre_dispatch_evidence_pipeline_stays_failed_active() -> None:
         evidence_pipeline_failure=True,
     )
     assert status is AgentRunStatus.FAILED
-    assert disposition == "active"
+    assert disposition == "reusable"

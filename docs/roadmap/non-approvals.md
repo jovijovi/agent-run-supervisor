@@ -130,11 +130,25 @@ a value-blind production projection at all, which is what selects the digest pat
 - **Not approved: a per-agent canary shortcut.** The mandatory denied-action mediation canary stays required
   per registered agent before that agent's use, and a registry entry's existence is not evidence that it ran.
 
+- **Decided (2026-08-06): source implementation of the Session no-close model**,
+  `docs/plans/active/2026-08-06-session-no-close-model.md` stages D0–D4, including the targeted removal of
+  Session-close and Session-kind logic from the still-present acpx source. It authorizes **source, tests,
+  and documentation only**, and it exhausts itself there.
+- **Not approved by that decision, and not implied by a green gate or a merge:** runtime-data reset or
+  archival, `arsd` restart or any service action, runtime cutover, release, publication, deployment,
+  real Claude/Codex canaries, push, pull request, merge, tag, and Sachima integration. Because the change
+  deliberately adds no dual-schema compatibility, cutover must be one operator-controlled action pairing the
+  v3 package and caller with the operator-selected development-data decision — never a side effect of
+  landing source.
+- **Not approved: expanding the acpx cleanup.** Only Session-close concepts, Session-lifetime
+  classification, and their direct dependencies leave the acpx source. Complete acpx removal remains its own
+  separately authorized decision, no acpx capability is added, and ordinary resource-level `close()` for
+  sockets, streams, ACP connections, files, and process teardown is preserved.
+
 The standing rule is unchanged: **an active plan is not approval to land source, to publish, to deploy, or
-to run a real provider.** Activating a plan records only that it is the board-linked planning artifact.
-`docs/plans/active/2026-08-06-session-no-close-model.md` is active now and authorizes no source
-implementation, runtime-data reset, service restart, release, deployment, real-agent canary, or caller
-integration. An archived plan authorizes strictly less than an active one — nothing.
+to run a real provider.** Activating a plan records only that it is the board-linked planning artifact, and
+an approval of one stage is not an approval of the next. An archived plan authorizes strictly less than an
+active one — nothing.
 
 The legacy v0.1.7 acpx path holds no product, runtime, or compatibility authority, and while its code exists
 it may receive separately approved compatibility/security maintenance. Such maintenance does not reopen its

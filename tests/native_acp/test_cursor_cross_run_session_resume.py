@@ -23,15 +23,22 @@ The contract tests run the **registered** ``cursor-native-acp-v1``, not a
 test-local copy of it. That is the point: the profile *as registered* is what a
 deployment resolves, and every suite that missed this built its own.
 
-Scope, because "same Session" names two different things here. The **external
-AGENT** Session id is what these tests pin as continuous: two real child
-processes use one id, the second reaches its prompt through a real
-``session/load``, and the agent answers out of state it kept itself. The **ARS**
-Session record is only the controller's own record naming that external id, and
-the harness seeds Run 2's record the way an earlier Run would have left it (see
-``_two_runs``). That record's binding to the external id is therefore arranged
-here, not derived from Run 1's own record — record lineage is not what this file
-pins.
+Scope, because "same Session" names two things here, and this file pins **both**.
+The **external AGENT** Session id is continuous: two real child processes use one
+id, the second reaches its prompt through a real ``session/load``, and the agent
+answers out of state it kept itself. The **ARS** Session record is the
+controller's own record naming that external id, and Run 2 reuses *the identity
+Run 1 actually returned and persisted* — ``_two_runs`` passes
+``seed_session=False``, so nothing is arranged on Run 2's behalf. Record lineage
+is therefore part of the contract under test: if Run 1 fails to publish a durable
+bound record, Run 2 fails instead of quietly succeeding against a seeded one.
+
+The negative controls close the other half. With Run 1's binding **missing**,
+**corrupt**, **drifted** (a workspace hash that no longer matches), or
+**unbound** (no external id), Run 2 must fail *before* it prompts and *without*
+falling back to ``session/new`` — proven by the absence of a dispatch marker and
+of any ``session_new_requested``/``session_prompt_sent`` event. Reuse is
+existing-only: a broken binding is a refusal, never a fresh conversation.
 """
 
 from __future__ import annotations
@@ -58,6 +65,7 @@ from agent_run_supervisor.native_acp.profile import (
 from agent_run_supervisor.native_acp.spec import resolve_run_environment
 
 from .test_model_only_fidelity import CURSOR_MODEL, CURSOR_SCRIPT
+from agent_run_supervisor.native_acp.run_task import DISPATCH_STARTED_MARKER
 from .test_run_task import FAKE_AGENT_PATH, Harness, _request, _run
 
 REGISTERED_PROFILE_ID = "cursor-native-acp-v1"
@@ -126,17 +134,17 @@ def _request_for(**overrides):
 
 def _new_session_request():
     """Run 1: the only intent that may open a Session with ``session/new``."""
-    return _request_for(session_reuse="none", ars_session_id=None)
+    return _request_for(session_id=None)
 
 
-def _reuse_request():
+def _reuse_request(session_id: str):
     """Run 2: a reuse request naming the ARS record bound to the external id.
 
-    ``ars_session_id`` names ARS's record and nothing else. The external id the
+    ``session_id`` names ARS's record and nothing else. The external id the
     child is actually sent lives in that record's binding, so no reuse request
     ever carries it.
     """
-    return _request_for(session_reuse="reuse", ars_session_id=REUSED_ARS_SESSION_ID)
+    return _request_for(session_id=session_id)
 
 
 def _payload(run_dir: Path) -> dict:
@@ -152,18 +160,12 @@ def _event_types(run_dir: Path) -> list[str]:
 
 
 def _two_runs(harness: Harness):
-    """Run 1 opens the Session and plants the token; Run 2 loads and recalls.
+    """Run 1 creates the Session and plants the token; Run 2 loads and recalls.
 
-    Run 1 is a ``session/new`` Run, so the external Session and everything the
-    agent stores about it are created by a real child process. Its own ARS
-    record is ephemeral and closes with the Run; ``Harness.task`` then seeds Run
-    2's record — bound to that same external id, carrying the identity fields a
-    real reuse admission recomputes, so a mismatch is still a real refusal.
-
-    What that leaves under test is the part a fixture cannot fake: Run 2 is a
-    genuinely new process that has to reach its prompt through a real
-    ``session/load`` of that external id. How its ARS record came to name the id
-    is arranged by the harness, not derived from Run 1's record.
+    Run 2 reuses **the Session identity Run 1 actually returned and persisted** —
+    nothing is seeded. That is the whole point: if Run 1 fails to publish a
+    durable bound record, or publishes one Run 2 cannot bind to, Run 2 must fail
+    rather than quietly succeed against a fixture-arranged record.
     """
     first = _run(
         harness.task(
@@ -172,11 +174,13 @@ def _two_runs(harness: Harness):
             request=_new_session_request(),
         )
     )
+    assert first.session_id, "run 1 published no Session identity to continue"
     second = _run(
         harness.task(
             run_id="run-0002",
             prompt_text=RUN_TWO_PROMPT,
-            request=_reuse_request(),
+            request=_reuse_request(first.session_id),
+            seed_session=False,
         )
     )
     return first, second
@@ -193,11 +197,11 @@ def test_run_two_loads_the_same_external_session_and_prompts_in_it(
     prompts — and the answer carries Run 1's token, so the agent really did
     continue the same conversation out of its own state.
 
-    So what is pinned is external AGENT Session continuity: one external id
-    across two distinct child processes, a real load on the second, agent-owned
-    state surviving in the operator's stable configuration home, and the token
-    coming back out of it. ARS record lineage is not pinned here — Run 2's
-    record is seeded, not adopted from Run 1's ephemeral one (see ``_two_runs``).
+    So what is pinned is the whole continuity chain: Run 1 publishes a durable
+    bound Session, Run 2 names *that* identity, one external id crosses two
+    distinct child processes, the second really loads, agent-owned state
+    survives in the operator's stable configuration home, and the token comes
+    back out of it.
     """
     home = _operator_home(tmp_path, monkeypatch)
     harness = Harness(tmp_path, monkeypatch, _script())
@@ -220,11 +224,12 @@ def test_run_two_loads_the_same_external_session_and_prompts_in_it(
     effective = json.loads((harness.run_dir("run-0002") / "effective.json").read_text())
     assert effective["effective_model"] == CURSOR_MODEL
     assert effective["effective_effort"] == EFFORT_NOT_APPLICABLE
-    # The record Run 2 loaded through still names that external id and is still
-    # open, so a further Run reuses the same external Session rather than a new one.
-    record = harness.session_store().open_session(REUSED_ARS_SESSION_ID)
+    # Run 2 ran under Run 1's own Session, and that Session is still there and
+    # still reusable, so a third Run continues the same external thread.
+    assert second.session_id == first.session_id
+    record = harness.session_store().open_session(first.session_id)
     assert record.agent_session_id == harness.external_id
-    assert record.state == "open"
+    assert record.quarantine is None
     # The agent's configuration home is the operator's, untouched by ARS: it
     # still holds the Session state, and nothing was created under either Run.
     assert (home / "sessions").is_dir()
@@ -346,3 +351,109 @@ def test_a_config_root_repointed_per_run_cannot_carry_the_session(
     assert "session_load_requested" in families
     assert "session_new_requested" not in families
     assert not (harness.run_dir("run-0002") / "prompt-dispatch-started").exists()
+
+
+# -- negative controls: continuity fails closed, before any wire work --------
+#
+# The positive test proves Run 2 continues Run 1's Session. These prove the
+# other half: when that binding is missing, unusable, or belongs to a different
+# identity, Run 2 fails *before* it can prompt and *without* falling back to
+# creating a replacement Session. Without these, a broken Run 1 publication
+# could still look green.
+
+
+def _first_run(harness: Harness):
+    first = _run(
+        harness.task(
+            run_id="run-0001",
+            prompt_text=RUN_ONE_NONCE,
+            request=_new_session_request(),
+        )
+    )
+    assert first.status is AgentRunStatus.COMPLETED
+    return first
+
+
+def _second_run(harness: Harness, session_id: str):
+    return _run(
+        harness.task(
+            run_id="run-0002",
+            prompt_text=RUN_TWO_PROMPT,
+            request=_reuse_request(session_id),
+            seed_session=False,
+        )
+    )
+
+
+def _cursor_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
+    _operator_home(tmp_path, monkeypatch)
+    harness = Harness(tmp_path, monkeypatch, _script())
+    harness.registry = ProfileRegistry((CURSOR_NATIVE_ACP_V1,))
+    harness.entry = _entry()
+    return harness
+
+
+def _assert_failed_before_the_wire(harness: Harness, second) -> None:
+    assert second.status is AgentRunStatus.FAILED
+    run_dir = harness.run_dir("run-0002")
+    # An absent event stream is the strongest form of this proof: the Run was
+    # refused before it opened one. When a stream does exist, it must still
+    # carry neither a prompt nor a replacement Session.
+    events = run_dir / "events.jsonl"
+    families = _event_types(run_dir) if events.exists() else []
+    assert "session_new_requested" not in families
+    assert "session_prompt_sent" not in families
+    assert not (run_dir / DISPATCH_STARTED_MARKER).exists()
+
+
+def test_a_missing_binding_fails_run_two_without_creating_a_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _cursor_harness(tmp_path, monkeypatch)
+    first = _first_run(harness)
+
+    (Path(harness.session_store().base_dir) / first.session_id / "session.json").unlink()
+
+    _assert_failed_before_the_wire(harness, _second_run(harness, first.session_id))
+
+
+def test_a_corrupt_binding_fails_run_two_without_creating_a_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _cursor_harness(tmp_path, monkeypatch)
+    first = _first_run(harness)
+
+    record = Path(harness.session_store().base_dir) / first.session_id / "session.json"
+    record.write_bytes(b"{ this record was never finished")
+
+    _assert_failed_before_the_wire(harness, _second_run(harness, first.session_id))
+
+
+def test_a_drifted_binding_fails_run_two_without_creating_a_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Structurally valid, but it belongs to a different Run identity."""
+    harness = _cursor_harness(tmp_path, monkeypatch)
+    first = _first_run(harness)
+
+    record = Path(harness.session_store().base_dir) / first.session_id / "session.json"
+    payload = json.loads(record.read_text(encoding="utf-8"))
+    payload["workspace_hash"] = "9" * 64
+    record.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
+
+    _assert_failed_before_the_wire(harness, _second_run(harness, first.session_id))
+
+
+def test_an_unbound_binding_fails_run_two_without_creating_a_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record that names no external Session cannot be loaded, only refused."""
+    harness = _cursor_harness(tmp_path, monkeypatch)
+    first = _first_run(harness)
+
+    record = Path(harness.session_store().base_dir) / first.session_id / "session.json"
+    payload = json.loads(record.read_text(encoding="utf-8"))
+    del payload["agent_session_id"]
+    record.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
+
+    _assert_failed_before_the_wire(harness, _second_run(harness, first.session_id))

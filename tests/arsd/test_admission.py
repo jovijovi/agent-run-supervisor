@@ -27,6 +27,7 @@ from agent_run_supervisor.event_store import (
     EventStoreError,
 )
 from agent_run_supervisor.native_acp import storage
+from agent_run_supervisor.session import QUARANTINE_DISPATCH_OBSERVATION_LOST
 
 SECRET_SENTINEL = "sk-live-" + "LEAKCANARY"  # concatenated; no scannable literal
 
@@ -67,8 +68,7 @@ def valid_wire_request(**overrides) -> dict:
         "owner": "hermes",
         "namespace": "hermes/doc-check",
         "agent_id": "fake-agent",
-        "session_reuse": "reuse",
-        "ars_session_id": "sess-arsd-1",
+        "session_id": "sess-arsd-1",
         "expected_binding_hash": None,
         "input_refs": [
             {"ref": "prompt:inline", "content_hash": "sha256:" + "a" * 64},
@@ -86,6 +86,11 @@ def valid_wire_request(**overrides) -> dict:
         "recovery_policy_hash": "sha256:" + "e" * 64,
     }
     request.update(overrides)
+    if request.get("session_id") is None:
+        # A create *omits* the field. Emitting an explicit null would be a
+        # different caller statement, and the wire refuses it — so a helper that
+        # emitted one would be testing a frame no caller should ever send.
+        request.pop("session_id", None)
     return request
 
 
@@ -380,8 +385,8 @@ _BEHAVIOR_MUTATIONS = [
     ("owner", {"request": valid_wire_request(owner="hermes2")}),
     ("namespace", {"request": valid_wire_request(namespace="hermes/other")}),
     ("agent_id", {"request": valid_wire_request(agent_id="fake-agent-2")}),
-    ("session_reuse", {"request": valid_wire_request(session_reuse="none")}),
-    ("ars_session_id", {"request": valid_wire_request(ars_session_id="sess-arsd-2")}),
+    ("session_id", {"request": valid_wire_request(session_id="sess-arsd-2")}),
+    ("session_id_absent", {"request": valid_wire_request(session_id=None)}),
     (
         "expected_binding_hash",
         {"request": valid_wire_request(expected_binding_hash="sha256:" + "9" * 64)},
@@ -483,7 +488,7 @@ def test_ack_only_after_durable_submission_and_registration(tmp_path: Path) -> N
             assert call["registered_at_construction"] is False
             # The acknowledgement exists only after registration.
             assert harness.handlers.registry.is_registered(reply["run_id"])
-            assert set(reply) == {"run_id", "accepted_at"}
+            assert set(reply) == {"run_id", "session_id", "accepted_at"}
             assert reply["run_id"] == call["run_id"]
         finally:
             await harness.aclose()
@@ -582,7 +587,7 @@ def test_retransmit_never_refused_for_capacity_or_busy_session(tmp_path: Path) -
                 caller,
                 "req-full-2",
                 protocol.CAPACITY_EXHAUSTED,
-                submit_payload(request=valid_wire_request(ars_session_id="sess-b")),
+                submit_payload(request=valid_wire_request(session_id="sess-b")),
             )
             # ...but the accepted key resolves from durable facts first: not
             # refused for capacity and not refused against its own busy session.
@@ -630,7 +635,7 @@ def test_cross_principal_same_request_id_distinct_identity(tmp_path: Path) -> No
                 request=valid_wire_request(
                     owner="other",
                     namespace="other/ns",
-                    ars_session_id="sess-other-1",
+                    session_id="sess-other-1",
                 )
             )
             reply_b = await harness.submit(
@@ -676,7 +681,7 @@ def test_concurrent_capacity_refusal_creates_no_second_artifacts(
                     caller,
                     "race-cap-1",
                     submit_payload(
-                        request=valid_wire_request(ars_session_id="sess-race-a")
+                        request=valid_wire_request(session_id="sess-race-a")
                     ),
                 )
             )
@@ -687,7 +692,7 @@ def test_concurrent_capacity_refusal_creates_no_second_artifacts(
                     caller,
                     "race-cap-2",
                     submit_payload(
-                        request=valid_wire_request(ars_session_id="sess-race-b")
+                        request=valid_wire_request(session_id="sess-race-b")
                     ),
                 )
             assert err.value.code == protocol.CAPACITY_EXHAUSTED
@@ -774,7 +779,7 @@ def test_cancelled_submit_releases_reservation_before_create(
                 caller,
                 "cancel-res-1",
                 submit_payload(
-                    request=valid_wire_request(ars_session_id="sess-cancel-1")
+                    request=valid_wire_request(session_id="sess-cancel-1")
                 ),
             )
         assert not harness.run_dir(cancelled_id).exists()
@@ -784,7 +789,7 @@ def test_cancelled_submit_releases_reservation_before_create(
             caller,
             "cancel-res-2",
             submit_payload(
-                request=valid_wire_request(ars_session_id="sess-cancel-2")
+                request=valid_wire_request(session_id="sess-cancel-2")
             ),
         )
         assert later["run_id"] == derived("principal-a", "cancel-res-2")
@@ -816,8 +821,7 @@ def test_resolve_durable_rejects_symlinked_run_dir(tmp_path: Path) -> None:
                 "peer": {"pid": 1, "uid": 1, "gid": 1},
                 "owner": "hermes",
                 "namespace": "hermes/doc-check",
-                "session_reuse": "reuse",
-                "ars_session_id": "sess-arsd-1",
+                "session_id": "sess-arsd-1",
                 "agent_id": "fake-agent",
                 "request_digest": digest.value,
                 "prompt_sha256": digest.prompt_sha256,
@@ -914,8 +918,7 @@ def test_foreign_principal_binding_never_duplicate_matched(tmp_path: Path) -> No
             "peer": {"pid": 1, "uid": 1, "gid": 1},
             "owner": "hermes",
             "namespace": "hermes/doc-check",
-            "session_reuse": "reuse",
-            "ars_session_id": "sess-arsd-1",
+            "session_id": "sess-arsd-1",
             "agent_id": "fake-agent",
             "request_digest": digest.value,
             "prompt_sha256": digest.prompt_sha256,
@@ -1046,6 +1049,7 @@ def test_registration_failure_finalizes_pre_dispatch_failed(tmp_path: Path) -> N
             reply = await harness.submit(caller, "req-reg-1")
             assert reply == {
                 "run_id": run_id,
+                "session_id": submission["session_id"],
                 "accepted_at": submission["accepted_at"],
             }
             assert len(harness.factory.calls) == 1  # never a second construction
@@ -1099,8 +1103,7 @@ EXPECTED_SUBMISSION_FIELDS = {
     "peer",
     "owner",
     "namespace",
-    "session_reuse",
-    "ars_session_id",
+    "session_id",
     "agent_id",
     "request_digest",
     "prompt_sha256",
@@ -1132,8 +1135,7 @@ def test_submission_artifact_exact_fields_mode_and_no_secrets(tmp_path: Path) ->
             assert submission["peer"] == {"pid": 4242, "uid": 1000, "gid": 1000}
             assert submission["owner"] == "hermes"
             assert submission["namespace"] == "hermes/doc-check"
-            assert submission["session_reuse"] == "reuse"
-            assert submission["ars_session_id"] == "sess-arsd-1"
+            assert submission["session_id"] == "sess-arsd-1"
             assert submission["agent_id"] == "fake-agent"
             digest = admission.compute_request_digest(protocol.parse_submit(payload))
             assert submission["request_digest"] == digest.value
@@ -1265,11 +1267,12 @@ def seeded_native_session(tmp_path: Path, session_id: str, *, agent_id="fake-age
         effective_cwd=binding.effective_cwd,
         matched_root=binding.canonical_root,
         agent_id=agent_id,
+        agent_session_id=f"external-{session_id}",
     )
     return session_store, binding, profile
 
 
-def test_profile_hash_drift_refuses_session_reuse(tmp_path: Path) -> None:
+def test_profile_hash_drift_refuses_reuse(tmp_path: Path) -> None:
     """A profile whose frozen ACP semantics changed no longer binds its Sessions."""
     from agent_run_supervisor.native_acp.profile import AcpCompatProfile
     from agent_run_supervisor.session import SessionBindingError, validate_native_binding
@@ -1325,15 +1328,23 @@ def test_reuse_under_a_different_agent_is_refused(tmp_path: Path) -> None:
     assert "agent_id" in str(excinfo.value)
 
 
-def test_quarantined_session_reuse_refused(tmp_path: Path) -> None:
+def test_quarantined_session_refuses_reuse(tmp_path: Path) -> None:
     from agent_run_supervisor.session import (
         SessionQuarantinedError,
         validate_native_binding,
     )
 
     store, binding, profile = seeded_native_session(tmp_path, "sess-quarantined")
-    store.write_quarantine_pending("sess-quarantined", reason="test", run_id="run-x")
-    store.mark_quarantined("sess-quarantined", reason="test", run_id="run-x")
+    store.write_quarantine_pending(
+        "sess-quarantined",
+        reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST,
+        run_id="run-x",
+    )
+    store.mark_quarantined(
+        "sess-quarantined",
+        reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST,
+        run_id="run-x",
+    )
     record = store.open_session("sess-quarantined")
     with pytest.raises(SessionQuarantinedError):
         validate_native_binding(
@@ -1390,11 +1401,11 @@ def test_naming_a_different_agent_changes_the_digest() -> None:
 
 
 @pytest.mark.parametrize(
-    "field", ["ars_session_id", "expected_binding_hash", "cwd", "retry_of_run_id"]
+    "field", ["session_id", "expected_binding_hash", "cwd", "retry_of_run_id"]
 )
 def test_every_null_valued_field_still_contributes(field: str) -> None:
     """No blanket null-strip: these four stay meaningful when they are null."""
-    null_frame = {"session_reuse": "none", "ars_session_id": None}
+    null_frame = {"session_id": None}
     baseline = submit_payload(request=valid_wire_request(**null_frame))
     if field in ("cwd", "retry_of_run_id"):
         changed = submit_payload(
@@ -1410,14 +1421,23 @@ def test_every_null_valued_field_still_contributes(field: str) -> None:
 
 
 def test_every_versioned_surface_moved_together() -> None:
-    """The wire, the digest, the submission, and the Spec moved as one change."""
-    assert admission.DIGEST_SCHEMA_VERSION == 2
-    assert admission.SUBMISSION_SCHEMA_VERSION == 2
-    assert protocol.ARSD_API_VERSION == 2
-    assert protocol.SUPPORTED_API_VERSIONS == (1, 2)
-    from agent_run_supervisor.native_acp.spec import SPEC_SCHEMA_VERSION
+    """The wire, the digest, the submission, and the Spec moved as one change.
 
-    assert SPEC_SCHEMA_VERSION == 2
+    The Session no-close model changed the request's Session block, so every
+    surface that seals it moved together. The launch snapshot did not change and
+    deliberately stays where it was.
+    """
+    assert admission.DIGEST_SCHEMA_VERSION == 3
+    assert admission.SUBMISSION_SCHEMA_VERSION == 3
+    assert protocol.ARSD_API_VERSION == 3
+    assert protocol.SUPPORTED_API_VERSIONS == (3,)
+    from agent_run_supervisor.native_acp.spec import (
+        LAUNCH_SCHEMA_VERSION,
+        SPEC_SCHEMA_VERSION,
+    )
+
+    assert SPEC_SCHEMA_VERSION == 3
+    assert LAUNCH_SCHEMA_VERSION == 2
 
 
 def test_agent_id_is_not_a_forbidden_runtime_selection_field() -> None:
@@ -1466,43 +1486,43 @@ def test_a_written_submission_validates_and_attributes_exactly() -> None:
     assert attribution.run_id == "run-strict-1"
     assert attribution.owner == "hermes"
     assert attribution.namespace == "hermes/doc-check"
-    assert attribution.session_id == valid_wire_request()["ars_session_id"]
+    assert attribution.session_id == valid_wire_request()["session_id"]
 
 
 def test_the_validator_accepts_the_writers_whole_value_domain() -> None:
     """Every request the parser admits must yield an acceptable submission.
 
-    ``session_reuse="none"`` with a non-null ``ars_session_id`` is admitted by
-    the wire parser and preserved verbatim by the writer, while runtime Session
-    selection ignores it. The durable validator therefore accepts the document
-    and derives only the deterministic ephemeral id — the stray value is never
-    attribution authority.
+    Both halves of the Session domain: a create writes ``session_id: null`` and
+    the validator derives the prospective id; a reuse writes the caller's id and
+    the validator attributes exactly that. One rule, and the runtime selector
+    agrees with it in both directions.
     """
-    command = protocol.parse_submit(
-        submit_payload(
-            request=valid_wire_request(
-                session_reuse="none", ars_session_id="sess-stray-ignored"
-            )
+    for declared, expected in (
+        (None, admission.derive_session_id_for_run("run-domain-1")),
+        ("sess-declared", "sess-declared"),
+    ):
+        command = protocol.parse_submit(
+            submit_payload(request=valid_wire_request(session_id=declared))
         )
-    )
-    payload = admission.build_submission_artifact(
-        key=admission.AdmissionKey(principal_id="principal-a", request_id="req-1"),
-        run_id="run-stray-1",
-        command=command,
-        digest=admission.compute_request_digest(command),
-        accepted_at="2026-07-22T00:00:00+00:00",
-        peer={"pid": 1, "uid": 1000, "gid": 1000},
-    )
-    assert payload["ars_session_id"] == "sess-stray-ignored"
+        payload = admission.build_submission_artifact(
+            key=admission.AdmissionKey(principal_id="principal-a", request_id="req-1"),
+            run_id="run-domain-1",
+            command=command,
+            digest=admission.compute_request_digest(command),
+            accepted_at="2026-07-22T00:00:00+00:00",
+            peer={"pid": 1, "uid": 1000, "gid": 1000},
+        )
+        assert payload["session_id"] == declared
 
-    attribution = admission.validate_submission_artifact(payload, run_id="run-stray-1")
-    assert attribution is not None
-    assert attribution.session_reuse == "none"
-    assert attribution.session_id == "run-stray-1-ephemeral"
-    # The same id the runtime selector derives for this Run.
-    assert attribution.session_id == admission.bound_session_id_for_run(
-        run_id="run-stray-1", submission=payload
-    )
+        attribution = admission.validate_submission_artifact(
+            payload, run_id="run-domain-1"
+        )
+        assert attribution is not None
+        assert attribution.session_id == expected
+        # The same id the runtime selector derives for this Run.
+        assert attribution.session_id == admission.bound_session_id_for_run(
+            run_id="run-domain-1", submission=payload
+        )
 
 
 @pytest.mark.parametrize(
@@ -1514,8 +1534,8 @@ def test_the_validator_accepts_the_writers_whole_value_domain() -> None:
         lambda p: p.pop("prompt_bytes"),
         lambda p: p["peer"].__setitem__("euid", 0),
         lambda p: p["peer"].pop("uid"),
-        lambda p: p.__setitem__("ars_session_id", 17),
-        lambda p: p.__setitem__("ars_session_id", ""),
+        lambda p: p.__setitem__("session_id", 17),
+        lambda p: p.__setitem__("session_id", ""),
     ],
     ids=[
         "missing_agent_id",
@@ -1658,8 +1678,8 @@ def test_digest_material_carries_no_forbidden_selection_field() -> None:
 
 
 def test_digest_schema_version_moved_with_the_material() -> None:
-    assert admission.DIGEST_SCHEMA_VERSION == 2
-    assert admission.SUBMISSION_SCHEMA_VERSION == 2
+    assert admission.DIGEST_SCHEMA_VERSION == 3
+    assert admission.SUBMISSION_SCHEMA_VERSION == 3
 
 
 def test_submission_records_the_agent_not_a_profile() -> None:
@@ -1667,3 +1687,170 @@ def test_submission_records_the_agent_not_a_profile() -> None:
     assert "agent_id" in payload
     assert "profile_id" not in payload
     assert admission.validate_submission_artifact(payload, run_id="run-strict-1")
+
+
+# -- D1: the deterministic prospective Session identity ----------------------
+#
+# A create submission carries no ``session_id``. The Session it will create is
+# named by the *same* authenticated identity that names the Run, so a repeated
+# request converges on the same Session instead of creating a second one — and
+# it does so with no durable pre-Session reservation of its own.
+
+
+def test_prospective_session_id_is_derived_from_the_admission_key() -> None:
+    key = admission.AdmissionKey(principal_id="principal-a", request_id="req-1")
+    first = admission.derive_session_id(key)
+    assert first == admission.derive_session_id(key)
+    # Same principal, different request → a different Session.
+    other = admission.derive_session_id(
+        admission.AdmissionKey(principal_id="principal-a", request_id="req-2")
+    )
+    assert other != first
+    # Same request text, different principal → a different Session.
+    foreign = admission.derive_session_id(
+        admission.AdmissionKey(principal_id="principal-b", request_id="req-1")
+    )
+    assert foreign != first
+
+
+def test_prospective_session_id_is_a_safe_session_store_component() -> None:
+    from agent_run_supervisor.session import is_valid_session_id
+
+    key = admission.AdmissionKey(principal_id="principal-a", request_id="req-1")
+    session_id = admission.derive_session_id(key)
+    assert is_valid_session_id(session_id)
+    assert admission.derive_session_id(key) != admission.derive_run_id(key)
+
+
+def test_a_create_submission_records_a_null_session_id_and_derives_the_id() -> None:
+    command = protocol.parse_submit(
+        submit_payload(request=valid_wire_request(session_id=None))
+    )
+    key = admission.AdmissionKey(principal_id="principal-a", request_id="req-1")
+    run_id = admission.derive_run_id(key)
+    payload = admission.build_submission_artifact(
+        key=key,
+        run_id=run_id,
+        command=command,
+        digest=admission.compute_request_digest(command),
+        accepted_at="2026-07-22T00:00:00+00:00",
+        peer={"pid": 1, "uid": 1000, "gid": 1000},
+    )
+    assert payload["session_id"] is None
+    assert "session_reuse" not in payload
+    assert "ars_session_id" not in payload
+
+    attribution = admission.validate_submission_artifact(payload, run_id=run_id)
+    assert attribution is not None
+    assert attribution.session_id == admission.derive_session_id(key)
+    assert attribution.session_id == admission.bound_session_id_for_run(
+        run_id=run_id, submission=payload
+    )
+
+
+def test_a_reuse_submission_records_and_attributes_the_caller_session_id() -> None:
+    command = protocol.parse_submit(
+        submit_payload(request=valid_wire_request(session_id="sess-existing"))
+    )
+    key = admission.AdmissionKey(principal_id="principal-a", request_id="req-9")
+    run_id = admission.derive_run_id(key)
+    payload = admission.build_submission_artifact(
+        key=key,
+        run_id=run_id,
+        command=command,
+        digest=admission.compute_request_digest(command),
+        accepted_at="2026-07-22T00:00:00+00:00",
+        peer={"pid": 1, "uid": 1000, "gid": 1000},
+    )
+    assert payload["session_id"] == "sess-existing"
+    attribution = admission.validate_submission_artifact(payload, run_id=run_id)
+    assert attribution is not None
+    assert attribution.session_id == "sess-existing"
+
+
+# -- D4 scenarios 2 and 3: one request, one dispatch, however it arrives ------
+
+
+def test_a_post_terminal_duplicate_returns_the_same_facts_and_dispatches_once(
+    tmp_path: Path,
+) -> None:
+    """Scenario 2: a lost response costs the caller nothing and the agent nothing.
+
+    The caller retransmits after the Run is already over. It gets the same
+    ``run_id`` and the same ``session_id`` back, and no second Run is
+    constructed — so the prompt is never sent twice.
+    """
+
+    async def case():
+        harness = Harness(tmp_path, mode="complete")
+        caller = caller_for(principal_a())
+        payload = submit_payload(request=valid_wire_request(session_id=None))
+        try:
+            first = await harness.submit(caller, "dup-1", payload)
+            run_id = first["run_id"]
+            await asyncio.wait({harness.handlers.registry.task_for(run_id)})
+            assert not harness.handlers.registry.is_registered(run_id)
+
+            second = await harness.submit(caller, "dup-1", payload)
+
+            assert second == first
+            assert second["session_id"] == admission.derive_session_id_for_run(run_id)
+            # One construction, one run directory, one submission — ever.
+            assert len(harness.factory.calls) == 1
+            assert harness.event_store.create_calls == [run_id]
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_an_in_flight_duplicate_is_serialized_onto_the_same_submission(
+    tmp_path: Path,
+) -> None:
+    """Scenario 3: the duplicate arrives while the original is still running.
+
+    The keyed admission lock serializes the two attempts, the second resolves
+    through the *same* durable submission, and exactly one Run is constructed —
+    so exactly one ``session/new`` and one prompt dispatch can follow.
+    """
+
+    async def case():
+        harness = Harness(tmp_path)
+        caller = caller_for(principal_a())
+        payload = submit_payload(request=valid_wire_request(session_id=None))
+        real_register = harness.handlers.registry.register
+        first_in_register = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def gated_register(*args, **kwargs):
+            first_in_register.set()
+            await release_first.wait()
+            return await real_register(*args, **kwargs)
+
+        harness.handlers.registry.register = gated_register  # type: ignore[method-assign]
+        try:
+            original = asyncio.create_task(harness.submit(caller, "inflight-1", payload))
+            await first_in_register.wait()
+
+            # The duplicate must block on the keyed lock, not race past it.
+            duplicate = asyncio.create_task(
+                harness.submit(caller, "inflight-1", payload)
+            )
+            await asyncio.sleep(0)
+            assert not duplicate.done(), "the duplicate was not serialized"
+
+            release_first.set()
+            first = await original
+            second = await duplicate
+
+            assert second["run_id"] == first["run_id"]
+            assert second["session_id"] == first["session_id"]
+            assert second["accepted_at"] == first["accepted_at"]
+            # One construction: only one Run can reach session/new and prompt.
+            assert len(harness.factory.calls) == 1
+            assert harness.event_store.create_calls == [first["run_id"]]
+        finally:
+            release_first.set()
+            await harness.aclose()
+
+    run_async(case())

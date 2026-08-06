@@ -40,20 +40,19 @@ def test_run_session_drives_full_lifecycle(
         sessions_dir=fake_session_runtime.sessions_dir,
     )
 
-    # create -> send -> send -> status -> close, in order.
+    # create -> send -> send -> status, in order. Nothing closes the Session.
     assert fake_session_runtime.calls == [
         "create_session",
         "send",
         "send",
         "status",
-        "close",
     ]
 
     # One CallerResult per call.
     assert isinstance(results, list)
-    assert len(results) == 5
+    assert len(results) == 4
     assert all(isinstance(r, CallerResult) for r in results)
 
-    # The final view-model reflects a closed session lifecycle.
+    # The final view-model reflects a Session that remains durable.
     assert isinstance(view_model, CardViewModel)
-    assert view_model.session_lifecycle == "closed"
+    assert view_model.session_lifecycle == "durable"

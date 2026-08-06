@@ -196,7 +196,7 @@ def test_probe_policy_exec_role_is_ok_with_default_deny(valid_role_dict) -> None
 
 
 def test_probe_policy_persistent_role_is_ok(valid_role_dict) -> None:
-    result = probe_policy(_role(valid_role_dict, session={"strategy": "persistent"}))
+    result = probe_policy(_role(valid_role_dict, session={"lease_seconds": 900}))
 
     assert result["ok"] is True
     assert result["default_action"] == "deny"
@@ -356,7 +356,7 @@ def test_probe_session_readiness_reports_dir_and_file_modes(valid_role_dict) -> 
 def test_probe_session_readiness_reports_lease_for_persistent_role(valid_role_dict, tmp_path) -> None:
     work = tmp_path / "work"
     work.mkdir()
-    role = _role(valid_role_dict, work, session={"strategy": "persistent", "lease_seconds": 1234})
+    role = _role(valid_role_dict, work, session={"lease_seconds": 1234})
 
     result = probe_session_readiness(role)
 
@@ -370,7 +370,7 @@ def test_probe_session_readiness_surfaces_injected_expired_lock(
     # A real sessions dir with a provably expired lock is surfaced read-only.
     work = tmp_path / "work"
     work.mkdir()
-    role = _role(valid_role_dict, work, session={"strategy": "persistent"})
+    role = _role(valid_role_dict, work, session={"lease_seconds": 900})
     sessions_dir = tmp_path / "sessions"
     store = SessionStore(base_dir=sessions_dir)
     from agent_run_supervisor.workspace import validate_effective_cwd

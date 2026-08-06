@@ -1,7 +1,7 @@
-"""Slice 1 — versioned bounded UDS frame protocol (active plan §5).
+"""Versioned bounded UDS frame protocol (api_version 3).
 
 Pure protocol-layer contracts: NDJSON framing and byte caps, the closed
-v1 envelope/operation/error sets, request_id format and correlation, and
+envelope/operation/error sets, request_id format and correlation, and
 the strict submit wire mapping onto the untouched ``native_acp.spec``
 dataclasses. No sockets, no server, no I/O.
 """
@@ -24,7 +24,7 @@ from agent_run_supervisor.native_acp.spec import (
 
 _ABSENT = object()
 
-OPS_V1 = (
+OPS = (
     "server_info",
     "submit",
     "run_status",
@@ -32,10 +32,9 @@ OPS_V1 = (
     "run_cancel",
     "session_status",
     "session_list",
-    "session_close",
 )
 
-ERROR_CODES_V1 = {
+ERROR_CODES = {
     "UNSUPPORTED_API_VERSION",
     "UNKNOWN_OP",
     "MALFORMED_FRAME",
@@ -81,8 +80,7 @@ def valid_wire_request() -> dict:
         "owner": "hermes",
         "namespace": "hermes/doc-check",
         "agent_id": "fake-agent",
-        "session_reuse": "reuse",
-        "ars_session_id": "sess-arsd-1",
+        "session_id": "sess-arsd-1",
         "expected_binding_hash": None,
         "input_refs": [
             {"ref": "prompt:inline", "content_hash": "sha256:" + "a" * 64},
@@ -106,8 +104,7 @@ def expected_request() -> AgentRunRequest:
         owner="hermes",
         namespace="hermes/doc-check",
         agent_id="fake-agent",
-        session_reuse="reuse",
-        ars_session_id="sess-arsd-1",
+        session_id="sess-arsd-1",
         expected_binding_hash=None,
         input_refs=(InputRef(ref="prompt:inline", content_hash="sha256:" + "a" * 64),),
         requested_model="kimi-for-coding/k3",
@@ -138,16 +135,16 @@ def valid_submit_payload() -> dict:
 
 
 def test_api_version_constants() -> None:
-    assert protocol.ARSD_API_VERSION == 2
-    assert protocol.SUPPORTED_API_VERSIONS == (1, 2)
+    assert protocol.ARSD_API_VERSION == 3
+    assert protocol.SUPPORTED_API_VERSIONS == (3,)
 
 
 def test_operation_set_is_closed() -> None:
-    assert protocol.OPERATIONS_V1 == frozenset(OPS_V1)
+    assert protocol.OPERATIONS == frozenset(OPS)
 
 
 def test_error_code_set_is_closed() -> None:
-    assert protocol.ERROR_CODES_V1 == frozenset(ERROR_CODES_V1)
+    assert protocol.ERROR_CODES == frozenset(ERROR_CODES)
 
 
 def test_byte_caps_are_coherent() -> None:
@@ -217,7 +214,7 @@ def test_decode_frame_malformed(data: bytes) -> None:
 # --- request envelope -----------------------------------------------------
 
 
-@pytest.mark.parametrize("op", OPS_V1)
+@pytest.mark.parametrize("op", OPS)
 def test_parse_request_accepts_every_v1_op(op: str) -> None:
     parsed = protocol.parse_request(envelope(op=op))
     assert parsed.op == op
@@ -233,14 +230,15 @@ def test_parse_request_echoes_request_id_and_payload() -> None:
     assert parsed.payload == {"a": 1}
 
 
-@pytest.mark.parametrize("version", [_ABSENT, 0, 3, -1, "1", None, True])
+@pytest.mark.parametrize("version", [_ABSENT, 0, 1, 2, 4, -1, "3", None, True])
 def test_missing_or_unknown_api_version_reports_supported_list(version) -> None:
     err = _reject(
         "UNSUPPORTED_API_VERSION",
         protocol.parse_request,
         envelope(api_version=version),
     )
-    assert "1" in err.message
+    # The refusal names the served set, so a caller learns what to send.
+    assert "3" in err.message
 
 
 def test_api_version_error_takes_precedence_over_unknown_op() -> None:
@@ -356,7 +354,7 @@ def test_parse_submit_maps_field_for_field() -> None:
         mcp_snapshot_hashes=["sha256:" + "1" * 64],
         credential_refs=["slot-a"],
         limits=dict(custom_limits),
-        schema_version=2,
+        schema_version=3,
     )
     payload.update(cwd="/tmp/ws/sub", retry_of_run_id="run-prior")
 
@@ -387,7 +385,7 @@ def test_parse_submit_minimal_defaults() -> None:
 
     assert command.request == expected_request()
     assert command.request.limits == RunLimits()
-    assert command.request.schema_version == 2
+    assert command.request.schema_version == 3
     assert command.cwd is None
     assert command.retry_of_run_id is None
 
@@ -425,7 +423,7 @@ def test_r4_b4_parse_submit_accepts_a_missing_schema_version_as_the_current_one(
     payload = valid_submit_payload()
     payload["request"].pop("schema_version", None)
     command = protocol.parse_submit(payload)
-    assert command.request.schema_version == 2
+    assert command.request.schema_version == 3
 
 
 @pytest.mark.parametrize("key", ["argv", "env", "executable", "config_json"])
@@ -468,7 +466,7 @@ def test_parse_submit_rejects_unknown_nested_fields() -> None:
         ("credential_refs", [1]),
         ("mcp_snapshot_hashes", [None]),
         ("expected_binding_hash", 7),
-        ("ars_session_id", 7),
+        ("session_id", 7),
     ],
 )
 def test_parse_submit_rejects_bad_shapes(field: str, value) -> None:
@@ -829,3 +827,123 @@ def test_r6_b5_parse_submit_huge_float_limit_is_invalid_request(field: str) -> N
     # Must not become INTERNAL and must not leak the huge decimal.
     assert "INTERNAL" not in err.message
     assert "1" + "0" * 50 not in err.message
+
+
+# -- D1: the v3 no-close Session contract ------------------------------------
+#
+# One optional ``session_id`` replaces the ``session_reuse``/``ars_session_id``
+# pair, ``session_close`` leaves the operation set, and only ``api_version`` 3
+# is served. These pin the *boundary*: what a frame may say, and what it may not.
+
+
+def _v3_request_fields() -> dict:
+    """A minimal valid v3 request object (no Session field at all)."""
+    return {
+        "owner": "team",
+        "namespace": "team/ns",
+        "agent_id": "native-agent",
+        "expected_binding_hash": None,
+        "input_refs": [],
+        "requested_model": "m",
+        "requested_effort": "high",
+        "grant_ref": "grant:1",
+        "grant_hash": "h" * 8,
+        "grant_role_hash": "r" * 8,
+        "grant_capabilities": ["read"],
+        "mcp_snapshot_hashes": [],
+        "credential_refs": [],
+        "limits": {},
+        "evidence_policy_hash": "e" * 8,
+        "recovery_policy_hash": "y" * 8,
+    }
+
+
+def _v3_submit_payload(**request_overrides) -> dict:
+    request = _v3_request_fields()
+    request.update(request_overrides)
+    return {
+        "request": request,
+        "prompt_text": "hello",
+        "workspace_root": "/work",
+    }
+
+
+def test_v3_submit_without_session_id_creates_a_new_session() -> None:
+    command = protocol.parse_submit(_v3_submit_payload())
+    assert command.request.session_id is None
+
+
+def test_v3_submit_with_session_id_is_existing_only_reuse() -> None:
+    command = protocol.parse_submit(_v3_submit_payload(session_id="sess-abc"))
+    assert command.request.session_id == "sess-abc"
+
+
+def test_v3_submit_rejects_the_retired_session_reuse_field() -> None:
+    with pytest.raises(protocol.ProtocolError) as err:
+        protocol.parse_submit(_v3_submit_payload(session_reuse="none"))
+    assert err.value.code == protocol.INVALID_REQUEST
+
+
+def test_v3_submit_rejects_the_retired_ars_session_id_field() -> None:
+    with pytest.raises(protocol.ProtocolError) as err:
+        protocol.parse_submit(_v3_submit_payload(ars_session_id="sess-abc"))
+    assert err.value.code == protocol.INVALID_REQUEST
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["", "../escape", "a/b", "a b", ".hidden", "-leading", "sess\x00"],
+)
+def test_v3_submit_validates_session_id_grammar_before_storage(bad: str) -> None:
+    """Grammar is a wire fact: nothing may reach the store to find out."""
+    with pytest.raises(protocol.ProtocolError) as err:
+        protocol.parse_submit(_v3_submit_payload(session_id=bad))
+    assert err.value.code == protocol.INVALID_REQUEST
+    # The offending value never reaches the bounded message (stable-error rule).
+    assert not bad or bad not in err.value.message
+
+
+def test_session_close_is_not_an_operation() -> None:
+    assert "session_close" not in protocol.OPERATIONS
+    assert protocol.OPERATIONS == frozenset(
+        {
+            "server_info",
+            "submit",
+            "run_status",
+            "run_events",
+            "run_cancel",
+            "session_status",
+            "session_list",
+        }
+    )
+
+
+# -- B1: absent creates; present null is not a create ------------------------
+#
+# "Absent" and "present null" are different caller statements. Absent says "I
+# have no Session"; present null says "my Session is the null value", which is
+# not a Session. Collapsing them lets a caller that *meant* to reuse — and whose
+# id-producing code returned None — silently start a second conversation.
+
+
+def test_absent_session_id_is_the_only_thing_that_creates() -> None:
+    payload = _v3_submit_payload()
+    assert "session_id" not in payload["request"]
+    command = protocol.parse_submit(payload)
+    assert command.request.session_id is None
+
+
+def test_a_present_null_session_id_is_refused_before_any_side_effect() -> None:
+    request = _v3_request_fields()
+    request["session_id"] = None
+    with pytest.raises(protocol.ProtocolError) as err:
+        protocol.parse_submit(
+            {"request": request, "prompt_text": "hello", "workspace_root": "/work"}
+        )
+    assert err.value.code == protocol.INVALID_REQUEST
+    assert "session_id" in err.value.message
+
+
+def test_the_session_field_is_not_in_the_generic_nullable_set() -> None:
+    """Structural: it needs its own rule, or absent and null collapse again."""
+    assert "session_id" not in protocol._NULLABLE_REQUEST_FIELDS

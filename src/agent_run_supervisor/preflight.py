@@ -449,7 +449,7 @@ def probe_session_readiness(
         "stale_locks": [],
         "error_detail": None,
     }
-    if role is not None and role.session.strategy == "persistent":
+    if role is not None:
         payload["lease_seconds"] = role.session.lease_seconds
     try:
         with tempfile.TemporaryDirectory() as tmp:
@@ -469,12 +469,12 @@ def probe_session_readiness(
 def _session_mode_probe(tmp_dir: Path, role) -> tuple[bool, bool]:
     """Create a synthetic session store under ``tmp_dir`` and check artifact modes.
 
-    A persistent role exercises the real ``SessionStore.create_session`` path; any
-    other case (role-less or exec role) just asserts the sessions root + a probe
-    file get the secure 0700/0600 modes. Synthetic only — never the live root.
+    With a role, this exercises the real ``SessionStore.create_session`` path;
+    role-less, it just asserts the sessions root + a probe file get the secure
+    0700/0600 modes. Synthetic only — never the live root.
     """
     sessions_root = tmp_dir / "sessions"
-    if role is not None and role.session.strategy == "persistent":
+    if role is not None:
         store = SessionStore(base_dir=sessions_root)
         workspace_result = _workspace.validate_effective_cwd(role, None)
         store.create_session(

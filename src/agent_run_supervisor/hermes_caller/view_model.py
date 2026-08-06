@@ -59,7 +59,7 @@ class CardViewModel:
     supervisor_status: str | None = None      # evidence chip, NOT a verdict
     findings_text: str | None = None          # redacted final_message, untrusted
     verdict: VerdictDecision | None = None     # caller-owned banner
-    session_lifecycle: str | None = None       # opened | alive | closed
+    session_lifecycle: str | None = None       # opened | alive | durable
     evidence_ref: str | None = None            # local run_dir/session_dir; no upload
 
 

@@ -119,15 +119,49 @@ the same check against a constant frozen months earlier. A profile or registry e
 ### R4 — Session continuity, closed start plan, and between-Run switching
 
 - v1 is process-per-Run; the AGENT process lifetime is contained within one Run.
+- **Runs terminate; Sessions do not close.** There is exactly one Session kind:
+
+  ```text
+  Session: create → reuse → reuse → indefinitely resumable
+  Run:     create → execute → terminal
+  ```
+
+  A Session has no normal terminal state, no one-shot or ephemeral variant, and no close/revoke alias. ARS
+  has no observable business event meaning "the user is finished with this conversation": a caller may
+  continue immediately, return months later, change topic, or never return, and neither Run completion nor
+  silence proves abandonment. External AGENT context is durable state rather than a resident ARS process,
+  so normal operation needs no close transition.
 - One ARS Session binds one external AGENT Session ID plus the complete identity field set of R13's
   registry model: `agent_id`, profile id/revision/hash, owner/namespace, `workspace_hash`, and the
   optional operator-controlled `session_epoch`. The external AGENT remains conversation/context authority.
 - Admission derives a **closed start plan** from the immutable request before any Session-store recovery
-  behavior. A reuse request opens the named Session **existing-only**: an absent record fails, a corrupt
+  behavior. The Session portion of the request is exactly one optional field, `session_id`:
+
+  | Input | Meaning |
+  |---|---|
+  | `session_id` absent | create one new durable Session and execute its first Run |
+  | `session_id` present | existing-only reuse of that Session |
+  | unknown or invalid `session_id` | stable refusal; never create a replacement |
+
+  A reuse request opens the named Session **existing-only**: an absent record fails, a corrupt
   record fails, and neither branch creates a record. Reuse then validates the full binding with the
   load-time gate **before** acquiring the lease and requires a non-empty stored external ID. Only then may
-  it load. A new-session plan is constructible **only** from a request whose reuse intent is "none", and
-  it is the only path allowed to create a Session record without an external ID.
+  it load. A create plan is constructible **only** from a request that carries no `session_id`.
+- Creation is atomic with the first Run. There is no standalone `session_create` operation, because empty
+  Sessions have no product use and a two-step creation can be abandoned. The create path derives the
+  prospective `session_id` deterministically from the same authenticated principal/`request_id` identity
+  that determines the Run, so repeating a lost request returns the same Run and Session facts instead of
+  creating a second Session. The durable submission record — not an in-memory lock — is that reservation;
+  the keyed admission lock only serializes concurrent live attempts.
+- There is no provisional or unbound Session record. Before `session/new`, the prospective `session_id`
+  exists only in the sealed submission/Spec identity and the live keyed admission lock. After `session/new`
+  succeeds, ARS atomically persists **one fully bound Session record** carrying the exact external AGENT
+  Session ID, before the dispatch marker. If creation fails before that commit, `run_status` reports the
+  terminal failed Run and `session_status` for the prospective ID returns the stable unknown/not-found
+  result, so a failed creation is never mistaken for a resumable Session. A provider context created by
+  `session/new` but never durably bound may become an unreachable provider-side orphan: ARS does not guess
+  its ID, scan AGENT-owned storage, or convert it into a Session. The ordering makes that safe, because the
+  prompt was not sent.
 - Later Runs use real `session/load` on the stored external ID, sent **byte-unchanged** — no trimming,
   Unicode normalization, parsing, case conversion, canonicalization, or regeneration — and **no identity
   field is read out of the response**. Reuse is proven by a successful load whose `config_options` seed
@@ -147,14 +181,26 @@ the same check against a constant frozen months earlier. A profile or registry e
   entry for the first time cuts that agent's existing Sessions, because absent ≠ 1** — the same deliberate
   act as a bump.
 - model/effort are immutable per Run but may change between completed Runs under the Session lease.
-- Partial switching failure sends no prompt. Exact rollback to the previous observed configuration
-  reopens the Session; failed or unprovable rollback quarantines it.
+- Partial switching failure sends no prompt. Exact rollback to the previous observed configuration leaves
+  the Session reusable; failed or unprovable rollback quarantines it.
 - Changing AGENT type requires a new Session plus caller-owned, explicit context handoff.
+- **A Session record retains identity and continuity evidence only:** `session_id`, owner and namespace,
+  `agent_id`, profile identity, workspace binding, the optional operator `session_epoch`, the external
+  AGENT session id, creation and last-use timestamps, the last observed effective model/effort, and
+  optional quarantine evidence. It carries no `state = open | active | closed`, no `closed_at`, no close
+  reason or source, no ephemeral/persistent flag, and no reuse mode as identity.
 
 ### R5 — Terminal state, uncertainty, and duplicate prevention
 
 The Native terminal vocabulary includes `completed | failed | cancelled | timed_out | unknown`; all
-terminal states are irreversible. Sessions include persistent `active | closed | quarantined`.
+terminal states are irreversible. **They are Run terminals only** — no member of that vocabulary is a
+Session state, and every trustworthy Run terminal releases the Session lease while leaving the Session
+resumable. `run_cancel` affects only the current Run. Daemon restart performs reconciliation only.
+
+Quarantine is not a lifecycle state. It is optional, independent safety evidence on a Session — a reason
+code, the source Run, and when it was recorded — written when continuity is machine-proven unsafe. A
+quarantined Session still exists and stays queryable, and it refuses new Runs. There is no unquarantine
+operation.
 
 Persist two dispatch markers:
 
@@ -180,7 +226,7 @@ no unquarantine tool.
 - Production ingress is a local Unix socket in a `0700` directory with a `0600` socket; no TCP or root.
 - `arsd` authenticates peer credentials with `SO_PEERCRED`, enforces an approved caller UID policy, and
   records owner identity on Runs/Sessions.
-- Only the owner may query, stream, cancel, or close its resources.
+- Only the owner may query, stream, or cancel its resources.
 - Exact UID values and policy ownership are gate G12, closed as a recorded operator decision. The
   repository never stores a production mapping value; it reaches the daemon only as `--caller-mapping`
   arguments supplied by the operator.
@@ -272,6 +318,17 @@ guarantees. ARS makes no isolation claim either way.
 - One writer owns each Run event stream with monotonic sequence and bounded queue/bytes.
 - The ledger supports supervision, recovery, duplicate prevention, progress, config/result proof, and
   audit. It is not a second AGENT conversation database.
+- **Session identity records are small and durable by default.** Silence, age, Run completion, daemon
+  restart, and caller disconnection never imply Session expiry, so retention never treats a Session
+  directory as a deletion candidate at all. A live lease and quarantine are query/admission facts, not
+  deletion eligibility.
+- **Run retention may prune bulky evidence only after a trustworthy terminal exists**, and it must
+  preserve a minimal immutable idempotency and attribution spine inside the Run directory — at least the
+  durable submission, the sealed Spec/launch attribution, and the terminal result that duplicate-submit
+  handling and reconciliation depend on. Event streams, bounded stderr, and other non-authority bulk
+  evidence may be pruned without ever making an authenticated `request_id` dispatchable again. Any
+  destructive Session-data purge, or deletion of that minimal Run spine, is a separate
+  administrator/data-governance design that does not exist here.
 - Evidence tiers never substitute for each other:
   - A: pre-implementation compatibility probes — context only;
   - B: direct-drive real-AGENT evidence;
@@ -301,23 +358,26 @@ guarantees. ARS makes no isolation claim either way.
 
 ### R11 — Compatibility, migration, and no fallback
 
-- The caller wire moves to `api_version` 2, because the primary selector's meaning changes: `profile_id`
-  stops selecting a launch and `agent_id` starts. Silently reinterpreting a v1 frame is exactly the quiet
-  fallback this product forbids.
-- The drain window is defined **per operation** on the creating-versus-non-creating axis. Of the eight
-  operations, only `submit` is refused at `api_version: 1`. `server_info` stays **accepted** because it is
-  the version/capability discovery operation — refusing it would leave a v1 caller unable to discover
-  *that* it must upgrade — and during the window it reports the supported version set including 2.
-  `run_cancel` and `session_close` are state-mutating but non-creating, owner-scoped, and only ever narrow
-  what is running; they stay accepted so in-flight v1 Runs can be stopped and their Sessions closed. The
-  window exists to drain, not to operate.
+- The caller wire is `api_version` 3, and 3 is the **only** version the daemon and the repository client
+  accept or send. v3 is an unambiguous contract marker for the no-close Session model: the request drops
+  `session_reuse` and `ars_session_id` for one optional `session_id`, and the operation set drops
+  `session_close`. Silently reinterpreting an older frame is exactly the quiet fallback this product
+  forbids.
+- **There is no drain window, per-operation version matrix, dual protocol, alias, shim, or old-client
+  grace period, because there is no external or production ARS client population to preserve.** ARS is
+  developed and tested on one development machine. An unsupported `api_version` is refused on the
+  envelope, for every operation including `server_info`, with `UNSUPPORTED_API_VERSION`.
 - The **shutdown** drain is a separate mechanism and is unchanged: once shutdown begins, every frame,
-  including `server_info`, is answered with `SHUTTING_DOWN`. The version drain narrows versions only; it
+  including `server_info`, is answered with `SHUTTING_DOWN`. Version admission narrows versions only; it
   never relaxes peer authentication, caller-UID policy, or owner scoping.
 - Legacy Runs and Sessions stay readable through a value-blind projection (R15). Legacy Sessions carrying
   retired ARS-derived identity hashes are **refused for `session/load`** with a stable code while staying
-  owner-scoped `status`/`list`/`close`-readable. The new runtime cannot honor identities it no longer
+  owner-scoped `status`/`list`-readable. The new runtime cannot honor identities it no longer
   models and must not pretend it can, and there is no silent `session/new`.
+- No online schema migration, no dual-read or dual-write of old Session records, and no retention of
+  close-only legacy fixture behavior as a supported surface. Archiving operator-selected evidence and
+  rebuilding development Run/Session state at cutover is a separately approved operator action, never
+  something source implementation performs.
 - The one-time legacy-Session load refusal is a **deliberate continuity loss and a human decision**: every
   live Session at cutover ends, and continuing that work means a new Session with caller-owned context
   handoff.
@@ -558,10 +618,20 @@ under its own decision, for the reason recorded in R15, and the structural half 
 ### Stage 3 — The boundary reset
 
 Land the operator registry read once at startup, two source profiles, value-blind sealed launch material
-with once-only environment resolution, `api_version` 2 with the eight-operation drain matrix,
-`--agents-file`, the operator validate/doctor/inspect surface, and value-blind legacy inspection. Deleting
-the three per-agent profiles from source is a **separate confirmation** on top of source-implementation
-approval, because introducing a retirement capability and using it are two decisions.
+with once-only environment resolution, the `agent_id` caller wire, `--agents-file`, the operator
+validate/doctor/inspect surface, and value-blind legacy inspection. Deleting the three per-agent profiles
+from source is a **separate confirmation** on top of source-implementation approval, because introducing a
+retirement capability and using it are two decisions.
+
+### Stage 4 — The Session no-close model
+
+Replace the artificial Session closing lifecycle with the one durable, resumable Session of R4/R5: the
+optional `session_id` request field, atomic create-plus-first-Run with deterministic prospective identity,
+one fully bound Session record committed before the dispatch marker, quarantine as independent evidence,
+Session directories excluded from retention deletion with a minimal immutable Run idempotency/attribution
+spine preserved, and `api_version` 3 as a single-version clean cutover. Runtime cutover — archiving or
+rebuilding development Run/Session state and restarting the daemon — is a separate operator action after
+merge, not part of the stage.
 
 Acceptance per stage is proven by real tests, not by prose. Real-provider evidence, deployment, service
 restart, migration/cutover, and publication each remain separate operator decisions after every gate.
@@ -581,8 +651,8 @@ source position.
   service/cgroup containment) are implemented on `main` with their acceptance closed.
 - **Authority and source are aligned on `main`.** Every requirement above, R13–R15 included, has merged
   source: the agent registry read once at startup, the four-way boundary, value-blind sealed launch
-  material with once-only environment resolution, observed-evidence demotion, `api_version` 2 with the
-  eight-operation drain matrix, `--agents-file`, and the validate/doctor/inspect operator surface. The
+  material with once-only environment resolution, observed-evidence demotion, `api_version` 3 as the sole
+  accepted caller wire, `--agents-file`, and the validate/doctor/inspect operator surface. The
   retired artifact/Binding implementation and the three per-agent profiles are deleted from source; the
   retired authority is preserved at `docs/archive/binding-era-2026-07/`.
 - **Merge, publication, and deployment stay three separate facts.** Published package/release facts come

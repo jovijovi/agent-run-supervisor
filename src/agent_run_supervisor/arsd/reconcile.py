@@ -27,6 +27,9 @@ from agent_run_supervisor.event_store import EventStore, atomic_write_json
 from agent_run_supervisor.exit_classifier import _RETRYABLE_DEFAULT, AgentRunStatus
 from agent_run_supervisor.native_acp import storage
 from agent_run_supervisor.native_acp.run_task import (
+    CONFIG_PROVEN_MARKER,
+    CONFIG_ROLLBACK_PROVEN_MARKER,
+    CONFIG_SWITCH_STARTED_MARKER,
     DISPATCH_STARTED_MARKER,
     PROMPT_ACCEPTED_MARKER,
 )
@@ -39,9 +42,11 @@ from agent_run_supervisor.native_acp.spec import (
 )
 from agent_run_supervisor.result import build_result_payload
 from agent_run_supervisor.session import (
-    STATE_OPEN,
-    STATE_QUARANTINED,
+    QUARANTINE_RECONCILED_DISPATCH_WITHOUT_TERMINAL,
+    QUARANTINE_SWITCH_ROLLBACK_UNPROVEN,
     SessionStore,
+    derive_session_id_for_run,
+    is_valid_session_id,
     read_native_session_record,
 )
 
@@ -56,9 +61,8 @@ _LAUNCH_NAME = "launch.json"
 
 _DETAIL_RECONCILED_UNKNOWN = "RECONCILED_UNKNOWN"
 _DETAIL_RECONCILED_PRE_DISPATCH = "RECONCILED_PRE_DISPATCH"
-_QUARANTINE_REASON = (
-    "reconciled: dispatched run without a trustworthy ACP terminal"
-)
+_QUARANTINE_REASON_CODE = QUARANTINE_RECONCILED_DISPATCH_WITHOUT_TERMINAL
+_SWITCH_QUARANTINE_REASON_CODE = QUARANTINE_SWITCH_ROLLBACK_UNPROVEN
 
 # Stable categorical refusal rules. Each names a rule and nothing else: no run
 # id, no session id, no path, no artifact bytes.
@@ -79,8 +83,6 @@ _REFUSAL_BY_ROW = {
     10: REFUSE_LAUNCH_WITHOUT_SPEC,
     11: REFUSE_CORRUPT_SUBMISSION,
 }
-
-_REUSE_MODES = ("reuse", "none")
 
 DOC = storage.JsonDocumentKind
 
@@ -132,6 +134,12 @@ class RunFacts:
 
     The first six fields are the **only** inputs to row selection, and
     ``actionable`` is the only Session-derived one of them.
+
+    ``switch_unproven`` is deliberately **not** a row input. It does not change
+    which row a Run is: an interrupted configuration switch with no dispatch
+    marker is still the pre-dispatch row. It changes what that row does to the
+    *Session*, exactly as the fence does — so the exhaustive table stays the
+    size it was, and the new fact composes with it instead of doubling it.
     """
 
     terminal: TerminalClass
@@ -143,6 +151,7 @@ class RunFacts:
     attribution: Attribution | None = None
     terminal_payload: dict[str, Any] | None = None
     run_id: str = ""
+    switch_unproven: bool = False
 
 
 # -- classification ----------------------------------------------------------
@@ -177,6 +186,39 @@ def _dispatch_present(run_dir: Path) -> bool:
             return True
         return True
     return False
+
+
+def _marker_present(run_dir: Path, name: str) -> bool:
+    """Present when ``lstat`` finds the name, whatever shape it has.
+
+    Exactly the dispatch-marker rule, for exactly the dispatch-marker reason: a
+    symlink, a directory, a truncated file, or any I/O result that cannot prove
+    clean absence is still evidence that the boundary was crossed. Only a clean
+    ``ENOENT`` proves it was not.
+    """
+    try:
+        os.lstat(run_dir / name)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _switch_unproven(run_dir: Path) -> bool:
+    """True when a configuration set may have landed and nothing proved it.
+
+    The asymmetry is deliberate. "Started" is believed on any evidence at all,
+    because a set that may have been written moved the agent. A *proof* is
+    believed only on a clean present marker, because claiming proof from an
+    unreadable byte is how an unproven Session gets handed to a prompt.
+    """
+    if not _marker_present(run_dir, CONFIG_SWITCH_STARTED_MARKER):
+        return False
+    proven = _marker_present(run_dir, CONFIG_PROVEN_MARKER) or _marker_present(
+        run_dir, CONFIG_ROLLBACK_PROVEN_MARKER
+    )
+    return not proven
 
 
 def _classify_terminal(
@@ -228,24 +270,15 @@ def _spec_attribution(payload: Any, *, run_id: str) -> Attribution | None:
     session = payload.get("session")
     if not isinstance(session, dict):
         return None
-    reuse = session.get("reuse")
-    if reuse not in _REUSE_MODES:
-        return None
-    ars_session_id = session.get("ars_session_id")
-    if reuse == "reuse":
-        if not _nonempty_str(ars_session_id):
-            return None
-        session_id = ars_session_id
+    declared_session_id = session.get("session_id")
+    if declared_session_id is None:
+        # A create: the Session this Run would have made is named by the same
+        # single rule the runtime uses, from the Run identity this Spec seals.
+        session_id = derive_session_id_for_run(run_id)
+    elif is_valid_session_id(declared_session_id):
+        session_id = declared_session_id
     else:
-        # A non-reuse request may still carry an id: the request model requires
-        # one only in the reuse direction, and the writer copies whatever it
-        # was given. Runtime Session selection ignores it, so the durable
-        # validator accepts the document and derives only the deterministic
-        # ephemeral id — the stray value never becomes attribution authority.
-        # Its *type* domain is unchanged: null, or a non-empty string.
-        if ars_session_id is not None and not _nonempty_str(ars_session_id):
-            return None
-        session_id = f"{run_id}-ephemeral"
+        return None
     agent = payload.get("agent")
     if not isinstance(agent, dict):
         return None
@@ -307,19 +340,28 @@ def _classify_launch(
 def _is_actionable(
     attribution: Attribution | None, *, session_store: SessionStore
 ) -> bool:
-    """An already-existing, strictly readable, matching, usable record.
+    """An already-existing, strictly readable, matching record.
 
-    Never creates, reopens, or repairs anything: a missing, unreadable,
-    foreign, or closed record simply is not actionable.
+    Never creates or repairs anything: a missing, unreadable, or foreign record
+    simply is not actionable. Existing quarantine evidence does **not** make a
+    record less actionable — converging quarantine on an already-quarantined
+    Session is a no-op, and refusing there would turn an idempotent rerun into
+    a startup refusal.
+
+    A create Run that crashed before committing its one bound record resolves
+    here to "no record", which is exactly right: nothing was dispatched, so
+    there is nothing to fence, and ``session_status`` answers unknown for the
+    prospective id.
     """
     if attribution is None:
         return False
     record = read_native_session_record(session_store, attribution.session_id)
     if record is None:
         return False
-    if record.owner != attribution.owner or record.namespace != attribution.namespace:
-        return False
-    return record.state in (STATE_OPEN, STATE_QUARANTINED)
+    return (
+        record.owner == attribution.owner
+        and record.namespace == attribution.namespace
+    )
 
 
 def classify_run(run_dir: Path, *, session_store: SessionStore) -> RunFacts:
@@ -369,6 +411,7 @@ def classify_run(run_dir: Path, *, session_store: SessionStore) -> RunFacts:
     return RunFacts(
         terminal=terminal,
         dispatch=dispatch,
+        switch_unproven=_switch_unproven(run_dir),
         spec=spec_kind,
         launch=launch_kind,
         submission=submission_state.kind,
@@ -501,9 +544,19 @@ def _apply(
             )
         return
 
-    # Pre-dispatch: one failed terminal, no Session mutation, no progress. The
-    # Session (if any) stays reusable — reconciliation certifies nothing about
-    # it and a later reuse must still pass the load proof.
+    # Pre-dispatch. No prompt was sent, so the Run is simply failed — but the
+    # Session is only left reusable when the configuration it was left in is
+    # known. A set that may have landed with neither an exact-readback proof nor
+    # a proven rollback leaves a Session nobody can describe, and handing that
+    # to a later prompt is the thing this row exists to prevent.
+    if decision.outcome is Outcome.PRE_DISPATCH_FAILED and facts.switch_unproven:
+        if facts.actionable:
+            _fence_and_quarantine(
+                session_store,
+                facts=facts,
+                run_id=run_id,
+                reason_code=_SWITCH_QUARANTINE_REASON_CODE,
+            )
     _write_terminal_result(
         run_dir,
         run_id=run_id,
@@ -520,7 +573,11 @@ def _refuse(row: int, *, run_id: str) -> None:
 
 
 def _fence_and_quarantine(
-    session_store: SessionStore, *, facts: RunFacts, run_id: str
+    session_store: SessionStore,
+    *,
+    facts: RunFacts,
+    run_id: str,
+    reason_code: str = _QUARANTINE_REASON_CODE,
 ) -> None:
     """Fence first, then quarantine; both idempotent, both fail closed.
 
@@ -533,21 +590,21 @@ def _fence_and_quarantine(
     assert attribution is not None  # actionable implies attributed
     session_id = attribution.session_id
     record = read_native_session_record(session_store, session_id)
-    if record is not None and record.state == STATE_QUARANTINED:
+    if record is not None and record.quarantine is not None:
         # Already converged: an already-quarantined Session is a no-op on every
         # rerun. The one exception is a fence left behind by a crash between
         # the two writes — clearing it is what ``mark_quarantined`` already
         # does idempotently, and it needs no second fence to do it.
         if session_store.has_quarantine_pending(session_id):
             session_store.mark_quarantined(
-                session_id, reason=_QUARANTINE_REASON, run_id=run_id
+                session_id, reason_code=reason_code, run_id=run_id
             )
         return
     session_store.write_quarantine_pending(
-        session_id, reason=_QUARANTINE_REASON, run_id=run_id
+        session_id, reason_code=reason_code, run_id=run_id
     )
     session_store.mark_quarantined(
-        session_id, reason=_QUARANTINE_REASON, run_id=run_id
+        session_id, reason_code=reason_code, run_id=run_id
     )
 
 

@@ -1,9 +1,14 @@
-"""Versioned bounded NDJSON frame protocol for the ``arsd`` UDS ingress (v1).
+"""Versioned bounded NDJSON frame protocol for the ``arsd`` UDS ingress (v3).
 
-Pure protocol layer: framing and byte caps, envelope validation, the
-closed v1 operation/error sets, and the submit wire mapping onto the
-untouched ``native_acp.spec`` dataclasses. No sockets, no I/O, no daemon
-state. Error messages are bounded and never echo caller payload text.
+Pure protocol layer: framing and byte caps, envelope validation, the closed
+operation/error sets, and the submit wire mapping onto the untouched
+``native_acp.spec`` dataclasses. No sockets, no I/O, no daemon state. Error
+messages are bounded and never echo caller payload text.
+
+v3 is the Session no-close wire: the request carries one optional
+``session_id`` — absent creates a durable Session, present is existing-only
+reuse — and ``session_close`` is not an operation, because Runs terminate and
+Sessions do not close.
 """
 
 from __future__ import annotations
@@ -14,12 +19,14 @@ import re
 from typing import Any, Mapping
 
 from ..native_acp.spec import AgentRunRequest, InputRef, NativeSpecError, RunLimits
+from ..session import is_valid_session_id
 
-ARSD_API_VERSION = 2
-# Both versions are served during the drain window. v1 is not a compatibility
-# shim: it is the *same* wire for seven of eight operations, and the eighth is
-# the only one whose payload shape actually moved.
-SUPPORTED_API_VERSIONS = (1, 2)
+ARSD_API_VERSION = 3
+# Exactly one served version. There is deliberately no drain window, dual
+# protocol, alias, or shim: no external or production caller population exists,
+# so a compatibility mechanism would be a mechanism for nobody. The verdict is
+# therefore an *envelope* verdict, judged once for every operation.
+SUPPORTED_API_VERSIONS = (3,)
 
 MAX_FRAME_BYTES = 1_048_576
 MAX_PROMPT_BYTES = 262_144
@@ -55,7 +62,7 @@ EVENT_BACKLOG_EXCEEDED = "EVENT_BACKLOG_EXCEEDED"
 SHUTTING_DOWN = "SHUTTING_DOWN"
 INTERNAL = "INTERNAL"
 
-ERROR_CODES_V1 = frozenset(
+ERROR_CODES = frozenset(
     {
         UNSUPPORTED_API_VERSION,
         UNKNOWN_OP,
@@ -77,7 +84,7 @@ ERROR_CODES_V1 = frozenset(
     }
 )
 
-OPERATIONS_V1 = frozenset(
+OPERATIONS = frozenset(
     {
         "server_info",
         "submit",
@@ -86,20 +93,8 @@ OPERATIONS_V1 = frozenset(
         "run_cancel",
         "session_status",
         "session_list",
-        "session_close",
     }
 )
-
-# The operations whose payload shape moved at ``api_version`` 2, and therefore
-# the only ones a v1 caller may not use. ``submit`` moved because the request
-# drops ``profile_id`` and requires ``agent_id``; nothing else on the wire
-# changed, so refusing the other seven would break an in-flight caller for no
-# information gain.
-#
-# This is the *whole* rule. Judging it per operation — rather than on the
-# envelope — is what makes the drain window exist at all.
-V2_ONLY_OPERATIONS = frozenset({"submit"})
-MIN_API_VERSION_FOR_V2_ONLY = 2
 
 _ENVELOPE_KEYS = frozenset({"api_version", "op", "request_id", "payload"})
 _SUBMIT_KEYS = frozenset(
@@ -115,7 +110,14 @@ _REQUIRED_REQUEST_FIELDS = tuple(
     if field.default is dataclasses.MISSING
     and field.default_factory is dataclasses.MISSING
 )
-_NULLABLE_REQUEST_FIELDS = frozenset({"ars_session_id", "expected_binding_hash"})
+_NULLABLE_REQUEST_FIELDS = frozenset({"expected_binding_hash"})
+
+# ``session_id`` is deliberately NOT in the nullable set. Absent and present-null
+# are different caller statements: absent says "I have no Session", present null
+# says "my Session is the null value", which is not a Session. Collapsing them
+# lets a caller that meant to reuse — and whose id-producing code returned None —
+# silently start a second conversation against the same agent. So the field gets
+# its own rule: omit it to create, or send a valid id to reuse.
 _STRING_TUPLE_REQUEST_FIELDS = frozenset(
     {"grant_capabilities", "mcp_snapshot_hashes", "credential_refs"}
 )
@@ -125,11 +127,11 @@ _INPUT_REF_FIELDS = frozenset(field.name for field in dataclasses.fields(InputRe
 
 
 class ProtocolError(Exception):
-    """A v1 protocol violation carrying a code from the closed error set."""
+    """A protocol violation carrying a code from the closed error set."""
 
     def __init__(self, code: str, message: str) -> None:
-        if code not in ERROR_CODES_V1:
-            raise ValueError(f"unknown v1 error code: {code!r}")
+        if code not in ERROR_CODES:
+            raise ValueError(f"unknown error code: {code!r}")
         bounded = _bound_message(message)
         super().__init__(bounded)
         self.code = code
@@ -268,13 +270,11 @@ def _unsupported_version_error() -> ProtocolError:
 
 
 def parse_request(frame: Mapping[str, Any]) -> ParsedRequest:
-    """Validate one request envelope and decide the version **per operation**.
+    """Validate one request envelope against the single served version.
 
-    Order matters and is the contract. The envelope's job is to establish that
-    the declared version is one this server serves at all; deciding whether
-    *this operation* is available at *that* version needs the operation, so it
-    happens after the op is resolved. A version verdict on the envelope alone
-    would refuse a v1 caller outright and there would be no drain window.
+    One version means one verdict, taken on the envelope before the operation
+    is even resolved. A per-operation matrix would be a drain window, and a
+    drain window exists to let a caller population migrate — there is none.
     """
     if not isinstance(frame, Mapping):
         raise ProtocolError(MALFORMED_FRAME, "request frame must be a JSON object")
@@ -292,11 +292,8 @@ def parse_request(frame: Mapping[str, Any]) -> ParsedRequest:
         )
     _require_closed_keys(frame, _ENVELOPE_KEYS, "envelope")
     op = frame.get("op")
-    if not isinstance(op, str) or op not in OPERATIONS_V1:
+    if not isinstance(op, str) or op not in OPERATIONS:
         raise ProtocolError(UNKNOWN_OP, "unknown op")
-    # Per-operation dispatch: the one rule, applied where the operation is known.
-    if op in V2_ONLY_OPERATIONS and api_version < MIN_API_VERSION_FOR_V2_ONLY:
-        raise _unsupported_version_error()
     payload = frame.get("payload", {})
     if not isinstance(payload, dict):
         raise _invalid("payload must be a JSON object")
@@ -310,8 +307,8 @@ def build_result(request_id: str, result: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def build_error(request_id: str | None, code: str, message: str) -> dict[str, Any]:
-    if code not in ERROR_CODES_V1:
-        raise ValueError(f"unknown v1 error code: {code!r}")
+    if code not in ERROR_CODES:
+        raise ValueError(f"unknown error code: {code!r}")
     return {
         "request_id": request_id,
         "error": {"code": code, "message": _bound_message(message)},
@@ -372,6 +369,17 @@ def _parse_request_object(value: Any) -> AgentRunRequest:
             elif name == "schema_version":
                 if isinstance(item, bool) or not isinstance(item, int):
                     raise _invalid("schema_version must be an integer")
+                kwargs[name] = item
+            elif name == "session_id":
+                # Present means reuse, so it must name a Session. A present null
+                # is refused here, before any storage access and long before a
+                # Session or Run side effect.
+                if not is_valid_session_id(item):
+                    raise _invalid(
+                        "request field session_id must be omitted to create a "
+                        "Session, or a safe session-store path component to "
+                        "reuse one"
+                    )
                 kwargs[name] = item
             elif name in _NULLABLE_REQUEST_FIELDS:
                 if item is not None and not isinstance(item, str):

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,11 +15,8 @@ from agent_run_supervisor import session_inspect
 from agent_run_supervisor.process_liveness import ProcessIdentity
 from agent_run_supervisor.session import (
     SESSION_JSON,
-    STATE_CLOSED,
-    STATE_OPEN,
-    STATE_QUARANTINED,
+    QUARANTINE_DISPATCH_OBSERVATION_LOST,
     SessionBindingError,
-    SessionClosedError,
     SessionLockError,
     SessionQuarantinedError,
     SessionRecord,
@@ -33,16 +31,18 @@ from agent_run_supervisor.session import (
 
 T0 = dt.datetime(2026, 7, 21, 0, 0, 0, tzinfo=dt.timezone.utc)
 
-# Golden bytes generated from the pre-change serializer at commit ec4cf34 —
-# the zero-migration proof that 0.1.7-shaped acpx records still serialize to
-# the exact same bytes.
+# Golden bytes for the legacy acpx record shape. Re-baselined at the Session
+# no-close model: the lifecycle ``state`` key is **deleted**, so these bytes
+# deliberately differ from the pre-change ones by exactly that key. Everything
+# else about a legacy record is byte-for-byte unchanged, which is what these
+# goldens still prove — no other key moved, gained a null, or reordered.
 LEGACY_GOLDEN_MINIMAL = (
     b'{\n  "acpx_session_id": null,\n  "acpx_version": "0.12.0",\n  "adapter_agent": "codex",\n'
     b'  "created_at": "2026-07-21T00:00:00+00:00",\n  "effective_cwd": "/work/project",\n'
     b'  "matched_root": "/work",\n  "policy_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",\n'
     b'  "role_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",\n'
     b'  "role_id": "doc-check",\n  "schema_version": 1,\n  "session_id": "legacy-sess-1",\n'
-    b'  "session_name": null,\n  "state": "open",\n  "updated_at": "2026-07-21T00:00:00+00:00",\n'
+    b'  "session_name": null,\n  "updated_at": "2026-07-21T00:00:00+00:00",\n'
     b'  "workspace_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"\n}'
 )
 LEGACY_GOLDEN_WITH_MCP = (
@@ -53,11 +53,12 @@ LEGACY_GOLDEN_WITH_MCP = (
     b'  "policy_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",\n'
     b'  "role_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",\n'
     b'  "role_id": "doc-check",\n  "schema_version": 1,\n  "session_id": "legacy-sess-2",\n'
-    b'  "session_name": "named",\n  "state": "closed",\n  "updated_at": "2026-07-21T01:00:00+00:00",\n'
+    b'  "session_name": "named",\n  "updated_at": "2026-07-21T01:00:00+00:00",\n'
     b'  "workspace_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"\n}'
 )
 
 NATIVE_KWARGS = dict(
+    agent_session_id="external-xyz",
     profile_id="opencode-1.18.4",
     profile_revision=1,
     profile_hash="e" * 64,
@@ -106,7 +107,6 @@ def test_legacy_records_serialize_byte_identical() -> None:
         adapter_agent="codex",
         effective_cwd="/work/project",
         matched_root="/work",
-        state="open",
         created_at="2026-07-21T00:00:00+00:00",
         updated_at="2026-07-21T00:00:00+00:00",
         acpx_session_id=None,
@@ -125,7 +125,6 @@ def test_legacy_records_serialize_byte_identical() -> None:
         adapter_agent="codex",
         effective_cwd="/work/project",
         matched_root=None,
-        state="closed",
         created_at="2026-07-21T00:00:00+00:00",
         updated_at="2026-07-21T01:00:00+00:00",
         acpx_session_id="acpx-abc",
@@ -143,8 +142,10 @@ def test_create_native_session_round_trip_and_exact_key_set(tmp_path: Path) -> N
     store = _store(tmp_path)
     record = _native(store)
     assert record.session_kind == "native"
-    assert record.state == STATE_OPEN  # canonical active persists as open
-    assert record.agent_session_id is None
+    assert record.quarantine is None
+    # Creation is atomic and fully bound: the external id is there from the
+    # record's first byte, and no second write completes it.
+    assert record.agent_session_id == "external-xyz"
 
     raw = json.loads(
         (store.base_dir / "native-1" / "session.json").read_text(encoding="utf-8")
@@ -156,62 +157,50 @@ def test_create_native_session_round_trip_and_exact_key_set(tmp_path: Path) -> N
         "workspace_hash",
         "effective_cwd",
         "matched_root",
-        "state",
         "created_at",
         "updated_at",
         "session_kind",
         "native_profile_id",
         "native_profile_revision",
         "native_profile_hash",
+        "agent_session_id",
         "owner",
         "namespace",
     }
-    assert raw["state"] == "open"
+    assert "state" not in raw
+    assert "quarantine" not in raw
     assert None not in raw.values()
 
     reopened = store.open_session("native-1")
     assert reopened == record
 
 
-def test_bind_agent_session_commits_exactly_once(tmp_path: Path) -> None:
+def test_creation_requires_the_external_session_id(tmp_path: Path) -> None:
+    """There is no unbound record, so there is nothing to bind later."""
     store = _store(tmp_path)
-    _native(store)
-    bound = store.bind_agent_session(
-        "native-1", agent_session_id="external-xyz", now=T0
-    )
-    assert bound.agent_session_id == "external-xyz"
-    with pytest.raises(SessionBindingError):
-        store.bind_agent_session("native-1", agent_session_id="external-xyz", now=T0)
-    with pytest.raises(SessionBindingError):
-        store.bind_agent_session("native-1", agent_session_id="other", now=T0)
-    assert store.open_session("native-1").agent_session_id == "external-xyz"
+    for missing in (None, "", 17):
+        with pytest.raises((SessionBindingError, TypeError)):
+            store.create_native_session(
+                session_id="native-unbound",
+                agent_session_id=missing,
+                **{**NATIVE_KWARGS, "now": T0},
+            )
+    assert not (store.base_dir / "native-unbound").exists()
 
 
-def test_active_open_state_bijection(tmp_path: Path) -> None:
-    from agent_run_supervisor.native_acp.storage import (
-        to_native_state,
-        to_persisted_state,
-    )
+def test_no_separate_binding_api_survives() -> None:
+    """A second write to complete a record is exactly what cannot exist."""
+    from agent_run_supervisor.native_acp import storage as storage_module
 
-    store = _store(tmp_path)
-    record = _native(store)
-    assert record.state == "open"  # persisted compatibility value
-    assert to_native_state(record.state) == "active"
-    assert to_persisted_state("active") == "open"
-    assert to_native_state("closed") == "closed"
-    assert to_persisted_state("closed") == "closed"
-    assert to_native_state("quarantined") == "quarantined"
-    assert to_persisted_state("quarantined") == "quarantined"
-    with pytest.raises(ValueError):
-        to_native_state("active")  # 'active' never persists
-    with pytest.raises(ValueError):
-        to_persisted_state("open")  # 'open' is not a canonical native state
+    assert not hasattr(SessionStore, "bind_agent_session")
+    assert not hasattr(storage_module, "bind_agent_session")
+    assert not hasattr(storage_module, "to_native_state")
+    assert not hasattr(storage_module, "to_persisted_state")
 
 
 def test_native_omit_when_unset_grows_with_observations(tmp_path: Path) -> None:
     store = _store(tmp_path)
     _native(store)
-    store.bind_agent_session("native-1", agent_session_id="external-xyz", now=T0)
     store.commit_last_effective(
         "native-1", model="kimi-for-coding/k3", effort="max", now=T0
     )
@@ -221,7 +210,7 @@ def test_native_omit_when_unset_grows_with_observations(tmp_path: Path) -> None:
     assert raw["agent_session_id"] == "external-xyz"
     assert raw["last_effective_model"] == "kimi-for-coding/k3"
     assert raw["last_effective_effort"] == "max"
-    assert "quarantine_reason" not in raw
+    assert "quarantine" not in raw
     assert "role_id" not in raw
     assert None not in raw.values()
     record = store.open_session("native-1")
@@ -284,26 +273,28 @@ def test_validate_native_binding_matrix(tmp_path: Path) -> None:
             namespace="hermes/other",
         )
 
-    # session/load path requires the committed external id.
-    with pytest.raises(SessionBindingError):
-        validate_native_binding(
-            record,
-            profile=_profile(),
-            workspace_result=_workspace(),
-            owner="hermes",
-            namespace="hermes/doc-check",
-            for_load=True,
-        )
-    store.bind_agent_session("native-1", agent_session_id="external-xyz", now=T0)
-    bound = store.open_session("native-1")
+    # The session/load path requires the committed external id, and a record
+    # created by this store always has one — an unbound record cannot exist.
+    assert record.agent_session_id == "external-xyz"
     validate_native_binding(
-        bound,
+        record,
         profile=_profile(),
         workspace_result=_workspace(),
         owner="hermes",
         namespace="hermes/doc-check",
         for_load=True,
     )
+    # The gate is still real: a record whose external id went missing is
+    # refused for load rather than silently re-created.
+    with pytest.raises(SessionBindingError):
+        validate_native_binding(
+            replace(record, agent_session_id=None),
+            profile=_profile(),
+            workspace_result=_workspace(),
+            owner="hermes",
+            namespace="hermes/doc-check",
+            for_load=True,
+        )
 
     # model/effort deltas are never a binding mismatch: a new Run's frozen
     # Spec is the legitimate switching input.
@@ -321,7 +312,7 @@ def test_validate_native_binding_matrix(tmp_path: Path) -> None:
 def test_validate_native_binding_refuses_quarantined(tmp_path: Path) -> None:
     store = _store(tmp_path)
     _native(store)
-    store.mark_quarantined("native-1", reason="observation lost", run_id="run-9", now=T0)
+    store.mark_quarantined("native-1", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-9", now=T0)
     with pytest.raises(SessionQuarantinedError):
         validate_native_binding(
             store.open_session("native-1"),
@@ -339,36 +330,37 @@ def test_quarantine_is_irreversible_and_refuses_reuse(tmp_path: Path) -> None:
     store = _store(tmp_path)
     _native(store)
     first = store.mark_quarantined(
-        "native-1", reason="observation lost", run_id="run-9", now=T0
+        "native-1", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-9", now=T0
     )
-    assert first.state == STATE_QUARANTINED
-    assert first.quarantine_reason == "observation lost"
-    assert first.quarantined_by_run_id == "run-9"
+    assert first.quarantine == {
+        "reason_code": QUARANTINE_DISPATCH_OBSERVATION_LOST,
+        "source_run_id": "run-9",
+        "recorded_at": T0.isoformat(),
+    }
 
     # Idempotent-safe repeat: first fact wins, no error.
     again = store.mark_quarantined(
-        "native-1", reason="second reason", run_id="run-10", now=T0
+        "native-1", reason_code="UNTRUSTED_TERMINAL_EVIDENCE", run_id="run-10", now=T0
     )
-    assert again.quarantine_reason == "observation lost"
-    assert again.quarantined_by_run_id == "run-9"
+    assert again.quarantine == first.quarantine
 
     record = store.open_session("native-1")
     with pytest.raises(SessionQuarantinedError):
-        SessionStore.ensure_open(record)
-    assert isinstance(SessionQuarantinedError("x"), SessionClosedError)
+        SessionStore.ensure_usable(record)
+    # A quarantined Session still exists and stays queryable — it simply
+    # refuses new work. There is no operation that un-quarantines it.
+    assert store.open_session("native-1").session_id == "native-1"
     with pytest.raises(SessionQuarantinedError):
-        store.mark_closed("native-1", now=T0)  # no un-quarantine via close
-    with pytest.raises(SessionQuarantinedError):
-        store.acquire_lock("native-1", "owner", required_state=STATE_OPEN, now=T0)
+        store.acquire_lock("native-1", "owner", refuse_quarantined=True, now=T0)
     assert not (store.base_dir / "native-1" / "lock.json").exists()
 
 
 def test_lease_race_quarantine_first_never_mints_lock(tmp_path: Path) -> None:
     store = _store(tmp_path)
     _native(store)
-    store.mark_quarantined("native-1", reason="r", run_id="run-1", now=T0)
+    store.mark_quarantined("native-1", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-1", now=T0)
     with pytest.raises(SessionQuarantinedError):
-        store.acquire_lock("native-1", "owner", required_state=STATE_OPEN, now=T0)
+        store.acquire_lock("native-1", "owner", refuse_quarantined=True, now=T0)
     assert not (store.base_dir / "native-1" / "lock.json").exists()
 
 
@@ -378,12 +370,12 @@ def test_lease_race_lock_first_keeps_holder_lease_valid(tmp_path: Path) -> None:
     lock = store.acquire_lock(
         "native-1",
         "runtask",
-        required_state=STATE_OPEN,
+        refuse_quarantined=True,
         reclaimable=False,
         now=T0,
     )
     # Quarantine commits while the lease is held; it never unlinks lock.json.
-    store.mark_quarantined("native-1", reason="kill after dispatch", run_id="run-2", now=T0)
+    store.mark_quarantined("native-1", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-2", now=T0)
     assert (store.base_dir / "native-1" / "lock.json").exists()
     # The quarantining finalizer's own lease stays valid for finalization
     # writes (holder update + release).
@@ -398,51 +390,52 @@ def test_lease_race_lock_first_keeps_holder_lease_valid(tmp_path: Path) -> None:
     store.release_lock("native-1", lock.token)
     # Every later acquire refuses: no usable new lease on a quarantined record.
     with pytest.raises(SessionQuarantinedError):
-        store.acquire_lock("native-1", "owner", required_state=STATE_OPEN, now=T0)
+        store.acquire_lock("native-1", "owner", refuse_quarantined=True, now=T0)
 
 
 def test_expired_lock_reclamation_cannot_bypass_quarantine(tmp_path: Path) -> None:
     store = _store(tmp_path)
     _native(store)
     store.acquire_lock(
-        "native-1", "runtask", required_state=STATE_OPEN, lease_seconds=1, now=T0
+        "native-1", "runtask", refuse_quarantined=True, lease_seconds=1, now=T0
     )
-    store.mark_quarantined("native-1", reason="r", run_id="run-3", now=T0)
+    store.mark_quarantined("native-1", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-3", now=T0)
     later = T0 + dt.timedelta(hours=2)
     lock_path = store.base_dir / "native-1" / "lock.json"
     before = lock_path.read_bytes()
     with pytest.raises(SessionQuarantinedError):
-        store.acquire_lock("native-1", "other", required_state=STATE_OPEN, now=later)
+        store.acquire_lock("native-1", "other", refuse_quarantined=True, now=later)
     # The refusal neither created nor unlinked any lock: the expired lease
     # file is byte-identical.
     assert lock_path.read_bytes() == before
 
 
-def test_required_state_none_preserves_legacy_acquire_behavior(tmp_path: Path) -> None:
+def test_refuse_quarantined_false_preserves_legacy_acquire_behavior(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
-    _native(store, "native-closed")
-    store.mark_closed("native-closed", now=T0)
-    # Legacy default: acquire_lock never read session state before this
-    # change, so required_state=None must keep acquiring on a closed record.
-    lock = store.acquire_lock("native-closed", "legacy-owner", now=T0)
-    store.release_lock("native-closed", lock.token)
-    with pytest.raises(SessionClosedError):
+    _native(store, "native-q")
+    store.mark_quarantined("native-q", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-0", now=T0)
+    # Legacy default: acquire_lock reads no Session fact at all, so an acpx
+    # call site keeps acquiring exactly as before.
+    lock = store.acquire_lock("native-q", "legacy-owner", now=T0)
+    store.release_lock("native-q", lock.token)
+    with pytest.raises(SessionQuarantinedError):
         store.acquire_lock(
-            "native-closed", "native-owner", required_state=STATE_OPEN, now=T0
+            "native-q", "native-owner", refuse_quarantined=True, now=T0
         )
 
 
 # -- legacy inspection surface + last-effective ------------------------------
 
 
-def test_read_record_state_degrades_to_none_for_quarantined(tmp_path: Path) -> None:
-    # Pinned exactly as the C1 G5 inventory classified this acpx-only
-    # surface: a quarantined record is outside (STATE_OPEN, STATE_CLOSED),
-    # so the legacy inspection state degrades to None.
+def test_inspection_reports_quarantine_rather_than_a_state(tmp_path: Path) -> None:
+    """The inspection surface projects the one durable refusal, not a state."""
     store = _store(tmp_path)
     _native(store)
-    store.mark_quarantined("native-1", reason="r", run_id="run-4", now=T0)
-    assert session_inspect._read_record_state(store, "native-1") is None
+    assert session_inspect._read_quarantined(store, "native-1") is False
+    store.mark_quarantined("native-1", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-4", now=T0)
+    assert session_inspect._read_quarantined(store, "native-1") is True
 
 
 def test_commit_last_effective_updates_atomically(tmp_path: Path) -> None:
@@ -459,7 +452,7 @@ def test_commit_last_effective_updates_atomically(tmp_path: Path) -> None:
     assert reread.last_effective_model == "kimi-for-coding/k3"
     assert reread.last_effective_effort == "max"
 
-    store.mark_quarantined("native-1", reason="r", run_id="run-5", now=later)
+    store.mark_quarantined("native-1", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-5", now=later)
     with pytest.raises(SessionQuarantinedError):
         store.commit_last_effective("native-1", model="a/b", effort="low", now=later)
 
@@ -471,33 +464,32 @@ def test_r5_b3_quarantine_pending_fence_blocks_acquire_even_after_ttl(
 
     from agent_run_supervisor.session import (
         QUARANTINE_PENDING_JSON,
-        STATE_OPEN,
         SessionQuarantinedError,
     )
 
     store = _store(tmp_path)
     _native(store)
     lock = store.acquire_lock(
-        "native-1", "owner", required_state=STATE_OPEN, now=T0, lease_seconds=1
+        "native-1", "owner", refuse_quarantined=True, now=T0, lease_seconds=1
     )
     assert lock.token
     store.write_quarantine_pending(
-        "native-1", reason="interrupted", run_id="run-fence", now=T0
+        "native-1", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-fence", now=T0
     )
     session_dir = tmp_path / "native-root" / "native-1"
     assert (session_dir / QUARANTINE_PENDING_JSON).is_file()
-    assert store.open_session("native-1").state == "open"
+    assert store.open_session("native-1").quarantine is None
     later = T0 + dt.timedelta(seconds=3600)
     with pytest.raises(SessionQuarantinedError):
         store.acquire_lock(
-            "native-1", "other", required_state=STATE_OPEN, now=later
+            "native-1", "other", refuse_quarantined=True, now=later
         )
     # Successful quarantine clears fence.
     store.mark_quarantined(
-        "native-1", reason="converged", run_id="run-fence", now=later
+        "native-1", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-fence", now=later
     )
     assert not (session_dir / QUARANTINE_PENDING_JSON).exists()
-    assert store.open_session("native-1").state == "quarantined"
+    assert store.open_session("native-1").quarantine is not None
 
 
 def test_r5_b3_mark_quarantined_clears_preexisting_fence_when_already_quarantined(
@@ -507,7 +499,7 @@ def test_r5_b3_mark_quarantined_clears_preexisting_fence_when_already_quarantine
 
     store = _store(tmp_path)
     _native(store)
-    store.mark_quarantined("native-1", reason="first", run_id="run-1", now=T0)
+    store.mark_quarantined("native-1", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-1", now=T0)
     session_dir = tmp_path / "native-root" / "native-1"
     # Simulate a stale fence left beside an already-quarantined record.
     (session_dir / QUARANTINE_PENDING_JSON).write_text(
@@ -516,9 +508,9 @@ def test_r5_b3_mark_quarantined_clears_preexisting_fence_when_already_quarantine
         encoding="utf-8",
     )
     again = store.mark_quarantined(
-        "native-1", reason="ignored", run_id="run-2", now=T0
+        "native-1", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-2", now=T0
     )
-    assert again.quarantine_reason == "first"
+    assert again.quarantine["source_run_id"] == "run-1"  # first fact wins
     assert not (session_dir / QUARANTINE_PENDING_JSON).exists()
 
 
@@ -549,7 +541,7 @@ def test_r6_b2_write_quarantine_pending_uses_durable_helper(
     monkeypatch.setattr(os, "fsync", boom_parent)
     with pytest.raises(EventStoreError):
         store.write_quarantine_pending(
-            "native-1", reason="boom", run_id="run-x", now=T0
+            "native-1", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-x", now=T0
         )
 
 
@@ -565,7 +557,7 @@ def test_r6_b2_mark_quarantined_clears_fence_only_after_state_durable(
     store = _store(tmp_path)
     _native(store)
     store.write_quarantine_pending(
-        "native-1", reason="pending", run_id="run-x", now=T0
+        "native-1", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-x", now=T0
     )
     session_dir = (tmp_path / "native-root" / "native-1").resolve()
     fence = session_dir / QUARANTINE_PENDING_JSON
@@ -601,8 +593,8 @@ def test_r6_b2_mark_quarantined_clears_fence_only_after_state_durable(
     monkeypatch.setattr(os, "replace", tracking_replace)
     monkeypatch.setattr(os, "unlink", tracking_unlink)
     monkeypatch.setattr(os, "fsync", tracking_fsync)
-    store.mark_quarantined("native-1", reason="done", run_id="run-x", now=T0)
-    assert store.open_session("native-1").state == "quarantined"
+    store.mark_quarantined("native-1", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-x", now=T0)
+    assert store.open_session("native-1").quarantine is not None
     assert not fence.exists()
     assert "session_replace" in order
     assert "fence_unlink" in order
@@ -621,7 +613,7 @@ def test_r6_b2_mark_quarantined_session_fsync_failure_keeps_fence(
     store = _store(tmp_path)
     _native(store)
     store.write_quarantine_pending(
-        "native-1", reason="pending", run_id="run-x", now=T0
+        "native-1", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-x", now=T0
     )
     session_dir = (tmp_path / "native-root" / "native-1").resolve()
     real_fsync = os.fsync
@@ -637,9 +629,9 @@ def test_r6_b2_mark_quarantined_session_fsync_failure_keeps_fence(
 
     monkeypatch.setattr(os, "fsync", boom_after_session_file)
     with pytest.raises(EventStoreError):
-        store.mark_quarantined("native-1", reason="done", run_id="run-x", now=T0)
+        store.mark_quarantined("native-1", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-x", now=T0)
     assert (session_dir / QUARANTINE_PENDING_JSON).is_file()
-    assert store.open_session("native-1").state == "open"
+    assert store.open_session("native-1").quarantine is None
 
 
 def test_r6_b2_fence_clear_unlink_parent_fsync_failure_propagates(
@@ -654,7 +646,7 @@ def test_r6_b2_fence_clear_unlink_parent_fsync_failure_propagates(
     store = _store(tmp_path)
     _native(store)
     store.write_quarantine_pending(
-        "native-1", reason="pending", run_id="run-x", now=T0
+        "native-1", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-x", now=T0
     )
     session_dir = (tmp_path / "native-root" / "native-1").resolve()
     real_fsync = os.fsync
@@ -681,9 +673,9 @@ def test_r6_b2_fence_clear_unlink_parent_fsync_failure_propagates(
     monkeypatch.setattr(os, "unlink", tracking_unlink)
     monkeypatch.setattr(os, "fsync", boom_after_fence_unlink)
     with pytest.raises(EventStoreError):
-        store.mark_quarantined("native-1", reason="done", run_id="run-x", now=T0)
+        store.mark_quarantined("native-1", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-x", now=T0)
     # Session may already be quarantined on disk; fence clear durability failed.
-    assert store.open_session("native-1").state == "quarantined"
+    assert store.open_session("native-1").quarantine is not None
 
 
 # ---------------------------------------------------------------------------

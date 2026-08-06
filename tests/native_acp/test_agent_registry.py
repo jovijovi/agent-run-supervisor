@@ -131,7 +131,7 @@ def test_undecodable_toml_refuses(tmp_path):
 
 def test_missing_or_wrong_schema_version_refuses(tmp_path):
     assert refusal(tmp_path, schema_version=None) == "REGISTRY_SCHEMA_VERSION"
-    assert refusal(tmp_path, schema_version=2) == "REGISTRY_SCHEMA_VERSION"
+    assert refusal(tmp_path, schema_version=3) == "REGISTRY_SCHEMA_VERSION"
     assert refusal(tmp_path, text='schema_version = "1"\n') == "REGISTRY_SCHEMA_VERSION"
 
 

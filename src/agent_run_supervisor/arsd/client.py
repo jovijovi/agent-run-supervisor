@@ -35,7 +35,7 @@ class ArsdClientError(Exception):
 
     def __init__(self, code: str | None = None, message: str | None = None) -> None:
         resolved = code or type(self).code
-        if resolved not in protocol.ERROR_CODES_V1 and resolved != "CLIENT":
+        if resolved not in protocol.ERROR_CODES and resolved != "CLIENT":
             resolved = protocol.INTERNAL
         # Only caller-supplied *local* messages are accepted; remote wire
         # messages are discarded by raise_for_error_code / _raise_error_frame.
@@ -51,10 +51,10 @@ def _make_error_type(code: str) -> type[ArsdClientError]:
 
 
 ERROR_CODE_TO_EXCEPTION: dict[str, type[ArsdClientError]] = {
-    code: _make_error_type(code) for code in sorted(protocol.ERROR_CODES_V1)
+    code: _make_error_type(code) for code in sorted(protocol.ERROR_CODES)
 }
 
-# Stable named aliases for the closed v1 set (import-friendly).
+# Stable named aliases for the closed error set (import-friendly).
 ArsdUnsupportedApiVersionError = ERROR_CODE_TO_EXCEPTION[protocol.UNSUPPORTED_API_VERSION]
 ArsdUnknownOpError = ERROR_CODE_TO_EXCEPTION[protocol.UNKNOWN_OP]
 ArsdMalformedFrameError = ERROR_CODE_TO_EXCEPTION[protocol.MALFORMED_FRAME]
@@ -226,6 +226,23 @@ class ArsdClient:
         request_id: str,
         payload: Mapping[str, Any],
     ) -> dict[str, Any]:
+        """Submit one Run. The ack carries ``run_id``, ``session_id``, ``accepted_at``.
+
+        ``payload["request"]["session_id"]`` is the whole Session choice:
+        **omit the key** to create one new durable Session and run its first
+        Run, or send an existing Session id to reuse it. Reuse is existing-only
+        and never falls back to creating anything.
+
+        Omitting the key and sending ``None`` are **not** the same. Absent says
+        "I have no Session"; a present null says "my Session is the null value",
+        which is not a Session — so the daemon refuses it with
+        ``INVALID_REQUEST`` rather than quietly starting a second conversation
+        for a caller whose id-producing code returned ``None``.
+
+        ``request_id`` is the idempotency key. Repeating it returns the same
+        ``run_id``/``session_id`` facts and dispatches nothing a second time —
+        this client never replays a request on its own.
+        """
         return self._roundtrip("submit", dict(payload), request_id=request_id)
 
     def run_status(self, run_id: str, *, request_id: str | None = None) -> dict[str, Any]:
@@ -270,13 +287,6 @@ class ArsdClient:
 
     def session_list(self, *, request_id: str | None = None) -> dict[str, Any]:
         return self._roundtrip("session_list", {}, request_id=request_id)
-
-    def session_close(
-        self, session_id: str, *, request_id: str | None = None
-    ) -> dict[str, Any]:
-        return self._roundtrip(
-            "session_close", {"session_id": session_id}, request_id=request_id
-        )
 
     def _next_request_id(self) -> str:
         return f"cli-{next(self._req_counter)}"
@@ -435,7 +445,7 @@ class ArsdClient:
                 protocol.MALFORMED_FRAME, _GENERIC_ERROR_MESSAGE
             )
         code = error.get("code")
-        if not isinstance(code, str) or code not in protocol.ERROR_CODES_V1:
+        if not isinstance(code, str) or code not in protocol.ERROR_CODES:
             self.close()
             raise ArsdInternalError(protocol.INTERNAL, _GENERIC_ERROR_MESSAGE)
         # Discard untrusted remote ``message`` entirely.

@@ -2504,7 +2504,7 @@ def test_lease_dirfd_close_failure_on_open_error_does_not_leak_or_raw_oserror(
 # --- client typed errors --------------------------------------------------
 
 
-@pytest.mark.parametrize("code", sorted(protocol.ERROR_CODES_V1))
+@pytest.mark.parametrize("code", sorted(protocol.ERROR_CODES))
 def test_client_maps_every_v1_error_code(code: str, sock_root: Path) -> None:
     path = sock_path(sock_root)
     path.parent.mkdir(mode=0o700)
@@ -2756,7 +2756,7 @@ def test_follow_break_refuses_same_client_ops_run_persists(sock_root: Path) -> N
         accepted = cli.submit(
             request_id="s5-follow-break",
             payload=submit_payload(
-                request=valid_wire_request(ars_session_id="sess-follow-break")
+                request=valid_wire_request(session_id="sess-follow-break")
             ),
         )
         run_id = accepted["run_id"]
@@ -2798,7 +2798,7 @@ def test_follow_for_break_closes_client(sock_root: Path) -> None:
         accepted = cli.submit(
             request_id="s5-follow-for",
             payload=submit_payload(
-                request=valid_wire_request(ars_session_id="sess-follow-for")
+                request=valid_wire_request(session_id="sess-follow-for")
             ),
         )
         run_id = accepted["run_id"]
@@ -2944,14 +2944,14 @@ def test_submit_status_events_cancel_session_roundtrips(sock_root: Path) -> None
 
         with arsd_client.ArsdClient(path) as cli:
             info = cli.server_info()
-            assert info["api_version"] == 2
-            assert info["supported_api_versions"] == [1, 2]
+            assert info["api_version"] == 3
+            assert info["supported_api_versions"] == [3]
             assert "limits" in info
 
             accepted = cli.submit(
                 request_id="s5-submit-1",
                 payload=submit_payload(
-                    request=valid_wire_request(ars_session_id="sess-s5-1")
+                    request=valid_wire_request(session_id="sess-s5-1")
                 ),
             )
             run_id = accepted["run_id"]
@@ -2981,8 +2981,10 @@ def test_submit_status_events_cancel_session_roundtrips(sock_root: Path) -> None
             assert any(s["session_id"] == "sess-s5-1" for s in listed["sessions"])
             one = cli.session_status("sess-s5-1")
             assert one["session_id"] == "sess-s5-1"
-            closed = cli.session_close("sess-s5-1")
-            assert closed["session_id"] == "sess-s5-1"
+            # The Run reached a terminal, and the Session it ran under is still
+            # there and still reusable. There is no close to call on it.
+            assert one["quarantine"] is None
+            assert not hasattr(cli, "session_close")
 
 
 def test_follow_consumes_stream_without_cancelling_run(sock_root: Path) -> None:
@@ -2997,7 +2999,7 @@ def test_follow_consumes_stream_without_cancelling_run(sock_root: Path) -> None:
             accepted = cli.submit(
                 request_id="s5-follow-1",
                 payload=submit_payload(
-                    request=valid_wire_request(ars_session_id="sess-follow")
+                    request=valid_wire_request(session_id="sess-follow")
                 ),
             )
             run_id = accepted["run_id"]
@@ -3033,8 +3035,8 @@ def test_explicit_same_uid_allow_mapping_works(sock_root: Path) -> None:
     with running_daemon(path, root, policy=policy):
         with arsd_client.ArsdClient(path) as cli:
             info = cli.server_info()
-            assert info["api_version"] == 2
-            assert info["supported_api_versions"] == [1, 2]
+            assert info["api_version"] == 3
+            assert info["supported_api_versions"] == [3]
 
 
 # --- SIGTERM lifecycle ----------------------------------------------------
@@ -3066,7 +3068,7 @@ def test_sigterm_shutdown_shutting_down_unlink_bounded_exit(sock_root: Path) -> 
                     request_id="s5-term-1",
                     payload=submit_payload(
                         request=valid_wire_request(
-                            ars_session_id=None, session_reuse="none"
+                            session_id=None
                         )
                     ),
                 )
@@ -3191,7 +3193,7 @@ def test_r11_b3_shutdown_holds_lease_until_registry_drained(
                     request_id="r11-lease-1",
                     payload=submit_payload(
                         request=valid_wire_request(
-                            ars_session_id=None, session_reuse="none"
+                            session_id=None
                         )
                     ),
                 )
@@ -3308,7 +3310,7 @@ def test_r11b_serve_task_cancel_holds_lease_until_registry_idle(
                     request_id="r11b-lease-1",
                     payload=submit_payload(
                         request=valid_wire_request(
-                            ars_session_id=None, session_reuse="none"
+                            session_id=None
                         )
                     ),
                 )
@@ -3415,7 +3417,7 @@ def test_r12_cancel_during_stop_wait_closes_admission_before_lease_release(
                         request_id="r12-pre-reserve-1",
                         payload=submit_payload(
                             request=valid_wire_request(
-                                ars_session_id=None, session_reuse="none"
+                                session_id=None
                             )
                         ),
                     )
@@ -3925,7 +3927,7 @@ def test_follow_list_terminates_after_terminal_stream_exhaustion(
         accepted = cli.submit(
             request_id="follow-term-1",
             payload=submit_payload(
-                request=valid_wire_request(ars_session_id="sess-follow-term")
+                request=valid_wire_request(session_id="sess-follow-term")
             ),
         )
         run_id = accepted["run_id"]
@@ -3975,3 +3977,99 @@ def test_cli_main_zero_mappings_exits_nonzero(
     err = capsys.readouterr().err
     assert "mapping" in err.lower() or "caller" in err.lower() or "zero" in err.lower()
     assert SECRET_SENTINEL not in err
+
+
+# --- an unsafe Session id over a real socket -------------------------------
+
+
+def _raw_roundtrip(sock: socket.socket, op: str, request_id: str, payload: dict) -> dict:
+    """One request/response on a raw connection, so the *daemon* is observed.
+
+    ``ArsdClient`` closes itself on any error frame by policy, which would hide
+    what the daemon did with the connection — and the daemon's behaviour is the
+    thing this repair changed.
+    """
+    sock.sendall(
+        protocol.encode_frame(
+            {
+                "api_version": protocol.ARSD_API_VERSION,
+                "op": op,
+                "request_id": request_id,
+                "payload": payload,
+            }
+        )
+    )
+    buf = bytearray()
+    while b"\n" not in buf:
+        chunk = sock.recv(65536)
+        assert chunk, "daemon closed the connection instead of answering"
+        buf.extend(chunk)
+    return protocol.decode_frame(bytes(buf.split(b"\n", 1)[0]))
+
+
+def test_unsafe_session_id_is_a_stable_error_and_the_daemon_keeps_serving(
+    sock_root: Path,
+) -> None:
+    """The whole point of the repair is what the daemon does with the connection.
+
+    An unhandled store refusal used to reach the caller as ``INTERNAL`` and take
+    the connection down with it: a request problem reported as a server fault,
+    with a reconnect as the only way forward. It must be a stable
+    ``INVALID_REQUEST`` on a connection the daemon keeps serving, and the
+    offending text must not come back.
+    """
+    path = sock_path(sock_root)
+    root = supervisor_root(sock_root)
+    with running_daemon(path, root):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(10)
+        sock.connect(str(path))
+        try:
+            for index, unsafe in enumerate(
+                (
+                    "../escape",
+                    "..",
+                    "a/b",
+                    ".hidden",
+                    "with space",
+                    "sess-ok\n",
+                    "sess-ok\r\n",
+                    "sess-ok\nsess-evil",
+                )
+            ):
+                frame = _raw_roundtrip(
+                    sock, "session_status", f"unsafe-{index}", {"session_id": unsafe}
+                )
+                assert "error" in frame, frame
+                assert frame["error"]["code"] == protocol.INVALID_REQUEST
+                # Neither the offending value nor a path-shaped diagnostic.
+                message = frame["error"]["message"]
+                assert unsafe not in message
+                assert "/" not in message
+
+            # Same connection, still serving: the refusal cost the caller nothing.
+            info = _raw_roundtrip(sock, "server_info", "still-alive", {})
+            assert info["result"]["api_version"] == protocol.ARSD_API_VERSION
+            listed = _raw_roundtrip(sock, "session_list", "still-listing", {})
+            assert listed["result"] == {"sessions": []}
+        finally:
+            sock.close()
+
+
+def test_a_well_formed_unknown_session_id_keeps_its_unknown_session_answer(
+    sock_root: Path,
+) -> None:
+    """The other side of the line, over the socket: still fail-closed, not invalid."""
+    path = sock_path(sock_root)
+    root = supervisor_root(sock_root)
+    with running_daemon(path, root):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(10)
+        sock.connect(str(path))
+        try:
+            frame = _raw_roundtrip(
+                sock, "session_status", "wf-missing", {"session_id": "sess-nothing"}
+            )
+            assert frame["error"]["code"] == protocol.UNKNOWN_SESSION
+        finally:
+            sock.close()

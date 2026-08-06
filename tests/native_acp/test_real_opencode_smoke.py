@@ -43,6 +43,10 @@ REQUIRED_EFFORT = "max"
 SECOND_MODEL = "deepseek/deepseek-v4-pro"
 SECOND_EFFORT = "high"
 
+# The operator-registered agent this smoke drives. v3 selects an agent,
+# never a source profile.
+AGENT_ID = "opencode"
+
 RUN_TIMEOUT_SECONDS = 900
 
 
@@ -53,13 +57,20 @@ def _fresh_root(tag: str) -> tuple[Path, Path]:
     return base / "supervisor", workspace
 
 
-def _request(model: str, effort: str, session_id: str) -> AgentRunRequest:
+def _request(
+    model: str, effort: str, session_id: str | None = None
+) -> AgentRunRequest:
+    """One request builder, v3.
+
+    ``session_id=None`` is a **create**: the first Run of a leg has no Session
+    to name yet. Later Runs pass the id that create actually returned, so a leg
+    continues its own Session rather than one the harness invented.
+    """
     return AgentRunRequest(
         owner="hermes",
         namespace="hermes/native-smoke",
-        profile_id="opencode-1.18.4",
-        session_reuse="reuse",
-        ars_session_id=session_id,
+        agent_id=AGENT_ID,
+        session_id=session_id,
         expected_binding_hash=None,
         input_refs=(InputRef(ref="prompt:inline", content_hash="sha256:" + "0" * 64),),
         requested_model=model,
@@ -149,7 +160,7 @@ def test_s1_readonly_exact_config_new_session() -> None:
         root,
         workspace,
         "run-s1",
-        _request(REQUIRED_MODEL, REQUIRED_EFFORT, "smoke-s1"),
+        _request(REQUIRED_MODEL, REQUIRED_EFFORT),
         f"Reply with exactly {marker} and nothing else. Do not use any tools. "
         "Do not read or write any files.",
     )
@@ -182,9 +193,9 @@ def test_s1_readonly_exact_config_new_session() -> None:
     identity = effective["process_identity"]
     _assert_pid_gone(identity["pid"])
 
-    record = storage.native_session_store(root).open_session("smoke-s1")
+    record = storage.native_session_store(root).open_session(result.session_id)
     assert record.agent_session_id
-    assert record.state == "open"
+    assert record.quarantine is None
 
     _evidence(
         "s1-readonly",
@@ -215,20 +226,23 @@ def test_s2_session_load_nonce_continuity() -> None:
         root,
         workspace,
         "run-s2a",
-        _request(REQUIRED_MODEL, REQUIRED_EFFORT, "smoke-s2"),
+        _request(REQUIRED_MODEL, REQUIRED_EFFORT),
         f"Remember this token exactly: {nonce}. Reply with exactly STORED "
         "and nothing else. Do not use any tools.",
     )
     assert r1.status is AgentRunStatus.COMPLETED, r1.payload
+    # Continue the Session run 1 actually published, not a literal.
+    session_id = r1.session_id
+    assert session_id
     store = storage.native_session_store(root)
-    external_id = store.open_session("smoke-s2").agent_session_id
+    external_id = store.open_session(session_id).agent_session_id
     assert external_id
 
     r2 = _run(
         root,
         workspace,
         "run-s2b",
-        _request(REQUIRED_MODEL, REQUIRED_EFFORT, "smoke-s2"),
+        _request(REQUIRED_MODEL, REQUIRED_EFFORT, session_id),
         "Reply with the exact token I asked you to remember earlier in this "
         "conversation, and nothing else. Do not use any tools.",
     )
@@ -240,7 +254,7 @@ def test_s2_session_load_nonce_continuity() -> None:
     # Historical-token continuity across process-per-Run: the recall answer
     # must contain the planted nonce.
     assert nonce in r2.payload["final_message"]
-    record = store.open_session("smoke-s2")
+    record = store.open_session(session_id)
     assert record.agent_session_id == external_id  # external ID unchanged
 
     _evidence(
@@ -271,12 +285,15 @@ def test_s3_model_switch_with_exact_readback() -> None:
         root,
         workspace,
         "run-s3m-a",
-        _request(REQUIRED_MODEL, REQUIRED_EFFORT, "smoke-s3m"),
+        _request(REQUIRED_MODEL, REQUIRED_EFFORT),
         "Reply with exactly S3M_BASELINE_OK and nothing else. Do not use any tools.",
     )
     assert r1.status is AgentRunStatus.COMPLETED, r1.payload
+    # Continue the Session run 1 actually published, not a literal.
+    session_id = r1.session_id
+    assert session_id
     _spec_effective_equality(r1.run_dir)
-    record = store.open_session("smoke-s3m")
+    record = store.open_session(session_id)
     external_id = record.agent_session_id
     assert external_id
     assert (record.last_effective_model, record.last_effective_effort) == (
@@ -290,7 +307,7 @@ def test_s3_model_switch_with_exact_readback() -> None:
         root,
         workspace,
         "run-s3m-b",
-        _request(SECOND_MODEL, SECOND_EFFORT, "smoke-s3m"),
+        _request(SECOND_MODEL, SECOND_EFFORT, session_id),
         "Reply with exactly S3M_SWITCH_OK and nothing else. Do not use any tools.",
     )
     assert r2.status is AgentRunStatus.COMPLETED, r2.payload
@@ -301,7 +318,7 @@ def test_s3_model_switch_with_exact_readback() -> None:
     families2 = [event["type"] for event in _events(r2.run_dir)]
     assert "session_load_requested" in families2
     assert "session_new_requested" not in families2
-    record = store.open_session("smoke-s3m")
+    record = store.open_session(session_id)
     assert record.agent_session_id == external_id
     assert (record.last_effective_model, record.last_effective_effort) == (
         SECOND_MODEL,
@@ -313,7 +330,7 @@ def test_s3_model_switch_with_exact_readback() -> None:
         root,
         workspace,
         "run-s3m-c",
-        _request(REQUIRED_MODEL, REQUIRED_EFFORT, "smoke-s3m"),
+        _request(REQUIRED_MODEL, REQUIRED_EFFORT, session_id),
         "Reply with exactly S3M_RETURN_OK and nothing else. Do not use any tools.",
     )
     assert r3.status is AgentRunStatus.COMPLETED, r3.payload
@@ -324,7 +341,7 @@ def test_s3_model_switch_with_exact_readback() -> None:
     families3 = [event["type"] for event in _events(r3.run_dir)]
     assert "session_load_requested" in families3
     assert "session_new_requested" not in families3
-    record = store.open_session("smoke-s3m")
+    record = store.open_session(session_id)
     assert record.agent_session_id == external_id  # unchanged across all three
     assert (record.last_effective_model, record.last_effective_effort) == (
         REQUIRED_MODEL,
@@ -370,11 +387,14 @@ def test_s3_effort_switch_with_exact_readback() -> None:
         root,
         workspace,
         "run-s3a",
-        _request(REQUIRED_MODEL, REQUIRED_EFFORT, "smoke-s3"),
+        _request(REQUIRED_MODEL, REQUIRED_EFFORT),
         "Reply with exactly S3_BASELINE_OK and nothing else. Do not use any tools.",
     )
     assert r1.status is AgentRunStatus.COMPLETED, r1.payload
-    record = store.open_session("smoke-s3")
+    # Continue the Session run 1 actually published, not a literal.
+    session_id = r1.session_id
+    assert session_id
+    record = store.open_session(session_id)
     external_id = record.agent_session_id
     assert (record.last_effective_model, record.last_effective_effort) == (
         REQUIRED_MODEL,
@@ -386,7 +406,7 @@ def test_s3_effort_switch_with_exact_readback() -> None:
         root,
         workspace,
         "run-s3b",
-        _request(REQUIRED_MODEL, "high", "smoke-s3"),
+        _request(REQUIRED_MODEL, "high", session_id),
         "Reply with exactly S3_SWITCH_OK and nothing else. Do not use any tools.",
     )
     assert r2.status is AgentRunStatus.COMPLETED, r2.payload
@@ -394,7 +414,7 @@ def test_s3_effort_switch_with_exact_readback() -> None:
     assert effective2["effective_model"] == REQUIRED_MODEL
     assert effective2["effective_effort"] == SECOND_EFFORT
     _spec_effective_equality(r2.run_dir)
-    record = store.open_session("smoke-s3")
+    record = store.open_session(session_id)
     assert (record.last_effective_model, record.last_effective_effort) == (
         REQUIRED_MODEL,
         SECOND_EFFORT,
@@ -408,7 +428,7 @@ def test_s3_effort_switch_with_exact_readback() -> None:
         root,
         workspace,
         "run-s3c",
-        _request(REQUIRED_MODEL, REQUIRED_EFFORT, "smoke-s3"),
+        _request(REQUIRED_MODEL, REQUIRED_EFFORT, session_id),
         "Reply with exactly S3_RETURN_OK and nothing else. Do not use any tools.",
     )
     assert r3.status is AgentRunStatus.COMPLETED, r3.payload
@@ -416,7 +436,7 @@ def test_s3_effort_switch_with_exact_readback() -> None:
     assert effective3["effective_model"] == REQUIRED_MODEL
     assert effective3["effective_effort"] == REQUIRED_EFFORT
     _spec_effective_equality(r3.run_dir)
-    record = store.open_session("smoke-s3")
+    record = store.open_session(session_id)
     assert (record.last_effective_model, record.last_effective_effort) == (
         REQUIRED_MODEL,
         REQUIRED_EFFORT,

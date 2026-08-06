@@ -28,7 +28,13 @@ from agent_run_supervisor.native_acp.spec import (
     spec_hash,
 )
 from agent_run_supervisor.result import build_result_payload
-from agent_run_supervisor.session import SESSION_JSON, SessionStore
+from agent_run_supervisor.session import (
+    QUARANTINE_DISPATCH_OBSERVATION_LOST,
+    QUARANTINE_RECONCILED_DISPATCH_WITHOUT_TERMINAL,
+    SESSION_JSON,
+    SessionStore,
+    derive_session_id_for_run,
+)
 
 OWNER = "hermes"
 NAMESPACE = "hermes/doc-check"
@@ -42,11 +48,13 @@ DISPATCH_STATES = (True, False)
 DOCUMENT_STATES = ("valid", "corrupt", "absent")
 
 # The nine Session-record states row selection can see.
+# The Session-record variants row selection distinguishes. There is no
+# ``closed`` variant, because a Session has no lifecycle state: it exists, or it
+# does not, or it is unusable evidence, or it belongs to someone else.
 SESSION_STATES = (
-    "matching_open",
+    "matching",
     "missing",
     "corrupt",
-    "closed",
     "owner_mismatch",
     "namespace_mismatch",
     "id_mismatch",
@@ -54,10 +62,11 @@ SESSION_STATES = (
     "already_quarantined",
 )
 
-# The three states an already-existing, strictly readable, matching record may
-# be in and still be actionable.
+# The variants of an already-existing, strictly readable, matching record that
+# are actionable. Quarantine evidence does not remove actionability: converging
+# quarantine on an already-quarantined Session is a no-op.
 ACTIONABLE_SESSION_STATES = frozenset(
-    {"matching_open", "already_fenced", "already_quarantined"}
+    {"matching", "already_fenced", "already_quarantined"}
 )
 
 CORRUPT_BYTES = b"{ this document was never finished"
@@ -72,6 +81,7 @@ NATIVE_SESSION_KWARGS: dict[str, Any] = dict(
     effective_cwd="/tmp/ws",
     matched_root="/tmp",
     agent_id=AGENT_ID,
+    agent_session_id="external-fake-agent-1",
 )
 
 
@@ -80,15 +90,14 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_bytes(json.dumps(payload, sort_keys=True, indent=2).encode("utf-8"))
 
 
-# -- Session identity derivations (the only two ARS defines) -----------------
+# -- Session identity derivation (the only one ARS defines) ------------------
 
 
-def ephemeral_session_id(run_id: str) -> str:
-    return f"{run_id}-ephemeral"
-
-
-def session_id_for(run_id: str, *, reuse: str, ars_session_id: str | None) -> str:
-    return ars_session_id if reuse == "reuse" else ephemeral_session_id(run_id)
+def session_id_for(run_id: str, *, session_id: str | None) -> str:
+    """The Session a Run is bound to: the caller's id, else the prospective one."""
+    if session_id is not None:
+        return session_id
+    return derive_session_id_for_run(run_id)
 
 
 # -- terminal ----------------------------------------------------------------
@@ -211,8 +220,7 @@ DEFAULT_LAUNCH_HASH = launch_payload()["launch_spec_hash"]
 def spec_payload(
     *,
     run_id: str,
-    reuse: str = "reuse",
-    ars_session_id: str | None = "sess-reuse-1",
+    session_id: str | None = "sess-reuse-1",
     owner: str = OWNER,
     namespace: str = NAMESPACE,
     launch_hash: str = DEFAULT_LAUNCH_HASH,
@@ -227,8 +235,7 @@ def spec_payload(
             },
             "identity": type(golden.identity)(owner=owner, namespace=namespace),
             "session": type(golden.session)(
-                reuse=reuse,
-                ars_session_id=ars_session_id,
+                session_id=session_id,
                 expected_binding_hash=None,
             ),
             "launch_spec_hash": launch_hash,
@@ -255,14 +262,13 @@ def write_document(path: Path, *, state: str, payload: dict[str, Any]) -> None:
 def submission_payload(
     *,
     run_id: str,
-    reuse: str = "reuse",
-    ars_session_id: str | None = "sess-reuse-1",
+    session_id: str | None = "sess-reuse-1",
     owner: str = OWNER,
     namespace: str = NAMESPACE,
     request_id: str = "req-1",
     principal_id: str = "principal-a",
 ) -> dict[str, Any]:
-    """Exactly the v1 artifact ``admission.build_submission_artifact`` writes."""
+    """Exactly the artifact ``admission.build_submission_artifact`` writes."""
     return {
         "schema_version": admission.SUBMISSION_SCHEMA_VERSION,
         "principal_id": principal_id,
@@ -274,8 +280,7 @@ def submission_payload(
         "peer": {"pid": 1, "uid": 1000, "gid": 1000},
         "owner": owner,
         "namespace": namespace,
-        "session_reuse": reuse,
-        "ars_session_id": ars_session_id,
+        "session_id": session_id,
         "agent_id": AGENT_ID,
         "request_digest": "sha256:" + "d" * 64,
         "prompt_sha256": "e" * 64,
@@ -295,8 +300,7 @@ def build_run(
     spec: str = "absent",
     launch: str = "absent",
     submission: str = "absent",
-    reuse: str = "reuse",
-    ars_session_id: str | None = "sess-reuse-1",
+    session_id: str | None = "sess-reuse-1",
     owner: str = OWNER,
     namespace: str = NAMESPACE,
 ) -> Path:
@@ -309,8 +313,7 @@ def build_run(
         state=spec,
         payload=spec_payload(
             run_id=run_id,
-            reuse=reuse,
-            ars_session_id=ars_session_id,
+            session_id=session_id,
             owner=owner,
             namespace=namespace,
             launch_hash=launch_hash,
@@ -324,8 +327,7 @@ def build_run(
         state=submission,
         payload=submission_payload(
             run_id=run_id,
-            reuse=reuse,
-            ars_session_id=ars_session_id,
+            session_id=session_id,
             owner=owner,
             namespace=namespace,
         ),
@@ -347,7 +349,7 @@ def build_session(
     namespace: str = NAMESPACE,
     run_id: str = "run-prior",
 ) -> None:
-    """Realize one of the nine Session-record states for ``session_id``."""
+    """Realize one of the Session-record variants for ``session_id``."""
     if state == "missing":
         return
     target = session_id
@@ -373,14 +375,18 @@ def build_session(
         )
     elif state == "corrupt":
         (Path(store.base_dir) / target / SESSION_JSON).write_bytes(CORRUPT_BYTES)
-    elif state == "closed":
-        store.mark_closed(target)
     elif state == "already_fenced":
         store.write_quarantine_pending(
-            target, reason="interrupted finalize", run_id=run_id
+            target,
+            reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST,
+            run_id=run_id,
         )
     elif state == "already_quarantined":
-        store.mark_quarantined(target, reason="prior", run_id=run_id)
+        store.mark_quarantined(
+            target,
+            reason_code=QUARANTINE_RECONCILED_DISPATCH_WITHOUT_TERMINAL,
+            run_id=run_id,
+        )
 
 
 __all__ = [
@@ -400,7 +406,6 @@ __all__ = [
     "TERMINAL_STATES",
     "build_run",
     "build_session",
-    "ephemeral_session_id",
     "launch_payload",
     "session_id_for",
     "spec_payload",

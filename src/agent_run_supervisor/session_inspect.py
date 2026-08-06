@@ -14,7 +14,7 @@ Contract:
   alternative.)
 - **Fail closed, never fabricate.** A missing session reports ``exists=False``;
   a corrupt record / lock / result / progress artifact degrades the affected
-  field to its conservative unknown value (``state=None``,
+  field to its conservative unknown value (``quarantined=None``,
   ``holder_liveness="unknown"``, ``status=None``, ``progress=None``) — a value
   the API cannot prove is never reported as healthy. Only an unsafe
   ``session_id`` raises (:class:`~agent_run_supervisor.session.InvalidSessionIdError`),
@@ -48,8 +48,6 @@ from agent_run_supervisor.exit_classifier import AgentRunStatus
 from agent_run_supervisor.hermes_caller.events import ProgressSnapshot, load_progress
 from agent_run_supervisor.session import (
     LOCK_JSON,
-    STATE_CLOSED,
-    STATE_OPEN,
     InvalidSessionIdError,
     SessionNotFoundError,
     SessionStore,
@@ -91,7 +89,9 @@ class TurnInfo:
 class SessionInspection:
     """Read-only structural view of one local session; no paths, no raw text.
 
-    ``state`` is ``"open"`` / ``"closed"`` from a readable record, else ``None``.
+    ``quarantined`` is True only when a readable record carries quarantine
+    evidence; ``None`` means the record could not be read. There is no Session
+    lifecycle state to report — a Session exists and is resumable.
     ``lease_held`` is True only for a present, not-provably-expired lease.
     ``holder_liveness`` is the K1 classification (``alive`` / ``crashed`` /
     ``unknown``) of a present lock's recorded holder set, ``None`` with no lock.
@@ -101,7 +101,7 @@ class SessionInspection:
 
     session_id: str
     exists: bool
-    state: str | None
+    quarantined: bool | None
     lease_held: bool
     holder_liveness: str | None
     lease_recoverable: bool
@@ -115,7 +115,7 @@ def _missing(session_id: str) -> SessionInspection:
     return SessionInspection(
         session_id=session_id,
         exists=False,
-        state=None,
+        quarantined=None,
         lease_held=False,
         holder_liveness=None,
         lease_recoverable=False,
@@ -126,19 +126,16 @@ def _missing(session_id: str) -> SessionInspection:
     )
 
 
-def _read_record_state(store: SessionStore, session_id: str) -> str | None:
-    """The record's state when readable and in the closed vocabulary, else None.
+def _read_quarantined(store: SessionStore, session_id: str) -> bool:
+    """Whether a readable record carries quarantine evidence.
 
     Raises :class:`SessionNotFoundError` / :class:`InvalidSessionIdError`
     exactly as :meth:`SessionStore.open_session` does; a parse failure after the
-    existence check degrades to ``None`` (the session exists, its record is
-    unreadable).
+    existence check degrades to ``None`` at the call site (the session exists,
+    its record is unreadable).
     """
 
-    record = store.open_session(session_id)
-    if record.state in (STATE_OPEN, STATE_CLOSED):
-        return record.state
-    return None
+    return store.open_session(session_id).quarantine is not None
 
 
 def _turn_dirs(session_dir: Path) -> list[Path]:
@@ -244,13 +241,13 @@ def inspect_session(
     base_dir = Path(sessions_dir)
     store = SessionStore(base_dir=base_dir, liveness_probe=liveness_probe)
     try:
-        state = _read_record_state(store, session_id)
+        quarantined: bool | None = _read_quarantined(store, session_id)
     except InvalidSessionIdError:
         raise
     except SessionNotFoundError:
         return _missing(session_id)
     except _ARTIFACT_READ_ERRORS:
-        state = None
+        quarantined = None
 
     session_dir = base_dir / session_id
     probe = liveness_probe or _liveness.REAL_PROBE
@@ -266,7 +263,7 @@ def inspect_session(
     return SessionInspection(
         session_id=session_id,
         exists=True,
-        state=state,
+        quarantined=quarantined,
         lease_held=lease_held,
         holder_liveness=holder_liveness,
         lease_recoverable=lease_recoverable,

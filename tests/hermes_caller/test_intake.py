@@ -22,7 +22,6 @@ from agent_run_supervisor.caller import CallerInvocationSpec
 from agent_run_supervisor.hermes_caller.intake import (
     build_check_prompt,
     build_exec_spec,
-    build_session_close_spec,
     build_session_create_spec,
     build_session_send_spec,
     build_session_status_spec,
@@ -134,15 +133,6 @@ def test_build_session_status_spec(task: DocCheckTask, persistent_doc_role, work
         task, role=persistent_doc_role, session_id="[REDACTED]", cwd=work_dir
     )
     assert spec.mode == "session_status"
-    assert spec.session_id == "[REDACTED]"
-    _assert_generic_only(spec)
-
-
-def test_build_session_close_spec(task: DocCheckTask, persistent_doc_role, work_dir: Path) -> None:
-    spec = build_session_close_spec(
-        task, role=persistent_doc_role, session_id="[REDACTED]", cwd=work_dir
-    )
-    assert spec.mode == "session_close"
     assert spec.session_id == "[REDACTED]"
     _assert_generic_only(spec)
 

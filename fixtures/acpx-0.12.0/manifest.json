@@ -165,18 +165,6 @@
         "kind": "management",
         "name": "session-cancel-no-active",
         "semantics": "Idle cancel should not close the session."
-      },
-      {
-        "expected_exit": 0,
-        "kind": "management",
-        "name": "session-close-named",
-        "semantics": "Close the named session."
-      },
-      {
-        "expected_exit": 0,
-        "kind": "management",
-        "name": "session-show-closed",
-        "semantics": "Show closed session record."
       }
     ],
     "management_command_schema": "Each management command emits a single summarized JSON object (acpx.session.v1 record or an action snapshot), NOT a raw ACP NDJSON stream.",

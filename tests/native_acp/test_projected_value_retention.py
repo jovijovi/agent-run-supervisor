@@ -32,6 +32,7 @@ from agent_run_supervisor.exit_classifier import AgentRunStatus
 from agent_run_supervisor.native_acp.profile import ProfileRegistry
 
 from .test_run_task import HAPPY_SCRIPT, Harness, _request, _run, _test_profile
+from agent_run_supervisor.session import derive_session_id_for_run
 
 SENTINEL_NAME = "ARS_ENV_SINK_SENTINEL"
 ALLOWLIST = (
@@ -332,12 +333,12 @@ def test_an_external_session_id_equal_to_a_projected_value_is_accepted(
     harness = _harness(tmp_path, monkeypatch, script, sentinel)
 
     result = _run(
-        harness.task(request=_request(session_reuse="none", ars_session_id=None))
+        harness.task(request=_request(session_id=None))
     )
 
     assert result.status is AgentRunStatus.COMPLETED
     assert (harness.run_dir() / "prompt-dispatch-started").exists()
-    record = harness.session_store().open_session("run-0001-ephemeral")
+    record = harness.session_store().open_session(derive_session_id_for_run("run-0001"))
     assert record.agent_session_id == sentinel
 
 

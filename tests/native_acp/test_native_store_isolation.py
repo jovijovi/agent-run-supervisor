@@ -19,7 +19,7 @@ import pytest
 
 from agent_run_supervisor.process_liveness import ProcessIdentity
 from agent_run_supervisor.session import (
-    STATE_OPEN,
+    QUARANTINE_DISPATCH_OBSERVATION_LOST,
     SessionStore,
 )
 
@@ -37,6 +37,7 @@ NATIVE_KWARGS = dict(
     workspace_hash="b" * 64,
     effective_cwd="/work/project",
     matched_root="/work",
+    agent_session_id="external-1",
 )
 
 POISON_BYTES = b"{ this is deliberately not parseable json"
@@ -72,7 +73,7 @@ def _native_matrix(storage, store: SessionStore, session_id: str) -> None:
     store.open_session(session_id)
     assert [record.session_id for record in store.list_records()] == [session_id]
     lock = store.acquire_lock(
-        session_id, "runtask", required_state=STATE_OPEN, reclaimable=False, now=T0
+        session_id, "runtask", refuse_quarantined=True, reclaimable=False, now=T0
     )
     store.update_lock_holder(
         session_id,
@@ -83,7 +84,9 @@ def _native_matrix(storage, store: SessionStore, session_id: str) -> None:
         now=T0,
     )
     store.release_lock(session_id, lock.token)
-    storage.bind_agent_session(store, session_id, agent_session_id="external-1", now=T0)
+    # Creation is already fully bound: there is no separate binding step, and
+    # therefore no window in which a record exists without its external id.
+    assert store.open_session(session_id).agent_session_id == "external-1"
     store.commit_last_effective(session_id, model="a/b", effort="max", now=T0)
     from agent_run_supervisor.session import validate_native_binding
 
@@ -97,7 +100,12 @@ def _native_matrix(storage, store: SessionStore, session_id: str) -> None:
         namespace="hermes/doc-check",
         for_load=True,
     )
-    store.mark_quarantined(session_id, reason="matrix end", run_id="run-x", now=T0)
+    store.mark_quarantined(
+        session_id,
+        reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST,
+        run_id="run-x",
+        now=T0,
+    )
 
 
 # -- seam binding ------------------------------------------------------------
@@ -144,7 +152,7 @@ def test_secure_modes_and_insecure_root_correction(tmp_path: Path) -> None:
     session_dir = root / "native-sessions" / "native-1"
     assert _mode(session_dir) == 0o700
     assert _mode(session_dir / "session.json") == 0o600
-    session_store.acquire_lock("native-1", "owner", required_state=STATE_OPEN, now=T0)
+    session_store.acquire_lock("native-1", "owner", refuse_quarantined=True, now=T0)
     assert _mode(session_dir / "lock.json") == 0o600
 
     handle = event_store.create_run("run-1")
@@ -172,7 +180,11 @@ def test_same_id_sessions_coexist_without_collision(tmp_path: Path) -> None:
     from agent_run_supervisor.native_acp import storage
 
     root = tmp_path / ".agent-run-supervisor"
-    legacy_payload = json.dumps({"session_id": "shared-id", "state": "open"}).encode()
+    # A poisoned legacy document, deliberately unlike anything this runtime
+    # writes: the point is that the Native root never reads it at all.
+    legacy_payload = json.dumps(
+        {"session_id": "shared-id", "role_id": "legacy-role"}
+    ).encode()
     _seed_legacy(root, "shared-id", legacy_payload)
 
     store = storage.native_session_store(root)
@@ -282,7 +294,7 @@ def test_no_agent_role_spec_reference_in_package() -> None:
 
 
 def test_native_record_creation_goes_through_the_seam_only() -> None:
-    seam_names = {"create_native_session", "bind_agent_session"}
+    seam_names = {"create_native_session"}
     for module_path in _package_modules():
         tree = ast.parse(module_path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
@@ -306,7 +318,7 @@ def test_native_record_creation_goes_through_the_seam_only() -> None:
 
 
 def test_no_module_outside_native_acp_calls_the_native_creation_api() -> None:
-    seam_names = {"create_native_session", "bind_agent_session"}
+    seam_names = {"create_native_session"}
     for module_path in sorted(SRC_ROOT.rglob("*.py")):
         relative = module_path.relative_to(SRC_ROOT)
         if relative.parts[0] == "native_acp":
