@@ -2,8 +2,8 @@
 
 This module connects S1a's fixture-proven ``acpx@0.12.0`` persistent-session
 command contract to S1b's local store/binding/lease-lock foundation. S1c added
-``create_session``/``send``/``status``; S1d extends the local lifecycle with
-``close``/``abort`` and local ``list_sessions``.
+``create_session``/``send``/``status``; ``abort`` and local ``list_sessions``
+complete the surface. There is no ``close``: Runs terminate, Sessions do not.
 
 Implemented local surfaces:
 
@@ -11,15 +11,12 @@ Implemented local surfaces:
   fixture-shaped ``sessions new`` management command through an executor, parse
   the management JSON into a safe summary, and create the local session record
   bound to the role/workspace/policy/acpx/adapter identity.
-- ``send`` — re-open + re-validate the binding, refuse closed sessions, acquire
-  the lease lock, run a single ``prompt -s`` turn, persist redacted turn
+- ``send`` — re-open + re-validate the binding, refuse quarantined sessions,
+  acquire the lease lock, run a single ``prompt -s`` turn, persist redacted turn
   artifacts under ``sessions/<session_id>/turns/<turn_id>/``, classify the
   result, and release the lease on success *and* failure.
 - ``status`` — re-validate the binding and run a read-only ``status -s``
   management query, returning a safe summary (no lease taken).
-- ``close`` — re-validate the binding, acquire the lease, run fixture-shaped
-  ``sessions close``, persist redacted management evidence, and atomically mark
-  the local record closed.
 - ``abort`` — re-validate the binding and run fixture-shaped ``cancel -s``;
   ``cancelled=false`` is reported honestly and never treated as a business
   verdict.
@@ -65,11 +62,9 @@ from agent_run_supervisor.process_liveness import LivenessProbe, identity_for_pi
 from agent_run_supervisor.policy import (
     compile_permission_policy,
     compile_session_cancel_command,
-    compile_session_close_command,
     compile_session_create_command,
     compile_session_prompt_command,
     compile_session_status_command,
-    ensure_persistent_strategy,
 )
 from agent_run_supervisor.redaction import (
     RedactionReport,
@@ -142,14 +137,6 @@ class SessionStatusOutcome:
 
 
 @dataclass
-class SessionCloseOutcome:
-    session_id: str
-    record: SessionRecord
-    summary: dict[str, Any]
-    result: dict[str, Any]
-
-
-@dataclass
 class SessionAbortOutcome:
     session_id: str
     cancelled: bool
@@ -199,7 +186,6 @@ class SessionRuntime:
         env: Mapping[str, str] | None = None,
         now: _dt.datetime | None = None,
     ) -> SessionCreateOutcome:
-        ensure_persistent_strategy(role)
         workspace = validate_effective_cwd(role, cwd)
         # Fail closed before spawning acpx if the local record already exists
         # (also validates the session id is a safe path component).
@@ -240,7 +226,6 @@ class SessionRuntime:
             "session_id": session_id,
             "acpx_session_id": record.acpx_session_id,
             "session_name": record.session_name,
-            "state": record.state,
             "kind": summary.get("kind"),
             "created": summary.get("created"),
             "session_dir": str(self.sessions_dir / session_id),
@@ -266,11 +251,10 @@ class SessionRuntime:
         env: Mapping[str, str] | None = None,
         now: _dt.datetime | None = None,
     ) -> SessionTurnOutcome:
-        ensure_persistent_strategy(role)
         record = self.store.open_session(session_id)
-        # Fail closed on a closed session BEFORE workspace/binding checks, lease
-        # acquisition, subprocess launch, or any turn-artifact mutation.
-        self.store.ensure_open(record)
+        # Fail closed on a quarantined session BEFORE workspace/binding checks,
+        # lease acquisition, subprocess launch, or any turn-artifact mutation.
+        self.store.ensure_usable(record)
         workspace = validate_effective_cwd(role, cwd)
         # Refuse cross-role/workspace/policy/acpx/adapter drift BEFORE taking a
         # lease, spawning acpx, or writing any turn artifact.
@@ -288,10 +272,10 @@ class SessionRuntime:
         )
         try:
             locked_record = self.store.open_session(session_id)
-            # Close marks state while holding the same lease. Re-check under the
-            # acquired lease to close the pre-lease TOCTOU window where a close
-            # could complete after the first ensure_open but before this send's lock.
-            self.store.ensure_open(locked_record)
+            # Re-check under the acquired lease to close the pre-lease TOCTOU
+            # window where a concurrent finalizer could record quarantine
+            # evidence after the first check but before this send's lock.
+            self.store.ensure_usable(locked_record)
             # The under-lease revalidation returns the freshly verified
             # canonical mcp binding; the prompt argv compiles from it so a
             # declared symlink swapped after this check cannot redirect acpx.
@@ -322,7 +306,6 @@ class SessionRuntime:
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
     ) -> SessionStatusOutcome:
-        ensure_persistent_strategy(role)
         record = self.store.open_session(session_id)
         workspace = validate_effective_cwd(role, cwd)
         mcp_binding = self.store.validate_binding(
@@ -357,84 +340,6 @@ class SessionRuntime:
             session_id=session_id, ok=ok, summary=summary, result=result
         )
 
-    # -- close ------------------------------------------------------------
-
-    def close(
-        self,
-        *,
-        role: AgentRoleSpec,
-        session_id: str,
-        cwd: str | None = None,
-        env: Mapping[str, str] | None = None,
-        now: _dt.datetime | None = None,
-    ) -> SessionCloseOutcome:
-        ensure_persistent_strategy(role)
-        record = self.store.open_session(session_id)
-        # Refuse on an already-closed session BEFORE binding checks, subprocess
-        # launch, or any management-artifact mutation.
-        self.store.ensure_open(record)
-        workspace = validate_effective_cwd(role, cwd)
-        self.store.validate_binding(record, role=role, workspace_result=workspace)
-
-        with self.store.lifecycle_guard(session_id):
-            locked_record = self.store.open_session(session_id)
-            self.store.ensure_open(locked_record)
-            mcp_binding = self.store.validate_binding(
-                locked_record, role=role, workspace_result=workspace
-            )
-            close_name = locked_record.session_name or session_id
-            lease_seconds = role.session.lease_seconds or DEFAULT_SESSION_LEASE_SECONDS
-            lock = self.store.acquire_lock(
-                session_id,
-                owner=self.owner,
-                now=now,
-                lease_seconds=lease_seconds,
-                reclaim_crashed=self.reclaim_crashed,
-                reclaimable=False,
-                holder_kind="supervisor_pending_subprocess",
-            )
-            try:
-                argv = compile_session_close_command(
-                    role,
-                    cwd=str(workspace.effective_cwd),
-                    session_name=close_name,
-                    mcp_binding=mcp_binding,
-                )
-                outcome = self._run(
-                    argv=argv,
-                    role=role,
-                    workspace=workspace,
-                    env=env,
-                    session_id=session_id,
-                    lock_token=lock.token,
-                )
-                summary = self._require_management_summary(
-                    outcome,
-                    op="close",
-                    expected_kinds={"session_closed"},
-                    require_acpx_session_id=False,
-                )
-                # Persist redacted close evidence BEFORE the local state flip so the
-                # management proof survives even if the atomic mark fails. The lease
-                # prevents concurrent send mutation; the lifecycle guard prevents a
-                # concurrent abort/close from using stale open state.
-                self._write_management_artifact(session_id, "close.json", summary)
-                closed_record = self.store.mark_closed(session_id, now=now)
-            finally:
-                self._release_quietly(session_id, lock.token)
-
-        result = {
-            "session_id": session_id,
-            "state": closed_record.state,
-            "closed": True,
-            "kind": summary.get("kind"),
-            "acpx_session_id": summary.get("acpx_session_id") or closed_record.acpx_session_id,
-            "business_verdict": None,
-        }
-        return SessionCloseOutcome(
-            session_id=session_id, record=closed_record, summary=summary, result=result
-        )
-
     # -- abort / cancel ---------------------------------------------------
 
     def abort(
@@ -445,18 +350,17 @@ class SessionRuntime:
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
     ) -> SessionAbortOutcome:
-        ensure_persistent_strategy(role)
         record = self.store.open_session(session_id)
-        # Refuse on a closed session before spawning acpx. Cancel deliberately
+        # Refuse a quarantined session before spawning acpx. Cancel deliberately
         # takes no lease: it is meant to interrupt an active turn, which would
         # itself hold the lease.
-        self.store.ensure_open(record)
+        self.store.ensure_usable(record)
         workspace = validate_effective_cwd(role, cwd)
         self.store.validate_binding(record, role=role, workspace_result=workspace)
 
-        with self.store.lifecycle_guard(session_id):
+        with self.store.mutation_guard(session_id):
             locked_record = self.store.open_session(session_id)
-            self.store.ensure_open(locked_record)
+            self.store.ensure_usable(locked_record)
             mcp_binding = self.store.validate_binding(
                 locked_record, role=role, workspace_result=workspace
             )
@@ -485,12 +389,12 @@ class SessionRuntime:
                 )
             self._write_management_artifact(session_id, "abort.json", summary)
 
-        # cancelled=false is honest (nothing active to cancel); cancel is NOT
-        # close, so the record stays open and this is never a business verdict.
+        # cancelled=false is honest (nothing active to cancel) and is never a
+        # business verdict. Cancelling affects the current work, never the
+        # Session: it stays exactly as durable and resumable as it was.
         result = {
             "session_id": session_id,
             "cancelled": cancelled,
-            "state": record.state,
             "kind": summary.get("kind"),
             "business_verdict": None,
         }
@@ -528,7 +432,6 @@ class SessionRuntime:
     def _record_summary(record: SessionRecord) -> dict[str, Any]:
         summary = {
             "session_id": record.session_id,
-            "state": record.state,
             "role_id": record.role_id,
             "session_name": record.session_name,
             "acpx_session_id": record.acpx_session_id,

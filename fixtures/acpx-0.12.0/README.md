@@ -90,8 +90,6 @@ Source inspection shows acpx client fs handlers resolve absolute paths under the
 - `session-read-tail-after-turns`: exit `0` expected `0`, stdout lines `1`.
 - `session-status-after-turns`: exit `0` expected `0`, stdout lines `1`.
 - `session-cancel-no-active`: exit `0` expected `0`, stdout lines `1`.
-- `session-close-named`: exit `0` expected `0`, stdout lines `1`.
-- `session-show-closed`: exit `0` expected `0`, stdout lines `1`.
 
 ## Skipped
 

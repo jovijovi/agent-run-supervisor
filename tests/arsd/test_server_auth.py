@@ -84,7 +84,7 @@ async def serving(path: Path, *, policy=None, seen=None, **kwargs):
 
 
 def info_frame(request_id: str = "req-1") -> dict:
-    return {"api_version": 1, "op": "server_info", "request_id": request_id}
+    return {"api_version": 3, "op": "server_info", "request_id": request_id}
 
 
 async def connect(path: Path):
@@ -351,7 +351,7 @@ def test_request_error_isolated_connection_survives(sock_root: Path) -> None:
         path = sock_path(sock_root)
         async with serving(path):
             reader, writer = await connect(path)
-            bad = {"api_version": 1, "op": "bogus", "request_id": "r1"}
+            bad = {"api_version": 3, "op": "bogus", "request_id": "r1"}
             reply = await roundtrip(reader, writer, bad)
             assert reply["error"]["code"] == "UNKNOWN_OP"
             assert reply["request_id"] == "r1"
@@ -371,7 +371,7 @@ def test_parse_errors_echo_valid_request_id_on_wire(sock_root: Path) -> None:
             unknown = await roundtrip(
                 reader,
                 writer,
-                {"api_version": 1, "op": "nope", "request_id": "corr-op"},
+                {"api_version": 3, "op": "nope", "request_id": "corr-op"},
             )
             assert unknown["request_id"] == "corr-op"
             assert unknown["error"]["code"] == "UNKNOWN_OP"
@@ -394,7 +394,7 @@ def test_parse_errors_echo_valid_request_id_on_wire(sock_root: Path) -> None:
                 reader,
                 writer,
                 {
-                    "api_version": 1,
+                    "api_version": 3,
                     "op": "server_info",
                     "request_id": "corr-pay",
                     "payload": ["x"],
@@ -406,7 +406,7 @@ def test_parse_errors_echo_valid_request_id_on_wire(sock_root: Path) -> None:
             bad_id = await roundtrip(
                 reader,
                 writer,
-                {"api_version": 1, "op": "bogus", "request_id": "bad id"},
+                {"api_version": 3, "op": "bogus", "request_id": "bad id"},
             )
             assert bad_id["request_id"] is None
             assert bad_id["error"]["code"] == "INVALID_REQUEST"

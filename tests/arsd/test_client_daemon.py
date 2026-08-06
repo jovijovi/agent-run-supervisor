@@ -2504,7 +2504,7 @@ def test_lease_dirfd_close_failure_on_open_error_does_not_leak_or_raw_oserror(
 # --- client typed errors --------------------------------------------------
 
 
-@pytest.mark.parametrize("code", sorted(protocol.ERROR_CODES_V1))
+@pytest.mark.parametrize("code", sorted(protocol.ERROR_CODES))
 def test_client_maps_every_v1_error_code(code: str, sock_root: Path) -> None:
     path = sock_path(sock_root)
     path.parent.mkdir(mode=0o700)
@@ -2756,7 +2756,7 @@ def test_follow_break_refuses_same_client_ops_run_persists(sock_root: Path) -> N
         accepted = cli.submit(
             request_id="s5-follow-break",
             payload=submit_payload(
-                request=valid_wire_request(ars_session_id="sess-follow-break")
+                request=valid_wire_request(session_id="sess-follow-break")
             ),
         )
         run_id = accepted["run_id"]
@@ -2798,7 +2798,7 @@ def test_follow_for_break_closes_client(sock_root: Path) -> None:
         accepted = cli.submit(
             request_id="s5-follow-for",
             payload=submit_payload(
-                request=valid_wire_request(ars_session_id="sess-follow-for")
+                request=valid_wire_request(session_id="sess-follow-for")
             ),
         )
         run_id = accepted["run_id"]
@@ -2944,14 +2944,14 @@ def test_submit_status_events_cancel_session_roundtrips(sock_root: Path) -> None
 
         with arsd_client.ArsdClient(path) as cli:
             info = cli.server_info()
-            assert info["api_version"] == 2
-            assert info["supported_api_versions"] == [1, 2]
+            assert info["api_version"] == 3
+            assert info["supported_api_versions"] == [3]
             assert "limits" in info
 
             accepted = cli.submit(
                 request_id="s5-submit-1",
                 payload=submit_payload(
-                    request=valid_wire_request(ars_session_id="sess-s5-1")
+                    request=valid_wire_request(session_id="sess-s5-1")
                 ),
             )
             run_id = accepted["run_id"]
@@ -2981,8 +2981,10 @@ def test_submit_status_events_cancel_session_roundtrips(sock_root: Path) -> None
             assert any(s["session_id"] == "sess-s5-1" for s in listed["sessions"])
             one = cli.session_status("sess-s5-1")
             assert one["session_id"] == "sess-s5-1"
-            closed = cli.session_close("sess-s5-1")
-            assert closed["session_id"] == "sess-s5-1"
+            # The Run reached a terminal, and the Session it ran under is still
+            # there and still reusable. There is no close to call on it.
+            assert one["quarantine"] is None
+            assert not hasattr(cli, "session_close")
 
 
 def test_follow_consumes_stream_without_cancelling_run(sock_root: Path) -> None:
@@ -2997,7 +2999,7 @@ def test_follow_consumes_stream_without_cancelling_run(sock_root: Path) -> None:
             accepted = cli.submit(
                 request_id="s5-follow-1",
                 payload=submit_payload(
-                    request=valid_wire_request(ars_session_id="sess-follow")
+                    request=valid_wire_request(session_id="sess-follow")
                 ),
             )
             run_id = accepted["run_id"]
@@ -3033,8 +3035,8 @@ def test_explicit_same_uid_allow_mapping_works(sock_root: Path) -> None:
     with running_daemon(path, root, policy=policy):
         with arsd_client.ArsdClient(path) as cli:
             info = cli.server_info()
-            assert info["api_version"] == 2
-            assert info["supported_api_versions"] == [1, 2]
+            assert info["api_version"] == 3
+            assert info["supported_api_versions"] == [3]
 
 
 # --- SIGTERM lifecycle ----------------------------------------------------
@@ -3066,7 +3068,7 @@ def test_sigterm_shutdown_shutting_down_unlink_bounded_exit(sock_root: Path) -> 
                     request_id="s5-term-1",
                     payload=submit_payload(
                         request=valid_wire_request(
-                            ars_session_id=None, session_reuse="none"
+                            session_id=None
                         )
                     ),
                 )
@@ -3191,7 +3193,7 @@ def test_r11_b3_shutdown_holds_lease_until_registry_drained(
                     request_id="r11-lease-1",
                     payload=submit_payload(
                         request=valid_wire_request(
-                            ars_session_id=None, session_reuse="none"
+                            session_id=None
                         )
                     ),
                 )
@@ -3308,7 +3310,7 @@ def test_r11b_serve_task_cancel_holds_lease_until_registry_idle(
                     request_id="r11b-lease-1",
                     payload=submit_payload(
                         request=valid_wire_request(
-                            ars_session_id=None, session_reuse="none"
+                            session_id=None
                         )
                     ),
                 )
@@ -3415,7 +3417,7 @@ def test_r12_cancel_during_stop_wait_closes_admission_before_lease_release(
                         request_id="r12-pre-reserve-1",
                         payload=submit_payload(
                             request=valid_wire_request(
-                                ars_session_id=None, session_reuse="none"
+                                session_id=None
                             )
                         ),
                     )
@@ -3925,7 +3927,7 @@ def test_follow_list_terminates_after_terminal_stream_exhaustion(
         accepted = cli.submit(
             request_id="follow-term-1",
             payload=submit_payload(
-                request=valid_wire_request(ars_session_id="sess-follow-term")
+                request=valid_wire_request(session_id="sess-follow-term")
             ),
         )
         run_id = accepted["run_id"]

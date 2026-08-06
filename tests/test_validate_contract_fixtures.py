@@ -223,11 +223,11 @@ def test_validate_session_command_argv_rejects_wrong_session_name() -> None:
         "/repo/.tmp/acpx-session-contract-scratch/persistent-session",
         "codex",
         "sessions",
-        "close",
+        "show",
         "some-other-session",
     ]
 
-    errors = validate_session_command_argv("session-close-named", argv)
+    errors = validate_session_command_argv("session-show-open", argv)
 
     assert any("session management command tail" in error for error in errors)
 
@@ -313,14 +313,14 @@ def test_validate_session_contract_detects_exit_mismatch(tmp_path: Path) -> None
     root = tmp_path / "acpx-0.12.0"
     shutil.copytree(REPO_FIXTURES_ROOT, root)
 
-    result_path = root / "session-close-named" / "result.json"
+    result_path = root / "session-show-open" / "result.json"
     result = json.loads(result_path.read_text(encoding="utf-8"))
     result["exit_code"] = 1
     result_path.write_text(json.dumps(result), encoding="utf-8")
 
     errors = validate_session_contract(root)
 
-    assert any("session-close-named" in error and "exit_code" in error for error in errors)
+    assert any("session-show-open" in error and "exit_code" in error for error in errors)
 
 
 def test_management_semantics_after_turns_accepts_valid_payload() -> None:
@@ -349,24 +349,3 @@ def test_management_semantics_after_turns_requires_positive_int_last_seq() -> No
 
     assert any("nonzero lastSeq" in error for error in missing_errors)
     assert any("nonzero lastSeq" in error for error in non_int_errors)
-
-
-def test_management_semantics_closed_accepts_valid_payload() -> None:
-    payload = {
-        "schema": "acpx.session.v1",
-        "closed": True,
-        "closedAt": "2026-05-30T14:18:53.698Z",
-    }
-
-    assert _validate_management_semantics("session-show-closed", payload) == []
-
-
-def test_management_semantics_closed_requires_nonempty_closed_at() -> None:
-    missing = {"schema": "acpx.session.v1", "closed": True}
-    empty = {"schema": "acpx.session.v1", "closed": True, "closedAt": ""}
-
-    missing_errors = _validate_management_semantics("session-show-closed", missing)
-    empty_errors = _validate_management_semantics("session-show-closed", empty)
-
-    assert any("closedAt" in error for error in missing_errors)
-    assert any("closedAt" in error for error in empty_errors)

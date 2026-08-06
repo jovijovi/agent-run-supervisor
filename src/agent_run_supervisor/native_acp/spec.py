@@ -31,6 +31,7 @@ from typing import Any, Iterable, Mapping
 
 from agent_run_supervisor.process_liveness import ProcessIdentity
 from agent_run_supervisor.role import PERMISSION_KINDS
+from agent_run_supervisor.session import is_valid_session_id
 
 from .agent_registration import AgentEntry, validate_agent_id
 from .launch_permissions import (
@@ -46,14 +47,17 @@ from .profile import (
     mediation_pairs,
 )
 
-# The digest material genuinely changed: environment values left the launch
-# snapshot, artifact identity is gone, and agent identity replaced profile
-# selection. A pre-reset frame is therefore refused rather than silently
-# re-interpreted under a shape it was never sealed against.
-SPEC_SCHEMA_VERSION = 2
+# The sealed material genuinely changed again at the Session no-close model:
+# the request's Session block became one optional ``session_id``, so a Spec
+# sealed under the old reuse-mode shape describes an intent this runtime no
+# longer models. It is therefore refused rather than silently re-interpreted
+# under a shape it was never sealed against — the same rule that moved this
+# constant at the reset, applied to the same kind of change.
+#
+# The launch snapshot did **not** change, so its version deliberately does not
+# move: a version that tracks nothing tells a reader nothing.
+SPEC_SCHEMA_VERSION = 3
 LAUNCH_SCHEMA_VERSION = 2
-
-_REUSE_MODES = ("none", "reuse")
 _MAX_FIELD_LENGTH = 512
 
 # Finite operational ceilings for sealed RunLimits.
@@ -216,8 +220,6 @@ class AgentRunRequest:
     owner: str
     namespace: str
     agent_id: str
-    session_reuse: str
-    ars_session_id: str | None
     # Carried unchanged and deliberately undisposed: whether this field keeps a
     # role after the reset is an explicit decision, not something to settle
     # inside a diff that was moving digest material for another reason.
@@ -234,6 +236,12 @@ class AgentRunRequest:
     limits: RunLimits
     evidence_policy_hash: str
     recovery_policy_hash: str
+    # The whole Session portion of the wire, and the only optional one: absent
+    # (``None``) creates one new durable Session and runs its first Run;
+    # present is existing-only reuse of exactly that Session. There is no reuse
+    # mode, because there is nothing left for one to say — and no value of this
+    # field can turn a reuse into a create.
+    session_id: str | None = None
     schema_version: int = SPEC_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -246,17 +254,15 @@ class AgentRunRequest:
         _require_text(self.owner, "owner")
         _require_text(self.namespace, "namespace")
         _require(type(self.agent_id) is str, "agent_id must be a string")
-        _require(
-            self.session_reuse in _REUSE_MODES,
-            f"session_reuse must be one of {_REUSE_MODES}",
-        )
-        if self.session_reuse == "reuse":
+        if self.session_id is not None:
+            # Grammar is validated here, before the Spec is sealed and long
+            # before any storage access: an unsafe id is a wire fact, and
+            # nothing may touch a path to find out what it is.
+            _require_text(self.session_id, "session_id")
             _require(
-                bool(self.ars_session_id),
-                "session_reuse='reuse' requires ars_session_id",
+                is_valid_session_id(self.session_id),
+                "session_id must be a safe session-store path component",
             )
-        if self.ars_session_id is not None:
-            _require_text(self.ars_session_id, "ars_session_id")
         _require_text(self.requested_model, "requested_model")
         _require_text(self.requested_effort, "requested_effort", max_length=64)
         _require_text(self.grant_ref, "grant_ref")
@@ -636,8 +642,15 @@ class RunIdentity:
 
 @dataclass(frozen=True)
 class SpecSession:
-    reuse: str
-    ars_session_id: str | None
+    """The sealed Session intent: one optional id, and nothing else.
+
+    ``session_id is None`` seals a create; a value seals existing-only reuse of
+    exactly that Session. Reconciliation reads this block as its attribution
+    authority, and a create derives its prospective id from the same
+    authenticated identity that derived the Run id.
+    """
+
+    session_id: str | None
     expected_binding_hash: str | None
 
 
@@ -718,9 +731,7 @@ class AgentRunSpec:
         return AgentRunSpec(
             schema_version=SPEC_SCHEMA_VERSION,
             identity=RunIdentity(owner="golden-owner", namespace="golden/ns"),
-            session=SpecSession(
-                reuse="none", ars_session_id=None, expected_binding_hash=None
-            ),
+            session=SpecSession(session_id=None, expected_binding_hash=None),
             agent=SpecAgent(
                 agent_id="golden-agent",
                 profile_id="golden-profile-v1",
@@ -1216,8 +1227,7 @@ class RunSpecAssembler:
             schema_version=request.schema_version,
             identity=RunIdentity(owner=request.owner, namespace=request.namespace),
             session=SpecSession(
-                reuse=request.session_reuse,
-                ars_session_id=request.ars_session_id,
+                session_id=request.session_id,
                 expected_binding_hash=request.expected_binding_hash,
             ),
             agent=SpecAgent(

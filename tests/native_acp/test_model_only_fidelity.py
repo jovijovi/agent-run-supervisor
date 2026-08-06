@@ -583,7 +583,7 @@ def test_a_non_sentinel_effort_fails_before_the_prompt(
     assert "session/prompt" not in harness.methods_seen()
     assert _lines(configs) == []
     # A clean pre-dispatch refusal leaves the Session reusable.
-    assert harness.session_store().open_session("sess-native-1").state == "open"
+    assert harness.session_store().open_session("sess-native-1").quarantine is None
 
 
 def test_a_model_only_reuse_run_loads_and_reconfigures(
@@ -647,7 +647,7 @@ def test_a_failed_model_only_switch_rolls_back_to_the_previous_model(
     # Rollback proved the previous model exactly, so the Session stays usable
     # and only model selectors were ever set.
     record = harness.session_store().open_session("sess-native-1")
-    assert record.state == "open"
+    assert record.quarantine is None
     assert record.last_effective_model == CURSOR_MODEL
     assert record.last_effective_effort == EFFORT_NOT_APPLICABLE
     assert all(line.startswith("model=") for line in _lines(configs))

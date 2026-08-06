@@ -1600,7 +1600,7 @@ def test_harness_submit_request_parses_under_the_v2_wire(tmp_path: Path) -> None
     )
     command = protocol.parse_submit(payload)
     assert command.request.agent_id == "s4-agent"
-    assert command.request.schema_version == 2
+    assert command.request.schema_version == 3
     assert not hasattr(command.request, "profile_id")
 
 
@@ -1634,7 +1634,7 @@ def test_harness_required_api_version_is_the_production_constant() -> None:
     from agent_run_supervisor.arsd import protocol
 
     harness = _load_harness()
-    assert harness._REQUIRED_API_VERSION == protocol.ARSD_API_VERSION == 2
+    assert harness._REQUIRED_API_VERSION == protocol.ARSD_API_VERSION == 3
 
 
 def _tree_snapshot(root: Path) -> list[tuple[str, str]]:

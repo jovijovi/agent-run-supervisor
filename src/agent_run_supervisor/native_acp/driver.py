@@ -83,11 +83,20 @@ class NativeAcpDriver:
         *,
         client: NativeAcpClient,
         machine: ConfigFidelityMachine,
+        on_config_switch_started: Callable[[], None] | None = None,
     ) -> None:
         self._client = client
         self._machine = machine
         self._connection: Any | None = None
         self._session_id: str | None = None
+        # Fired synchronously immediately before the FIRST
+        # ``session/set_config_option`` frame of this driver — the boundary
+        # after which the agent's configuration may have moved and ARS cannot
+        # yet prove what it moved to. It fires before the write rather than
+        # after, because a crash inside the RPC is precisely the case a
+        # post-hoc record would miss.
+        self._on_config_switch_started = on_config_switch_started
+        self._config_switch_announced = False
         # Fired synchronously after the complete session/prompt frame has been
         # written to the transport and drained (the SDK sender resolves each
         # send only after write+drain) — the prompt-accepted boundary.
@@ -355,6 +364,7 @@ class NativeAcpDriver:
         active = machine or self._machine
         connection = self._require_connection()
         session_id = self._require_session()
+        self._announce_config_switch()
         if active.has_permission_mode:
             # First leg: a session whose ambient initial mode auto-allows tool
             # calls must be switched to the frozen mode, with readback proof,
@@ -400,6 +410,14 @@ class NativeAcpDriver:
         )
         self._check_identity()
         return active.require_ready()
+
+    def _announce_config_switch(self) -> None:
+        """Record the switch boundary once, before the first set is written."""
+        if self._config_switch_announced:
+            return
+        self._config_switch_announced = True
+        if self._on_config_switch_started is not None:
+            self._on_config_switch_started()
 
     async def prompt_once(self, text: str) -> PromptOutcome:
         connection = self._require_connection()

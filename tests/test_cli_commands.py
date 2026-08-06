@@ -7,6 +7,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+from agent_run_supervisor.session import (
+    QUARANTINE_DISPATCH_OBSERVATION_LOST,
+    SessionStore,
+)
+
 
 def test_validate_role_accepts_valid_role(run_cli, role_file: Path) -> None:
     completed = run_cli(["validate-role", str(role_file)])
@@ -300,43 +305,11 @@ def test_run_real_exec_missing_prompt_creates_no_artifacts(
     assert not runs_dir.exists() or list(runs_dir.iterdir()) == []
 
 
-def test_run_refuses_persistent_role_without_launching(
-    run_cli, tmp_path: Path, prompt_file: Path, valid_role_dict: dict[str, Any]
-) -> None:
-    work = tmp_path / "work"
-    work.mkdir()
-    role_payload = dict(valid_role_dict)
-    role_payload["workspace"] = dict(valid_role_dict["workspace"])
-    role_payload["workspace"]["default_cwd"] = str(work)
-    role_payload["workspace"]["allowed_roots"] = [str(work)]
-    role_payload["session"] = {"strategy": "persistent"}
-    role_path = tmp_path / "role.json"
-    role_path.write_text(json.dumps(role_payload), encoding="utf-8")
-    runs_dir = tmp_path / "runs"
-
-    completed = run_cli(
-        [
-            "run",
-            "--role",
-            str(role_path),
-            "--prompt-file",
-            str(prompt_file),
-            "--runs-dir",
-            str(runs_dir),
-        ]
-    )
-
-    assert completed.returncode == 1, completed.stdout
-    combined = (completed.stdout + completed.stderr).lower()
-    assert "persistent" in combined
-    assert not runs_dir.exists() or list(runs_dir.iterdir()) == []
-
-
 def test_validate_role_accepts_persistent_role(
     run_cli, tmp_path: Path, valid_role_dict: dict[str, Any]
 ) -> None:
     role_payload = dict(valid_role_dict)
-    role_payload["session"] = {"strategy": "persistent"}
+    role_payload["session"] = {"lease_seconds": 900}
     role_path = tmp_path / "role.json"
     role_path.write_text(json.dumps(role_payload), encoding="utf-8")
 
@@ -401,7 +374,6 @@ def _fake_acpx(
     show_json = fixtures_root / "session-show-open" / "stdout.json"
     status_json = fixtures_root / status_fixture / "stdout.json"
     turn_ndjson = fixtures_root / "session-prompt-turn1" / "stdout.ndjson"
-    close_json = fixtures_root / "session-close-named" / "stdout.json"
     cancel_json = fixtures_root / "session-cancel-no-active" / "stdout.json"
     script = tmp_path / "fake-acpx"
     script.write_text(
@@ -410,7 +382,6 @@ def _fake_acpx(
         f'  *"sessions new"*) cat "{new_json}" ;;\n'
         f'  *"sessions ensure"*) cat "{new_json}" ;;\n'
         f'  *"sessions show"*) cat "{show_json}" ;;\n'
-        f'  *"sessions close"*) cat "{close_json}" ;;\n'
         f'  *"cancel -s"*) cat "{cancel_json}" ;;\n'
         f'  *"status -s"*) cat "{status_json}" ;;\n'
         f'  *"prompt -s"*) cat "{turn_ndjson}" ;;\n'
@@ -427,14 +398,12 @@ def _persistent_role_file(
     valid_role_dict: dict[str, Any],
     work: Path,
     acpx_binary: Path | None,
-    *,
-    strategy: str = "persistent",
 ) -> Path:
     payload = copy.deepcopy(valid_role_dict)
     payload["workspace"]["default_cwd"] = str(work)
     payload["workspace"]["allowed_roots"] = [str(work)]
     payload["runner"]["acpx_binary"] = str(acpx_binary) if acpx_binary else None
-    payload["session"] = {"strategy": strategy}
+    payload["session"] = {"lease_seconds": 900}
     path = tmp_path / "session-role.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
@@ -656,26 +625,6 @@ def test_session_status_cli_no_session_snapshot_returns_nonzero(
     assert payload["summary"]["status"] == "no-session"
 
 
-def test_session_create_cli_refuses_exec_role(
-    run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], fixtures_root: Path
-) -> None:
-    work = tmp_path / "work"
-    work.mkdir()
-    role_path = _persistent_role_file(
-        tmp_path, valid_role_dict, work, _fake_acpx(tmp_path, fixtures_root), strategy="exec"
-    )
-    sessions_dir = tmp_path / "sessions"
-
-    completed = run_cli(
-        ["session", "create", "--role", str(role_path), "--session-id", "sess-a",
-         "--sessions-dir", str(sessions_dir)]
-    )
-
-    assert completed.returncode == 1, completed.stdout
-    assert "persistent" in (completed.stdout + completed.stderr).lower()
-    assert not (sessions_dir / "sess-a").exists()
-
-
 def test_session_without_subcommand_errors(run_cli) -> None:
     completed = run_cli(["session"])
 
@@ -713,30 +662,6 @@ def _create_session_via_cli(run_cli, role_path: Path, sessions_dir: Path, sessio
     return created
 
 
-def test_session_close_cli_marks_closed_and_returns_json(
-    run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], fixtures_root: Path
-) -> None:
-    work = tmp_path / "work"
-    work.mkdir()
-    role_path = _persistent_role_file(tmp_path, valid_role_dict, work, _fake_acpx(tmp_path, fixtures_root))
-    sessions_dir = tmp_path / "sessions"
-    _create_session_via_cli(run_cli, role_path, sessions_dir)
-
-    completed = run_cli(
-        ["session", "close", "--role", str(role_path), "--session-id", "sess-a",
-         "--sessions-dir", str(sessions_dir)]
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    payload = json.loads(completed.stdout)
-    assert payload["state"] == "closed"
-    assert payload["closed"] is True
-    assert payload["business_verdict"] is None
-    data = json.loads((sessions_dir / "sess-a" / "session.json").read_text(encoding="utf-8"))
-    assert data["state"] == "closed"
-    assert (sessions_dir / "sess-a" / "management" / "close.json").exists()
-
-
 def test_session_abort_cli_reports_cancelled_flag(
     run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], fixtures_root: Path
 ) -> None:
@@ -756,15 +681,18 @@ def test_session_abort_cli_reports_cancelled_flag(
     assert payload["cancelled"] is False
     assert payload["kind"] == "cancel_result"
     assert payload["business_verdict"] is None
-    # Cancel is not close: the record remains open.
+    # Cancelling affects the current work, never the Session: it is still
+    # there, still carries no lifecycle state, and is still unquarantined.
     data = json.loads((sessions_dir / "sess-a" / "session.json").read_text(encoding="utf-8"))
-    assert data["state"] == "open"
+    assert "state" not in data
+    assert "quarantine" not in data
     assert (sessions_dir / "sess-a" / "management" / "abort.json").exists()
 
 
-def test_session_send_cli_refuses_closed_session(
+def test_session_send_cli_refuses_quarantined_session(
     run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], fixtures_root: Path
 ) -> None:
+    """The only refusal left: quarantine, recorded out of band by a finalizer."""
     work = tmp_path / "work"
     work.mkdir()
     role_path = _persistent_role_file(tmp_path, valid_role_dict, work, _fake_acpx(tmp_path, fixtures_root))
@@ -773,11 +701,11 @@ def test_session_send_cli_refuses_closed_session(
     prompt_path.write_text("contract turn 1", encoding="utf-8")
     _create_session_via_cli(run_cli, role_path, sessions_dir)
 
-    closed = run_cli(
-        ["session", "close", "--role", str(role_path), "--session-id", "sess-a",
-         "--sessions-dir", str(sessions_dir)]
+    SessionStore(base_dir=sessions_dir).mark_quarantined(
+        "sess-a",
+        reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST,
+        run_id="run-prior",
     )
-    assert closed.returncode == 0, closed.stderr
 
     completed = run_cli(
         ["session", "send", "--role", str(role_path), "--session-id", "sess-a",
@@ -785,8 +713,8 @@ def test_session_send_cli_refuses_closed_session(
     )
 
     assert completed.returncode == 1
-    assert "closed" in (completed.stdout + completed.stderr).lower()
-    # Fail closed: no turn artifacts produced for the closed session.
+    assert "quarantin" in (completed.stdout + completed.stderr).lower()
+    # Fail closed: no turn artifacts produced for the quarantined session.
     assert not (sessions_dir / "sess-a" / "turns").exists()
 
 
@@ -841,30 +769,6 @@ def test_session_list_cli_empty_when_no_sessions(run_cli, tmp_path: Path) -> Non
     assert payload["count"] == 0
 
 
-def test_session_close_cli_refuses_already_closed(
-    run_cli, tmp_path: Path, valid_role_dict: dict[str, Any], fixtures_root: Path
-) -> None:
-    work = tmp_path / "work"
-    work.mkdir()
-    role_path = _persistent_role_file(tmp_path, valid_role_dict, work, _fake_acpx(tmp_path, fixtures_root))
-    sessions_dir = tmp_path / "sessions"
-    _create_session_via_cli(run_cli, role_path, sessions_dir)
-
-    first = run_cli(
-        ["session", "close", "--role", str(role_path), "--session-id", "sess-a",
-         "--sessions-dir", str(sessions_dir)]
-    )
-    assert first.returncode == 0, first.stderr
-
-    second = run_cli(
-        ["session", "close", "--role", str(role_path), "--session-id", "sess-a",
-         "--sessions-dir", str(sessions_dir)]
-    )
-
-    assert second.returncode == 1
-    assert "closed" in (second.stdout + second.stderr).lower()
-
-
 # --- H1 W2 cleanup CLI (dry-run default / confined apply) ------------------
 
 
@@ -878,21 +782,47 @@ def _artifact_runs_sessions(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _aged_run(runs_dir: Path, run_id: str, *, age_days: float) -> Path:
+    """A terminated Run carrying bulk evidence beside its spine."""
     run_dir = runs_dir / run_id
     run_dir.mkdir()
+    bulk = run_dir / "events.jsonl"
+    bulk.write_text('{"seq":1}\n', encoding="utf-8")
     marker = run_dir / "result.json"
-    marker.write_text("{}", encoding="utf-8")
+    # A terminal the production reader trusts: retention prunes on nothing less.
+    from agent_run_supervisor.exit_classifier import AgentRunStatus
+    from agent_run_supervisor.result import build_result_payload
+
+    marker.write_text(
+        json.dumps(
+            build_result_payload(
+                run_id=run_id,
+                status=AgentRunStatus.COMPLETED,
+                origin="acp",
+                detail_code=None,
+                retryable=False,
+                exit_code=0,
+                signal=None,
+                stop_reason="end_turn",
+                usage=None,
+                final_message="done",
+                truncated=False,
+                truncate_reason=None,
+                run_dir=None,
+            )
+        ),
+        encoding="utf-8",
+    )
     ts = time.time() - age_days * 86400
-    os.utime(marker, (ts, ts))
-    os.utime(run_dir, (ts, ts))
+    for path in (bulk, marker, run_dir):
+        os.utime(path, (ts, ts))
     return run_dir
 
 
-def _aged_session(sessions_dir: Path, session_id: str, *, state: str, age_days: float) -> Path:
+def _aged_session(sessions_dir: Path, session_id: str, *, age_days: float) -> Path:
     sess_dir = sessions_dir / session_id
     sess_dir.mkdir()
     record = sess_dir / "session.json"
-    record.write_text(json.dumps({"session_id": session_id, "state": state}), encoding="utf-8")
+    record.write_text(json.dumps({"session_id": session_id}), encoding="utf-8")
     ts = time.time() - age_days * 86400
     os.utime(record, (ts, ts))
     os.utime(sess_dir, (ts, ts))
@@ -912,12 +842,13 @@ def test_cleanup_cli_dry_run_then_apply(run_cli, tmp_path: Path) -> None:
     assert dry.returncode == 0, dry.stderr
     plan = json.loads(dry.stdout)
     assert plan["applied"] is False
-    delete_ids = {c["id"] for c in plan["plan"]["delete"]}
+    prune_ids = {c["id"] for c in plan["plan"]["prune"]}
     skip_ids = {c["id"] for c in plan["plan"]["skip"]}
-    assert delete_ids == {"run-old"}
+    assert prune_ids == {"run-old"}
     assert "run-fresh" in skip_ids
-    # Dry-run deletes nothing.
-    assert old.exists() and fresh.exists()
+    # Dry-run removes nothing.
+    assert (old / "events.jsonl").exists()
+    assert (fresh / "events.jsonl").exists()
 
     applied = run_cli(
         ["cleanup", "--runs-dir", str(runs), "--sessions-dir", str(sessions),
@@ -927,10 +858,12 @@ def test_cleanup_cli_dry_run_then_apply(run_cli, tmp_path: Path) -> None:
     assert applied.returncode == 0, applied.stderr
     result = json.loads(applied.stdout)
     assert result["applied"] is True
-    assert result["deleted"] == ["run-old"]
+    assert result["pruned"] == ["run-old"]
     assert result["failed"] == []
-    assert not old.exists()
-    assert fresh.exists()
+    # Bulk evidence is gone; the Run and its idempotency spine remain.
+    assert not (old / "events.jsonl").exists()
+    assert (old / "result.json").exists()
+    assert (fresh / "events.jsonl").exists()
 
 
 def test_cleanup_cli_refuses_unconfined_root(run_cli, tmp_path: Path) -> None:
@@ -948,9 +881,9 @@ def test_cleanup_cli_refuses_unconfined_root(run_cli, tmp_path: Path) -> None:
     assert "retention error" in completed.stderr.lower()
 
 
-def test_cleanup_cli_never_deletes_open_session(run_cli, tmp_path: Path) -> None:
+def test_cleanup_cli_never_removes_a_session(run_cli, tmp_path: Path) -> None:
     runs, sessions = _artifact_runs_sessions(tmp_path)
-    open_sess = _aged_session(sessions, "sess-open", state="open", age_days=30)
+    durable = _aged_session(sessions, "sess-durable", age_days=4000)
 
     applied = run_cli(
         ["cleanup", "--runs-dir", str(runs), "--sessions-dir", str(sessions),
@@ -960,11 +893,11 @@ def test_cleanup_cli_never_deletes_open_session(run_cli, tmp_path: Path) -> None
     assert applied.returncode == 0, applied.stderr
     result = json.loads(applied.stdout)
     assert result["applied"] is True
-    # An open session is unconditionally protected: never deleted, forced to skip.
-    assert "sess-open" not in result["deleted"]
+    # A Session is unconditionally durable: never removed, forced to skip.
+    assert "sess-durable" not in result["pruned"]
     skip = {c["id"]: c for c in result["plan"]["skip"]}
-    assert skip["sess-open"]["reason"] == "open_session"
-    assert open_sess.exists()
+    assert skip["sess-durable"]["reason"] == "session_durable"
+    assert (durable / "session.json").exists()
 
 
 def test_cleanup_cli_rejects_removed_include_open_flag(run_cli, tmp_path: Path) -> None:

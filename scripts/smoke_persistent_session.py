@@ -10,14 +10,17 @@ existing CLI surface and walks the full S1 lifecycle:
       -> session send (turn 2)
       -> session status
       -> session list
-      -> session close
 
 It uses a persistent ``AgentRoleSpec`` whose ``runner.acpx_binary`` is ``null``,
 so the compiler resolves the pinned ``npx -y acpx@<acpx_version>`` prefix
 (see ``policy._acpx_prefix``); `npx` is therefore a required precondition. Both prompt turns ask the
 AGENT to reply with an exact marker; the smoke asserts those markers, the
-``status``/``list``/``close`` outcomes, and that every lifecycle result keeps
-``business_verdict: null``.
+``status``/``list`` outcomes, and that every result keeps
+``business_verdict: null``. There is no close step and no teardown of the
+external Session: Runs terminate, Sessions do not close. The smoke names a fresh
+session per invocation, so leaving one behind leaks nothing that a rerun would
+trip over, and disposing of real external agent state stays an operator
+decision.
 
 Scope boundary (S1 closure, local-only):
 
@@ -121,7 +124,6 @@ def build_role(scratch_cwd: Path, *, acpx_timeout_seconds: int) -> dict[str, Any
             "switch_mode": False,
             "other": False,
         },
-        "session": {"strategy": "persistent"},
         "limits": {
             "timeout_seconds": acpx_timeout_seconds,
             "max_turns": 1,
@@ -194,45 +196,6 @@ def run_cli(args: list[str], *, timeout: int) -> dict[str, Any]:
     }
 
 
-def best_effort_close_acpx_session(
-    *, session_name: str, cwd: Path, timeout: int
-) -> None:
-    """Close a real acpx named session without relying on a local supervisor record.
-
-    This is a failure-path leak guard for the create step: acpx may create the
-    named session before the supervisor CLI can parse/write a local record. The
-    normal smoke lifecycle still closes through the supervisor CLI; this direct
-    management command is only best-effort cleanup and never masks the original
-    smoke failure.
-    """
-    argv = [
-        "npx",
-        "-y",
-        f"acpx@{ACPX_VERSION}",
-        "--format",
-        "json",
-        "--json-strict",
-        "--cwd",
-        str(cwd),
-        ADAPTER_AGENT,
-        "sessions",
-        "close",
-        session_name,
-    ]
-    try:
-        subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            check=False,
-            env=_cli_env(),
-            cwd=str(REPO),
-            timeout=timeout,
-        )
-    except Exception:
-        pass
-
-
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise SmokeError(message)
@@ -288,30 +251,6 @@ def run_smoke(*, acpx_timeout_seconds: int, scratch: Path, sessions_dir: Path) -
     sessions_arg = ["--sessions-dir", str(sessions_dir)]
     common = ["--role", str(role_path), "--session-id", SESSION_ID]
 
-    created = False
-    closed = False
-    create_attempted = False
-
-    def best_effort_close() -> None:
-        """Avoid leaking a real acpx persistent session if a later check fails."""
-        if closed:
-            return
-        if created:
-            try:
-                cleanup = run_cli(
-                    ["session", "close", *common, *sessions_arg], timeout=launch_timeout
-                )
-                if cleanup.get("returncode") == 0:
-                    return
-            except Exception:
-                # Fall through to direct named-session cleanup below.
-                pass
-        if create_attempted:
-            best_effort_close_acpx_session(
-                session_name=session_name,
-                cwd=work_dir,
-                timeout=launch_timeout,
-            )
 
     try:
         # 1. validate-role -------------------------------------------------
@@ -321,18 +260,14 @@ def run_smoke(*, acpx_timeout_seconds: int, scratch: Path, sessions_dir: Path) -
         _require(validate.get("valid") is True, "validate-role: role not reported valid")
 
         # 2. session create ------------------------------------------------
-        create_attempted = True
         res = run_cli(
             ["session", "create", *common, "--session-name", session_name, *sessions_arg],
             timeout=launch_timeout,
         )
         _require(res["returncode"] == 0, f"session create: exit {res['returncode']}: {res['stderr'].strip()!r}")
-        # Once the create command exits 0, assume a real acpx named session may
-        # exist even if the following JSON/field validation fails. This makes the
-        # finally block close the session on post-create validation failures too.
-        created = True
         create = _require_json(res, "session create")
-        _require(create.get("state") == "open", f"session create: state={create.get('state')!r}, want 'open'")
+        _require("state" not in create, "session create: a Session has no lifecycle state")
+        _require(bool(create.get("session_id")), "session create: no session_id reported")
         _check_business_verdict_null(create, "session create")
 
         # 3. session send (turn 1) ----------------------------------------
@@ -383,15 +318,6 @@ def run_smoke(*, acpx_timeout_seconds: int, scratch: Path, sessions_dir: Path) -
         _require(records[0].get("session_id") == SESSION_ID, "session list: unexpected session_id")
         _check_business_verdict_null(listing, "session list")
 
-        # 7. session close -------------------------------------------------
-        res = run_cli(["session", "close", *common, *sessions_arg], timeout=launch_timeout)
-        _require(res["returncode"] == 0, f"session close: exit {res['returncode']}: {res['stderr'].strip()!r}")
-        close = _require_json(res, "session close")
-        _require(close.get("state") == "closed", f"session close: state={close.get('state')!r}, want 'closed'")
-        _require(close.get("closed") is True, "session close: closed flag not true")
-        _check_business_verdict_null(close, "session close")
-        closed = True
-
         # Two distinct redacted turn directories persisted under the one session.
         turns_root = sessions_dir / SESSION_ID / "turns"
         turn_dirs = sorted(p.name for p in turns_root.iterdir() if p.is_dir()) if turns_root.exists() else []
@@ -413,13 +339,16 @@ def run_smoke(*, acpx_timeout_seconds: int, scratch: Path, sessions_dir: Path) -
                 "turn2": {"status": turn2.get("status"), "marker": observed2, "turn_id": turn2.get("turn_id")},
                 "status_ok": status.get("ok"),
                 "list_count": listing.get("count"),
-                "closed_state": close.get("state"),
             },
             "turn_dir_count": len(turn_dirs),
             "business_verdict_null_all_steps": True,
         }
     finally:
-        best_effort_close()
+        # Nothing here ends the external Session. The smoke names a fresh
+        # session per invocation (``make_session_name``), so it leaks nothing by
+        # leaving one behind — and ending one is the mechanism this product
+        # removed, not a form of resource cleanup.
+        pass
 
 
 def main(argv: list[str] | None = None) -> int:

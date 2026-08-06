@@ -21,6 +21,7 @@ from agent_run_supervisor.exit_classifier import AgentRunStatus
 from agent_run_supervisor.native_acp import agent_registry, storage
 from agent_run_supervisor.native_acp.agent_registration import AgentEntry
 from agent_run_supervisor.result import build_result_payload
+from agent_run_supervisor.session import derive_session_id_for_run, is_valid_session_id
 
 from . import protocol
 
@@ -28,8 +29,8 @@ from . import protocol
 # identity replaced profile selection and the launch material became
 # value-blind. A pre-reset frame therefore hashes differently by construction
 # rather than being silently reinterpreted.
-DIGEST_SCHEMA_VERSION = 2
-SUBMISSION_SCHEMA_VERSION = 2
+DIGEST_SCHEMA_VERSION = 3
+SUBMISSION_SCHEMA_VERSION = 3
 
 # Request fields that would let a caller choose a runtime, name a value, or
 # anticipate a transport. None of them exists on ``AgentRunRequest`` and none is
@@ -133,6 +134,22 @@ def derive_run_id(key: AdmissionKey) -> str:
         + request
     )
     return _RUN_ID_PREFIX + hashlib.sha256(material).hexdigest()[:32]
+
+
+def derive_session_id(key: AdmissionKey) -> str:
+    """The prospective Session identity of a **create** submission.
+
+    A pure function of the same authenticated identity that derives the Run, so
+    a repeated request converges on the same Session instead of creating a
+    second one and a lost response cannot split a caller's context. Nothing
+    durable about the Session is written under this id before ``session/new``:
+    the sealed submission/Spec is the whole reservation.
+
+    The rule itself lives in :func:`session.derive_session_id_for_run` — one
+    definition shared by admission, the durable submission validator, and the
+    runtime — and this is its admission-key-facing spelling.
+    """
+    return derive_session_id_for_run(derive_run_id(key))
 
 
 def compute_request_digest(command: protocol.SubmitCommand) -> RequestDigest:
@@ -240,8 +257,10 @@ def build_submission_artifact(
         },
         "owner": command.request.owner,
         "namespace": command.request.namespace,
-        "session_reuse": command.request.session_reuse,
-        "ars_session_id": command.request.ars_session_id,
+        # Recorded exactly as the caller sent it: ``None`` is a create, whose
+        # prospective Session id is derived from this record's own
+        # principal/request identity rather than stored a second time.
+        "session_id": command.request.session_id,
         "agent_id": command.request.agent_id,
         "request_digest": digest.value,
         "prompt_sha256": digest.prompt_sha256,
@@ -254,7 +273,6 @@ def write_submission(run_dir: Path, artifact: Mapping[str, Any]) -> Path:
 
 
 SUBMISSION_NAME = "submission.json"
-_REUSE_MODES = ("reuse", "none")
 
 # The exact field set ``build_submission_artifact`` emits, named once so the
 # writer and the strict validator cannot drift. A structural test asserts the
@@ -270,8 +288,7 @@ SUBMISSION_FIELDS = (
     "peer",
     "owner",
     "namespace",
-    "session_reuse",
-    "ars_session_id",
+    "session_id",
     "agent_id",
     "request_digest",
     "prompt_sha256",
@@ -282,12 +299,16 @@ SUBMISSION_PEER_FIELDS = ("pid", "uid", "gid")
 
 @dataclasses.dataclass(frozen=True)
 class SubmissionAttribution:
-    """Exact run/owner/namespace/Session identity carried by a valid submission."""
+    """Exact run/owner/namespace/Session identity carried by a valid submission.
+
+    ``session_id`` is always resolved: the caller's value for a reuse, and the
+    deterministic prospective id for a create. Reconciliation reads one field
+    and never has to re-derive a rule.
+    """
 
     run_id: str
     owner: str
     namespace: str
-    session_reuse: str
     session_id: str
 
 
@@ -319,8 +340,9 @@ def validate_submission_artifact(
     is not a record ARS produced, and a document ARS did not produce is not
     evidence about a Run ARS admitted. Attribution is exact: the record must
     name **this** Run, and its Session identity is either the declared reuse id
-    or the already-defined deterministic ephemeral derivation — never a
-    directory name, a result field, or anything inferred.
+    or the deterministic prospective id derived from this record's own
+    principal/request identity — never a directory name, a result field, or
+    anything inferred.
     """
     if not isinstance(payload, dict):
         return None
@@ -341,24 +363,16 @@ def validate_submission_artifact(
     namespace = payload.get("namespace")
     if not _nonempty_str(owner) or not _nonempty_str(namespace):
         return None
-    reuse = payload.get("session_reuse")
-    if reuse not in _REUSE_MODES:
-        return None
-    ars_session_id = payload.get("ars_session_id")
-    if reuse == "reuse":
-        if not _nonempty_str(ars_session_id):
-            return None
-        session_id = ars_session_id
+    declared_session_id = payload.get("session_id")
+    if declared_session_id is None:
+        # A create: the prospective Session is named by the Run identity this
+        # record attests — already checked equal to ``run_id`` above — through
+        # the same single rule the runtime selector uses.
+        session_id = derive_session_id_for_run(run_id)
+    elif is_valid_session_id(declared_session_id):
+        session_id = declared_session_id
     else:
-        # Mirrors the Spec-side rule exactly: a non-reuse submission may carry
-        # a stray id because the request model and the wire parser accept one,
-        # and this writer preserves it. Attribution still derives only the
-        # deterministic ephemeral id — the same id the runtime selector uses —
-        # so the stray value is recorded evidence and never authority. The type
-        # domain stays null-or-non-empty-string.
-        if ars_session_id is not None and not _nonempty_str(ars_session_id):
-            return None
-        session_id = f"{run_id}-ephemeral"
+        return None
     if not _nonempty_str(payload.get("request_digest")):
         return None
     if not _nonempty_str(payload.get("prompt_sha256")):
@@ -381,7 +395,6 @@ def validate_submission_artifact(
         run_id=run_id,
         owner=owner,
         namespace=namespace,
-        session_reuse=reuse,
         session_id=session_id,
     )
 
@@ -449,14 +462,20 @@ def read_result(run_dir: Path) -> dict[str, Any] | None:
 def bound_session_id_for_run(
     *, run_id: str, submission: Mapping[str, Any] | None
 ) -> str | None:
-    """Resolve the Session bound to a Native run from its submission artifact."""
+    """Resolve the Session bound to a Native run from its submission artifact.
+
+    A reuse resolves to the id the caller sent; a create resolves to the
+    prospective id derived from the Run identity by the single shared rule.
+    """
     if submission is None:
         return None
-    reuse = submission.get("session_reuse")
-    if reuse == "reuse":
-        ars_session_id = submission.get("ars_session_id")
-        return ars_session_id if isinstance(ars_session_id, str) else None
-    return f"{run_id}-ephemeral"
+    declared = submission.get("session_id")
+    if declared is not None:
+        return declared if is_valid_session_id(declared) else None
+    try:
+        return derive_session_id_for_run(run_id)
+    except Exception:
+        return None
 
 
 def read_progress(run_dir: Path) -> dict[str, Any] | None:

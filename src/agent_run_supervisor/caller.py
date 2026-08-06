@@ -16,7 +16,6 @@ from typing import Any
 from agent_run_supervisor.role import AgentRoleSpec, load_role
 from agent_run_supervisor.runner import DryRunResult, RunOutcome, SupervisorRunner
 from agent_run_supervisor.session_runtime import (
-    SessionCloseOutcome,
     SessionCreateOutcome,
     SessionRuntime,
     SessionStatusOutcome,
@@ -30,7 +29,6 @@ EXEC_DRY_RUN_MODE = "exec_dry_run"
 SESSION_CREATE_MODE = "session_create"
 SESSION_SEND_MODE = "session_send"
 SESSION_STATUS_MODE = "session_status"
-SESSION_CLOSE_MODE = "session_close"
 SESSION_ABORT_MODE = "session_abort"
 SESSION_LIST_MODE = "session_list"
 
@@ -40,7 +38,6 @@ SUPPORTED_MODES = {
     SESSION_CREATE_MODE,
     SESSION_SEND_MODE,
     SESSION_STATUS_MODE,
-    SESSION_CLOSE_MODE,
     SESSION_ABORT_MODE,
     SESSION_LIST_MODE,
 }
@@ -49,7 +46,6 @@ SESSION_ID_REQUIRED_MODES = {
     SESSION_CREATE_MODE,
     SESSION_SEND_MODE,
     SESSION_STATUS_MODE,
-    SESSION_CLOSE_MODE,
     SESSION_ABORT_MODE,
 }
 SESSION_MODES = SESSION_ID_REQUIRED_MODES | {SESSION_LIST_MODE}
@@ -166,9 +162,6 @@ def invoke_caller(
             status.result,
             session_dir=_session_dir(active_runtime, spec, session_id),
         )
-    if spec.mode == SESSION_CLOSE_MODE:
-        closed = active_runtime.close(role=role, session_id=session_id, cwd=cwd)
-        return _from_session_close(spec.mode, closed, _session_dir(active_runtime, spec, session_id))
     if spec.mode == SESSION_ABORT_MODE:
         aborted = active_runtime.abort(role=role, session_id=session_id, cwd=cwd)
         return _from_session_management(
@@ -284,14 +277,6 @@ def _from_session_management(
         session_dir=session_dir_str,
         business_verdict=None,
     )
-
-
-def _from_session_close(
-    mode: str,
-    outcome: SessionCloseOutcome,
-    session_dir: Path,
-) -> CallerResult:
-    return _from_session_management(mode, outcome.result, session_dir=session_dir)
 
 
 def _status_from(result: dict[str, Any]) -> str | None:

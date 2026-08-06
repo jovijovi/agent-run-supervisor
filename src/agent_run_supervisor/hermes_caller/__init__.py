@@ -28,7 +28,6 @@ from .hermes import HermesDocCheckCaller
 from .intake import (
     build_check_prompt,
     build_exec_spec,
-    build_session_close_spec,
     build_session_create_spec,
     build_session_send_spec,
     build_session_status_spec,
@@ -69,6 +68,5 @@ __all__ = [
     "build_session_create_spec",
     "build_session_send_spec",
     "build_session_status_spec",
-    "build_session_close_spec",
     "HermesDocCheckCaller",
 ]

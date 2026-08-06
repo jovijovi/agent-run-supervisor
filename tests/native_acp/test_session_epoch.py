@@ -5,8 +5,8 @@ Native Session identity is: ``agent_id``, profile identity, owner, namespace,
 ARS-derived identity fields of the retired line — ``adapter_contract_hash``,
 ``session_compatibility_epoch``, and ``agent_registration_hash`` — are gone from
 identity. A legacy record that still carries any of them stays owner-scoped
-``status``/``list``/``close``-readable and is **refused for ``session/load``**
-with a stable code.
+``status``/``list``-readable and is **refused for ``session/load``**
+with a stable code. Nothing retires it from disk: Sessions do not close.
 
 ``session_epoch`` is an operator escape hatch. No automatic bump exists
 anywhere: an AGENT or adapter version change, an ARS upgrade, a profile revision
@@ -57,6 +57,7 @@ def make_record(tmp_path: Path, *, session_epoch=None, agent_id="a-1"):
         matched_root=binding.canonical_root,
         session_epoch=session_epoch,
         agent_id=agent_id,
+        agent_session_id="external-s-1",
     )
     return store, binding, store.open_session("s-1")
 
@@ -189,10 +190,15 @@ def test_a_legacy_identity_record_stays_status_readable(tmp_path, legacy):
     assert any(item.session_id == "s-1" for item in store.list_records())
 
 
-def test_a_legacy_identity_record_can_still_be_closed(tmp_path):
+def test_a_legacy_identity_record_stays_readable_and_never_ends(tmp_path):
+    """A retired-identity record is refused for load, not retired from disk.
+
+    There is no close to apply to it: it keeps existing, keeps being listed,
+    and keeps being queryable — only binding it to a Run is refused.
+    """
     store, _, _ = legacy_record(tmp_path, session_compatibility_epoch=3)
-    store.mark_closed("s-1")
-    assert store.open_session("s-1").state != "open"
+    assert store.open_session("s-1").session_id == "s-1"
+    assert [r.session_id for r in store.list_records()] == ["s-1"]
 
 
 def test_the_refusal_is_a_stable_code_carrying_no_legacy_value(tmp_path):

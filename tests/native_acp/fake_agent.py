@@ -161,7 +161,7 @@ class FakeAgent:
 
     # -- the agent's own configuration home --------------------------------
 
-    def _session_state_path(self, session_id: str) -> str | None:
+    def _session_quarantined_path(self, session_id: str) -> str | None:
         """Where this session's state lives, or ``None`` when unmodelled.
 
         Keyed off the environment so a client that repoints the configuration
@@ -176,8 +176,8 @@ class FakeAgent:
                 return os.path.join(home, "sessions", session_id + ".json")
         return None
 
-    def _save_session_state(self, session_id: str) -> None:
-        path = self._session_state_path(session_id)
+    def _save_session_quarantined(self, session_id: str) -> None:
+        path = self._session_quarantined_path(session_id)
         if path is None:
             return
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -186,8 +186,8 @@ class FakeAgent:
                 {"options": self._options_list(), "prompts": self.remembered}, handle
             )
 
-    def _restore_session_state(self, session_id: str) -> bool:
-        path = self._session_state_path(session_id)
+    def _restore_session_quarantined(self, session_id: str) -> bool:
+        path = self._session_quarantined_path(session_id)
         if path is None:
             return True
         try:
@@ -275,14 +275,14 @@ class FakeAgent:
         config_options = (
             None if self.script.get("omit_initial_options") else self._options_list()
         )
-        self._save_session_state(self.session_id)
+        self._save_session_quarantined(self.session_id)
         _result(request_id, {"sessionId": self.session_id, "configOptions": config_options})
 
     def _on_load(self, request_id: Any, params: dict[str, Any]) -> None:
         if self.script.get("load_fails"):
             _error(request_id, -32603, "session load rejected by fake script")
             return
-        if not self._restore_session_state(params.get("sessionId") or self.session_id):
+        if not self._restore_session_quarantined(params.get("sessionId") or self.session_id):
             # The load answers — the id is not rejected — but this configuration
             # root has never seen the session, so there is no configured session
             # to report options for.
@@ -345,7 +345,7 @@ class FakeAgent:
                 }
         if config_id in self.options:
             self.options[config_id]["currentValue"] = readback
-        self._save_session_state(params.get("sessionId") or self.session_id)
+        self._save_session_quarantined(params.get("sessionId") or self.session_id)
         _result(request_id, {"configOptions": self._options_list()})
 
     def _on_prompt(self, request_id: Any, params: dict[str, Any]) -> None:
@@ -355,7 +355,7 @@ class FakeAgent:
             text = block.get("text")
             if isinstance(text, str):
                 self.remembered.append(text)
-        self._save_session_state(params.get("sessionId") or self.session_id)
+        self._save_session_quarantined(params.get("sessionId") or self.session_id)
         for update in self.script.get("prompt_tool_updates", []):
             self._notify_update(update)
         if self.script.get("ask_permission"):
@@ -444,7 +444,10 @@ class FakeAgent:
         _result(
             request_id,
             {
-                "stopReason": "end_turn",
+                # ``prompt_stop_reason`` lets a fixture script the *agent's own*
+                # terminal, which is what distinguishes a trustworthy cancel
+                # (the agent answered) from lost observation (it did not).
+                "stopReason": self.script.get("prompt_stop_reason", "end_turn"),
                 "usage": self._usage(),
             },
         )

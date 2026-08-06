@@ -12,7 +12,6 @@ from pathlib import Path
 from agent_run_supervisor.caller import (
     EXEC_DRY_RUN_MODE,
     EXEC_MODE,
-    SESSION_CLOSE_MODE,
     SESSION_CREATE_MODE,
     SESSION_SEND_MODE,
     SESSION_STATUS_MODE,
@@ -111,24 +110,6 @@ def build_session_status_spec(
     """Map a task to a read-only ``session_status`` spec."""
     return CallerInvocationSpec(
         mode=SESSION_STATUS_MODE,
-        role=role,
-        cwd=cwd,
-        sessions_dir=sessions_dir,
-        session_id=session_id,
-    )
-
-
-def build_session_close_spec(
-    task: DocCheckTask,
-    *,
-    role: AgentRoleSpec,
-    session_id: str,
-    cwd: str | Path,
-    sessions_dir: str | Path | None = None,
-) -> CallerInvocationSpec:
-    """Map a task to a ``session_close`` spec."""
-    return CallerInvocationSpec(
-        mode=SESSION_CLOSE_MODE,
         role=role,
         cwd=cwd,
         sessions_dir=sessions_dir,

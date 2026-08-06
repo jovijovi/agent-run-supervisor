@@ -35,16 +35,6 @@ from agent_run_supervisor.session import SessionRecord, SessionStore
 NATIVE_SESSIONS_DIRNAME = "native-sessions"
 NATIVE_RUNS_DIRNAME = "native-runs"
 
-# Native state vocabulary bijection: the authority/API term 'active' maps to
-# the existing on-disk compatibility value 'open' at this boundary; 'closed'
-# and 'quarantined' persist 1:1. The persisted file never carries 'active'.
-_TO_NATIVE_STATE = {"open": "active", "closed": "closed", "quarantined": "quarantined"}
-_TO_PERSISTED_STATE = {
-    "active": "open",
-    "closed": "closed",
-    "quarantined": "quarantined",
-}
-
 # Read cap for terminal evidence: schema ceiling plus decode bound.
 _MAX_TERMINAL_READ_BYTES = MAX_NATIVE_RESULT_SERIALIZED_BYTES
 
@@ -90,20 +80,6 @@ class NativeTerminalState:
 
     kind: NativeTerminalKind
     payload: dict[str, Any] | None = None
-
-
-def to_native_state(persisted: str) -> str:
-    try:
-        return _TO_NATIVE_STATE[persisted]
-    except KeyError:
-        raise ValueError(f"not a persisted native session state: {persisted!r}") from None
-
-
-def to_persisted_state(native: str) -> str:
-    try:
-        return _TO_PERSISTED_STATE[native]
-    except KeyError:
-        raise ValueError(f"not a canonical native session state: {native!r}") from None
 
 
 def native_session_store(
@@ -331,11 +307,17 @@ def create_native_session(
     workspace_hash: str,
     effective_cwd: str,
     matched_root: str | None,
+    agent_session_id: str,
     agent_id: str | None = None,
     session_epoch: int | None = None,
     now: _dt.datetime | None = None,
 ) -> SessionRecord:
-    """The only sanctioned Native call site for record creation."""
+    """The only sanctioned Native call site for record creation.
+
+    One call, one exclusive write, one fully bound record. There is no separate
+    binding seam because there is no unbound record to bind: ``session/new`` has
+    already returned by the time this runs.
+    """
     return store.create_native_session(
         session_id=session_id,
         profile_id=profile_id,
@@ -346,20 +328,8 @@ def create_native_session(
         workspace_hash=workspace_hash,
         effective_cwd=effective_cwd,
         matched_root=matched_root,
+        agent_session_id=agent_session_id,
         agent_id=agent_id,
         session_epoch=session_epoch,
         now=now,
-    )
-
-
-def bind_agent_session(
-    store: SessionStore,
-    session_id: str,
-    *,
-    agent_session_id: str,
-    now: _dt.datetime | None = None,
-) -> SessionRecord:
-    """The only sanctioned Native call site for external-ID binding."""
-    return store.bind_agent_session(
-        session_id, agent_session_id=agent_session_id, now=now
     )

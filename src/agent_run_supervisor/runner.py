@@ -29,7 +29,6 @@ from agent_run_supervisor.parser import (
 from agent_run_supervisor.policy import (
     compile_command,
     compile_permission_policy,
-    ensure_exec_strategy,
     policy_hash,
 )
 from agent_run_supervisor.redaction import (
@@ -200,7 +199,6 @@ class SupervisorRunner:
         cwd: str | None,
         env: Mapping[str, str] | None = None,
     ) -> DryRunResult:
-        ensure_exec_strategy(role)
         workspace = validate_effective_cwd(role, cwd)
         bundle = self._prepare_artifacts(
             role=role,
@@ -243,7 +241,6 @@ class SupervisorRunner:
         cwd: str | None,
         env: Mapping[str, str] | None = None,
     ) -> RunOutcome:
-        ensure_exec_strategy(role)
         workspace = validate_effective_cwd(role, cwd)
         # Verify the role's declared MCP config immediately before spawn: the
         # exec path fails closed (no artifacts, no launch) unless the declared
@@ -290,7 +287,6 @@ class SupervisorRunner:
         subprocess_outcome: SubprocessOutcome,
         env: Mapping[str, str] | None = None,
     ) -> RunOutcome:
-        ensure_exec_strategy(role)
         workspace = validate_effective_cwd(role, cwd)
         bundle = self._prepare_artifacts(
             role=role,

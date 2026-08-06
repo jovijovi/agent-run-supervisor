@@ -52,7 +52,11 @@ from agent_run_supervisor.result import (
     truncate_utf8_bytes,
 )
 from agent_run_supervisor.session import (
-    STATE_OPEN,
+    QUARANTINE_DISPATCH_OBSERVATION_LOST,
+    derive_session_id_for_run,
+    QUARANTINE_DISPATCH_WITHOUT_TERMINAL,
+    QUARANTINE_SWITCH_ROLLBACK_UNPROVEN,
+    QUARANTINE_UNTRUSTED_TERMINAL_EVIDENCE,
     SessionBindingError,
     SessionLock,
     SessionNotFoundError,
@@ -96,6 +100,32 @@ from .spec import (
 DISPATCH_STARTED_MARKER = "prompt-dispatch-started"
 PROMPT_ACCEPTED_MARKER = "prompt-accepted"
 
+# The durable configuration-switch vocabulary.
+#
+# Between publishing the bound Session record and writing the dispatch marker,
+# ARS mutates the agent's configuration. A crash inside that window leaves a
+# Session whose configuration nobody proved, and reconciliation cannot ask the
+# dead process what it was doing — so the Run directory has to say it.
+#
+# Each marker records that one boundary was crossed and **nothing else**: no
+# model literal, no option value, no readback, no child text. Which markers
+# exist is the whole classification:
+#
+#   none                                  → no set was dispatched; reusable
+#   started only                          → a set may have landed, unproven;
+#                                           the Session must be quarantined
+#   started + proven                      → exact readback proved the state
+#   started + rollback-proven             → the switch was exactly undone
+CONFIG_SWITCH_STARTED_MARKER = "config-switch-started"
+CONFIG_PROVEN_MARKER = "config-proven"
+CONFIG_ROLLBACK_PROVEN_MARKER = "config-rollback-proven"
+
+CONFIG_SWITCH_MARKERS = (
+    CONFIG_SWITCH_STARTED_MARKER,
+    CONFIG_PROVEN_MARKER,
+    CONFIG_ROLLBACK_PROVEN_MARKER,
+)
+
 # The only thing an allowed-but-failed workspace read is ever allowed to say.
 FS_READ_FAILED = "FS_READ_FAILED"
 
@@ -129,6 +159,12 @@ def finalize_run_state(
 ) -> tuple[AgentRunStatus | None, str]:
     """The terminal table as a pure function → (run_status, session_disposition).
 
+    The disposition vocabulary is exactly ``keep | reusable | quarantined``.
+    None of the three is a Session lifecycle state: ``reusable`` is the ordinary
+    outcome and means the Session is untouched, ``quarantined`` records
+    independent safety evidence, and ``keep`` means an irreversible terminal
+    already stands. No Run terminal ends a Session.
+
     ``None`` status means an existing terminal result is kept (irreversible).
     Exit-code classification is subordinate by construction: no exit code is
     consulted, so a dispatched Turn without a reliable ACP terminal can never
@@ -144,11 +180,11 @@ def finalize_run_state(
     if obs.result_exists:
         return (None, "keep")
     if obs.persisted_terminal_event is not None:
-        return (_status_for_stop_reason(obs.persisted_terminal_event), "active")
+        return (_status_for_stop_reason(obs.persisted_terminal_event), "reusable")
     if not obs.dispatch_started:
         # Reusable unless a partial switch could not be rolled back with
         # exact readback proof.
-        disposition = "quarantined" if obs.rollback_unproven else "active"
+        disposition = "quarantined" if obs.rollback_unproven else "reusable"
         return (AgentRunStatus.FAILED, disposition)
 
     status, disposition = _post_dispatch_finalize(obs)
@@ -167,10 +203,10 @@ def _post_dispatch_finalize(
 ) -> tuple[AgentRunStatus, str]:
     if obs.acp_stop_reason is not None:
         if obs.permission_violation:
-            return (AgentRunStatus.FAILED, "active")
+            return (AgentRunStatus.FAILED, "reusable")
         if obs.supervisor_timed_out:
-            return (AgentRunStatus.TIMED_OUT, "active")
-        return (_status_for_stop_reason(obs.acp_stop_reason), "active")
+            return (AgentRunStatus.TIMED_OUT, "reusable")
+        return (_status_for_stop_reason(obs.acp_stop_reason), "reusable")
     if obs.escalated_kill_after_dispatch:
         if obs.supervisor_timed_out:
             # PRD R5 / GOAL contract 5: the supervisor killed the child with
@@ -205,17 +241,27 @@ class NativeRunResult:
     payload: dict[str, Any]
     run_dir: Path | None
     session_id: str | None
-    session_state: str | None
+    # Whether the Session ended this Run carrying quarantine evidence. There is
+    # no Session state to report: the Session exists and stays resumable, or it
+    # was never created at all (``session_id`` is then still the prospective id
+    # and ``session_status`` answers unknown/not-found for it).
+    session_quarantined: bool | None
 
 
 @dataclass(frozen=True)
-class NewSessionPlan:
-    """Start a brand-new external Session.
+class CreateSessionPlan:
+    """Create one brand-new durable Session, atomically, with its first Run.
 
-    Constructible **only** from a request whose immutable reuse intent is
-    "none": it is the sole plan type the ``session/new`` startup arm matches,
-    so a reuse request cannot reach ``driver.new_session`` structurally rather
-    than by branch ordering.
+    Constructible **only** from a request carrying no ``session_id``: it is the
+    sole plan type the ``session/new`` startup arm matches, so a reuse request
+    cannot reach ``driver.new_session`` structurally rather than by branch
+    ordering.
+
+    ``ar_session_id`` is the **prospective** id: nothing durable exists under it
+    yet, and nothing will unless ``session/new`` returns. The process-local
+    keyed admission lock is what serializes two live attempts at this id, and
+    the sealed submission is what makes a repeat converge instead of creating a
+    second Session.
     """
 
     ar_session_id: str
@@ -238,7 +284,7 @@ class LoadSessionPlan:
 
 # The closed union. There is no third member, no default arm, and no
 # conversion between the two: every startup arm matches one member exactly.
-SessionStartPlan = NewSessionPlan | LoadSessionPlan
+SessionStartPlan = CreateSessionPlan | LoadSessionPlan
 
 
 class _PreDispatchFailure(Exception):
@@ -333,7 +379,10 @@ class FinalMessageAccumulator:
 class _RunContext:
     handle: Any = None
     session_id: str | None = None
-    ephemeral: bool = False
+    # True until the create path commits its one fully bound Session record.
+    # While it holds, ``session_id`` names a Session that does not exist, and
+    # nothing may fence, quarantine, observe, or lease it.
+    session_pending_creation: bool = False
     previous_pair: tuple[str | None, str | None] = (None, None)
     rollback_unproven: bool = False
     lock: SessionLock | None = None
@@ -351,6 +400,9 @@ class _RunContext:
     # The same Session's earlier ``initialize`` observation, when one exists.
     # Read *only* to emit drift warnings: it can never change a verdict.
     previous_observation: Any = None
+    # This Run's own accepted ``initialize`` observation, held until a Session
+    # record exists to carry it. A create observes before it creates.
+    pending_observation: Any = None
     effective_written: bool = False
     dispatch_started: bool = False
     # Wire-order delivery ordinal of session/update callbacks (one per
@@ -458,6 +510,10 @@ class RunTask:
         self._request = request
         self._prompt_text = prompt_text
         self._run_id = run_id
+        # The prospective Session id of a create, computed once from this Run's
+        # identity by the single shared rule. It names nothing on disk until
+        # ``session/new`` returns and the one bound record is written.
+        self._prospective_session_id = derive_session_id_for_run(run_id)
         self._workspace_root = Path(workspace_root)
         self._registry = registry
         self._session_store = session_store
@@ -502,7 +558,7 @@ class RunTask:
                     payload=payload,
                     run_dir=None,
                     session_id=None,
-                    session_state=None,
+                    session_quarantined=None,
                 )
         cancelled = False
         try:
@@ -564,14 +620,18 @@ class RunTask:
             raise _PreDispatchFailure("spawn failed", exc.code) from exc
         except Exception as exc:
             raise _PreDispatchFailure("spawn failed", "SPAWN_FAILED") from exc
-        assert ctx.lock is not None and ctx.session_id is not None
-        self._session_store.update_lock_holder(
-            ctx.session_id,
-            ctx.lock.token,
-            identity=ctx.proc.identity,
-            holder_kind="native_agent",
-            reclaimable=False,
-        )
+        assert ctx.session_id is not None
+        if ctx.lock is not None:
+            # The load path leased before the spawn, so the child identity is
+            # recorded here. A create has no Session to lease yet; it records
+            # the same identity in ``_acquire_lease`` the moment it does.
+            self._session_store.update_lock_holder(
+                ctx.session_id,
+                ctx.lock.token,
+                identity=ctx.proc.identity,
+                holder_kind="native_agent",
+                reclaimable=False,
+            )
         ctx.effective.process_identity = ctx.proc.identity
         # Resolution facts, recorded with ``authoritative: false``. ARS performs
         # no pre-flight resolution and no ownership, mode, ancestor, symlink, or
@@ -621,7 +681,11 @@ class RunTask:
             # effort against a model-only agent — is refused here, before any
             # ACP frame and long before a prompt.
             raise _PreDispatchFailure(str(exc), "CONFIG_FIDELITY") from exc
-        ctx.driver = NativeAcpDriver(client=client, machine=ctx.machine)
+        ctx.driver = NativeAcpDriver(
+            client=client,
+            machine=ctx.machine,
+            on_config_switch_started=lambda: self._mark_config_switch_started(ctx),
+        )
 
         try:
             await asyncio.wait_for(
@@ -768,36 +832,63 @@ class RunTask:
     def _bind_session(
         self, ctx: _RunContext, spec, binding, instance
     ) -> SessionStartPlan:
-        """Derive the closed start plan from the immutable reuse intent (B1).
+        """Derive the closed start plan from the sealed Session intent (B1).
 
-        The intent decides the branch once, and each branch builds exactly one
-        plan type. There is no third path, no conversion, and no recovery
-        behavior that could turn a reuse request into a new Session: a reuse
-        request that cannot produce a ``LoadSessionPlan`` fails here, before
-        the lease and before any spawn.
+        ``session_id is None`` versus an existing-session load decides the
+        branch once, and each branch builds exactly one plan type. There is no
+        third path, no conversion, and no recovery behavior that could turn a
+        reuse request into a new Session: a reuse request that cannot produce a
+        ``LoadSessionPlan`` fails here, before the lease and before any spawn.
+
+        Only the load branch takes a lease here, because only it has a Session
+        to lease. A create branch has a prospective id and nothing under it; its
+        lease is taken in :meth:`_startup_sequence`, the instant the one fully
+        bound record exists.
         """
         # The operator's own continuity epoch, or ``None``. Nothing derives it:
         # absent is not 1, and only an operator's registry edit changes it.
         epoch = instance.session_epoch
-        if spec.session.reuse == "reuse":
+        if spec.session.session_id is not None:
             plan: SessionStartPlan = self._plan_reuse_session(
                 ctx, spec, binding, instance, epoch
             )
         else:
-            plan = self._plan_new_session(ctx, spec, binding, instance, epoch)
-        ctx.lock = self._session_store.acquire_lock(
-            plan.ar_session_id,
-            spec.identity.owner,
-            reclaimable=False,
-            required_state=STATE_OPEN,
-        )
-        # What this Session observed last time, loaded once, under the lease.
-        # Read-only and warning-only: it reaches nothing that decides admission,
-        # and a Session's first Run simply has none.
-        ctx.previous_observation = observation_from_record(
-            self._session_store.open_session(plan.ar_session_id)
-        )
+            plan = self._plan_create_session(ctx, spec)
+        if isinstance(plan, LoadSessionPlan):
+            # Only a reuse has a Session to lease at this point. A create leases
+            # in ``_startup_sequence``, the instant its one bound record exists.
+            self._acquire_lease(ctx, plan.ar_session_id, spec.identity.owner)
+            # What this Session observed last time, loaded once, under the
+            # lease. Read-only and warning-only: it reaches nothing that
+            # decides admission, and a Session's first Run simply has none.
+            ctx.previous_observation = observation_from_record(
+                self._session_store.open_session(plan.ar_session_id)
+            )
         return plan
+
+    def _acquire_lease(self, ctx: _RunContext, session_id: str, owner: str) -> None:
+        """Take the Session lease, and record the child holder when one exists.
+
+        The load path leases before the spawn, so there is no child identity to
+        record yet and ``_drive`` adds it. The create path leases *after* the
+        record commits, by which time the child is already running, so the
+        holder identity is recorded here instead — the lock is never left
+        naming only a supervisor whose child already exists.
+        """
+        ctx.lock = self._session_store.acquire_lock(
+            session_id,
+            owner,
+            reclaimable=False,
+            refuse_quarantined=True,
+        )
+        if ctx.proc is not None:
+            self._session_store.update_lock_holder(
+                session_id,
+                ctx.lock.token,
+                identity=ctx.proc.identity,
+                holder_kind="native_agent",
+                reclaimable=False,
+            )
 
     def _plan_reuse_session(
         self, ctx: _RunContext, spec, binding, instance, epoch
@@ -811,10 +902,9 @@ class RunTask:
         never bound to an external Session, or it belongs to a different Run
         identity.
         """
-        session_id = spec.session.ars_session_id
-        assert session_id is not None  # spec validation requires it for reuse
+        session_id = spec.session.session_id
+        assert session_id is not None  # this branch is chosen by its presence
         ctx.session_id = session_id
-        ctx.ephemeral = False
         try:
             record = self._session_store.open_session(session_id)
         except SessionNotFoundError as exc:
@@ -864,43 +954,21 @@ class RunTask:
             ar_session_id=session_id, external_session_id=external_id
         )
 
-    def _plan_new_session(
-        self, ctx: _RunContext, spec, binding, instance, epoch
-    ) -> NewSessionPlan:
-        """The only path allowed to create a record without an external ID."""
-        session_id = f"{self._run_id}-ephemeral"
+    def _plan_create_session(self, ctx: _RunContext, spec) -> CreateSessionPlan:
+        """Name the prospective Session and write nothing under it.
+
+        The whole create reservation is the durable submission and the sealed
+        Spec, which already carry this Run's authenticated identity, plus the
+        process-local keyed admission lock the daemon holds around the attempt.
+        No record, no directory, no lease, and no second durable reservation
+        exists until ``session/new`` returns — which is exactly what makes a
+        failed creation report a terminal failed Run and an unknown Session
+        rather than a resumable one.
+        """
+        session_id = self._prospective_session_id
         ctx.session_id = session_id
-        ctx.ephemeral = True
-        try:
-            record = self._session_store.open_session(session_id)
-        except SessionNotFoundError:
-            storage.create_native_session(
-                self._session_store,
-                session_id=session_id,
-                profile_id=spec.agent.profile_id,
-                profile_revision=spec.agent.profile_revision,
-                profile_hash=spec.agent.profile_hash,
-                owner=spec.identity.owner,
-                namespace=spec.identity.namespace,
-                workspace_hash=spec.workspace.workspace_hash,
-                effective_cwd=spec.workspace.cwd,
-                matched_root=spec.workspace.canonical_root,
-                session_epoch=epoch,
-                agent_id=spec.agent.agent_id,
-            )
-        else:
-            # A record already reserved under this Run's own derived id (a
-            # resumed Run identity) is still identity-checked before the lease.
-            validate_native_binding(
-                record,
-                profile=instance.profile,
-                workspace_result=binding,
-                owner=spec.identity.owner,
-                namespace=spec.identity.namespace,
-                expected_epoch=epoch,
-                expected_agent_id=spec.agent.agent_id,
-            )
-        return NewSessionPlan(ar_session_id=session_id)
+        ctx.session_pending_creation = True
+        return CreateSessionPlan(ar_session_id=session_id)
 
     async def _startup_sequence(
         self, ctx: _RunContext, spec, binding, plan: SessionStartPlan
@@ -931,19 +999,40 @@ class RunTask:
             # reuse request never reaches the ``session/new`` arm because it
             # cannot produce the plan type that arm matches.
             match plan:
-                case NewSessionPlan():
+                case CreateSessionPlan():
                     self._emit(ctx, {"type": "session_new_requested"})
                     external_id = await driver.new_session(
                         cwd=binding.effective_cwd, meta=session_meta
                     )
                     ctx.effective.agent_session_id = external_id
-                    record = self._session_store.open_session(ctx.session_id)
-                    if record.agent_session_id is None:
-                        storage.bind_agent_session(
-                            self._session_store,
-                            ctx.session_id,
-                            agent_session_id=external_id,
-                        )
+                    # One exclusive write commits one fully bound record. The
+                    # external id is present from the record's first byte, so
+                    # there is no window in which a Session exists without the
+                    # provider context it names — and a crash before this line
+                    # leaves no Session at all, which is what keeps a failed
+                    # creation distinguishable from a resumable one.
+                    storage.create_native_session(
+                        self._session_store,
+                        session_id=ctx.session_id,
+                        profile_id=spec.agent.profile_id,
+                        profile_revision=spec.agent.profile_revision,
+                        profile_hash=spec.agent.profile_hash,
+                        owner=spec.identity.owner,
+                        namespace=spec.identity.namespace,
+                        workspace_hash=spec.workspace.workspace_hash,
+                        effective_cwd=spec.workspace.cwd,
+                        matched_root=spec.workspace.canonical_root,
+                        agent_session_id=external_id,
+                        agent_id=spec.agent.agent_id,
+                        session_epoch=ctx.instance.session_epoch,
+                    )
+                    ctx.session_pending_creation = False
+                    # Now — and only now — there is something to lease, and
+                    # something to carry this Run's initialize observation.
+                    self._acquire_lease(
+                        ctx, ctx.session_id, spec.identity.owner
+                    )
+                    self._commit_pending_observation(ctx)
                 case LoadSessionPlan(external_session_id=stored_external_id):
                     if not summary.load_session_advertised:
                         raise _PreDispatchFailure(
@@ -971,18 +1060,29 @@ class RunTask:
                     f"{ctx.client.identity_violation}",
                     "SILENT_SESSION_RECREATION",
                 ) from exc
-            if isinstance(plan, LoadSessionPlan) and ctx.machine is not None and (
-                ctx.machine.phase not in ("init", "initial_options")
+            if (
+                not ctx.session_pending_creation
+                and ctx.machine is not None
+                and ctx.machine.phase not in ("init", "initial_options")
             ):
-                # A set may have been dispatched: partial switch. No prompt;
-                # roll back to the last exact-readback-proven pair or
-                # quarantine.
+                # A set may have been dispatched against a Session that now
+                # exists durably: partial switch. No prompt; roll back to the
+                # last exact-readback-proven pair, or quarantine.
+                #
+                # This is deliberately *not* limited to the load path. A create
+                # publishes its bound record before it configures, so the same
+                # window exists there — and a create has no previously proven
+                # pair to roll back to, which is why it can only quarantine.
                 await self._rollback_after_partial_switch(ctx)
             # Fidelity errors quote the exact requested/observed option values,
             # which are child-advertised strings; the terminal carries the
             # stable code and a categorical reason, never this text.
             raise _PreDispatchFailure(str(exc), "CONFIG_FIDELITY") from exc
 
+        # Exact readback succeeded, so what the agent's configuration is has
+        # been proven. Recorded before anything else so a crash after this point
+        # never looks like an unproven switch.
+        self._write_config_marker(ctx, CONFIG_PROVEN_MARKER)
         ctx.effective.effective_model = model
         ctx.effective.effective_effort = effort
         assert ctx.machine is not None
@@ -1045,9 +1145,21 @@ class RunTask:
                 "requires it — escalate per G6",
                 "CAPABILITY_MISSING",
             )
-        # Recorded only after the observation passed every contract check, so
-        # what a later Run compares against is an observation this Session
-        # actually accepted. Still evidence: nothing reads it to decide anything.
+        # Held only after the observation passed every contract check, so what
+        # a later Run compares against is an observation this Session actually
+        # accepted. Still evidence: nothing reads it to decide anything.
+        #
+        # It is *held*, not written, because ``initialize`` happens before
+        # ``session/new`` and a create path has no Session record to write to
+        # yet. ``_commit_pending_observation`` writes it the moment one exists.
+        ctx.pending_observation = observed
+        self._commit_pending_observation(ctx)
+
+    def _commit_pending_observation(self, ctx: _RunContext) -> None:
+        """Write the held ``initialize`` observation once a record exists."""
+        observed = ctx.pending_observation
+        if observed is None or ctx.session_id is None or ctx.session_pending_creation:
+            return
         name, version = observed.self_report()
         self._session_store.commit_last_observation(
             ctx.session_id,
@@ -1055,6 +1167,7 @@ class RunTask:
             agent_info_version=version,
             advertised_capabilities=tuple(observed.advertised()),
         )
+        ctx.pending_observation = None
 
     async def _rollback_after_partial_switch(self, ctx: _RunContext) -> None:
         self._emit(ctx, {"type": "config_rollback_started"})
@@ -1087,6 +1200,9 @@ class RunTask:
             self._session_store.commit_last_effective(
                 ctx.session_id, model=previous_model, effort=previous_effort
             )
+            # Durable proof that the switch was exactly undone, so a crash from
+            # here on does not read as an unproven switch.
+            self._write_config_marker(ctx, CONFIG_ROLLBACK_PROVEN_MARKER)
             self._emit(ctx, {"type": "config_rollback_proven"})
         except Exception:
             ctx.rollback_unproven = True
@@ -1283,6 +1399,33 @@ class RunTask:
         return handler
 
     # -- artifacts ---------------------------------------------------------
+
+    def _mark_config_switch_started(self, ctx: _RunContext) -> None:
+        """Durably record that a configuration set is about to be written.
+
+        Fired by the driver immediately before its first
+        ``session/set_config_option``. From here until a proof marker lands, a
+        crash leaves a Session whose configuration nobody proved, and
+        reconciliation must quarantine it rather than hand it to a prompt.
+        """
+        self._write_config_marker(ctx, CONFIG_SWITCH_STARTED_MARKER)
+
+    def _write_config_marker(self, ctx: _RunContext, name: str) -> None:
+        """Write one configuration boundary marker; never fail the Run for it.
+
+        A marker that cannot be written is not a supervision failure in itself:
+        the in-process path still has ``ctx.machine`` and still decides
+        correctly. Its absence only makes a *later* reconciliation more
+        conservative, which is the safe direction.
+        """
+        if ctx.handle is None:
+            return
+        try:
+            self._write_marker(ctx, name)
+        except FileExistsError:
+            pass
+        except Exception:
+            pass
 
     def _write_marker(self, ctx: _RunContext, name: str) -> None:
         ctx.marker_ordinal += 1
@@ -1497,12 +1640,8 @@ class RunTask:
         if existing.kind is storage.NativeTerminalKind.INVALID:
             if ctx.session_id is not None:
                 try:
-                    reason = "existing terminal evidence is untrusted"
-                    self._session_store.write_quarantine_pending(
-                        ctx.session_id, reason=reason, run_id=self._run_id
-                    )
-                    self._session_store.mark_quarantined(
-                        ctx.session_id, reason=reason, run_id=self._run_id
+                    self._quarantine(
+                        ctx, QUARANTINE_UNTRUSTED_TERMINAL_EVIDENCE
                     )
                 except Exception:
                     _propagate_if_cancelled()
@@ -1528,16 +1667,7 @@ class RunTask:
         )
         if need_quarantine:
             try:
-                reason = (
-                    "emergency finalization: dispatched turn without a "
-                    "reliable terminal"
-                )
-                self._session_store.write_quarantine_pending(
-                    ctx.session_id, reason=reason, run_id=self._run_id
-                )
-                self._session_store.mark_quarantined(
-                    ctx.session_id, reason=reason, run_id=self._run_id
-                )
+                self._quarantine(ctx, QUARANTINE_DISPATCH_WITHOUT_TERMINAL)
             except Exception:
                 # Required quarantine failed: no terminal result, no lease release.
                 _propagate_if_cancelled()
@@ -1608,7 +1738,7 @@ class RunTask:
             },
             run_dir=getattr(ctx.handle, "run_dir", None),
             session_id=ctx.session_id,
-            session_state=None,
+            session_quarantined=None,
         )
         if ctx.handle is None:
             return failed
@@ -1628,7 +1758,7 @@ class RunTask:
                 payload=state.payload,
                 run_dir=ctx.handle.run_dir,
                 session_id=ctx.session_id,
-                session_state=self._session_state(ctx),
+                session_quarantined=self._session_quarantined(ctx),
             )
         return failed
 
@@ -1655,7 +1785,7 @@ class RunTask:
                 payload=payload,
                 run_dir=getattr(ctx.handle, "run_dir", None),
                 session_id=ctx.session_id,
-                session_state=None,
+                session_quarantined=None,
             )
 
     async def _finalize_inner(self, ctx: _RunContext) -> NativeRunResult:
@@ -1716,14 +1846,7 @@ class RunTask:
                 existing_state.kind is not storage.NativeTerminalKind.TRUSTED
                 or existing_state.payload is None
             ):
-                if ctx.session_id is not None:
-                    reason = "existing terminal evidence is untrusted"
-                    self._session_store.write_quarantine_pending(
-                        ctx.session_id, reason=reason, run_id=self._run_id
-                    )
-                    self._session_store.mark_quarantined(
-                        ctx.session_id, reason=reason, run_id=self._run_id
-                    )
+                self._quarantine(ctx, QUARANTINE_UNTRUSTED_TERMINAL_EVIDENCE)
                 raise RuntimeError(
                     "untrusted existing terminal evidence; refusing release"
                 )
@@ -1734,7 +1857,7 @@ class RunTask:
                 payload=payload,
                 run_dir=ctx.handle.run_dir,
                 session_id=ctx.session_id,
-                session_state=self._session_state(ctx),
+                session_quarantined=self._session_quarantined(ctx),
             )
 
         detail_code: str | None = None
@@ -1849,7 +1972,7 @@ class RunTask:
             status = AgentRunStatus.FAILED
 
         try:
-            session_state = self._publish_terminal_with_disposition(
+            session_quarantined = self._publish_terminal_with_disposition(
                 ctx, status=status, disposition=disposition, payload=payload
             )
         except Exception:
@@ -1866,7 +1989,7 @@ class RunTask:
                 },
                 run_dir=ctx.handle.run_dir,
                 session_id=ctx.session_id,
-                session_state=self._session_state(ctx),
+                session_quarantined=self._session_quarantined(ctx),
             )
 
         status = AgentRunStatus(payload["status"])
@@ -1876,7 +1999,7 @@ class RunTask:
             payload=payload,
             run_dir=ctx.handle.run_dir,
             session_id=ctx.session_id,
-            session_state=session_state,
+            session_quarantined=session_quarantined,
         )
 
     def _observations(self, ctx: _RunContext) -> FinalizationObservations:
@@ -1910,21 +2033,17 @@ class RunTask:
         status: AgentRunStatus,
         disposition: str,
         payload: dict[str, Any],
-    ) -> str | None:
+    ) -> bool | None:
         """Quarantine-before-result when required; release lease only after both."""
-        if disposition == "quarantined" and ctx.session_id is not None:
-            reason = (
-                "observation lost after dispatch"
-                if status is AgentRunStatus.UNKNOWN
-                else f"run finalized {status.value} without a reliable terminal"
-            )
+        if disposition == "quarantined":
+            if ctx.rollback_unproven and not ctx.dispatch_started:
+                reason_code = QUARANTINE_SWITCH_ROLLBACK_UNPROVEN
+            elif status is AgentRunStatus.UNKNOWN:
+                reason_code = QUARANTINE_DISPATCH_OBSERVATION_LOST
+            else:
+                reason_code = QUARANTINE_DISPATCH_WITHOUT_TERMINAL
             # Never swallow: fence + quarantine must succeed before result.
-            self._session_store.write_quarantine_pending(
-                ctx.session_id, reason=reason, run_id=self._run_id
-            )
-            self._session_store.mark_quarantined(
-                ctx.session_id, reason=reason, run_id=self._run_id
-            )
+            self._quarantine(ctx, reason_code, swallow=False)
 
         try:
             storage.write_once_json(ctx.handle.run_dir / "result.json", payload)
@@ -1936,14 +2055,9 @@ class RunTask:
                 ctx.handle.run_dir / "result.json", run_id=self._run_id
             )
             if existing_state.kind is not storage.NativeTerminalKind.TRUSTED:
-                if ctx.session_id is not None:
-                    reason = "existing terminal evidence is untrusted"
-                    self._session_store.write_quarantine_pending(
-                        ctx.session_id, reason=reason, run_id=self._run_id
-                    )
-                    self._session_store.mark_quarantined(
-                        ctx.session_id, reason=reason, run_id=self._run_id
-                    )
+                self._quarantine(
+                    ctx, QUARANTINE_UNTRUSTED_TERMINAL_EVIDENCE, swallow=False
+                )
                 raise RuntimeError(
                     "untrusted existing terminal evidence; refusing release"
                 )
@@ -1954,11 +2068,9 @@ class RunTask:
             status = AgentRunStatus(payload["status"])
         self._write_progress(ctx, status.value)
 
-        if disposition != "quarantined" and ctx.ephemeral and ctx.session_id is not None:
-            try:
-                self._session_store.mark_closed(ctx.session_id)
-            except Exception:
-                pass
+        # Nothing happens to the Session here. A Run terminal is a Run fact:
+        # the Session it ran under stays exactly as durable and as resumable as
+        # it was a moment ago, and the only thing that changes is the lease.
 
         if ctx.lock is not None and ctx.session_id is not None:
             try:
@@ -1966,12 +2078,38 @@ class RunTask:
             except Exception:
                 pass
             ctx.lock = None
-        return self._session_state(ctx)
+        return self._session_quarantined(ctx)
 
-    def _session_state(self, ctx: _RunContext) -> str | None:
+    def _quarantine(
+        self, ctx: _RunContext, reason_code: str, *, swallow: bool = True
+    ) -> None:
+        """Fence, then record quarantine evidence — both idempotent.
+
+        A Session that does not exist cannot be quarantined, and that is not a
+        gap: quarantine only ever follows dispatch or an unproven switch
+        rollback, and both happen strictly after the create path has committed
+        its one bound record. Before that commit no prompt was sent, so there
+        is nothing to be uncertain about.
+        """
+        if ctx.session_id is None or ctx.session_pending_creation:
+            return
+        try:
+            self._session_store.write_quarantine_pending(
+                ctx.session_id, reason_code=reason_code, run_id=self._run_id
+            )
+            self._session_store.mark_quarantined(
+                ctx.session_id, reason_code=reason_code, run_id=self._run_id
+            )
+        except Exception:
+            if not swallow:
+                raise
+
+    def _session_quarantined(self, ctx: _RunContext) -> bool | None:
         if ctx.session_id is None:
             return None
         try:
-            return self._session_store.open_session(ctx.session_id).state
+            return self._session_store.open_session(ctx.session_id).quarantine is not None
         except Exception:
+            # No record: a create that never reached its commit. The Session
+            # does not exist, so it is neither quarantined nor resumable.
             return None

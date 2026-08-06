@@ -6,12 +6,6 @@
       "stdout_file": "stdout.json",
       "stdout_lines": 1
     },
-    "session-close-named": {
-      "exit_code": 0,
-      "expected_exit": 0,
-      "stdout_file": "stdout.json",
-      "stdout_lines": 1
-    },
     "session-ensure-existing": {
       "exit_code": 0,
       "expected_exit": 0,
@@ -49,12 +43,6 @@
       "stdout_lines": 1
     },
     "session-show-after-turns": {
-      "exit_code": 0,
-      "expected_exit": 0,
-      "stdout_file": "stdout.json",
-      "stdout_lines": 1
-    },
-    "session-show-closed": {
       "exit_code": 0,
       "expected_exit": 0,
       "stdout_file": "stdout.json",

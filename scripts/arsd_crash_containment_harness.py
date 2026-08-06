@@ -42,7 +42,7 @@ _REQUIRED_EFFORT = "max"
 # The wire version this harness drives. A health check that waits for a version
 # the daemon no longer reports never observes a healthy server and times out
 # looking like a crash-containment failure, so this tracks the shipped contract.
-_REQUIRED_API_VERSION = 2
+_REQUIRED_API_VERSION = 3
 
 # The registry-entry id grammar, restated here for the same reason
 # ``_agents_file_query_conflict`` is: this script must stay runnable from a bare
@@ -1043,8 +1043,7 @@ def _s4_submit_payload(
             "owner": owner,
             "namespace": namespace,
             "agent_id": agent_id,
-            "session_reuse": "reuse",
-            "ars_session_id": session_id,
+            "session_id": session_id,
             "expected_binding_hash": None,
             "input_refs": [
                 {"ref": "prompt:inline", "content_hash": "sha256:" + "0" * 64}
@@ -1076,7 +1075,6 @@ def run_s4(inputs: dict[str, str]) -> int:
     from agent_run_supervisor.arsd import client as arsd_client
     from agent_run_supervisor.native_acp import storage
     from agent_run_supervisor.native_acp.agent_registration import validate_agent_id
-    from agent_run_supervisor.session import STATE_QUARANTINED
 
     unit_name = inputs["unit_name"]
     socket = inputs["socket"]
@@ -1226,7 +1224,7 @@ def run_s4(inputs: dict[str, str]) -> int:
             record = store.open_session(crash_session)
         except Exception as exc:
             raise HarnessGateError("crash session missing after reconcile") from exc
-        if record.state != STATE_QUARANTINED:
+        if record.quarantine is None:
             raise HarnessGateError("crash session is not quarantined")
 
         events_path = run_dir / "events.jsonl"
@@ -1248,7 +1246,7 @@ def run_s4(inputs: dict[str, str]) -> int:
             **payload,
             "request": {
                 **payload["request"],
-                "ars_session_id": fresh_session,
+                "session_id": fresh_session,
             },
             "prompt_text": (
                 f"Reply with exactly {_FRESH_MARKER} and nothing else. "

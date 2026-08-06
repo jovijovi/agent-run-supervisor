@@ -21,7 +21,6 @@ from agent_run_supervisor.managed_process import (
 from agent_run_supervisor.goal import GoalPromptError, GoalSpec, compile_goal_prompt
 from agent_run_supervisor.mcp_config import McpConfigError
 from agent_run_supervisor.parser import ParseResult, parse_acpx_stdout
-from agent_run_supervisor.policy import ExecStrategyError
 from agent_run_supervisor.preflight import (
     probe_acpx,
     probe_adapter,
@@ -215,9 +214,6 @@ def cmd_run(args: argparse.Namespace) -> int:
             _print_json(outcome.result)
             return 0
         outcome = runner.run(role=role, prompt=prompt, cwd=args.cwd)
-    except ExecStrategyError as exc:
-        print(f"session strategy error: {exc}", file=sys.stderr)
-        return 1
     except WorkspaceValidationError as exc:
         print(f"workspace validation error: {exc}", file=sys.stderr)
         return 1
@@ -255,7 +251,7 @@ def cmd_session(args: argparse.Namespace) -> int:
     if session_command is None:
         print(
             "error: a session subcommand is required "
-            "(create | send | status | close | abort | list)",
+            "(create | send | status | abort | list)",
             file=sys.stderr,
         )
         return 2
@@ -328,14 +324,6 @@ def cmd_session(args: argparse.Namespace) -> int:
             )
             _print_json(status.result)
             return 0 if status.ok else 1
-        if session_command == "close":
-            closed = runtime.close(
-                role=role,
-                session_id=args.session_id,
-                cwd=args.cwd,
-            )
-            _print_json(closed.result)
-            return 0
         if session_command == "abort":
             aborted = runtime.abort(
                 role=role,
@@ -344,9 +332,6 @@ def cmd_session(args: argparse.Namespace) -> int:
             )
             _print_json(aborted.result)
             return 0
-    except ExecStrategyError as exc:
-        print(f"session strategy error: {exc}", file=sys.stderr)
-        return 1
     except WorkspaceValidationError as exc:
         print(f"workspace validation error: {exc}", file=sys.stderr)
         return 1
@@ -380,7 +365,7 @@ def _plan_payload(plan: CleanupPlan) -> dict[str, Any]:
         "root": str(plan.root),
         "runs_dir": str(plan.runs_dir),
         "sessions_dir": str(plan.sessions_dir),
-        "delete": [_candidate_payload(c) for c in plan.delete],
+        "prune": [_candidate_payload(c) for c in plan.prune],
         "skip": [_candidate_payload(c) for c in plan.skip],
     }
 
@@ -412,7 +397,7 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     _print_json(
         {
             "applied": True,
-            "deleted": result.deleted,
+            "pruned": result.pruned,
             "failed": result.failed,
             "plan": _plan_payload(plan),
         }

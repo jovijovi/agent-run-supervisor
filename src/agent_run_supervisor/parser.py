@@ -314,7 +314,7 @@ def summarize_management_json(payload: bytes | str) -> dict[str, Any]:
     """Summarize a single acpx management-command JSON object.
 
     Management commands (``sessions new/ensure/show``, ``status``,
-    ``sessions close``, ``cancel``) emit exactly one JSON object — never a
+    ``cancel``) emit exactly one JSON object — never a
     JSON-RPC NDJSON stream. This returns a safe, allow-listed summary and never
     echoes bulk payload. Use :func:`parse_acpx_stdout_bytes` for prompt turns.
     """

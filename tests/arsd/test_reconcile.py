@@ -25,6 +25,9 @@ from agent_run_supervisor.event_store import atomic_write_json
 from agent_run_supervisor.exit_classifier import _RETRYABLE_DEFAULT, AgentRunStatus
 from agent_run_supervisor.native_acp import storage
 from agent_run_supervisor.native_acp.run_task import (
+    CONFIG_PROVEN_MARKER,
+    CONFIG_ROLLBACK_PROVEN_MARKER,
+    CONFIG_SWITCH_STARTED_MARKER,
     DISPATCH_STARTED_MARKER,
     PROMPT_ACCEPTED_MARKER,
 )
@@ -32,10 +35,9 @@ from agent_run_supervisor.result import build_result_payload
 from agent_run_supervisor.session import (
     LOCK_JSON,
     SESSION_JSON,
-    STATE_OPEN,
-    STATE_QUARANTINED,
     SessionQuarantinedError,
 )
+from agent_run_supervisor.session import QUARANTINE_DISPATCH_OBSERVATION_LOST, derive_session_id_for_run
 
 T0 = dt.datetime(2026, 7, 22, 12, 0, 0, tzinfo=dt.timezone.utc)
 T_EXPIRED = dt.datetime(2026, 7, 22, 10, 0, 0, tzinfo=dt.timezone.utc)
@@ -58,6 +60,7 @@ NATIVE_SESSION_KWARGS = dict(
     workspace_hash="b" * 64,
     effective_cwd="/tmp/ws",
     matched_root="/tmp",
+    agent_session_id="external-fake-agent-1",
 )
 
 
@@ -84,8 +87,7 @@ def valid_wire_request(**overrides) -> dict:
         "owner": "hermes",
         "namespace": "hermes/doc-check",
         "agent_id": "fake-agent",
-        "session_reuse": "reuse",
-        "ars_session_id": "sess-reuse-1",
+        "session_id": "sess-reuse-1",
         "expected_binding_hash": None,
         "input_refs": [
             {"ref": "prompt:inline", "content_hash": "sha256:" + "a" * 64},
@@ -103,6 +105,9 @@ def valid_wire_request(**overrides) -> dict:
         "recovery_policy_hash": "sha256:" + "e" * 64,
     }
     request.update(overrides)
+    if request.get("session_id") is None:
+        # A create omits the field; an explicit null is refused on the wire.
+        request.pop("session_id", None)
     return request
 
 
@@ -180,18 +185,12 @@ def _seed_submission(
     *,
     request_id: str,
     run_id: str,
-    session_reuse: str = "reuse",
-    ars_session_id: str | None = "sess-reuse-1",
+    session_id: str | None = "sess-reuse-1",
     payload: dict | None = None,
 ) -> bytes:
     command = submit_command(
         payload
-        or submit_payload(
-            request=valid_wire_request(
-                session_reuse=session_reuse,
-                ars_session_id=ars_session_id,
-            )
-        )
+        or submit_payload(request=valid_wire_request(session_id=session_id))
     )
     digest = admission.compute_request_digest(command)
     artifact = {
@@ -205,8 +204,7 @@ def _seed_submission(
         "peer": {"pid": 1, "uid": 1, "gid": 1},
         "owner": "hermes",
         "namespace": "hermes/doc-check",
-        "session_reuse": session_reuse,
-        "ars_session_id": ars_session_id,
+        "session_id": session_id,
         "agent_id": "fake-agent",
         "request_digest": digest.value,
         "prompt_sha256": digest.prompt_sha256,
@@ -220,15 +218,14 @@ def _seed_spec(
     run_dir: Path,
     *,
     run_id: str,
-    reuse: str = "reuse",
-    ars_session_id: str | None = "sess-spec-1",
+    session_id: str | None = "sess-spec-1",
 ) -> None:
     # The exact shape RunTask seals and writes: a Spec that cannot answer the
     # immutable request, grant, owner, namespace, agent, profile, Session
     # binding, and referenced launch hash is not authority for anything.
     _write_json(
         run_dir / "spec.json",
-        rf.spec_payload(run_id=run_id, reuse=reuse, ars_session_id=ars_session_id),
+        rf.spec_payload(run_id=run_id, session_id=session_id),
     )
 
 
@@ -359,7 +356,7 @@ def test_pre_dispatch_reuse_session_submission_only_is_failed_reusable(
     assert result["retryable"] is _RETRYABLE_DEFAULT[AgentRunStatus.FAILED]
     assert (run_dir / "submission.json").read_bytes() == submission_bytes
     assert (sessions.base_dir / session_id / SESSION_JSON).read_bytes() == session_before
-    assert sessions.open_session(session_id).state == STATE_OPEN
+    assert sessions.open_session(session_id).quarantine is None
 
 
 def test_pre_dispatch_ephemeral_from_submission(tmp_path: Path) -> None:
@@ -368,15 +365,14 @@ def test_pre_dispatch_ephemeral_from_submission(tmp_path: Path) -> None:
     sessions = storage.native_session_store(root)
     events = storage.native_event_store(root)
     run_id = "run-pre-eph-1"
-    session_id = f"{run_id}-ephemeral"
+    session_id = derive_session_id_for_run(run_id)
     _seed_session(sessions, session_id)
     run_dir = events.create_run(run_id).run_dir
     _seed_submission(
         run_dir,
         request_id="pre-eph-1",
         run_id=run_id,
-        session_reuse="none",
-        ars_session_id=None,
+        session_id=None,
     )
     session_before = (sessions.base_dir / session_id / SESSION_JSON).read_bytes()
 
@@ -386,7 +382,7 @@ def test_pre_dispatch_ephemeral_from_submission(tmp_path: Path) -> None:
     assert result["status"] == "failed"
     assert result["detail_code"] == "RECONCILED_PRE_DISPATCH"
     assert (sessions.base_dir / session_id / SESSION_JSON).read_bytes() == session_before
-    assert sessions.open_session(session_id).state == STATE_OPEN
+    assert sessions.open_session(session_id).quarantine is None
 
 
 def test_pre_dispatch_spec_only_reuse_session(tmp_path: Path) -> None:
@@ -398,7 +394,7 @@ def test_pre_dispatch_spec_only_reuse_session(tmp_path: Path) -> None:
     session_id = "sess-spec-1"
     _seed_session(sessions, session_id)
     run_dir = events.create_run(run_id).run_dir
-    _seed_spec(run_dir, run_id=run_id, reuse="reuse", ars_session_id=session_id)
+    _seed_spec(run_dir, run_id=run_id, session_id=session_id)
     session_before = (sessions.base_dir / session_id / SESSION_JSON).read_bytes()
 
     reconcile.reconcile(root)
@@ -467,8 +463,8 @@ def test_dispatched_no_result_quarantines_and_writes_unknown(tmp_path: Path) -> 
     assert result["origin"] == "supervisor"
     assert result["retryable"] is False
     record = sessions.open_session(session_id)
-    assert record.state == STATE_QUARANTINED
-    assert record.quarantined_by_run_id == run_id
+    assert record.quarantine is not None
+    assert record.quarantine["source_run_id"] == run_id
     progress = json.loads((run_dir / "progress.json").read_text(encoding="utf-8"))
     assert progress["state"] == "unknown"
     assert (session_dir / LOCK_JSON).read_bytes() == lock_bytes
@@ -480,21 +476,20 @@ def test_dispatched_ephemeral_session_unknown(tmp_path: Path) -> None:
     sessions = storage.native_session_store(root)
     events = storage.native_event_store(root)
     run_id = "run-disp-eph-1"
-    session_id = f"{run_id}-ephemeral"
+    session_id = derive_session_id_for_run(run_id)
     _seed_session(sessions, session_id)
     run_dir = events.create_run(run_id).run_dir
     _seed_submission(
         run_dir,
         request_id="disp-eph-1",
         run_id=run_id,
-        session_reuse="none",
-        ars_session_id=None,
+        session_id=None,
     )
     _seed_marker(run_dir, run_id)
 
     reconcile.reconcile(root)
 
-    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert sessions.open_session(session_id).quarantine is not None
     result = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
     assert result["detail_code"] == "RECONCILED_UNKNOWN"
 
@@ -571,7 +566,7 @@ def test_repair_unknown_result_quarantines_preserving_result_bytes(
     reconcile.reconcile(root)
 
     assert (run_dir / "result.json").read_bytes() == result_bytes
-    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert sessions.open_session(session_id).quarantine is not None
     progress = json.loads((run_dir / "progress.json").read_text(encoding="utf-8"))
     assert progress["state"] == "unknown"
     assert (session_dir / LOCK_JSON).read_bytes() == lock_bytes
@@ -611,7 +606,7 @@ def test_second_pass_changes_zero_bytes(tmp_path: Path) -> None:
     held = _seed_session(sessions, "sess-held")
     expired = _seed_session(sessions, "sess-expired")
     quarantined = _seed_session(sessions, "sess-already-q")
-    sessions.mark_quarantined("sess-already-q", reason="prior", run_id="old", now=T0)
+    sessions.mark_quarantined("sess-already-q", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="old", now=T0)
     held_lock = _seed_lock(
         held, expires_at=(T0 + dt.timedelta(hours=2)).isoformat(), reclaimable=False
     )
@@ -680,7 +675,7 @@ def test_fault_after_quarantine_before_progress_converges(
     monkeypatch.setattr(reconcile, "_ensure_terminal_progress", boom)
     with pytest.raises(RuntimeError, match="injected crash"):
         reconcile.reconcile(root)
-    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert sessions.open_session(session_id).quarantine is not None
     assert not (run_dir / "result.json").exists()
     assert not (run_dir / "progress.json").exists()
 
@@ -720,7 +715,7 @@ def test_fault_after_progress_before_result_converges(
     monkeypatch.setattr(reconcile, "storage", storage)
     with pytest.raises(RuntimeError, match="injected crash"):
         reconcile.reconcile(root)
-    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert sessions.open_session(session_id).quarantine is not None
     assert (run_dir / "progress.json").is_file()
     assert json.loads((run_dir / "progress.json").read_text())["state"] == "unknown"
     assert not (run_dir / "result.json").exists()
@@ -759,7 +754,7 @@ def test_quarantine_failure_blocks_dispatched_progress_and_result(
 
     real_mark = SessionStore.mark_quarantined
 
-    def boom(self, session_id, *, reason, run_id, now=None):
+    def boom(self, session_id, *, reason_code, run_id, now=None):
         raise OSError("injected quarantine I/O failure")
 
     monkeypatch.setattr(SessionStore, "mark_quarantined", boom)
@@ -772,11 +767,11 @@ def test_quarantine_failure_blocks_dispatched_progress_and_result(
     assert (run_dir / DISPATCH_STARTED_MARKER).read_bytes() == marker_bytes
     assert (session_dir / SESSION_JSON).read_bytes() == session_before
     assert (session_dir / LOCK_JSON).read_bytes() == lock_bytes
-    assert sessions.open_session(session_id).state == STATE_OPEN
+    assert sessions.open_session(session_id).quarantine is None
 
     monkeypatch.setattr(SessionStore, "mark_quarantined", real_mark)
     reconcile.reconcile(root)
-    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert sessions.open_session(session_id).quarantine is not None
     assert json.loads((run_dir / "progress.json").read_text())["state"] == "unknown"
     result = json.loads((run_dir / "result.json").read_text())
     assert result["detail_code"] == "RECONCILED_UNKNOWN"
@@ -826,7 +821,7 @@ def test_quarantine_failure_on_unknown_repair_leaves_result_and_progress(
 
     real_mark = SessionStore.mark_quarantined
 
-    def boom(self, session_id, *, reason, run_id, now=None):
+    def boom(self, session_id, *, reason_code, run_id, now=None):
         raise RuntimeError("injected quarantine validation failure")
 
     monkeypatch.setattr(SessionStore, "mark_quarantined", boom)
@@ -837,11 +832,11 @@ def test_quarantine_failure_on_unknown_repair_leaves_result_and_progress(
     assert (run_dir / "progress.json").read_bytes() == progress_before
     assert (session_dir / SESSION_JSON).read_bytes() == session_before
     assert (session_dir / LOCK_JSON).read_bytes() == lock_bytes
-    assert sessions.open_session(session_id).state == STATE_OPEN
+    assert sessions.open_session(session_id).quarantine is None
 
     monkeypatch.setattr(SessionStore, "mark_quarantined", real_mark)
     reconcile.reconcile(root)
-    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert sessions.open_session(session_id).quarantine is not None
     assert (run_dir / "result.json").read_bytes() == result_bytes
     assert json.loads((run_dir / "progress.json").read_text())["state"] == "unknown"
     assert (session_dir / LOCK_JSON).read_bytes() == lock_bytes
@@ -877,8 +872,11 @@ def test_retransmit_after_reconciled_submission_returns_identity(
         harness = HandlerHarness(root)
         try:
             reply = await harness.submit(request_id, payload)
+            # The duplicate returns the same identity facts, including the
+            # Session the original attempt named.
             assert reply == {
                 "run_id": run_id,
+                "session_id": "sess-reuse-1",
                 "accepted_at": "2026-07-22T00:00:00+00:00",
             }
             assert harness.factory.calls == []
@@ -958,7 +956,7 @@ def test_seeded_locks_byte_identical_after_reconcile(tmp_path: Path) -> None:
     held = _seed_session(sessions, "sess-held")
     expired = _seed_session(sessions, "sess-expired")
     already_q = _seed_session(sessions, "sess-q")
-    sessions.mark_quarantined("sess-q", reason="prior", run_id="old", now=T0)
+    sessions.mark_quarantined("sess-q", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="old", now=T0)
     locks = {
         held: _seed_lock(held, expires_at=(T0 + dt.timedelta(hours=1)).isoformat()),
         expired: _seed_lock(expired, expires_at=T_EXPIRED.isoformat()),
@@ -987,12 +985,12 @@ def test_quarantined_session_refuses_new_lease(tmp_path: Path) -> None:
     _seed_marker(run_dir, "run-q-lease")
 
     reconcile.reconcile(root)
-    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert sessions.open_session(session_id).quarantine is not None
     with pytest.raises(SessionQuarantinedError):
         sessions.acquire_lock(
             session_id,
             "hermes",
-            required_state=STATE_OPEN,
+            refuse_quarantined=True,
             reclaimable=False,
             now=T0,
         )
@@ -1011,7 +1009,7 @@ def test_poisoned_legacy_same_ids_untouched(tmp_path: Path) -> None:
         run_dir,
         request_id="poison-1",
         run_id=run_id,
-        ars_session_id=session_id,
+        session_id=session_id,
     )
     _seed_marker(run_dir, run_id)
 
@@ -1033,7 +1031,7 @@ def test_poisoned_legacy_same_ids_untouched(tmp_path: Path) -> None:
         "sessions": _tree_snapshot(root / "sessions"),
         "runs": _tree_snapshot(root / "runs"),
     } == legacy_snap
-    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert sessions.open_session(session_id).quarantine is not None
 
 
 # ---------------------------------------------------------------------------
@@ -1091,10 +1089,8 @@ def test_reconcile_module_has_no_lock_mutation_or_prompt_acp_sites() -> None:
     # SessionStore mutation beyond mark_quarantined is forbidden.
     # open_session / detect_stale_locks are read-only and permitted.
     forbidden_session_mut = {
-        "mark_closed",
         "create_session",
         "create_native_session",
-        "bind_agent_session",
         "commit_last_effective",
     }
     assert not (calls & forbidden_session_mut), calls & forbidden_session_mut
@@ -1144,7 +1140,7 @@ def test_crash_between_exclusive_create_and_write_not_treated_terminal(
         or "invalid" in message
     )
     # Quarantine first for dispatched runs; never invent progress / overwrite result.
-    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert sessions.open_session(session_id).quarantine is not None
     assert not (run_dir / "progress.json").exists()
     assert (run_dir / "result.json").read_bytes() == b""
 
@@ -1167,7 +1163,7 @@ def test_invalid_json_result_with_marker_quarantines_then_fails_startup(
 
     with pytest.raises(reconcile.ReconciliationError):
         reconcile.reconcile(root)
-    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert sessions.open_session(session_id).quarantine is not None
     assert not (run_dir / "progress.json").exists()
     assert (run_dir / "result.json").read_bytes() == bad
 
@@ -1194,7 +1190,7 @@ def test_symlink_result_json_never_treated_terminal(tmp_path: Path) -> None:
 
     with pytest.raises(reconcile.ReconciliationError):
         reconcile.reconcile(root)
-    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert sessions.open_session(session_id).quarantine is not None
     assert (run_dir / "result.json").is_symlink()
     assert not (run_dir / "progress.json").exists()
 
@@ -1230,12 +1226,12 @@ def test_invalid_result_schema_never_treated_terminal(
     with pytest.raises(reconcile.ReconciliationError) as err:
         reconcile.reconcile(root)
     assert isinstance(err.value, reconcile.ReconciliationError)
-    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert sessions.open_session(session_id).quarantine is not None
     assert not (run_dir / "progress.json").exists()
     assert (run_dir / "result.json").read_bytes() == raw
 
 
-def test_pre_dispatch_corrupt_result_fails_without_inventing_session_state(
+def test_pre_dispatch_corrupt_result_fails_without_inventing_session_quarantined(
     tmp_path: Path,
 ) -> None:
     reconcile = _import_reconcile()
@@ -1254,7 +1250,7 @@ def test_pre_dispatch_corrupt_result_fails_without_inventing_session_state(
     with pytest.raises(reconcile.ReconciliationError):
         reconcile.reconcile(root)
     assert (sessions.base_dir / session_id / SESSION_JSON).read_bytes() == session_before
-    assert sessions.open_session(session_id).state == STATE_OPEN
+    assert sessions.open_session(session_id).quarantine is None
     assert not (run_dir / "progress.json").exists()
 
 
@@ -1324,7 +1320,7 @@ def test_symlink_result_rejected_without_reading_target(
     with pytest.raises(reconcile.ReconciliationError) as err:
         reconcile.reconcile(root)
     assert secret not in str(err.value)
-    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert sessions.open_session(session_id).quarantine is not None
     assert not any("hostile-target" in p for p in path_reads)
     assert not (run_dir / "progress.json").exists()
 
@@ -1387,7 +1383,7 @@ def test_result_path_swap_to_symlink_cannot_become_trusted(
 
     with pytest.raises(reconcile.ReconciliationError):
         reconcile.reconcile(root)
-    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert sessions.open_session(session_id).quarantine is not None
     assert result_path.is_symlink()
     assert not (run_dir / "progress.json").exists()
 
@@ -1427,7 +1423,7 @@ def test_oversized_terminal_result_rejected(
 
     with pytest.raises(reconcile.ReconciliationError):
         reconcile.reconcile(root)
-    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert sessions.open_session(session_id).quarantine is not None
     assert not (run_dir / "progress.json").exists()
     # After GREEN, validator must not path-read the oversized artifact.
     assert path_reads == []
@@ -1494,7 +1490,7 @@ def test_terminal_result_read_oserror_is_untrusted_quarantines(
         reconcile.reconcile(root)
     assert type(err.value) is reconcile.ReconciliationError
     assert "injected" not in str(err.value)
-    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert sessions.open_session(session_id).quarantine is not None
     assert not (run_dir / "progress.json").exists()
     assert (run_dir / "result.json").read_bytes() == result_bytes
     assert result_fds
@@ -1550,7 +1546,7 @@ def test_terminal_result_close_oserror_is_untrusted_quarantines(
         reconcile.reconcile(root)
     assert type(err.value) is reconcile.ReconciliationError
     assert "injected" not in str(err.value)
-    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert sessions.open_session(session_id).quarantine is not None
     assert not (run_dir / "progress.json").exists()
     assert (run_dir / "result.json").read_bytes() == result_bytes
     assert result_fds <= closed_ok
@@ -1587,7 +1583,7 @@ def test_r4_b1_complete_native_terminal_statuses_are_trusted(
     reconcile.reconcile(root)
     assert (run_dir / "result.json").read_bytes() == result_bytes
     if status == "unknown":
-        assert sessions.open_session(session_id).state == STATE_QUARANTINED
+        assert sessions.open_session(session_id).quarantine is not None
         assert (run_dir / "progress.json").is_file()
     else:
         assert (sessions.base_dir / session_id / SESSION_JSON).read_bytes() == session_before
@@ -1622,7 +1618,7 @@ def test_r4_b1_minimal_runner_error_is_untrusted_and_refuses_startup(
     assert "untrusted" in message.lower() or "terminal" in message.lower()
     assert "runner_error" not in message
     assert "True" not in message
-    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert sessions.open_session(session_id).quarantine is not None
     assert not (run_dir / "progress.json").exists()
     assert (run_dir / "result.json").read_bytes() == raw
 
@@ -1738,7 +1734,7 @@ def test_r4_b1_incomplete_or_mistyped_terminal_is_untrusted(
     with pytest.raises(reconcile.ReconciliationError) as err:
         reconcile.reconcile(root)
     assert "cli" not in str(err.value)
-    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert sessions.open_session(session_id).quarantine is not None
     assert not (run_dir / "progress.json").exists()
 
 
@@ -1775,7 +1771,7 @@ def test_r13_b2_semantically_invalid_terminal_is_invalid_and_quarantines(
     message = str(err.value).lower()
     assert "untrusted" in message or "terminal" in message
     assert "completed" not in message
-    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert sessions.open_session(session_id).quarantine is not None
     assert not (run_dir / "progress.json").exists()
     # First-fact preserved; no rewrite/reuse of the forged terminal.
     assert (run_dir / "result.json").read_bytes() == raw
@@ -1807,7 +1803,7 @@ def test_r13_b2_legal_trusted_terminals_remain_trusted_through_reconcile(
     assert terminal.kind is NativeTerminalKind.TRUSTED
 
     reconcile.reconcile(root)
-    assert sessions.open_session(session_id).state == STATE_OPEN
+    assert sessions.open_session(session_id).quarantine is None
     assert (
         storage.read_native_terminal_result(
             run_dir / "result.json", run_id=run_id
@@ -1831,20 +1827,20 @@ def test_r5_b3_reconcile_converges_quarantine_pending_fence(
     session_dir = _seed_session(sessions, session_id)
     _seed_lock(session_dir, expires_at=(T0 + dt.timedelta(hours=1)).isoformat())
     run_dir = events.create_run(run_id).run_dir
-    _seed_submission(run_dir, request_id="fence-1", run_id=run_id, ars_session_id=session_id)
+    _seed_submission(run_dir, request_id="fence-1", run_id=run_id, session_id=session_id)
     _seed_marker(run_dir, run_id)
     sessions.write_quarantine_pending(
-        session_id, reason="interrupted finalize", run_id=run_id, now=T0
+        session_id, reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id=run_id, now=T0
     )
     assert (session_dir / QUARANTINE_PENDING_JSON).is_file()
-    assert sessions.open_session(session_id).state == STATE_OPEN
+    assert sessions.open_session(session_id).quarantine is None
     with pytest.raises(SessionQuarantinedError):
         sessions.acquire_lock(
-            session_id, "hermes", required_state=STATE_OPEN, now=T0
+            session_id, "hermes", refuse_quarantined=True, now=T0
         )
 
     reconcile.reconcile(root)
-    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert sessions.open_session(session_id).quarantine is not None
     assert not (session_dir / QUARANTINE_PENDING_JSON).exists()
     result = json.loads((run_dir / "result.json").read_text())
     assert result["status"] == "unknown"
@@ -1875,7 +1871,7 @@ def test_row3_trusted_unknown_without_actionable_attribution_refuses(
         dispatch=True,
         spec="corrupt",
         submission="corrupt",
-        ars_session_id="sess-row3",
+        session_id="sess-row3",
     )
     before = run_dir.joinpath("result.json").read_bytes()
 
@@ -1899,7 +1895,7 @@ def test_row7_valid_spec_with_corrupt_submission_is_pre_dispatch(
         spec="valid",
         launch="absent",
         submission="corrupt",
-        ars_session_id="sess-row7",
+        session_id="sess-row7",
     )
     rf.build_session(sessions, state="matching_open", session_id="sess-row7")
 
@@ -1911,7 +1907,7 @@ def test_row7_valid_spec_with_corrupt_submission_is_pre_dispatch(
     # Scoped by the Spec; the lower-priority submission is irrelevant even when
     # corrupt, and the Session stays reusable.
     assert result["session_id"] == "sess-row7"
-    assert sessions.open_session("sess-row7").state == STATE_OPEN
+    assert sessions.open_session("sess-row7").quarantine is None
 
 
 def test_row8_valid_spec_with_corrupt_launch_refuses(tmp_path: Path) -> None:
@@ -1923,7 +1919,7 @@ def test_row8_valid_spec_with_corrupt_launch_refuses(tmp_path: Path) -> None:
         spec="valid",
         launch="corrupt",
         submission="valid",
-        ars_session_id="sess-row8",
+        session_id="sess-row8",
     )
     rf.build_session(sessions, state="matching_open", session_id="sess-row8")
 
@@ -1932,7 +1928,7 @@ def test_row8_valid_spec_with_corrupt_launch_refuses(tmp_path: Path) -> None:
 
     assert reconcile.REFUSE_CORRUPT_LAUNCH in str(err.value)
     assert not (run_dir / "result.json").exists()
-    assert sessions.open_session("sess-row8").state == STATE_OPEN
+    assert sessions.open_session("sess-row8").quarantine is None
 
 
 def test_row8_launch_whose_hash_disagrees_with_its_spec_is_corrupt(
@@ -1941,7 +1937,7 @@ def test_row8_launch_whose_hash_disagrees_with_its_spec_is_corrupt(
     root, sessions, runs_root = _fixture_root(tmp_path)
     reconcile = _import_reconcile()
     run_dir = rf.build_run(
-        runs_root, "run-row8-hash", spec="valid", ars_session_id="sess-row8h"
+        runs_root, "run-row8-hash", spec="valid", session_id="sess-row8h"
     )
     # Structurally fine and correctly sealed *for itself*, but it is not the
     # launch this Spec sealed.
@@ -1968,7 +1964,7 @@ def test_row5_dispatch_with_corrupt_spec_falls_back_to_the_submission(
         dispatch=True,
         spec="corrupt",
         submission="valid",
-        ars_session_id="sess-row5f",
+        session_id="sess-row5f",
     )
     rf.build_session(sessions, state="matching_open", session_id="sess-row5f")
 
@@ -1978,7 +1974,7 @@ def test_row5_dispatch_with_corrupt_spec_falls_back_to_the_submission(
     assert result["status"] == "unknown"
     assert result["retryable"] is False
     assert result["session_id"] == "sess-row5f"
-    assert sessions.open_session("sess-row5f").state == STATE_QUARANTINED
+    assert sessions.open_session("sess-row5f").quarantine is not None
 
 
 @pytest.mark.parametrize("degraded", ["submission", "launch"], ids=["submission", "launch"])
@@ -1994,7 +1990,7 @@ def test_row5_dispatch_with_valid_spec_wins_over_degraded_evidence(
         spec="valid",
         launch="corrupt" if degraded == "launch" else "valid",
         submission="corrupt" if degraded == "submission" else "valid",
-        ars_session_id="sess-row5s",
+        session_id="sess-row5s",
     )
     rf.build_session(sessions, state="matching_open", session_id="sess-row5s")
 
@@ -2003,7 +1999,7 @@ def test_row5_dispatch_with_valid_spec_wins_over_degraded_evidence(
     result = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
     assert result["status"] == "unknown"
     assert result["session_id"] == "sess-row5s"
-    assert sessions.open_session("sess-row5s").state == STATE_QUARANTINED
+    assert sessions.open_session("sess-row5s").quarantine is not None
 
 
 def test_row11_all_absent_with_corrupt_submission_refuses(tmp_path: Path) -> None:
@@ -2058,7 +2054,7 @@ def test_row9_corrupt_spec_is_never_rehabilitated_by_a_valid_submission(
         spec="corrupt",
         launch="valid",
         submission="valid",
-        ars_session_id="sess-row9",
+        session_id="sess-row9",
     )
     rf.build_session(sessions, state="matching_open", session_id="sess-row9")
 
@@ -2067,14 +2063,14 @@ def test_row9_corrupt_spec_is_never_rehabilitated_by_a_valid_submission(
 
     assert reconcile.REFUSE_CORRUPT_SPEC in str(err.value)
     assert not (run_dir / "result.json").exists()
-    assert sessions.open_session("sess-row9").state == STATE_OPEN
+    assert sessions.open_session("sess-row9").quarantine is None
 
 
 @pytest.mark.parametrize(
-    "session_state", ["closed", "owner_mismatch", "namespace_mismatch", "id_mismatch"]
+    "session_quarantined", ["owner_mismatch", "namespace_mismatch", "id_mismatch"]
 )
 def test_a_non_matching_session_record_is_not_actionable(
-    tmp_path: Path, session_state: str
+    tmp_path: Path, session_quarantined: str
 ) -> None:
     root, sessions, runs_root = _fixture_root(tmp_path)
     reconcile = _import_reconcile()
@@ -2084,10 +2080,10 @@ def test_a_non_matching_session_record_is_not_actionable(
         dispatch=True,
         spec="valid",
         submission="valid",
-        ars_session_id="sess-not-actionable",
+        session_id="sess-not-actionable",
     )
     rf.build_session(
-        sessions, state=session_state, session_id="sess-not-actionable"
+        sessions, state=session_quarantined, session_id="sess-not-actionable"
     )
 
     with pytest.raises(reconcile.ReconciliationError) as err:
@@ -2108,8 +2104,8 @@ def _rewrite_json(path: Path, payload: dict[str, Any]) -> None:
 
 def _classified_run(tmp_path: Path, run_id: str, **build):
     root, sessions, runs_root = _fixture_root(tmp_path)
-    session_id = build.pop("ars_session_id", f"sess-{run_id}")
-    run_dir = rf.build_run(runs_root, run_id, ars_session_id=session_id, **build)
+    session_id = build.pop("session_id", f"sess-{run_id}")
+    run_dir = rf.build_run(runs_root, run_id, session_id=session_id, **build)
     rf.build_session(sessions, state="matching_open", session_id=session_id)
     reconcile = _import_reconcile()
     return run_dir, sessions, reconcile
@@ -2267,8 +2263,7 @@ def _production_spec_payload(run_id: str, request) -> dict[str, Any]:
         AgentRunSpec.for_golden_fixture(),
         identity=RunIdentity(owner=request.owner, namespace=request.namespace),
         session=SpecSession(
-            reuse=request.session_reuse,
-            ars_session_id=request.ars_session_id,
+            session_id=request.session_id,
             expected_binding_hash=request.expected_binding_hash,
         ),
         input_refs=request.input_refs,
@@ -2320,86 +2315,75 @@ def test_an_empty_input_refs_spec_converges_through_row_7(tmp_path: Path) -> Non
     assert result["detail_code"] == "RECONCILED_PRE_DISPATCH"
 
 
-def test_non_reuse_with_a_stray_session_id_attributes_only_the_ephemeral_id(
+def test_a_create_attributes_the_prospective_id_from_both_authorities(
     tmp_path: Path,
 ) -> None:
-    """A stray id on a non-reuse request is preserved but never authority.
+    """A create carries no ``session_id``, so both writers derive the same one.
 
-    ``AgentRunRequest`` accepts it, both writers copy it verbatim, and runtime
-    Session selection ignores it — so the durable validators must accept the
-    document and derive only the deterministic ephemeral id. A dispatched Run
-    whose ephemeral Session exists therefore reaches row 5 and is fenced,
-    rather than row 6 leaving a possibly prompted Session unquarantined.
+    A dispatched create whose Session record already landed therefore reaches
+    row 5 and is fenced, rather than row 6 leaving a possibly prompted Session
+    unquarantined. The Spec and the submission must agree without conferring.
     """
     reconcile = _import_reconcile()
     root, sessions, runs_root = _fixture_root(tmp_path)
-    run_id = "run-stray-id"
-    stray = "sess-stray-ignored"
-    command = submit_command(
-        submit_payload(
-            request=valid_wire_request(session_reuse="none", ars_session_id=stray)
-        )
-    )
-    assert command.request.ars_session_id == stray
+    run_id = "run-create-attr"
+    command = submit_command(submit_payload(request=valid_wire_request(session_id=None)))
+    assert command.request.session_id is None
 
     run_dir = runs_root / run_id
     run_dir.mkdir(parents=True)
     spec_payload = _production_spec_payload(run_id, command.request)
     submission = _production_submission(run_id, command)
-    assert spec_payload["session"]["ars_session_id"] == stray
-    assert submission["ars_session_id"] == stray
+    assert spec_payload["session"].get("session_id") is None
+    assert submission["session_id"] is None
     _write_json(run_dir / "spec.json", spec_payload)
     _write_json(run_dir / "submission.json", submission)
     _seed_marker(run_dir, run_id)
-    ephemeral = f"{run_id}-ephemeral"
-    rf.build_session(sessions, state="matching_open", session_id=ephemeral)
+    prospective = derive_session_id_for_run(run_id)
+    rf.build_session(sessions, state="matching", session_id=prospective)
 
     facts = reconcile.classify_run(run_dir, session_store=sessions)
     assert facts.spec is storage.JsonDocumentKind.VALID
     assert facts.submission is storage.JsonDocumentKind.VALID
     assert facts.attribution is not None
-    assert facts.attribution.session_id == ephemeral
+    assert facts.attribution.session_id == prospective
     assert facts.attribution.source == "spec"
     assert facts.actionable is True
     assert reconcile.select_row(facts).row == 5
 
-    # The submission alone attributes identically — the stray value is never
-    # authority on either path.
+    # The submission alone attributes identically — one rule, two readers.
     fallback = admission.validate_submission_artifact(submission, run_id=run_id)
     assert fallback is not None
-    assert fallback.session_id == ephemeral
+    assert fallback.session_id == prospective
 
     reconcile.reconcile(root)
     result = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
     assert result["status"] == "unknown"
-    assert result["session_id"] == ephemeral
-    assert sessions.open_session(ephemeral).state == STATE_QUARANTINED
-    assert stray not in json.dumps(result)
+    assert result["session_id"] == prospective
+    assert sessions.open_session(prospective).quarantine is not None
 
 
-def test_reuse_still_requires_and_attributes_its_own_session_id(
-    tmp_path: Path,
-) -> None:
-    """The negative control on the other side of the pairing rule."""
+def test_a_reuse_attributes_its_own_session_id(tmp_path: Path) -> None:
+    """The other side of the rule: a present id is the attribution, verbatim."""
     reconcile = _import_reconcile()
     _root, sessions, runs_root = _fixture_root(tmp_path)
     run_id = "run-reuse-domain"
     command = submit_command(submit_payload(request=valid_wire_request()))
     submission = _production_submission(run_id, command)
+    assert command.request.session_id is not None
     assert (
         admission.validate_submission_artifact(submission, run_id=run_id).session_id
-        == command.request.ars_session_id
+        == command.request.session_id
     )
 
-    without_id = dict(submission)
-    without_id["ars_session_id"] = None
-    assert (
-        admission.validate_submission_artifact(without_id, run_id=run_id) is None
-    )
+    # An unsafe id is not a Session at all: the document is not evidence.
+    unsafe = dict(submission)
+    unsafe["session_id"] = "../escape"
+    assert admission.validate_submission_artifact(unsafe, run_id=run_id) is None
 
     run_dir = runs_root / run_id
     run_dir.mkdir(parents=True)
-    _write_json(run_dir / "submission.json", without_id)
+    _write_json(run_dir / "submission.json", unsafe)
     facts = reconcile.classify_run(run_dir, session_store=sessions)
     assert facts.submission is storage.JsonDocumentKind.CORRUPT
 
@@ -2424,7 +2408,7 @@ def test_a_conflicting_internal_session_id_is_never_actionable(
         spec="valid",
         launch="valid",
         submission="valid",
-        ars_session_id="sess-requested",
+        session_id="sess-requested",
     )
     rf.build_session(sessions, state="matching_open", session_id="sess-requested")
     record_path = Path(sessions.base_dir) / "sess-requested" / SESSION_JSON
@@ -2475,7 +2459,7 @@ def test_no_replay_call_trace_over_every_converging_row(
         spec="valid",
         launch="valid",
         submission="valid",
-        ars_session_id="sess-trace-5",
+        session_id="sess-trace-5",
     )
     rf.build_session(sessions, state="matching_open", session_id="sess-trace-5")
     # Row 2: trusted unknown, actionable.
@@ -2486,7 +2470,7 @@ def test_no_replay_call_trace_over_every_converging_row(
         dispatch=True,
         spec="valid",
         submission="valid",
-        ars_session_id="sess-trace-2",
+        session_id="sess-trace-2",
     )
     rf.build_session(sessions, state="matching_open", session_id="sess-trace-2")
     # Row 1: trusted terminal, untouched.
@@ -2497,13 +2481,13 @@ def test_no_replay_call_trace_over_every_converging_row(
         dispatch=True,
         spec="valid",
         submission="valid",
-        ars_session_id="sess-trace-1",
+        session_id="sess-trace-1",
     )
     rf.build_session(sessions, state="matching_open", session_id="sess-trace-1")
     # Row 7 and row 11: pre-dispatch, reusable.
-    rf.build_run(runs_root, "run-trace-7", spec="valid", ars_session_id="sess-trace-7")
+    rf.build_run(runs_root, "run-trace-7", spec="valid", session_id="sess-trace-7")
     rf.build_session(sessions, state="matching_open", session_id="sess-trace-7")
-    rf.build_run(runs_root, "run-trace-11", submission="valid", ars_session_id="sess-t11")
+    rf.build_run(runs_root, "run-trace-11", submission="valid", session_id="sess-t11")
     rf.build_session(sessions, state="matching_open", session_id="sess-t11")
 
     tripped: list[str] = []
@@ -2521,11 +2505,8 @@ def test_no_replay_call_trace_over_every_converging_row(
         (SessionStore, "update_lock_holder"),
         (SessionStore, "create_native_session"),
         (SessionStore, "create_session"),
-        (SessionStore, "bind_agent_session"),
         (SessionStore, "commit_last_effective"),
-        (SessionStore, "mark_closed"),
         (storage, "create_native_session"),
-        (storage, "bind_agent_session"),
         (agent_registry, "load_agents_file"),
         (admission, "resolve_agent_entry"),
         (NativeAcpDriver, "open"),
@@ -2554,10 +2535,10 @@ def test_no_replay_call_trace_over_every_converging_row(
 
     assert tripped == []
     # …and the converging rows still did their work.
-    assert sessions.open_session("sess-trace-5").state == STATE_QUARANTINED
-    assert sessions.open_session("sess-trace-2").state == STATE_QUARANTINED
-    assert sessions.open_session("sess-trace-1").state == STATE_OPEN
-    assert sessions.open_session("sess-trace-7").state == STATE_OPEN
+    assert sessions.open_session("sess-trace-5").quarantine is not None
+    assert sessions.open_session("sess-trace-2").quarantine is not None
+    assert sessions.open_session("sess-trace-1").quarantine is None
+    assert sessions.open_session("sess-trace-7").quarantine is None
     assert json.loads(
         (runs_root / "run-trace-7" / "result.json").read_text()
     )["detail_code"] == "RECONCILED_PRE_DISPATCH"
@@ -2572,7 +2553,7 @@ def test_no_replay_leaves_every_seeded_lock_byte_identical(tmp_path: Path) -> No
         dispatch=True,
         spec="valid",
         submission="valid",
-        ars_session_id="sess-trace-lock",
+        session_id="sess-trace-lock",
     )
     rf.build_session(sessions, state="matching_open", session_id="sess-trace-lock")
     session_dir = Path(sessions.base_dir) / "sess-trace-lock"
@@ -2626,7 +2607,7 @@ def test_before_bind_a_refusing_reconciliation_never_listens(tmp_path: Path) -> 
         dispatch=True,
         spec="valid",
         submission="valid",
-        ars_session_id="sess-absent",
+        session_id="sess-absent",
     )
     kwargs = _daemon_kwargs(tmp_path, root)
 
@@ -2650,7 +2631,7 @@ def test_before_bind_reconciliation_is_complete_when_the_socket_appears(
         dispatch=True,
         spec="valid",
         submission="valid",
-        ars_session_id="sess-bind-order",
+        session_id="sess-bind-order",
     )
     rf.build_session(sessions, state="matching_open", session_id="sess-bind-order")
 
@@ -2661,7 +2642,9 @@ def test_before_bind_reconciliation_is_complete_when_the_socket_appears(
         run_dir = runs_root / "run-bind-order"
         observed["result"] = (run_dir / "result.json").is_file()
         observed["progress"] = (run_dir / "progress.json").is_file()
-        observed["session_state"] = sessions.open_session("sess-bind-order").state
+        observed["session_quarantined"] = (
+            sessions.open_session("sess-bind-order").quarantine is not None
+        )
         return await real_start(self)
 
     monkeypatch.setattr(server.ArsdServer, "start", observing_start)
@@ -2676,7 +2659,7 @@ def test_before_bind_reconciliation_is_complete_when_the_socket_appears(
     # Every reconciliation write of this Run was already durable at bind time.
     assert observed["result"] is True
     assert observed["progress"] is True
-    assert observed["session_state"] == STATE_QUARANTINED
+    assert observed["session_quarantined"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -2694,7 +2677,7 @@ def _dispatched_tree(tmp_path: Path, *, run_id: str, session_id: str):
         spec="valid",
         launch="valid",
         submission="valid",
-        ars_session_id=session_id,
+        session_id=session_id,
     )
     rf.build_session(sessions, state="matching_open", session_id=session_id)
     return root, sessions, run_dir
@@ -2711,7 +2694,7 @@ def test_crash_injection_before_the_fence_leaves_nothing_and_converges(
     )
     real_fence = SessionStore.write_quarantine_pending
 
-    def boom(self, session_id, *, reason, run_id, now=None):
+    def boom(self, session_id, *, reason_code, run_id, now=None):
         raise OSError("injected fence write failure")
 
     monkeypatch.setattr(SessionStore, "write_quarantine_pending", boom)
@@ -2720,13 +2703,13 @@ def test_crash_injection_before_the_fence_leaves_nothing_and_converges(
 
     session_dir = Path(sessions.base_dir) / "sess-crash-0"
     assert not (session_dir / QUARANTINE_PENDING_JSON).exists()
-    assert sessions.open_session("sess-crash-0").state == STATE_OPEN
+    assert sessions.open_session("sess-crash-0").quarantine is None
     assert not (run_dir / "progress.json").exists()
     assert not (run_dir / "result.json").exists()
 
     monkeypatch.setattr(SessionStore, "write_quarantine_pending", real_fence)
     reconcile.reconcile(root)
-    assert sessions.open_session("sess-crash-0").state == STATE_QUARANTINED
+    assert sessions.open_session("sess-crash-0").quarantine is not None
     assert json.loads((run_dir / "result.json").read_text())["status"] == "unknown"
 
 
@@ -2742,7 +2725,7 @@ def test_crash_injection_after_the_fence_leaves_a_non_leasable_session(
     )
     real_mark = SessionStore.mark_quarantined
 
-    def boom(self, session_id, *, reason, run_id, now=None):
+    def boom(self, session_id, *, reason_code, run_id, now=None):
         raise OSError("injected quarantine failure")
 
     monkeypatch.setattr(SessionStore, "mark_quarantined", boom)
@@ -2751,17 +2734,17 @@ def test_crash_injection_after_the_fence_leaves_a_non_leasable_session(
 
     session_dir = Path(sessions.base_dir) / "sess-crash-1"
     assert (session_dir / QUARANTINE_PENDING_JSON).is_file()
-    assert sessions.open_session("sess-crash-1").state == STATE_OPEN
+    assert sessions.open_session("sess-crash-1").quarantine is None
     with pytest.raises(SessionQuarantinedError):
         sessions.acquire_lock(
-            "sess-crash-1", "hermes", required_state=STATE_OPEN, now=T0
+            "sess-crash-1", "hermes", refuse_quarantined=True, now=T0
         )
     assert not (run_dir / "progress.json").exists()
     assert not (run_dir / "result.json").exists()
 
     monkeypatch.setattr(SessionStore, "mark_quarantined", real_mark)
     reconcile.reconcile(root)
-    assert sessions.open_session("sess-crash-1").state == STATE_QUARANTINED
+    assert sessions.open_session("sess-crash-1").quarantine is not None
     assert not (session_dir / QUARANTINE_PENDING_JSON).exists()
     assert json.loads((run_dir / "result.json").read_text())["status"] == "unknown"
 
@@ -2783,7 +2766,7 @@ def test_crash_injection_after_progress_before_terminal_resumes_the_same_row(
     monkeypatch.setattr(storage, "write_once_json", boom)
     with pytest.raises(RuntimeError, match="injected crash"):
         reconcile.reconcile(root)
-    assert sessions.open_session("sess-crash-2").state == STATE_QUARANTINED
+    assert sessions.open_session("sess-crash-2").quarantine is not None
     assert json.loads((run_dir / "progress.json").read_text())["state"] == "unknown"
     assert not (run_dir / "result.json").exists()
 
@@ -2808,7 +2791,7 @@ def test_crash_injection_reruns_keep_the_trusted_terminal_byte_identical(
         dispatch=True,
         spec="valid",
         submission="valid",
-        ars_session_id="sess-crash-3",
+        session_id="sess-crash-3",
     )
     rf.build_session(sessions, state="matching_open", session_id="sess-crash-3")
     before = (run_dir / "result.json").read_bytes()
@@ -2826,7 +2809,7 @@ def test_crash_injection_reruns_keep_the_trusted_terminal_byte_identical(
 
     assert "result.json" not in written
     assert (run_dir / "result.json").read_bytes() == before
-    assert sessions.open_session("sess-crash-3").state == STATE_QUARANTINED
+    assert sessions.open_session("sess-crash-3").quarantine is not None
     assert json.loads((run_dir / "progress.json").read_text())["state"] == "unknown"
 
 
@@ -2845,7 +2828,7 @@ def test_crash_injection_rerun_is_a_no_op_for_an_already_quarantined_session(
         dispatch=True,
         spec="valid",
         submission="valid",
-        ars_session_id="sess-crash-4",
+        session_id="sess-crash-4",
     )
     rf.build_session(
         sessions, state="already_quarantined", session_id="sess-crash-4"
@@ -2888,13 +2871,13 @@ def test_crash_injection_clears_a_stale_fence_on_a_quarantined_session(
         dispatch=True,
         spec="valid",
         submission="valid",
-        ars_session_id="sess-crash-5",
+        session_id="sess-crash-5",
     )
     rf.build_session(
         sessions, state="already_quarantined", session_id="sess-crash-5"
     )
     sessions.write_quarantine_pending(
-        "sess-crash-5", reason="interrupted", run_id="run-crash-5"
+        "sess-crash-5", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-crash-5"
     )
     session_dir = Path(sessions.base_dir) / "sess-crash-5"
     assert (session_dir / QUARANTINE_PENDING_JSON).is_file()
@@ -2902,7 +2885,7 @@ def test_crash_injection_clears_a_stale_fence_on_a_quarantined_session(
     reconcile.reconcile(root)
 
     assert not (session_dir / QUARANTINE_PENDING_JSON).exists()
-    assert sessions.open_session("sess-crash-5").state == STATE_QUARANTINED
+    assert sessions.open_session("sess-crash-5").quarantine is not None
 
 
 # ---------------------------------------------------------------------------
@@ -3038,7 +3021,7 @@ def test_either_marker_in_any_shape_means_dispatch_is_present(
     assert result["status"] == "unknown"
     assert result["detail_code"] == "RECONCILED_UNKNOWN"
     assert result["retryable"] is False
-    assert sessions.open_session(session_id).state == STATE_QUARANTINED
+    assert sessions.open_session(session_id).quarantine is not None
 
 
 def test_no_marker_at_all_stays_pre_dispatch(tmp_path: Path) -> None:
@@ -3055,7 +3038,7 @@ def test_no_marker_at_all_stays_pre_dispatch(tmp_path: Path) -> None:
 
     result = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
     assert result["detail_code"] == "RECONCILED_PRE_DISPATCH"
-    assert sessions.open_session("sess-reuse-1").state == STATE_OPEN
+    assert sessions.open_session("sess-reuse-1").quarantine is None
 
 
 def _submission_payload(**overrides) -> dict[str, Any]:
@@ -3070,8 +3053,7 @@ def _submission_payload(**overrides) -> dict[str, Any]:
         "peer": {"pid": 1, "uid": 1, "gid": 1},
         "owner": "hermes",
         "namespace": "hermes/doc-check",
-        "session_reuse": "reuse",
-        "ars_session_id": "sess-reuse-1",
+        "session_id": "sess-reuse-1",
         "agent_id": "fake-agent",
         "request_digest": "sha256:" + "a" * 64,
         "prompt_sha256": "b" * 64,
@@ -3092,13 +3074,14 @@ def test_strict_submission_validator_accepts_the_exact_v1_shape() -> None:
     assert attribution.session_id == "sess-reuse-1"
 
 
-def test_strict_submission_validator_derives_only_the_ephemeral_id() -> None:
+def test_strict_submission_validator_derives_the_prospective_id() -> None:
+    """A create submission names no Session; the one rule derives which."""
     attribution = admission.validate_submission_artifact(
-        _submission_payload(session_reuse="none", ars_session_id=None),
+        _submission_payload(session_id=None),
         run_id="run-attr-1",
     )
     assert attribution is not None
-    assert attribution.session_id == "run-attr-1-ephemeral"
+    assert attribution.session_id == derive_session_id_for_run("run-attr-1")
 
 
 @pytest.mark.parametrize(
@@ -3110,9 +3093,9 @@ def test_strict_submission_validator_derives_only_the_ephemeral_id() -> None:
         {"namespace": None},
         {"principal_id": ""},
         {"request_id": "not a request id"},
-        {"session_reuse": "maybe"},
-        {"ars_session_id": None},
-        {"session_reuse": "none", "ars_session_id": 17},
+        {"session_id": ""},
+        {"session_id": "../escape"},
+        {"session_id": 17},
         {"prompt_bytes": -1},
         {"prompt_bytes": True},
         {"peer": {"pid": "1", "uid": 1, "gid": 1}},
@@ -3125,9 +3108,9 @@ def test_strict_submission_validator_derives_only_the_ephemeral_id() -> None:
         "missing_namespace",
         "empty_principal",
         "bad_request_id",
-        "bad_reuse",
-        "reuse_without_session",
-        "non_reuse_with_non_string_session",
+        "empty_session_id",
+        "unsafe_session_id",
+        "non_string_session_id",
         "negative_prompt_bytes",
         "boolean_prompt_bytes",
         "non_integer_peer",
@@ -3198,3 +3181,111 @@ def test_r6_b3_secure_terminal_reader_maps_int_limit_and_nesting(
             storage.read_native_terminal_result(path, run_id="run_malformed").kind
             is NativeTerminalKind.INVALID
         )
+
+
+# --- B2: an interrupted configuration switch is not a plain pre-dispatch row ---
+#
+# Between publishing the bound Session record and writing the dispatch marker,
+# ARS mutates the agent's configuration. A crash inside that window leaves a
+# Session whose configuration ARS never proved. Reconciliation cannot ask the
+# dead process what it was doing, so the Run directory has to say it: which
+# configuration boundary was crossed, and nothing else.
+
+
+def _seed_config_markers(run_dir: Path, *names: str) -> None:
+    for ordinal, name in enumerate(names, start=1):
+        storage.write_once_json(
+            run_dir / name,
+            {
+                "marker": name,
+                "run_id": run_dir.name,
+                "ordinal": ordinal,
+                "created_at": "2026-07-22T00:00:00+00:00",
+            },
+        )
+
+
+def _pre_dispatch_run(tmp_path: Path, run_id: str, *markers: str):
+    reconcile = _import_reconcile()
+    root, sessions, runs_root = _fixture_root(tmp_path)
+    _seed_session(sessions, "sess-reuse-1")
+    run_dir = runs_root / run_id
+    run_dir.mkdir(parents=True)
+    _seed_spec(run_dir, run_id=run_id, session_id="sess-reuse-1")
+    _seed_submission(run_dir, request_id=f"{run_id}-req", run_id=run_id)
+    _seed_config_markers(run_dir, *markers)
+    return reconcile, root, sessions, run_dir
+
+
+def test_a_crash_after_a_dispatched_switch_without_proof_quarantines(
+    tmp_path: Path,
+) -> None:
+    """The switch may have landed and nothing proved what it landed as."""
+    reconcile, root, sessions, run_dir = _pre_dispatch_run(
+        tmp_path, "run-switch-unproven", CONFIG_SWITCH_STARTED_MARKER
+    )
+
+    reconcile.reconcile(root)
+
+    result = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    assert result["detail_code"] == "RECONCILED_PRE_DISPATCH"
+    assert sessions.open_session("sess-reuse-1").quarantine is not None
+
+
+def test_a_crash_before_any_switch_leaves_the_session_reusable(
+    tmp_path: Path,
+) -> None:
+    """No set was dispatched, so the agent's configuration never moved."""
+    reconcile, root, sessions, run_dir = _pre_dispatch_run(
+        tmp_path, "run-switch-none"
+    )
+
+    reconcile.reconcile(root)
+
+    assert sessions.open_session("sess-reuse-1").quarantine is None
+
+
+def test_a_crash_after_proven_configuration_leaves_the_session_reusable(
+    tmp_path: Path,
+) -> None:
+    """Exact readback proved what the agent's configuration is."""
+    reconcile, root, sessions, run_dir = _pre_dispatch_run(
+        tmp_path,
+        "run-switch-proven",
+        CONFIG_SWITCH_STARTED_MARKER,
+        CONFIG_PROVEN_MARKER,
+    )
+
+    reconcile.reconcile(root)
+
+    assert sessions.open_session("sess-reuse-1").quarantine is None
+
+
+def test_a_crash_after_proven_rollback_leaves_the_session_reusable(
+    tmp_path: Path,
+) -> None:
+    """The switch was undone with exact readback proof."""
+    reconcile, root, sessions, run_dir = _pre_dispatch_run(
+        tmp_path,
+        "run-switch-rolled-back",
+        CONFIG_SWITCH_STARTED_MARKER,
+        CONFIG_ROLLBACK_PROVEN_MARKER,
+    )
+
+    reconcile.reconcile(root)
+
+    assert sessions.open_session("sess-reuse-1").quarantine is None
+
+
+def test_an_unproven_switch_marker_of_any_shape_counts_as_started(
+    tmp_path: Path,
+) -> None:
+    """Same conservative rule as the dispatch markers: shape cannot clear it."""
+    reconcile, root, sessions, run_dir = _pre_dispatch_run(
+        tmp_path, "run-switch-weird"
+    )
+    (run_dir / CONFIG_SWITCH_STARTED_MARKER).mkdir()
+
+    reconcile.reconcile(root)
+
+    assert sessions.open_session("sess-reuse-1").quarantine is not None

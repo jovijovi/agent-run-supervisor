@@ -244,13 +244,6 @@ def test_summarize_status_snapshot_reports_no_session() -> None:
     assert summary["status"] == "no-session"
 
 
-def test_summarize_session_closed() -> None:
-    summary = summarize_management_json(_read("session-close-named", "stdout.json"))
-
-    assert summary["kind"] == "session_closed"
-    assert isinstance(summary["acpx_session_id"], str) and summary["acpx_session_id"]
-
-
 def test_summarize_cancel_result_reports_cancelled_flag() -> None:
     summary = summarize_management_json(_read("session-cancel-no-active", "stdout.json"))
 

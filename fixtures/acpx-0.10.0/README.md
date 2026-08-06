@@ -144,8 +144,6 @@ npx -y acpx@0.10.0 --format json --json-strict --cwd <scratch> <command tail>
 | `session-read-tail-after-turns` | `codex sessions read --tail 8 s1a-session-contract` | `count>0` entries carrying the persistent `sessionId` |
 | `session-status-after-turns` | `codex status -s s1a-session-contract` | `action=status_snapshot`, `status=alive` |
 | `session-cancel-no-active` | `codex cancel -s s1a-session-contract` | `action=cancel_result`, `cancelled=false` |
-| `session-close-named` | `codex sessions close s1a-session-contract` | `action=session_closed` |
-| `session-show-closed` | `codex sessions show s1a-session-contract` | `schema=acpx.session.v1`, `closed=true`, `closedAt` present |
 
 ### Findings that constrain S1 implementation
 
@@ -154,11 +152,8 @@ npx -y acpx@0.10.0 --format json --json-strict --cwd <scratch> <command tail>
   success stream.
 - **Session continuity is real.** A second `codex prompt -s <name>` reuses the
   existing ACP session id and skips `initialize`/`session/new`.
-- **Idle cancel is not close.** `session-cancel-no-active` exits `0` with
-  `cancelled=false`; S1 must not treat a no-op cancel as a successful
-  abort/close.
-- **Close is observable.** After `sessions close`, `sessions show` reports
-  `closed=true` with `closedAt`, while message history is retained.
+- **Idle cancel affects work, not the Session.** `session-cancel-no-active`
+  exits `0` with `cancelled=false`; a no-op cancel is not a successful abort.
 - **`acpSessionId` rotates from the record id.** The stable `acpxRecordId`
   differs from the live `acpSessionId` once the agent process starts; S1
   persistence must record both.

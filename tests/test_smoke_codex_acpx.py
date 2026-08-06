@@ -18,28 +18,27 @@ def test_validate_model_id_rejects_bare_codex_model() -> None:
 
 
 def test_build_roles_use_advertised_model_and_no_tool_permissions(tmp_path: Path) -> None:
-    exec_role = smoke.build_role(
+    one_shot_role = smoke.build_role(
         tmp_path / "work",
         role_id="codex-smoke-exec",
-        strategy="exec",
         model=smoke.DEFAULT_MODEL,
         acpx_timeout_seconds=7,
     )
-    persistent_role = smoke.build_role(
+    session_role = smoke.build_role(
         tmp_path / "work",
         role_id="codex-smoke-session",
-        strategy="persistent",
         model=smoke.DEFAULT_MODEL,
         acpx_timeout_seconds=7,
     )
 
-    assert exec_role["runner"]["adapter_agent"] == "codex"
-    assert exec_role["runner"]["model"] == "gpt-5.5[xhigh]"
-    assert exec_role["runner"]["acpx_binary"] is None
-    assert exec_role["session"]["strategy"] == "exec"
-    assert persistent_role["session"]["strategy"] == "persistent"
-    assert set(exec_role["permissions"].values()) == {False}
-    assert set(persistent_role["permissions"].values()) == {False}
+    assert one_shot_role["runner"]["adapter_agent"] == "codex"
+    assert one_shot_role["runner"]["model"] == "gpt-5.5[xhigh]"
+    assert one_shot_role["runner"]["acpx_binary"] is None
+    # No Session-lifetime declaration on either: the two roles differ only by id.
+    assert "strategy" not in one_shot_role.get("session", {})
+    assert "strategy" not in session_role.get("session", {})
+    assert set(one_shot_role["permissions"].values()) == {False}
+    assert set(session_role["permissions"].values()) == {False}
 
 
 def test_run_smoke_drives_one_shot_before_persistent_session(monkeypatch, tmp_path: Path) -> None:
@@ -60,7 +59,7 @@ def test_run_smoke_drives_one_shot_before_persistent_session(monkeypatch, tmp_pa
             )
         if args[:2] == ["session", "create"]:
             return _result(
-                {"session_id": smoke.SESSION_ID, "state": "open", "business_verdict": None}
+                {"session_id": smoke.SESSION_ID, "business_verdict": None}
             )
         if args[:2] == ["session", "send"]:
             prompt_file = Path(args[args.index("--prompt-file") + 1])
@@ -76,10 +75,6 @@ def test_run_smoke_drives_one_shot_before_persistent_session(monkeypatch, tmp_pa
             )
         if args[:2] == ["session", "status"]:
             return _result({"session_id": smoke.SESSION_ID, "ok": True, "business_verdict": None})
-        if args[:2] == ["session", "close"]:
-            return _result(
-                {"session_id": smoke.SESSION_ID, "state": "closed", "closed": True, "business_verdict": None}
-            )
         raise AssertionError(f"unexpected CLI args: {args!r}")
 
     monkeypatch.setattr(smoke, "run_cli", fake_run_cli)
@@ -118,7 +113,7 @@ def test_run_smoke_writes_helper_scratch_artifacts_private(monkeypatch, tmp_path
             )
         if args[:2] == ["session", "create"]:
             return _result(
-                {"session_id": smoke.SESSION_ID, "state": "open", "business_verdict": None}
+                {"session_id": smoke.SESSION_ID, "business_verdict": None}
             )
         if args[:2] == ["session", "send"]:
             prompt_file = Path(args[args.index("--prompt-file") + 1])
@@ -134,10 +129,6 @@ def test_run_smoke_writes_helper_scratch_artifacts_private(monkeypatch, tmp_path
             )
         if args[:2] == ["session", "status"]:
             return _result({"session_id": smoke.SESSION_ID, "ok": True, "business_verdict": None})
-        if args[:2] == ["session", "close"]:
-            return _result(
-                {"session_id": smoke.SESSION_ID, "state": "closed", "closed": True, "business_verdict": None}
-            )
         raise AssertionError(f"unexpected CLI args: {args!r}")
 
     monkeypatch.setattr(smoke, "run_cli", fake_run_cli)
@@ -163,7 +154,9 @@ def test_run_smoke_writes_helper_scratch_artifacts_private(monkeypatch, tmp_path
     assert {oct(path.stat().st_mode & 0o777) for path in private_files} == {"0o600"}
 
 
-def test_run_smoke_closes_persistent_session_after_marker_failure(monkeypatch, tmp_path: Path) -> None:
+def test_run_smoke_ends_no_session_after_marker_failure(
+    monkeypatch, tmp_path: Path
+) -> None:
     calls: list[list[str]] = []
 
     def fake_run_cli(args: list[str], *, timeout: int) -> dict:
@@ -176,7 +169,7 @@ def test_run_smoke_closes_persistent_session_after_marker_failure(monkeypatch, t
             )
         if args[:2] == ["session", "create"]:
             return _result(
-                {"session_id": smoke.SESSION_ID, "state": "open", "business_verdict": None}
+                {"session_id": smoke.SESSION_ID, "business_verdict": None}
             )
         if args[:2] == ["session", "send"]:
             return _result(
@@ -188,13 +181,10 @@ def test_run_smoke_closes_persistent_session_after_marker_failure(monkeypatch, t
                     "business_verdict": None,
                 }
             )
-        if args[:2] == ["session", "close"]:
-            return _result(
-                {"session_id": smoke.SESSION_ID, "state": "closed", "closed": True, "business_verdict": None}
-            )
         raise AssertionError(f"unexpected CLI args: {args!r}")
 
     monkeypatch.setattr(smoke, "run_cli", fake_run_cli)
+    monkeypatch.setattr(smoke, "make_session_name", lambda: "codex-smoke-fixed")
 
     with pytest.raises(smoke.SmokeError, match="WRONG_MARKER"):
         smoke.run_smoke(
@@ -205,5 +195,7 @@ def test_run_smoke_closes_persistent_session_after_marker_failure(monkeypatch, t
             sessions_dir=tmp_path / "sessions",
         )
 
-    assert calls[-1][:2] == ["session", "close"]
-    assert sum(1 for args in calls if args[:2] == ["session", "close"]) == 1
+    # Nothing ends a Session on any path: not through the supervisor CLI, and
+    # not by reaching around it to the agent's own management surface.
+    assert not any(args[:2] == ["session", "close"] for args in calls)
+    assert not hasattr(smoke, "teardown_real_acpx_session")

@@ -76,9 +76,15 @@
 
 **两个协议、两条版本线，谁也推不出谁。** **下游**是 ARS 与 agent 进程之间、通过 stdio JSON-RPC 讲的
 **ACP Protocol v1**；**上游**是你的应用与 `arsd` 之间、由 ARS 自己拥有的 **`arsd` API
-v2**：客户端发出的每一个**请求**信封都带 `api_version`，未知版本一律拒绝而不是猜测；结果帧与错误帧带
-的是用于关联的 `request_id`，不带版本号。`submit` 只在 `api_version: 2` 上受理，由 `agent_id` 指定要
-启动哪个 agent；其余七个操作在 `api_version: 1` 上同样受理，`server_info` 也在其中。
+v3**：客户端发出的每一个**请求**信封都带 `api_version`，除 `3` 以外一律拒绝而不是猜测 —— 对每一个操作
+都如此，`server_info` 也不例外；结果帧与错误帧带的是用于关联的 `request_id`，不带版本号。这里没有过渡
+窗口、双协议或别名：v3 是一次干净的切换。
+
+**Run 会终结，Session 不会关闭。** 不带 `session_id` 的 `submit` 会原子地创建一个持久 Session 并执行
+它的第一个 Run；带 `session_id` 的 `submit` 只复用那个既有 Session，任何情况下都不会回退成新建。
+Session 没有 open/active/closed 状态，没有一次性变体，也没有关闭操作 —— Run 走到终态从不结束它。真正
+会挡住复用的东西更窄也更诚实：活跃租约意味着同一时刻只跑一个 Run，而**隔离（quarantine）**是"连续性
+已被证明不安全"的持久证据。
 
 ## 环境要求
 
@@ -206,8 +212,11 @@ with ArsdClient(socket_path) as client:
                 "owner": "my-team",
                 "namespace": "my-team/docs",
                 "agent_id": "native-agent",           # 你注册表里的某个 agent_id
-                "session_reuse": "none",              # "none" 表示新开一个 Session
-                "ars_session_id": None,               # session_reuse="reuse" 时才填
+                # "session_id": "<某个 Session id>",   # 省略该字段表示新建一个持久
+                                                      # Session；填 Session id 则只
+                                                      # 复用既有的那个。显式传 null
+                                                      # 会被拒绝：省略与 null 是两种
+                                                      # 不同的表述。
                 "expected_binding_hash": None,
                 "input_refs": [
                     {"ref": "prompt:inline", "content_hash": "sha256:" + "a" * 64},
@@ -239,7 +248,9 @@ with ArsdClient(socket_path) as client:
             ...
 ```
 
-`session_list()`、`session_status(id)`、`session_close(id)` 补全其余接口，同样按 owner 限定。
+终态结果里带着本次 Run 所用的 `session_id` —— 下一次 `submit` 回传的就是它。
+`session_list()`、`session_status(id)` 补全其余接口，同样按 owner 限定；两者投影的是身份、最近一次使用
+的观测值与可选的隔离证据，而不是任何生命周期状态。
 上面 `request` 的键集是封闭且完整的：未知键会被拒绝；它不携带 shell 文本、argv、环境变量值、可执行
 文件路径或凭据内容 —— 这些字段在协议上根本不存在，而 `credential_refs` 只是**引用**，ARS 从不把它
 解析成值。错误是类型化且失败关闭的：异常携带 `PEER_UID_DENIED`、`OWNER_MISMATCH`、

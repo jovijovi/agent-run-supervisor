@@ -1,31 +1,39 @@
-"""H1 W2 confined, dry-run-first run/session artifact retention.
+"""Confined, dry-run-first Run evidence retention.
 
-This module *plans* and *applies* safe cleanup of run and session artifacts that
-live under a resolved ``.agent-run-supervisor`` root. It is stdlib-only and keeps
-the same security posture as ``event_store.py`` / ``session.py``: it launches
-nothing (no acpx, no network, no process signals), planning is strictly
-read-only, and deletion happens only with an explicit ``confirm is True``.
+This module *plans* and *applies* safe pruning of bulky Run evidence under a
+resolved ``.agent-run-supervisor`` root. It is stdlib-only and keeps the same
+security posture as ``event_store.py`` / ``session.py``: it launches nothing (no
+acpx, no network, no process signals), planning is strictly read-only, and
+removal happens only with an explicit ``confirm is True``.
+
+**Sessions are never deletion candidates, and Run directories are never
+deleted.** Runs terminate; Sessions do not close, and a Session identity record
+is small and durable by default — silence, age, Run completion, daemon restart,
+and caller disconnection never imply expiry. A Run directory keeps a minimal
+immutable idempotency and attribution spine forever, because duplicate-submit
+handling and reconciliation read it; only the bulky evidence around that spine
+is prunable, and only after a trustworthy terminal exists. Pruning is therefore
+never an idempotency reset: a repeated authenticated ``request_id`` stays
+recognized and stays non-dispatching.
 
 Safety boundaries (each pinned by ``tests/test_retention.py``):
 
 1. **Artifact-root confinement.** ``runs_dir`` / ``sessions_dir`` must resolve
    under a ``.agent-run-supervisor`` path segment, else :class:`RetentionError`.
    The tool refuses to operate on arbitrary directories (``/``, ``$HOME``, …).
-2. **Per-candidate confinement.** A candidate is only deletable when its
+2. **Per-candidate confinement.** A candidate is only prunable when its
    *resolved* path is strictly inside the resolved root; the root itself (and the
-   ``runs``/``sessions`` enumeration dirs) is never a delete target, and a path
+   ``runs``/``sessions`` enumeration dirs) is never a target, and a path
    that resolves outside root is refused at apply time (TOCTOU-aware).
 3. **No symlink escape.** A symlinked entry is skipped with
-   ``reason="symlink_escape"`` and never traversed or removed; deletion never
+   ``reason="symlink_escape"`` and never traversed or removed; removal never
    follows a symlink (re-checked immediately before removal).
-4. **Never delete live sessions.** An ``open`` session is *always* skipped
-   (``reason="open_session"``), regardless of policy or flags, and the state is
-   re-read at apply time so a session that re-opens between plan and apply is
-   still refused; a session holding a non-expired lease is always skipped
-   (``reason="live_lock"``). Only ``closed`` sessions are ever deletable.
-5. **Expired-lock hygiene.** A closed/eligible session's *expired* ``lock.json``
-   is removed together with the directory; a live lock makes the whole session
-   non-deletable (rule 4).
+4. **Sessions are durable.** Every Session directory is skipped with
+   ``reason="session_durable"``, unconditionally, regardless of policy, age,
+   flags, lease, or quarantine. There is no bound that makes one deletable.
+5. **The Run spine survives.** :data:`RUN_IDEMPOTENCY_SPINE` is the single
+   allowlist, and a Run without a trustworthy terminal is not prunable at all
+   (``reason="no_trustworthy_terminal"``).
 """
 from __future__ import annotations
 
@@ -36,12 +44,31 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from agent_run_supervisor.session import LOCK_JSON, SESSION_JSON, STATE_OPEN
+from agent_run_supervisor.native_acp.storage import (
+    NativeTerminalKind,
+    read_native_terminal_result,
+)
+from agent_run_supervisor.session import SESSION_JSON
 
-#: The only directory name this tool will ever delete inside.
+#: The only directory name this tool will ever remove anything inside.
 ARTIFACT_ROOT_NAME = ".agent-run-supervisor"
 #: Per-run metadata file whose mtime is the preferred age source for a run dir.
 RUN_MARKER = "result.json"
+
+#: The immutable idempotency and attribution spine of a Run directory, defined
+#: **once** here so no policy, bound, or future caller can shorten it. Pruning
+#: removes everything else and never one of these: the durable submission that
+#: recognizes a repeated authenticated ``request_id``, the sealed Spec/launch
+#: attribution and terminal result that reconciliation decides on, and the two
+#: dispatch markers that keep its uncertainty verdict identical after a prune.
+RUN_IDEMPOTENCY_SPINE = (
+    "submission.json",
+    "spec.json",
+    "launch.json",
+    "result.json",
+    "prompt-dispatch-started",
+    "prompt-accepted",
+)
 
 _DAY_SECONDS = 86400.0
 _UTC = timezone.utc
@@ -55,9 +82,10 @@ class RetentionError(RuntimeError):
 class RetentionPolicy:
     """Retention bounds. At least one of the two bounds must be set.
 
-    ``max_age_days`` deletes anything strictly older than the bound; ``max_count``
-    keeps the newest N eligible artifacts and deletes the remainder. Open and
-    live-locked sessions are *never* deletable regardless of these bounds.
+    ``max_age_days`` prunes anything strictly older than the bound;
+    ``max_count`` keeps the newest N eligible Runs and prunes the remainder.
+    Sessions are never prunable regardless of these bounds, and no bound ever
+    reaches a Run's idempotency spine.
     """
 
     max_age_days: int | None = None
@@ -75,7 +103,7 @@ class CleanupCandidate:
     id: str
     path: Path
     age_seconds: float
-    action: str  # "delete" | "skip"
+    action: str  # "prune" | "skip"
     reason: str
 
 
@@ -86,16 +114,16 @@ class CleanupPlan:
     root: Path
     runs_dir: Path
     sessions_dir: Path
-    delete: list[CleanupCandidate]
+    prune: list[CleanupCandidate]
     skip: list[CleanupCandidate]
 
 
 @dataclass(frozen=True)
 class CleanupResult:
-    """The result of :func:`apply_cleanup` — deleted ids and any failures."""
+    """The result of :func:`apply_cleanup` — pruned run ids and any failures."""
 
     plan: CleanupPlan
-    deleted: list[str]
+    pruned: list[str]
     failed: list[dict]
 
 
@@ -201,23 +229,6 @@ def _age_seconds(entry: Path, marker: str, now: datetime) -> float:
     return max(0.0, (now - moment).total_seconds())
 
 
-def _has_live_lock(session_dir: Path, now: datetime) -> bool:
-    """True only when ``lock.json`` holds a lease that has not yet expired.
-
-    An absent, unreadable, or garbage lock is never a live lease (it cannot
-    protect a session from cleanup); a parseable, future ``expires_at`` is live.
-    """
-    lock_path = session_dir / LOCK_JSON
-    if not lock_path.exists():
-        return False
-    try:
-        data = _read_json(lock_path)
-        expires_at = _ensure_aware(datetime.fromisoformat(data["expires_at"]))
-    except (OSError, ValueError, KeyError, TypeError):
-        return False
-    return expires_at > now
-
-
 def _symlink_escape_candidate(
     entry: Path, kind: str, root: Path, now: datetime, marker: str
 ) -> CleanupCandidate | None:
@@ -243,6 +254,24 @@ def _symlink_escape_candidate(
 # --- scanning -------------------------------------------------------------
 
 
+def _has_trustworthy_terminal(run_dir: Path) -> bool:
+    """True only when the **production** reader trusts this Run's terminal.
+
+    Pruning is irreversible data loss gated on one fact — this Run is over —
+    and that fact already has exactly one definition in the product. Retention
+    must not carry a second, looser one: a document the supervisor would refuse
+    as evidence must never license deleting evidence.
+
+    :func:`read_native_terminal_result` is that definition. It is bounded
+    (a size ceiling and a no-follow open), schema-complete, status-closed, and
+    identity-exact against this Run — so a truncated, forged, oversized,
+    symlinked, wrong-Run, or unknown-status result all resolve the same way
+    here: not trusted, therefore not prunable.
+    """
+    state = read_native_terminal_result(run_dir / RUN_MARKER, run_id=run_dir.name)
+    return state.kind is NativeTerminalKind.TRUSTED
+
+
 def _scan_runs(
     runs_dir: Path, root: Path, now: datetime
 ) -> tuple[list[CleanupCandidate], list[_Pending]]:
@@ -257,24 +286,38 @@ def _scan_runs(
             continue
         if not entry.is_dir():
             continue  # stray files are not run artifacts
-        eligible.append(
-            _Pending(
-                kind="run",
-                id=entry.name,
-                path=entry,
-                age_seconds=_age_seconds(entry, RUN_MARKER, now),
+        age = _age_seconds(entry, RUN_MARKER, now)
+        if not _has_trustworthy_terminal(entry):
+            # An in-flight or unterminated Run keeps everything: its evidence
+            # is what a supervisor or a reconciliation still needs.
+            forced.append(
+                CleanupCandidate(
+                    kind="run", id=entry.name, path=entry,
+                    age_seconds=age, action="skip",
+                    reason="no_trustworthy_terminal",
+                )
             )
+            continue
+        eligible.append(
+            _Pending(kind="run", id=entry.name, path=entry, age_seconds=age)
         )
     return forced, eligible
 
 
 def _scan_sessions(
     sessions_dir: Path, root: Path, now: datetime
-) -> tuple[list[CleanupCandidate], list[_Pending]]:
+) -> list[CleanupCandidate]:
+    """Every Session directory, always skipped.
+
+    There is no eligibility path and no bound to apply: a Session is durable,
+    so it is reported for visibility and never selected. A live lease and
+    quarantine evidence are query/admission facts, not deletion eligibility, so
+    neither is read here — reading them could only suggest that some *other*
+    value would have made the directory deletable, and none does.
+    """
     forced: list[CleanupCandidate] = []
-    eligible: list[_Pending] = []
     if not sessions_dir.is_dir():
-        return forced, eligible
+        return forced
     for entry in sorted(sessions_dir.iterdir(), key=lambda p: p.name):
         escape = _symlink_escape_candidate(entry, "session", root, now, SESSION_JSON)
         if escape is not None:
@@ -284,48 +327,26 @@ def _scan_sessions(
             continue
         if not (entry / SESSION_JSON).exists():
             continue  # not a session-record directory
-        age = _age_seconds(entry, SESSION_JSON, now)
-
-        # A live lease always wins (rule 4) — checked before the open-state gate
-        # so a held lock reports ``live_lock`` rather than ``open_session``.
-        if _has_live_lock(entry, now):
-            forced.append(
-                CleanupCandidate(
-                    kind="session", id=entry.name, path=entry,
-                    age_seconds=age, action="skip", reason="live_lock",
-                )
+        forced.append(
+            CleanupCandidate(
+                kind="session", id=entry.name, path=entry,
+                age_seconds=_age_seconds(entry, SESSION_JSON, now),
+                action="skip", reason="session_durable",
             )
-            continue
-
-        # An ``open`` session is *never* deletable (rule 4): skip it regardless
-        # of policy or flags; only ``closed`` sessions reach the age/count gate.
-        try:
-            state = _read_json(entry / SESSION_JSON).get("state")
-        except (OSError, ValueError):
-            state = None
-        if state == STATE_OPEN:
-            forced.append(
-                CleanupCandidate(
-                    kind="session", id=entry.name, path=entry,
-                    age_seconds=age, action="skip", reason="open_session",
-                )
-            )
-            continue
-
-        eligible.append(_Pending(kind="session", id=entry.name, path=entry, age_seconds=age))
-    return forced, eligible
+        )
+    return forced
 
 
 def _classify_eligible(
     pending: list[_Pending], policy: RetentionPolicy
 ) -> tuple[list[CleanupCandidate], list[CleanupCandidate]]:
-    """Split policy-eligible artifacts into delete/skip by age and count."""
+    """Split policy-eligible Runs into prune/skip by age and count."""
     keep_ids: set[int] | None = None
     if policy.max_count is not None:
         newest_first = sorted(pending, key=lambda p: p.age_seconds)
         keep_ids = {id(p) for p in newest_first[: policy.max_count]}
 
-    delete: list[CleanupCandidate] = []
+    prune: list[CleanupCandidate] = []
     skip: list[CleanupCandidate] = []
     for item in pending:
         too_old = (
@@ -335,10 +356,10 @@ def _classify_eligible(
         over_count = keep_ids is not None and id(item) not in keep_ids
         if too_old or over_count:
             reason = "max_age_days" if too_old else "max_count"
-            delete.append(_finalize(item, "delete", reason))
+            prune.append(_finalize(item, "prune", reason))
         else:
             skip.append(_finalize(item, "skip", "retained"))
-    return delete, skip
+    return prune, skip
 
 
 def _finalize(item: _Pending, action: str, reason: str) -> CleanupCandidate:
@@ -362,12 +383,13 @@ def plan_cleanup(
     policy: RetentionPolicy,
     now: datetime | None = None,
 ) -> CleanupPlan:
-    """Plan a confined cleanup. Read-only: deletes nothing.
+    """Plan a confined prune. Read-only: removes nothing.
 
-    Enumerates run and session directories, classifies each as ``delete`` or
-    ``skip`` per ``policy`` and the safety rules, and returns a :class:`CleanupPlan`.
-    Refuses (``RetentionError``) when ``policy`` has no bound or when either
-    directory is not confined to a ``.agent-run-supervisor`` root.
+    Enumerates Run and Session directories, classifies each as ``prune`` or
+    ``skip`` per ``policy`` and the safety rules, and returns a
+    :class:`CleanupPlan`. Refuses (``RetentionError``) when ``policy`` has no
+    bound or when either directory is not confined to a
+    ``.agent-run-supervisor`` root. Session directories are always ``skip``.
     """
     if not policy.has_bound():
         raise RetentionError(
@@ -379,15 +401,15 @@ def plan_cleanup(
     moment = _now(now)
 
     run_forced, run_eligible = _scan_runs(runs_dir, root, moment)
-    sess_forced, sess_eligible = _scan_sessions(sessions_dir, root, moment)
+    sess_forced = _scan_sessions(sessions_dir, root, moment)
 
-    delete, retained = _classify_eligible([*run_eligible, *sess_eligible], policy)
+    prune, retained = _classify_eligible(run_eligible, policy)
     skip = [*run_forced, *sess_forced, *retained]
     return CleanupPlan(
         root=root,
         runs_dir=runs_dir.resolve(),
         sessions_dir=sessions_dir.resolve(),
-        delete=delete,
+        prune=prune,
         skip=skip,
     )
 
@@ -395,61 +417,60 @@ def plan_cleanup(
 def apply_cleanup(
     plan: CleanupPlan, *, confirm: bool, now: datetime | None = None
 ) -> CleanupResult:
-    """Delete only ``plan.delete`` entries, re-verifying every safety invariant.
+    """Prune only ``plan.prune`` entries, re-verifying every safety invariant.
 
     Refuses entirely unless ``confirm is True`` (dry-run is the default). Each
     candidate is re-checked immediately before removal (no symlink, resolves
-    strictly within ``plan.root``, session not re-opened, no live lease) so a
-    tampered or raced plan can never escape the artifact root or delete a session
-    that re-opened between plan and apply.
+    strictly within ``plan.root``, terminal still present) so a tampered or
+    raced plan can never escape the artifact root — and the spine is re-read
+    from :data:`RUN_IDEMPOTENCY_SPINE` at removal time, never from the plan, so
+    a tampered plan cannot widen what is removable either.
     """
     if confirm is not True:
         raise RetentionError(
-            "apply_cleanup refuses to delete without confirm=True (dry-run is the default)"
+            "apply_cleanup refuses to remove anything without confirm=True "
+            "(dry-run is the default)"
         )
     moment = _now(now)
-    deleted: list[str] = []
+    pruned: list[str] = []
     failed: list[dict] = []
-    for candidate in plan.delete:
+    for candidate in plan.prune:
         try:
-            _delete_candidate(candidate, plan.root, moment)
+            _prune_candidate(candidate, plan.root, moment)
         except (RetentionError, OSError) as exc:
             failed.append(
                 {"id": candidate.id, "path": str(candidate.path), "reason": str(exc)}
             )
             continue
-        deleted.append(candidate.id)
-    return CleanupResult(plan=plan, deleted=deleted, failed=failed)
+        pruned.append(candidate.id)
+    return CleanupResult(plan=plan, pruned=pruned, failed=failed)
 
 
-def _delete_candidate(candidate: CleanupCandidate, root: Path, now: datetime) -> None:
+def _prune_candidate(candidate: CleanupCandidate, root: Path, now: datetime) -> None:
+    """Remove one Run's non-spine evidence. The directory itself always stays."""
     path = Path(candidate.path)
+    if candidate.kind != "run":
+        # Structural, not defensive: nothing but a Run ever reaches ``prune``.
+        raise RetentionError(f"refuses to prune a {candidate.kind} artifact")
     if path.is_symlink():
-        raise RetentionError(f"refuses to delete symlink {path!s}")
-    _resolve_within_root(path, root)
-    if candidate.kind == "session":
-        # TOCTOU-aware: re-read state so a session that re-opened after planning
-        # is refused (rule 4), then re-confirm no live lease was taken.
-        if _is_open_session(path):
-            raise RetentionError(
-                f"refuses to delete session {candidate.id!r}: its state is now open"
-            )
-        if _has_live_lock(path, now):
-            raise RetentionError(
-                f"refuses to delete session {candidate.id!r}: its lease is now live"
-            )
-    shutil.rmtree(path)
-
-
-def _is_open_session(session_dir: Path) -> bool:
-    """True when the session record's current state reads ``open``.
-
-    Used as an apply-time recheck (rule 4). An absent or unreadable record is not
-    treated as open here — the candidate was a readable, closed record at plan
-    time, and the path-confinement / live-lock guards still apply.
-    """
-    try:
-        state = _read_json(session_dir / SESSION_JSON).get("state")
-    except (OSError, ValueError):
-        return False
-    return state == STATE_OPEN
+        raise RetentionError(f"refuses to prune through symlink {path!s}")
+    resolved = _resolve_within_root(path, root)
+    # TOCTOU-aware: a Run that lost its terminal between plan and apply is no
+    # longer over, so its evidence is no longer prunable.
+    if not _has_trustworthy_terminal(path):
+        raise RetentionError(
+            f"refuses to prune run {candidate.id!r}: it has no readable terminal"
+        )
+    for entry in sorted(path.iterdir(), key=lambda p: p.name):
+        if entry.name in RUN_IDEMPOTENCY_SPINE:
+            continue
+        # Re-confine every child on its own: a symlinked child is unlinked as
+        # the link it is, and never followed.
+        if entry.is_symlink():
+            entry.unlink()
+            continue
+        _resolve_within_root(entry, resolved)
+        if entry.is_dir():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()

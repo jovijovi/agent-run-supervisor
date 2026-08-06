@@ -84,6 +84,14 @@ result verification.
 3. One process per Run. Same-Session continuity uses one external session id and a real `session/load`;
    AGENT processes do not survive between Runs. A reuse request can never become `session/new` — not as a
    fallback, not after a failure, not under any error class.
+   **Runs terminate; Sessions do not close.** There is one Session kind, durable and indefinitely
+   resumable, and no normal Session terminal state: a Run reaching `completed`, `failed`, `cancelled`,
+   `timed_out`, or `unknown` never ends the Session it ran under. ARS cannot observe "the user is finished
+   with this conversation" — Run completion and caller silence prove nothing about abandonment — so it
+   never infers one. A `submit` without `session_id` atomically creates one durable Session and its first
+   Run; a `submit` with `session_id` is existing-only reuse. Concurrency is a lease concern, machine-proven
+   unsafe continuity is a quarantine concern, and storage is a data-governance concern; none of the three
+   is a Session lifecycle.
 4. Model and effort are immutable within a Run, switchable only between completed Runs on the same external
    AGENT Session, and proved by exact literal readback before any prompt. An unadvertised value, an alias,
    a coercion, or an inexact readback yields zero Turn and no prompt. The live-advertised option set is the
@@ -205,7 +213,9 @@ deployment, and no green verification and no prior approval transfers to the nex
 Public ingress, TCP/root service, distributed scheduling, multi-tenant cloud control plane, broad RBAC,
 durable per-Run Worker, runtime plugin platform, remote transport, attach-to-running-agent, plugin loading,
 containers, sandboxing, ARS credential resolution, acpx fallback, shared or imported acpx session storage,
-generalized Session rebind, cross-AGENT Session reuse, automatic replay, workspace content-digest service,
+generalized Session rebind, cross-AGENT Session reuse, automatic replay, Session close/revoke, one-shot or
+ephemeral Sessions, standalone empty-Session creation, automatic Session expiry by age or silence,
+destructive Session purge, workspace content-digest service,
 filesystem watcher, second conversation database, hostile-process sandbox claims, and embedding
 caller-side business, messaging, or delivery semantics in ARS.
 

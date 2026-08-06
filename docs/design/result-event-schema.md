@@ -124,25 +124,26 @@ management evidence is persisted separately under
   `state`, `kind`, `created`, `session_dir`, `business_verdict`.
 - **`status.result`**: `session_id`, `ok`, `acpx_exit_code`, `summary`,
   `business_verdict`. `ok` is `true` only when the management `summary.status == "alive"`.
-- **`close.result`**: `session_id`, `state`, `closed`, `kind`, `acpx_session_id`,
-  `business_verdict`.
-- **`abort.result`**: `session_id`, `cancelled`, `state`, `kind`,
+- **`abort.result`**: `session_id`, `cancelled`, `kind`,
   `business_verdict`. `cancelled: false` is reported honestly (nothing active to
-  cancel) and is **not** a business verdict; abort never flips session state.
+  cancel) and is **not** a business verdict.
+
+There is no `close.result`, because there is no Session close: Runs terminate and Sessions do not.
 
 The `summary` embedded above is the allow-listed management summary from
 `parser.summarize_management_json` / `_management_summary`:
-`kind`, `acpx_record_id`, `acpx_session_id`, `session_name`, `created`, `closed`,
+`kind`, `acpx_record_id`, `acpx_session_id`, `session_name`, `created`,
 `status`, `cancelled`, `code`, `acpx_code`, `top_level_keys`. It carries only
-scalar identity/lifecycle fields plus structural evidence (`top_level_keys` are
+scalar identity fields plus structural evidence (`top_level_keys` are
 `name:type` pairs) — never bulk payload, model catalogs, or message bodies.
 
 ### 2.3 Session record summary (`list`)
 
 `SessionRuntime.list_sessions` returns `{ "sessions": [...], "count": <int>,
 "business_verdict": null }`, where each entry is a redacted record summary:
-`session_id`, `state`, `role_id`, `session_name`, `acpx_session_id`,
-`acpx_version`, `adapter_agent`, `created_at`, `updated_at`.
+`session_id`, `role_id`, `session_name`, `acpx_session_id`,
+`acpx_version`, `adapter_agent`, `created_at`, `updated_at`. There is no `state` key: a Session record
+carries no lifecycle state.
 
 The on-disk record `session.json` (`session.SessionRecord`) additionally carries:
 `schema_version` (integer), `role_hash`, `workspace_hash`, `policy_hash`,
@@ -164,7 +165,7 @@ platform/delivery fields. Keys:
 
 | Key | Type | Meaning |
 |-----|------|---------|
-| `mode` | `string` | Local caller invocation mode: `exec`, `exec_dry_run`, `session_create`, `session_send`, `session_status`, or `session_close`. |
+| `mode` | `string` | Local caller invocation mode: `exec`, `exec_dry_run`, `session_create`, `session_send`, or `session_status`. |
 | `supervisor_status` | `string` \| `null` | Existing supervisor `status` when the wrapped payload has one; otherwise `null`. |
 | `result` | `object` | The existing run/session supervisor payload or projection. The caller wrapper does not parse raw acpx streams. |
 | `artifact_dir` | `string` \| `null` | Local artifact directory for the wrapped result, when applicable. |
@@ -396,16 +397,15 @@ returns a list with one entry per local record:
 | Key | Type | Meaning |
 |-----|------|---------|
 | `session_id` | `string` | Local session identifier. |
-| `state` | `string` | Record state (`open` / `closed`). |
+| `quarantined` | `boolean` | Whether the record carries quarantine evidence. Not a lifecycle state. |
 | `lock_present` | `boolean` | Whether `lock.json` exists. |
 | `lease_expired` | `boolean` | `true` when `expires_at <= now`, or when the lock is unreadable/garbage (conservatively expired). A live (future) lease is `false`. |
 | `holder_liveness` | `string` \| `null` | K1 process-liveness classification of the recorded lock holder set: `alive`, `crashed`, or `unknown`; `null` when there is no lock. Composite supervisor+child locks classify as `crashed` only when both identities are provably crashed; if either is alive the result is `alive`, and if either is unverifiable the result is `unknown`. An unreadable/garbage lock classifies `unknown`. See [§6.1](#61-k1-holder-liveness-and-safe-recovery-posture). |
 | `recoverable` | `boolean` | `true` when the lease is TTL-expired (`lease_expired`) **or** the holder is provably `crashed` and the lock is reclaimable. An `alive`, `unknown`, or explicitly unreclaimable pending holder on a within-TTL lease is **not** `recoverable`. |
 | `tmp_debris` | `array<string>` | Leftover `.tmp-*` atomic-write debris file names in the session dir. |
 
-`holder_liveness` and `recoverable` are **additive** keys (K1); the existing
-`session_id`/`state`/`lock_present`/`lease_expired`/`tmp_debris` keys are
-unchanged. The top-level holder identity is read from the additive `host`/`pid`/
+`holder_liveness` and `recoverable` are **additive** keys (K1); the
+`session_id`/`quarantined`/`lock_present`/`lease_expired`/`tmp_debris` keys carry the rest. The top-level holder identity is read from the additive `host`/`pid`/
 `process_start`/`boot_id` fields that `acquire_lock` now records into `lock.json`
 alongside the existing `token`/`owner`/`acquired_at`/`expires_at`. When the runtime
 spawns an acpx subprocess, it preserves that top-level supervisor identity and adds
@@ -440,13 +440,16 @@ lease recovery (`process_liveness.classify_holder`). The safety posture is:
 
 ## 7. Cleanup plan / result
 
-`retention.py` plans and applies confined, dry-run-first cleanup; the
-`agent-run-supervisor cleanup` command serializes it via `commands.cmd_cleanup`.
+`retention.py` plans and applies confined, dry-run-first **pruning of Run
+evidence**; the `agent-run-supervisor cleanup` command serializes it via
+`commands.cmd_cleanup`. Nothing is deleted wholesale: a Run directory always
+survives with its idempotency spine, and a Session directory is never a
+candidate at all.
 
 Command output (stdout JSON):
 
 - **Dry-run (default, no `--apply`)**: `{ "applied": false, "plan": <CleanupPlan> }`.
-- **Apply (`--apply`)**: `{ "applied": true, "deleted": [<id>...],
+- **Apply (`--apply`)**: `{ "applied": true, "pruned": [<run id>...],
   "failed": [{ id, path, reason }...], "plan": <CleanupPlan> }`.
 
 `CleanupPlan` shape (`commands._plan_payload`):
@@ -456,19 +459,26 @@ Command output (stdout JSON):
 | `root` | `string` | Resolved `.agent-run-supervisor` artifact root the tool is confined to. |
 | `runs_dir` | `string` | Resolved runs directory scanned. |
 | `sessions_dir` | `string` | Resolved sessions directory scanned. |
-| `delete` | `array<CleanupCandidate>` | Candidates planned for deletion. |
+| `prune` | `array<CleanupCandidate>` | Runs whose non-spine evidence is planned for removal. |
 | `skip` | `array<CleanupCandidate>` | Candidates retained/refused, with reasons. |
 
 `CleanupCandidate` shape: `kind` (`run` / `session`), `id`, `path`, `age_seconds`,
-`action` (`delete` / `skip`), `reason`. Reasons in use: `max_age_days`,
-`max_count` (delete reasons); `retained`, `symlink_escape`, `open_session`,
-`live_lock` (skip reasons).
+`action` (`prune` / `skip`), `reason`. Reasons in use: `max_age_days`,
+`max_count` (prune reasons); `retained`, `symlink_escape`, `session_durable`,
+`no_trustworthy_terminal` (skip reasons).
 
-Safety posture (documented for callers): planning is read-only and deletes
-nothing; `apply` deletes **only** `plan.delete` entries and re-verifies every
-safety invariant immediately before removal; the tool refuses to operate outside a
-resolved `.agent-run-supervisor` root, never follows a symlink out of root, and
-never deletes an open or live-locked session.
+`retention.RUN_IDEMPOTENCY_SPINE` is the single allowlist a prune may never
+remove: `submission.json`, `spec.json`, `launch.json`, `result.json`,
+`prompt-dispatch-started`, `prompt-accepted`. Pruning is therefore never an
+idempotency reset — a repeated authenticated `request_id` stays recognized and
+stays non-dispatching.
+
+Safety posture (documented for callers): planning is read-only and removes
+nothing; `apply` prunes **only** `plan.prune` entries, re-reads the spine from
+source rather than from the plan, and re-verifies every safety invariant
+immediately before removal; the tool refuses to operate outside a resolved
+`.agent-run-supervisor` root, never follows a symlink out of root, and **never
+removes a Session directory, whatever its age, lease, or quarantine evidence**.
 
 ## 8. Caller-stability contract
 
@@ -600,7 +610,7 @@ Reset-line readers obey these rules:
 - expose, for legacy Runs, only trusted categorical terminal status and independently safe owner and Run
   metadata, withholding legacy free-form final messages, error detail, events, stderr, effective and
   discovery text, and raw inspection documents categorically;
-- keep legacy Session `status`/`list`/`close` available and owner-scoped, while withholding the external
+- keep legacy Session `status`/`list` available and owner-scoped, while withholding the external
   session id and the retired value-derived identity hashes from the response allowlist.
 
 Direct filesystem access to old files by an authorized operator stays outside the daemon projection. Those
@@ -639,5 +649,24 @@ commit as the emitter — the two are one contract, not a document that describe
 The terminal vocabulary, the additive-only rule, `business_verdict: null`, owner scoping, event ordering with
 its monotonic `seq`, bounded queues and truncation markers, and the caller-facing event grammar are unchanged
 by the reset. The reset changes what may appear *inside* a free-form field, adds withholding metadata and the
-policy-warning family, and moves the caller wire to `api_version` 2 for the reasons in the PRD — not the
+policy-warning family, and moves the caller wire to `api_version` 3 for the reasons in the PRD — not the
 grammar a caller parses.
+
+### 9.7 The no-close Session projection
+
+`session_status` and `session_list` project identity, lease/activity facts, last-use observations, and
+optional quarantine evidence. They expose **no** synthetic Session lifecycle state, because none exists:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `session_id` | `string` | the durable ARS Session identifier |
+| `owner`, `namespace` | `string` | the authenticated identity the Session belongs to |
+| `agent_id` | `string` \| `null` | the registered agent this Session binds |
+| `profile_id` | `string` \| `null` | the source profile identity |
+| `created_at`, `updated_at` | `string` \| `null` | creation and last-use timestamps |
+| `last_effective_model`, `last_effective_effort` | `string` \| `null` | the last exact-readback-proven pair |
+| `quarantine` | `object` \| `null` | `{reason_code, source_run_id, recorded_at}` when continuity was proven unsafe, else `null` |
+
+`quarantine.reason_code` is drawn from a closed source-owned vocabulary. It is never an exception message,
+never remote or agent-authored text, and never a path, so the evidence is bounded and categorical by
+construction. The external AGENT session id is never projected.

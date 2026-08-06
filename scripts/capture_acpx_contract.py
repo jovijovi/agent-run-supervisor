@@ -177,24 +177,6 @@ def init_session_scratch() -> Path:
     return SESSION_SCRATCH
 
 
-def best_effort_close_session(scratch: Path) -> None:
-    run(
-        ACPX
-        + [
-            "--format",
-            "json",
-            "--json-strict",
-            "--cwd",
-            str(scratch),
-            "codex",
-            "sessions",
-            "close",
-            SESSION_NAME,
-        ],
-        timeout=120,
-    )
-
-
 def run_session_fixture(spec: FixtureSpec) -> dict[str, Any]:
     fixture_dir = FIXTURE_ROOT / spec.name
     if fixture_dir.exists():
@@ -276,14 +258,37 @@ def summarize_prompt_records(records: list[Any]) -> dict[str, Any]:
     }
 
 
+def require_no_leftover_contract_session(scratch: Path, management_head: list[str]) -> None:
+    """Refuse to capture over a Session a previous capture left behind.
+
+    This tool used to *close* that Session so ``sessions new`` would succeed.
+    Ending an external Session is not scratch cleanup — it is the mechanism the
+    Session no-close model removes — so the leftover is now reported instead of
+    destroyed. Disposing of real external agent state is an operator decision,
+    and the operator is the one who can make it.
+
+    The probe is read-only: it runs ``sessions show`` and never mutates.
+    """
+    exit_code, _stdout, _stderr = run(
+        management_head + ["codex", "sessions", "show", SESSION_NAME], timeout=120
+    )
+    if exit_code != 0:
+        return  # no such session: the expected starting state
+    raise SystemExit(
+        f"refusing to capture: the contract session {SESSION_NAME!r} already "
+        f"exists under {scratch}. Capture does not end external Sessions. "
+        "Dispose of it yourself, or capture into a fresh scratch root."
+    )
+
+
 def nonempty_line_count(path: Path) -> int:
     return len([line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()])
 
 
 def capture_session_contract() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     scratch = init_session_scratch()
-    best_effort_close_session(scratch)
     management_head = ACPX + ["--format", "json", "--json-strict", "--cwd", str(scratch)]
+    require_no_leftover_contract_session(scratch, management_head)
     prompt_head = ACPX + [
         "--format",
         "json",
@@ -317,8 +322,6 @@ def capture_session_contract() -> tuple[list[dict[str, Any]], dict[str, Any]]:
         FixtureSpec("session-read-tail-after-turns", management_head + ["codex", "sessions", "read", "--tail", "8", SESSION_NAME], stdout_name="stdout.json", description="Read session tail after turns."),
         FixtureSpec("session-status-after-turns", management_head + ["codex", "status", "-s", SESSION_NAME], stdout_name="stdout.json", description="Live status snapshot after turns."),
         FixtureSpec("session-cancel-no-active", management_head + ["codex", "cancel", "-s", SESSION_NAME], stdout_name="stdout.json", description="Idle cancel should not close the session."),
-        FixtureSpec("session-close-named", management_head + ["codex", "sessions", "close", SESSION_NAME], stdout_name="stdout.json", description="Close the named session."),
-        FixtureSpec("session-show-closed", management_head + ["codex", "sessions", "show", SESSION_NAME], stdout_name="stdout.json", description="Show closed session record."),
     ]
     results = [run_session_fixture(spec) for spec in session_specs]
     turn1 = summarize_prompt_records(parse_ndjson_lines(FIXTURE_ROOT / "session-prompt-turn1" / "stdout.ndjson"))

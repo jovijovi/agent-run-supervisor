@@ -78,8 +78,8 @@ identity, promotion, digests, ownership or mode gates, or credential-root inspec
 | Module | Responsibility |
 |---|---|
 | `server.py` | asyncio UDS accept loop, `SO_PEERCRED`, finite backlog, per-connection isolation; UDS create/chmod/replace/unlink as the second writable surface |
-| `protocol.py` | bounded JSON frames, mandatory `api_version`, **per-operation** version admission rather than envelope-level rejection, so the drain matrix is expressible |
-| `handlers.py` | submit/status/events/cancel and Session status/list/close with owner checks; Session creation is part of `submit`; `server_info` reports the supported version set; responses expose only allowlisted fields and never raw stored objects or exceptions |
+| `protocol.py` | bounded JSON frames, mandatory `api_version`, **single-version** envelope admission (exactly 3; no per-operation matrix and no drain window, because no client population exists), the seven-operation set, and the submit wire mapping with one optional `session_id` |
+| `handlers.py` | submit/status/events/cancel and Session status/list with owner checks; Session creation is part of `submit` and there is no Session-close operation; `server_info` reports the supported version set; responses expose only allowlisted fields and never raw stored objects or exceptions |
 | `admission.py` | durable submission/idempotency records, keyed admission locks, typed terminal-result inspection; the strict submission writer/validator shared with reconciliation; **pure in-memory** agent resolution against the startup snapshot with zero filesystem access; value-blind digest material; the forbidden runtime-selection field set |
 | `reconcile.py` | startup-only, ordered, exhaustive, fail-closed reconciliation (§9); no prompt replay, resume, or repair |
 | `client.py` | typed local caller for Hermes/CLI; explicit connect/close, no silent reconnect or replay |
@@ -191,11 +191,12 @@ rather than a comment.
 ### `SessionStartPlan`
 
 ```python
-SessionStartPlan = NewSessionPlan | LoadSessionPlan
+SessionStartPlan = CreateSessionPlan | LoadSessionPlan
 
 @dataclass(frozen=True)
-class NewSessionPlan:
-    # Constructible ONLY from a request whose immutable reuse intent is "none".
+class CreateSessionPlan:
+    # Constructible ONLY from a request carrying no session_id. The id is
+    # PROSPECTIVE: nothing durable exists under it until session/new returns.
     ar_session_id: str
 
 @dataclass(frozen=True)
@@ -207,8 +208,8 @@ class LoadSessionPlan:
 
 Invariants that must hold **structurally, not by convention**:
 
-1. `driver.new_session` is reachable only from the new-session match arm.
-2. `NewSessionPlan.__init__` is reachable only from the non-reuse admission path.
+1. `driver.new_session` is reachable only from the create match arm.
+2. `CreateSessionPlan.__init__` is reachable only from the `session_id is None` admission branch.
 3. The startup sequence has **no default arm** and no conversion between plan types.
 4. The load arm passes the stored ID with no trimming, Unicode normalization, parsing, case conversion,
    canonicalization, or regeneration, and reads **no** ID from the response — the pinned SDK's load response
@@ -235,14 +236,19 @@ and audit require.
 ### `AgentRunSpec`
 
 Immutable, exclusive-created requested fact: input/context references and hashes; caller owner/namespace and
-Session reuse expectation; `agent_id` and profile/launch/schema hashes; frozen execution grant,
+the optional `session_id`; `agent_id` and profile/launch/schema hashes; frozen execution grant,
 role/capability, workspace, MCP, and credential-**reference** hashes; requested model/effort, limits,
 recovery/evidence policy; and `spec_hash` excluding generated control fields such as `run_id`/timestamps.
 
 `to_dict()` stays an explicit projection rather than raw `asdict`, and a structural test walks every spec
-dataclass field asserting it appears in the projection except the declared omit set. `SPEC_SCHEMA_VERSION`
-and `DIGEST_SCHEMA_VERSION` both move with the reset, because the digest material genuinely changes when
-environment values leave the launch snapshot; the launch-snapshot schema version moves for the same reason.
+dataclass field asserting it appears in the projection except the declared omit set.
+
+**Schema versions move with the material they seal, and only then.** At the Session no-close model the
+request's Session block became one optional `session_id`, so `SPEC_SCHEMA_VERSION`, `DIGEST_SCHEMA_VERSION`,
+`SUBMISSION_SCHEMA_VERSION`, and the caller `api_version` all moved to **3** together — a document sealed
+under the old reuse-mode shape describes an intent this runtime no longer models, and is refused rather
+than reinterpreted. `LAUNCH_SCHEMA_VERSION` deliberately stayed at **2**, because the launch snapshot did
+not change and a version that tracks nothing tells a reader nothing.
 The disposition of the retired expected-binding-hash request/Spec field is an explicitly carried follow-up
 and is **not** silently changed while moving digest material.
 
@@ -259,8 +265,20 @@ never alters a profile, the registry snapshot, or a Spec.
 ### Native Session record
 
 Stable identity: `agent_id`, profile identity, external Session ID, owner/namespace, `workspace_hash`, and
-the optional operator `session_epoch`. Mutable observations: `last_effective_model/effort`. Persistent
-state: `active | closed | quarantined`, reason, source Run. model/effort are not Session identity.
+the optional operator `session_epoch`. Mutable observations: `last_effective_model/effort`, last-use
+timestamp, and the last `initialize` self-report. Optional safety evidence: `quarantine: null |
+{reason_code, source_run_id, recorded_at}`. model/effort are not Session identity.
+
+**There is no Session lifecycle field.** `state = open | active | closed`, `closed_at`, close reason/source,
+the ephemeral/persistent flag, and reuse-mode-as-identity are deleted, not hidden: a Session exists, is
+durable, and is indefinitely resumable, and no Run terminal changes that. Quarantine is independent
+evidence rather than a state — a quarantined Session still exists, stays queryable, and refuses new Runs.
+
+**Creation is atomic and never provisional.** A `submit` without `session_id` derives a prospective
+`session_id` deterministically from the authenticated `(principal_id, request_id)`; the sealed
+submission/Spec is the only durable pre-Session reservation. After `session/new` returns, ARS writes one
+fully bound record carrying the external ID, then takes its lease, then proves configuration, then marks
+dispatch. A crash before that commit leaves a terminal failed Run and no Session record at all.
 
 Reuse requires equality on the full identity set, and comparison is **symmetric**: a record carrying an
 epoch is refused by a Run with none and vice versa, which is exactly why adding an epoch for the first time
@@ -271,8 +289,14 @@ Retired identity fields — the adapter contract hash, the ARS-derived compatibi
 registration hash — are deleted as identity. Records carrying them stay **status-readable** and are
 **refused for load** with a stable code.
 
-Same Session has one lease and one active Run. A quarantined Session refuses new work. v1 has no
+Same Session has one lease and one active Run; the lease is independent of Session existence and every
+trustworthy Run terminal releases it. A quarantined Session refuses new work. v1 has no
 unquarantine tool; successor work uses a new Session with caller-owned context handoff.
+
+**Retention never treats a Session directory as a deletion candidate.** Run retention prunes bulky evidence
+only after a trustworthy terminal and always preserves one centrally defined immutable
+idempotency/attribution allowlist inside the Run directory, so a repeated authenticated `request_id` stays
+non-dispatching after pruning.
 
 ### Native Run record
 
@@ -313,7 +337,7 @@ embedding raw exception text. Process-group and reap behavior are unchanged.
 initialize
 → verify protocol major, required capabilities, forbidden capabilities
 → record agentInfo as EVIDENCE (gates nothing)
-→ session/new or session/load, per the closed start plan
+→ session/new (create plan) or session/load (load plan), per the closed start plan
 → read complete config options (live discovery)
 → set model
 → consume complete model-dependent options
@@ -393,13 +417,17 @@ rollback targets the prior effective pair and is itself exact-readback gated.
 ## 6. Dispatch, finalization, and reconciliation
 
 `RunTask` exclusively creates `prompt-dispatch-started` immediately before the wire write and
-`prompt-accepted` after a successful write. Finalization prioritizes durable reconciliation facts over
+`prompt-accepted` after a successful write. It additionally records the configuration-switch window as
+three bounded categorical markers — `config-switch-started` before the first `session/set_config_option`,
+then `config-proven` or `config-rollback-proven` — so a crash between the Session record and the dispatch
+marker is classifiable (architecture §5.1). A started-but-unproven switch quarantines the Session on both
+the create and the reuse path. Finalization prioritizes durable reconciliation facts over
 ordinary process exit classification.
 
 | Condition | Result | Session |
 |---|---|---|
-| pre-dispatch failure | `failed` | active unless switch rollback failed |
-| trustworthy ACP terminal | matching terminal state | active unless continuity is disproven |
+| pre-dispatch failure | `failed` | reusable unless switch rollback failed |
+| trustworthy ACP terminal | matching terminal state | reusable unless continuity is disproven |
 | dispatched; supervisor proves matched child abnormal exit while observation remained intact | `failed` | quarantined |
 | dispatched; observation lost / no trustworthy terminal | `unknown`, `retryable=false` | quarantined |
 | external session identity violation observed after dispatch | `unknown`, `retryable=false` | quarantined |
@@ -511,17 +539,18 @@ not a rename.
 Spec validation requires the immutable request, grant, owner, namespace, agent, profile, and Session binding
 plus its referenced launch hash. Launch validation is structural when no valid Spec exists; when the Spec is
 valid, the launch hash must equal the Spec's reference or the launch is corrupt. Submission validation uses
-the admission schema with exact request, principal, run, owner, namespace, and Session fields; a non-reuse
-submission derives only the already-defined deterministic ephemeral Session id.
+the admission schema with exact request, principal, run, owner, namespace, and Session fields; a create
+submission (no `session_id`) derives the deterministic prospective Session id from its own
+`(principal_id, request_id)`.
 
 **Attribution authority is ordered.** A valid Spec is authoritative and the submission is ignored for
 attribution even when absent, corrupt, or conflicting. A valid submission is a fallback only when the Spec is
 not valid, sufficient only to fence a possibly dispatched Run or safely scope a terminal record; it never
 makes a corrupt Spec valid and never permits pre-dispatch launch recovery. Launch records, result fields,
-directory names other than the deterministic ephemeral derivation, progress, events, locks, and marker
-contents are never attribution authority. Attribution is **actionable** only when the chosen identity
-resolves to an already-existing, strictly readable Session record whose id, owner, and namespace match and
-whose state is open/active or already quarantined.
+directory names, progress, events, locks, and marker contents are never attribution authority. Attribution
+is **actionable** only when the chosen identity resolves to an already-existing, strictly readable Session
+record whose id, owner, and namespace match; existing quarantine evidence does not make it less actionable,
+because converging quarantine on an already-quarantined Session is a no-op.
 
 **One exhaustive first-match table** over terminal × dispatch × Spec × launch × submission assigns exactly
 one outcome to every combination:

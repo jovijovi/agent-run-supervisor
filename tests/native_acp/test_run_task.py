@@ -40,6 +40,7 @@ from agent_run_supervisor.native_acp.spec import (
     resolve_run_environment,
 )
 from agent_run_supervisor.session import SessionNotFoundError, SessionStore
+from agent_run_supervisor.session import QUARANTINE_DISPATCH_OBSERVATION_LOST, derive_session_id_for_run
 
 FAKE_AGENT_PATH = Path(__file__).with_name("fake_agent.py")
 TEST_PROFILE_ID = "fake-agent-v1"
@@ -107,8 +108,7 @@ def _request(**overrides) -> AgentRunRequest:
         owner="hermes",
         namespace="hermes/doc-check",
         agent_id=TEST_AGENT_ID,
-        session_reuse="reuse",
-        ars_session_id="sess-native-1",
+        session_id="sess-native-1",
         expected_binding_hash=None,
         input_refs=(InputRef(ref="prompt:inline", content_hash="sha256:" + "a" * 64),),
         requested_model="kimi-for-coding/k3",
@@ -141,9 +141,9 @@ def _seed_bound_session(kwargs: dict, external_id: str) -> None:
     itself is left untouched.
     """
     request = kwargs["request"]
-    if request.session_reuse != "reuse":
+    if request.session_id is None:
         return
-    session_id = request.ars_session_id
+    session_id = request.session_id
     root = kwargs.get("supervisor_root")
     store = kwargs.get("session_store") if root is None else (
         storage.native_session_store(root)
@@ -207,8 +207,8 @@ def _seed_bound_session(kwargs: dict, external_id: str) -> None:
         matched_root=spec.workspace.canonical_root,
         agent_id=spec.agent.agent_id,
         session_epoch=spec.agent.session_epoch,
+        agent_session_id=external_id,
     )
-    storage.bind_agent_session(store, session_id, agent_session_id=external_id)
 
 
 class Harness:
@@ -228,7 +228,22 @@ class Harness:
         self.entry = _test_entry()
         self.external_id = script.get("session_id", DEFAULT_EXTERNAL_ID)
 
-    def task(self, *, run_id: str = "run-0001", request=None, **overrides) -> RunTask:
+    def task(
+        self,
+        *,
+        run_id: str = "run-0001",
+        request=None,
+        seed_session: bool = True,
+        **overrides,
+    ) -> RunTask:
+        """Build one RunTask.
+
+        ``seed_session`` arranges the already-existing record a *reuse* request
+        needs, for tests whose subject is something other than where that record
+        came from. A test that is about continuity itself must pass
+        ``seed_session=False`` and name the Session its own first Run published —
+        otherwise the seeder can hide a broken publication behind a green load.
+        """
         kwargs = dict(
             request=request or _request(),
             prompt_text="hello agent",
@@ -240,7 +255,8 @@ class Harness:
             submitted_at="2026-07-21T00:00:00+00:00",
         )
         kwargs.update(overrides)
-        _seed_bound_session(kwargs, self.external_id)
+        if seed_session:
+            _seed_bound_session(kwargs, self.external_id)
         return RunTask(**kwargs)
 
     def run_dir(self, run_id: str = "run-0001") -> Path:
@@ -317,7 +333,7 @@ def test_happy_vertical_produces_full_artifact_set(
     store = harness.session_store()
     record = store.open_session("sess-native-1")
     assert record.agent_session_id == "fake-external-session-1"
-    assert record.state == "open"
+    assert record.quarantine is None
     assert record.last_effective_model == "kimi-for-coding/k3"
     assert record.last_effective_effort == "max"
     assert not (harness.root / "native-sessions" / "sess-native-1" / "lock.json").exists()
@@ -366,8 +382,8 @@ def test_observation_lost_finalizes_unknown_despite_both_markers(
     assert payload["status"] == "unknown"
     assert payload["retryable"] is False
     record = harness.session_store().open_session("sess-native-1")
-    assert record.state == "quarantined"
-    assert record.quarantined_by_run_id == "run-0001"
+    assert record.quarantine is not None
+    assert record.quarantine["source_run_id"] == "run-0001"
     assert not (harness.root / "native-sessions" / "sess-native-1" / "lock.json").exists()
 
 
@@ -385,7 +401,7 @@ def test_kill_after_dispatch_fails_and_quarantines(
     payload = json.loads((run_dir / "result.json").read_text())
     assert payload["status"] == "failed"
     record = harness.session_store().open_session("sess-native-1")
-    assert record.state == "quarantined"
+    assert record.quarantine is not None
 
 
 def test_spawn_failure_is_pre_dispatch_failed_session_active(
@@ -402,7 +418,7 @@ def test_spawn_failure_is_pre_dispatch_failed_session_active(
     assert not (run_dir / "prompt-dispatch-started").exists()
     assert not (run_dir / "prompt-accepted").exists()
     record = harness.session_store().open_session("sess-native-1")
-    assert record.state == "open"  # session stays active on 0-Turn failure
+    assert record.quarantine is None  # session stays active on 0-Turn failure
     assert not (harness.root / "native-sessions" / "sess-native-1" / "lock.json").exists()
 
 
@@ -423,7 +439,7 @@ def test_fidelity_failure_is_zero_turn_failed_session_active(
     assert not (harness.run_dir() / "prompt-dispatch-started").exists()
     assert "session/prompt" not in harness.methods_seen()
     record = harness.session_store().open_session("sess-native-1")
-    assert record.state == "open"
+    assert record.quarantine is None
     assert record.last_effective_model is None
 
 
@@ -520,13 +536,13 @@ def test_seeded_legacy_roots_stay_byte_identical(
     script = dict(HAPPY_SCRIPT)
     script["exit_before_prompt_response"] = True
     monkeypatch.setenv("FAKE_AGENT_SCRIPT", json.dumps(script))
-    request = _request(ars_session_id="sess-native-2")
+    request = _request(session_id="sess-native-2")
     result2 = _run(harness.task(run_id="run-0002", request=request))
     assert result2.status is AgentRunStatus.FAILED
     assert snapshot(harness.root / "sessions") == before_sessions
     assert snapshot(harness.root / "runs") == before_runs
     record = harness.session_store().open_session("sess-native-2")
-    assert record.state == "quarantined"
+    assert record.quarantine is not None
 
 
 def test_constructor_refuses_non_native_rooted_stores(
@@ -557,7 +573,7 @@ def test_retry_of_run_id_never_mutates_the_original(
     original_result = harness.run_dir("run-0001") / "result.json"
     before = original_result.read_bytes()
 
-    request = _request(ars_session_id="sess-native-3")
+    request = _request(session_id="sess-native-3")
     result = _run(
         harness.task(
             run_id="run-0002", request=request, retry_of_run_id="run-0001"
@@ -709,7 +725,7 @@ def test_cancellation_before_dispatch_finalizes_controlled(
     assert not (run_dir / "prompt-dispatch-started").exists()
     assert not (run_dir / "prompt-accepted").exists()
     record = harness.session_store().open_session("sess-native-1")
-    assert record.state == "open"  # 0-Turn cancel keeps the session reusable
+    assert record.quarantine is None  # 0-Turn cancel keeps the session reusable
     assert not (
         harness.root / "native-sessions" / "sess-native-1" / "lock.json"
     ).exists()
@@ -745,7 +761,7 @@ def test_cancellation_after_dispatch_is_conservative_and_cleans_up(
     assert payload["retryable"] is False
     assert (run_dir / "prompt-dispatch-started").exists()
     record = harness.session_store().open_session("sess-native-1")
-    assert record.state == "quarantined"
+    assert record.quarantine is not None
     assert not (
         harness.root / "native-sessions" / "sess-native-1" / "lock.json"
     ).exists()
@@ -789,26 +805,38 @@ def test_repeated_cancellation_not_hidden_and_emergency_cleans_up(
     assert payload["retryable"] is False
     assert payload["detail_code"] == "EMERGENCY_FINALIZE"
     record = harness.session_store().open_session("sess-native-1")
-    assert record.state == "quarantined"
+    assert record.quarantine is not None
     assert not (
         harness.root / "native-sessions" / "sess-native-1" / "lock.json"
     ).exists()
     _assert_pid_gone_sync(spawned[0].pid)
 
 
-def test_session_reuse_none_uses_ephemeral_record_closed_at_terminal(
+def test_a_create_leaves_one_durable_reusable_session_at_terminal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The whole point: the Run terminates and the Session survives it."""
+    from agent_run_supervisor.session import derive_session_id_for_run
+
     harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
-    request = _request(session_reuse="none", ars_session_id=None)
+    request = _request(session_id=None)
     result = _run(harness.task(request=request))
     assert result.status is AgentRunStatus.COMPLETED
+
     store = harness.session_store()
     records = store.list_records()
     assert len(records) == 1
-    ephemeral = records[0]
-    assert ephemeral.session_kind == "native"
-    assert ephemeral.state == "closed"
+    created = records[0]
+    assert created.session_kind == "native"
+    # Named by the deterministic prospective id, fully bound, and untouched by
+    # the Run reaching its terminal.
+    assert created.session_id == derive_session_id_for_run(result.run_id)
+    assert created.session_id == result.session_id
+    assert created.agent_session_id
+    assert created.quarantine is None
+    assert result.session_quarantined is False
+    # The lease is released, so the next Run can take it.
+    assert not (Path(store.base_dir) / created.session_id / "lock.json").exists()
 
 
 # --- Slice 3b: prepared RunHandle admission handoff -----------------------
@@ -1033,7 +1061,7 @@ def test_r4_b2_hang_overflow_timeout_must_not_persist_retryable_timed_out(
     assert (harness.run_dir() / "prompt-dispatch-started").exists()
     assert result.status is AgentRunStatus.UNKNOWN
     record = harness.session_store().open_session("sess-native-1")
-    assert record.state == "quarantined"
+    assert record.quarantine is not None
 
 
 def test_b2_dispatched_timeout_escalated_kill_is_unknown_quarantined(
@@ -1060,8 +1088,8 @@ def test_b2_dispatched_timeout_escalated_kill_is_unknown_quarantined(
     assert payload["stop_reason"] is None
     assert payload["detail_code"] == "TURN_TIMEOUT"
     record = harness.session_store().open_session("sess-native-1")
-    assert record.state == "quarantined"
-    assert record.quarantined_by_run_id == "run-0001"
+    assert record.quarantine is not None
+    assert record.quarantine["source_run_id"] == "run-0001"
     assert not (
         harness.root / "native-sessions" / "sess-native-1" / "lock.json"
     ).exists()
@@ -1329,7 +1357,7 @@ def test_r5_b2_session_prompt_sent_enqueue_fail_skips_prompt(
     assert payload["status"] == "unknown"
     assert payload["retryable"] is False
     record = harness.session_store().open_session("sess-native-1")
-    assert record.state == "quarantined"
+    assert record.quarantine is not None
     assert result.status is AgentRunStatus.UNKNOWN
 
 
@@ -1403,8 +1431,8 @@ def test_r5_b3_fence_before_result_and_failure_retains_lock(
     import datetime as dt
 
     from agent_run_supervisor.session import (
+    QUARANTINE_DISPATCH_OBSERVATION_LOST,
         QUARANTINE_PENDING_JSON,
-        STATE_OPEN,
         SessionQuarantinedError,
         SessionStore,
     )
@@ -1439,15 +1467,15 @@ def test_r5_b3_fence_before_result_and_failure_retains_lock(
     store = harness.session_store()
     with pytest.raises(SessionQuarantinedError):
         store.acquire_lock(
-            "sess-native-1", "hermes", required_state=STATE_OPEN, now=later
+            "sess-native-1", "hermes", refuse_quarantined=True, now=later
         )
     # Later successful reconciliation quarantine clears fence.
     monkeypatch.setattr(SessionStore, "mark_quarantined", real_mark)
     store.mark_quarantined(
-        "sess-native-1", reason="reconcile", run_id="run-0001", now=later
+        "sess-native-1", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-0001", now=later
     )
     assert not (session_dir / QUARANTINE_PENDING_JSON).exists()
-    assert store.open_session("sess-native-1").state == "quarantined"
+    assert store.open_session("sess-native-1").quarantine is not None
     assert calls["n"] >= 1
     assert result.payload.get("error") or result.status is AgentRunStatus.FAILED
 
@@ -1462,7 +1490,7 @@ def test_r5_b3_happy_completed_unchanged(
     assert result.status is AgentRunStatus.COMPLETED
     session_dir = harness.root / "native-sessions" / "sess-native-1"
     assert not (session_dir / QUARANTINE_PENDING_JSON).exists()
-    assert harness.session_store().open_session("sess-native-1").state == "open"
+    assert harness.session_store().open_session("sess-native-1").quarantine is None
     assert not (session_dir / "lock.json").exists()
 
 
@@ -1482,12 +1510,12 @@ def test_r7_b2_forged_invalid_existing_result_quarantines_no_release(
     result = _run(harness.task(prepared_handle=handle))
     session_dir = harness.root / "native-sessions" / "sess-native-1"
     record = harness.session_store().open_session("sess-native-1")
-    assert record.state == "quarantined" or (
+    assert record.quarantine is not None or (
         session_dir / QUARANTINE_PENDING_JSON
     ).is_file()
     assert result.status is not AgentRunStatus.COMPLETED
     # Must not look like a clean successful lease release.
-    assert (session_dir / "lock.json").exists() or record.state == "quarantined"
+    assert (session_dir / "lock.json").exists() or record.quarantine is not None
 
 
 def test_r7_b3_awaited_event_fsync_failure_skips_prompt(
@@ -1595,7 +1623,7 @@ def test_r8_b2_emergency_invalid_forged_result_no_release(
     result = asyncio.run(case())
     session_dir = harness.root / "native-sessions" / "sess-native-1"
     record = harness.session_store().open_session("sess-native-1")
-    assert record.state == "quarantined" or (
+    assert record.quarantine is not None or (
         session_dir / QUARANTINE_PENDING_JSON
     ).is_file()
     assert (session_dir / "lock.json").exists()
@@ -1954,10 +1982,10 @@ def test_r10b_b2a_cancel_while_dedicated_reap_pending_keeps_reap_alive(
     release_wait = asyncio.Event()
     reap_task_box: dict[str, asyncio.Task | None] = {"task": None}
     captured: dict[str, object] = {}
-    in_direct_emergency = {"active": False}
+    in_direct_emergency = {"reusable": False}
 
     async def gated_wait(self):
-        if in_direct_emergency["active"]:
+        if in_direct_emergency["reusable"]:
             reap_task_box["task"] = asyncio.current_task()
             order.append("wait_entered")
             entered_wait.set()
@@ -1966,7 +1994,7 @@ def test_r10b_b2a_cancel_while_dedicated_reap_pending_keeps_reap_alive(
         return await real_wait(self)
 
     def tracking_release(self, session_id, token):
-        if in_direct_emergency["active"]:
+        if in_direct_emergency["reusable"]:
             order.append("release")
         return real_release(self, session_id, token)
 
@@ -2001,7 +2029,7 @@ def test_r10b_b2a_cancel_while_dedicated_reap_pending_keeps_reap_alive(
         assert ctx.proc is not None
         live_pid = ctx.proc.pid
 
-        in_direct_emergency["active"] = True
+        in_direct_emergency["reusable"] = True
         cleanup = asyncio.ensure_future(task_obj._emergency_cleanup(ctx))
         await asyncio.wait_for(entered_wait.wait(), 30)
         reap = reap_task_box["task"]
@@ -2022,7 +2050,7 @@ def test_r10b_b2a_cancel_while_dedicated_reap_pending_keeps_reap_alive(
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(cleanup, 30)
         order.append("cleanup_cancelled")
-        in_direct_emergency["active"] = False
+        in_direct_emergency["reusable"] = False
 
         assert reap.done()
         assert not reap.cancelled()
@@ -2066,11 +2094,11 @@ def test_r10c_b2a_wait_exception_retries_until_proven_reap(
     wait_calls = {"n": 0}
     second_entered = asyncio.Event()
     release_second = asyncio.Event()
-    in_direct_emergency = {"active": False}
+    in_direct_emergency = {"reusable": False}
     captured: dict[str, object] = {}
 
     async def flaky_wait(self):
-        if not in_direct_emergency["active"]:
+        if not in_direct_emergency["reusable"]:
             return await real_wait(self)
         wait_calls["n"] += 1
         if wait_calls["n"] == 1:
@@ -2083,7 +2111,7 @@ def test_r10c_b2a_wait_exception_retries_until_proven_reap(
         return await real_wait(self)
 
     def tracking_release(self, session_id, token):
-        if in_direct_emergency["active"]:
+        if in_direct_emergency["reusable"]:
             order.append("release")
         return real_release(self, session_id, token)
 
@@ -2121,7 +2149,7 @@ def test_r10c_b2a_wait_exception_retries_until_proven_reap(
             assert ctx.lock is not None
             live_pid = ctx.proc.pid
 
-            in_direct_emergency["active"] = True
+            in_direct_emergency["reusable"] = True
             cleanup = asyncio.ensure_future(task_obj._emergency_cleanup(ctx))
             await asyncio.wait_for(second_entered.wait(), 30)
             assert wait_calls["n"] == 2
@@ -2158,7 +2186,7 @@ def test_r10c_b2a_wait_exception_retries_until_proven_reap(
                 await asyncio.wait_for(run_task, 30)
             return live_pid
         finally:
-            in_direct_emergency["active"] = False
+            in_direct_emergency["reusable"] = False
             release_second.set()
             release_close.set()
             if cleanup is not None and not cleanup.done():
@@ -2242,7 +2270,7 @@ def test_r10d_b2a_caller_cancel_when_reap_already_done_still_propagates(
     real_release = SessionStore.release_lock
     order: list[str] = []
     wait_calls = {"n": 0}
-    in_direct_emergency = {"active": False}
+    in_direct_emergency = {"reusable": False}
     captured: dict[str, object] = {}
     cleanup_box: dict[str, asyncio.Task | None] = {"task": None}
     race = _install_caller_cancel_when_target_done_race(
@@ -2252,14 +2280,14 @@ def test_r10d_b2a_caller_cancel_when_reap_already_done_still_propagates(
     )
 
     async def instant_wait(self):
-        if not in_direct_emergency["active"]:
+        if not in_direct_emergency["reusable"]:
             return await real_wait(self)
         wait_calls["n"] += 1
         order.append("wait_finished")
         return await real_wait(self)
 
     def tracking_release(self, session_id, token):
-        if in_direct_emergency["active"]:
+        if in_direct_emergency["reusable"]:
             cleanup = cleanup_box["task"]
             if cleanup is not None and race["fired"]:
                 race["cancelling_at_release"] = cleanup.cancelling()
@@ -2295,13 +2323,13 @@ def test_r10d_b2a_caller_cancel_when_reap_already_done_still_propagates(
         assert ctx.proc is not None
         live_pid = ctx.proc.pid
 
-        in_direct_emergency["active"] = True
+        in_direct_emergency["reusable"] = True
         cleanup = asyncio.ensure_future(task_obj._emergency_cleanup(ctx))
         cleanup_box["task"] = cleanup
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(cleanup, 30)
         order.append("cleanup_cancelled")
-        in_direct_emergency["active"] = False
+        in_direct_emergency["reusable"] = False
 
         assert race["fired"] is True
         assert wait_calls["n"] == 1, (
@@ -2344,7 +2372,7 @@ def test_r10d_b2a_caller_cancel_when_retry_delay_already_done_still_propagates(
     real_release = SessionStore.release_lock
     order: list[str] = []
     wait_calls = {"n": 0}
-    in_direct_emergency = {"active": False}
+    in_direct_emergency = {"reusable": False}
     captured: dict[str, object] = {}
     cleanup_box: dict[str, asyncio.Task | None] = {"task": None}
     race = _install_caller_cancel_when_target_done_race(
@@ -2354,7 +2382,7 @@ def test_r10d_b2a_caller_cancel_when_retry_delay_already_done_still_propagates(
     )
 
     async def flaky_wait(self):
-        if not in_direct_emergency["active"]:
+        if not in_direct_emergency["reusable"]:
             return await real_wait(self)
         wait_calls["n"] += 1
         if wait_calls["n"] == 1:
@@ -2367,7 +2395,7 @@ def test_r10d_b2a_caller_cancel_when_retry_delay_already_done_still_propagates(
         return await real_wait(self)
 
     def tracking_release(self, session_id, token):
-        if in_direct_emergency["active"]:
+        if in_direct_emergency["reusable"]:
             order.append("release")
         return real_release(self, session_id, token)
 
@@ -2400,13 +2428,13 @@ def test_r10d_b2a_caller_cancel_when_retry_delay_already_done_still_propagates(
         assert ctx.proc is not None
         live_pid = ctx.proc.pid
 
-        in_direct_emergency["active"] = True
+        in_direct_emergency["reusable"] = True
         cleanup = asyncio.ensure_future(task_obj._emergency_cleanup(ctx))
         cleanup_box["task"] = cleanup
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(cleanup, 30)
         order.append("cleanup_cancelled")
-        in_direct_emergency["active"] = False
+        in_direct_emergency["reusable"] = False
 
         assert race["fired"] is True
         assert race.get("cancelling_at_wait2") == 0, (
@@ -2582,7 +2610,7 @@ def test_r14_finalize_cancel_waits_for_event_writer_close_before_emergency(
     assert payload["retryable"] is False
     assert payload["detail_code"] == "EMERGENCY_FINALIZE"
     record = harness.session_store().open_session("sess-native-1")
-    assert record.state == "quarantined"
+    assert record.quarantine is not None
     assert not lock_path.exists()
     _assert_pid_gone_sync(spawned[0].pid)
 
@@ -3045,7 +3073,7 @@ def test_claude_shaped_run_sends_the_frozen_metadata_on_session_new(
     # Non-reuse intent is the only path that reaches ``session/new``.
     result = _run(
         harness.task(
-            request=_claude_request(session_reuse="none", ars_session_id=None)
+            request=_claude_request(session_id=None)
         )
     )
 
@@ -3074,7 +3102,7 @@ def test_claude_shaped_reused_session_sends_the_same_metadata_on_load(
     first = _run(
         harness.task(
             run_id="run-0001",
-            request=_claude_request(session_reuse="none", ars_session_id=None),
+            request=_claude_request(session_id=None),
         )
     )
     assert first.status is AgentRunStatus.COMPLETED

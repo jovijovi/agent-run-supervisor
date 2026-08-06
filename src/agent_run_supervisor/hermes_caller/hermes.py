@@ -17,7 +17,6 @@ from agent_run_supervisor.role import AgentRoleSpec
 from .events import load_events
 from .intake import (
     build_exec_spec,
-    build_session_close_spec,
     build_session_create_spec,
     build_session_send_spec,
     build_session_status_spec,
@@ -68,10 +67,11 @@ class HermesDocCheckCaller:
         cwd: str | Path,
         sessions_dir: str | Path | None = None,
     ) -> tuple[list[CallerResult], CardViewModel]:
-        """Interactive multi-turn check: create -> send* -> status -> close.
+        """Interactive multi-turn check: create -> send* -> status.
 
         Returns each turn/management ``CallerResult`` plus the final result
-        view-model, whose session lifecycle has advanced to ``closed``.
+        view-model. There is no close step: the Session stays durable and
+        resumable after the last turn.
         """
         results: list[CallerResult] = []
 
@@ -107,18 +107,8 @@ class HermesDocCheckCaller:
             )
         )
 
-        results.append(
-            invoke_caller(
-                build_session_close_spec(
-                    task, role=role, session_id=session_id, cwd=cwd,
-                    sessions_dir=sessions_dir,
-                ),
-                session_runtime=self._session_runtime,
-            )
-        )
-
         final = turn_results[-1] if turn_results else results[-1]
-        view_model = self._result_view_model(final, session_lifecycle="closed")
+        view_model = self._result_view_model(final, session_lifecycle="durable")
         return results, view_model
 
     @staticmethod
