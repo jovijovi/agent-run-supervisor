@@ -2,7 +2,7 @@
 title: "AI-assisted development flow"
 status: active
 created_at: 2026-05-28
-last_validated_at: 2026-07-21
+last_validated_at: 2026-08-06
 ---
 # AI-assisted development flow
 
@@ -119,11 +119,11 @@ Canonical entry: [`scripts/verify_local.sh`](../scripts/verify_local.sh) and
 Quick smoke (when full verify is too heavy for a tiny doc-only change):
 
 ```bash
-python3 scripts/validate_contract_fixtures.py fixtures/acpx-0.12.0
 python3 -m pytest -q
 python3 -m compileall -q src scripts tests
 python3 tools/build_docs_index.py --check
 python3 tools/docs_drift_signal.py --check
+python3 tools/static_safety_scan.py
 python3 tools/check_roadmap_governance.py
 git diff --check
 ```

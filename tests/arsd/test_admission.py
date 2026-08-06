@@ -160,7 +160,6 @@ class FakeRunner:
                     origin="acp",
                     detail_code=None,
                     retryable=False,
-                    exit_code=0,
                     signal=None,
                     stop_reason="end_turn",
                     usage=None,

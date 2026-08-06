@@ -138,7 +138,6 @@ def write_terminal(
         origin=origin,
         detail_code=detail,
         retryable=_RETRYABLE_DEFAULT[status],
-        exit_code=None,
         signal=None,
         stop_reason=stop_reason,
         usage=None,

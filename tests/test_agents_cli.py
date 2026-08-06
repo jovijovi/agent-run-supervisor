@@ -121,9 +121,10 @@ def test_agents_requires_a_subcommand(capsys):
     assert cli.main(["agents"]) == 2
 
 
-def test_the_legacy_run_command_still_requires_its_own_inputs(capsys):
+def test_run_requires_the_inspect_subcommand(capsys):
+    """``run`` is a parent, not a command. The exec leaf it used to hold is gone."""
     assert cli.main(["run"]) == 2
-    assert "--role" in capsys.readouterr().err
+    assert "inspect" in capsys.readouterr().err
 
 
 # -- agents validate ---------------------------------------------------------

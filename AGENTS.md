@@ -88,14 +88,15 @@ ars-core / Native ACP, one supervised process per Run with real Session load, an
 and grant, and fail-closed evidence and recovery. `GOAL.md` and the design layer own the detail; do not
 restate architecture here.
 
-`acpx` is **not** a product, runtime, or compatibility surface. It is never a Native ACP driver, fallback,
-or degraded path, and never a reason to restore archived product requirements. It is retained only as a
-bounded differential/comparison test reference. Removing the remaining acpx product, runtime, and
-compatibility content is separately authorized work: do not treat that removal as already done, do not
-extend or re-document acpx as a supported surface in the meantime, and do not add new acpx capability.
+`acpx` is **not** a product, runtime, or compatibility surface. It was never a Native ACP driver,
+fallback, or degraded path, and is never a reason to restore archived product requirements. Its product,
+runtime, and compatibility content — code, CLI leaves, fixtures, and the result field named after its
+process exit — **has been removed**. Do not reintroduce it under any spelling: no shim, alias, flag, bridge,
+dual runtime, renamed field, or re-added capability. `tools/static_safety_scan.py` and the wheel/sdist
+manifest allowlists refuse its return; naming it in prose to refuse it, or in the past tense, stays legal.
 
 Native ACP state stays in its own isolated run/session roots. Native code never reads, writes, imports,
-mirrors, or migrates acpx/legacy session storage in either direction.
+mirrors, or migrates any pre-existing legacy session storage in either direction.
 
 **Source work authorizes source, tests, and docs only.** It never authorizes installing an artifact,
 writing production configuration, enabling or restarting a service, rollout, cutover, migration, release,

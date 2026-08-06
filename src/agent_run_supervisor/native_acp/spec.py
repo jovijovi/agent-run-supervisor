@@ -30,8 +30,24 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from agent_run_supervisor.process_liveness import ProcessIdentity
-from agent_run_supervisor.role import PERMISSION_KINDS
 from agent_run_supervisor.session import is_valid_session_id
+
+# The closed capability vocabulary a per-Run grant may name. Owned here because
+# the Spec is the only thing that still reads it: a grant capability outside
+# this set is refused rather than carried, so the set is part of the admission
+# contract and not a leftover of the module it used to live in.
+PERMISSION_KINDS: tuple[str, ...] = (
+    "read",
+    "search",
+    "write",
+    "execute",
+    "terminal",
+    "delete",
+    "move",
+    "fetch",
+    "switch_mode",
+    "other",
+)
 
 from .agent_registration import AgentEntry, validate_agent_id
 from .launch_permissions import (

@@ -8,7 +8,7 @@ help:
 	@echo "  make sync          Install dev + release extras (uv sync)"
 	@echo "  make verify        Full local gates (same as CI)"
 	@echo "  make build         sdist/wheel + twine check"
-	@echo "  make smoke         build + installed-wheel smoke"
+	@echo "  make smoke         build + manifest gate + wheel/sdist smoke"
 	@echo "  make clean         Remove build artifacts, caches, local runtime scratch"
 	@echo "  make clean-all     clean + remove .venv (re-run make sync after)"
 	@echo "  make bump          Bump version (make bump VERSION=X.Y.Z)"
@@ -29,7 +29,9 @@ build: sync
 	uv run python -m twine check dist/*
 
 smoke: build
-	./scripts/smoke_installed_wheel.sh
+	uv run python tools/check_dist_manifest.py
+	./scripts/smoke_installed_artifact.sh wheel
+	./scripts/smoke_installed_artifact.sh sdist
 
 clean:
 	./scripts/clean.sh
@@ -52,4 +54,4 @@ release-tag:
 	@echo "  git tag v$(VERSION)"
 	@echo "  git push origin v$(VERSION)"
 	@echo ""
-	@echo "Verify: pip install agent-run-supervisor==$(VERSION) && agent-run-supervisor doctor"
+	@echo "Verify: pip install agent-run-supervisor==$(VERSION) && agent-run-supervisor --help"

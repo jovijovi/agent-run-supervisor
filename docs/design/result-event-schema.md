@@ -2,45 +2,43 @@
 title: "agent-run-supervisor Result / Event Schema"
 status: active
 created_at: 2026-06-01
-last_validated_at: 2026-08-04
+last_validated_at: 2026-08-06
 ---
 # agent-run-supervisor Result / Event Schema
 
 > **Authority and scope.** This document is the *caller-stable contract* for the
 > JSON shapes `agent-run-supervisor` emits: the persisted `result.json` payload,
-> the session result projections returned by the dev CLI, the supervisor status
-> and error-code vocabulary, the normalized event families, the `doctor` output
-> (including the H1 read-only probes), and the `cleanup` plan/result shape. It is
-> **derivative and descriptive**: it documents the schema *as the code emits it
-> today* (`result.py`, `parser.py`, `exit_classifier.py`, `commands.py`,
-> `preflight.py`, `retention.py`, `session.py`, `session_runtime.py`). It does
+> the terminal status and error-code vocabulary, the normalized event stream, and
+> the stale-lock detector projection. It is **derivative and descriptive**: it
+> documents the schema *as the code emits it today* (`result.py`,
+> `exit_classifier.py`, `native_acp/event_writer.py`, `session.py`). It does
 > **not** redefine product goals, expand scope, grant any runtime/live approval,
 > or introduce a business verdict.
 >
-> **Current-source description, not a compatibility baseline and not vNext product direction.** This
-> document remains active because it states exactly which result/event shapes the code on `main` emits
-> today, including the legacy acpx-named keys in the tables below. That is a fact about current source, not
-> a compatibility baseline, surface, or obligation: acpx is not an ARS product, runtime, fallback, or
-> session store, V4 owes it no compatibility, and removing the acpx code together with the fields it emits
-> is separately authorized work that this document neither performs nor approves. New product scope, Native
-> terminal semantics, module design, staging, and acceptance come only from GOAL/PRD/vNext
-> design/roadmap/active plan. Do not use this schema to restore archived acpx requirements, to create a
-> compatibility obligation, or to claim Native ACP is implemented.
+> **One runtime.** ARS is `arsd` + ars-core + Native ACP.
+> The retired acpx path was removed from source.
+> That removal took its CLI leaves, its parser and probe surfaces, and every
+> result field named after it; the shapes below are what the Native emitters
+> write.
+> acpx is not a product, runtime, or compatibility surface. New
+> product scope, Native terminal semantics, module design, staging, and
+> acceptance come only from GOAL/PRD/design/roadmap/active plan.
 >
-> **Evidence rules for the reset line.** [§9](#9-native-reset-line-evidence-rules) records the
-> environment-value, withholding, and policy-warning rules that every Native emitter on the V4
-> boundary-reset line must obey, and the audit that found no launch, provenance, or attestation field in the
-> caller-stable contract above. Those rules are normative for the reset line and are **merged on `main`**;
-> published package/release facts come from live GitHub Releases and PyPI, and deployed/running facts come
-> from operator-held runtime/live checks. §1–§8 describe the caller-stable contract, which the reset does
-> not change.
+> **Evidence rules for the reset line.** [§5](#5-native-reset-line-evidence-rules)
+> records the environment-value, withholding, and policy-warning rules that every
+> Native emitter must obey, and the audit that found no launch, provenance, or
+> attestation field in the caller-stable contract above. Those rules are normative
+> and are **merged on `main`**; published package/release facts come from live
+> GitHub Releases and PyPI, and deployed/running facts come from operator-held
+> runtime/live checks.
 >
 > **Stability rule (read this first).** `business_verdict` is **always `null`**
-> and caller-owned — the supervisor never sets it. Schema evolution is
-> **additive only**: new keys may be added, but existing keys are never renamed,
-> removed, or repurposed, and no existing key changes meaning. Callers should
-> ignore unknown keys rather than fail on them. See
-> [§8 Caller-stability contract](#8-caller-stability-contract).
+> and caller-owned — the supervisor never sets it. API v3 is the only contract
+> and its persisted-terminal field set is **closed**: a `result.json` carrying a
+> key this version does not define is untrusted evidence, not a tolerated
+> extension. Adding a key is a contract change made here, in the table below,
+> and existing keys are never renamed, removed, or repurposed. See
+> [§4 Caller-stability contract](#4-caller-stability-contract).
 >
 > The top-level `result.json` key set is pinned against
 > `result.build_result_payload` by `tests/test_result_event_schema.py`, so this
@@ -48,11 +46,10 @@ last_validated_at: 2026-08-04
 
 ## 1. `result.json` payload
 
-`result.build_result_payload(...)` produces the canonical one-shot run result
-that the supervisor persists at `.agent-run-supervisor/runs/<run_id>/result.json`
-and prints to stdout from `agent-run-supervisor run`. The session turn path
-(`SessionRuntime._run_turn`) reuses the **same** builder and then adds the
-additive turn keys in [§2.1](#21-session-turn-resultjson-persisted).
+`result.build_result_payload(...)` is the single emitter of the per-Run terminal
+the supervisor persists at `<run_dir>/result.json`. Native code reaches it through
+`build_native_result_payload`, which additionally judges that the one
+child-authored field is really a `str`.
 
 The table below is the authoritative top-level key set. Types use JSON spelling
 (`string`, `number`, `boolean`, `object`, `null`). "Always present" means the
@@ -62,155 +59,74 @@ key is always serialized (its value may still be `null`).
 
 | Key | Type | Always present | Meaning |
 |-----|------|----------------|---------|
-| `run_id` | `string` | yes | Run identifier (turn id on the session path). |
-| `status` | `string` | yes | Supervisor status enum value (see [§3](#3-statuses-and-error-codes)). Never a business verdict. |
+| `run_id` | `string` | yes | Run identifier. |
+| `status` | `string` | yes | Supervisor terminal status (see [§2](#2-statuses-and-error-codes)). Never a business verdict. |
 | `business_verdict` | `null` | yes | **Always `null`.** Caller-owned; the supervisor never sets it. |
-| `error_code` | `string` \| `null` | yes | Stable error code for the status, or `null` when `status == "completed"` (see [§3.2](#32-error-codes)). |
-| `detail_code` | `string` \| `null` | yes | Finer detail (e.g. acpx `acpxCode`/`SUPERVISOR_KILL`/`PROTOCOL_ERROR`), or `null`. |
-| `origin` | `string` | yes | Where the outcome originated: `cli`, `acp`, `supervisor`, or an acpx-reported origin. |
-| `retryable` | `boolean` | yes | Whether the supervisor considers the status safe to retry (status-derived default). |
-| `acpx_exit_code` | `number` \| `null` | yes | Observed acpx/runner process exit code, or `null` when not applicable. |
-| `signal` | `number` \| `null` | yes | Terminating signal number, or `null`. |
-| `stop_reason` | `string` \| `null` | yes | acpx `stopReason` from the completion record, or `null`. |
-| `usage` | `object` \| `null` | yes | Usage payload (token/turn counters) as reported by acpx, or `null`. |
+| `error_code` | `string` \| `null` | yes | Stable error code for the status, or `null` when `status == "completed"` (see [§2.2](#22-error-codes)). |
+| `detail_code` | `string` \| `null` | yes | Finer categorical detail (e.g. `REGISTRATION_FAILED`, `EMERGENCY_FINALIZE`, `EVIDENCE_PIPELINE`), or `null`. |
+| `origin` | `string` | yes | Where the outcome originated: `acp` (an ACP terminal was observed) or `supervisor`. |
+| `retryable` | `boolean` | yes | Whether the supervisor considers the status safe to retry (status-derived, never caller-set). |
+| `signal` | `number` \| `null` | yes | Terminating signal number for the supervised child, or `null`. |
+| `stop_reason` | `string` \| `null` | yes | ACP `stopReason` from the turn, or `null`. |
+| `usage` | `object` \| `null` | yes | Bounded usage payload as reported over ACP, or `null`. |
 | `final_message` | `string` | yes | Redacted concatenated agent message text (may be empty). |
-| `truncated` | `boolean` | yes | Whether stdout parsing was truncated at `max_output_bytes`. |
-| `truncate_reason` | `string` \| `null` | yes | Reason for truncation (e.g. `max_output_bytes`), or `null`. |
-| `observed_effect` | `boolean` \| `null` | yes | Whether the parsed stream showed agent output or tool activity (`parser.has_observed_effect`); `null` when nothing was parsed (e.g. dry run). Additive since S2. |
-| `run_dir` | `string` | yes | Absolute path to the run/turn artifact directory. |
+| `truncated` | `boolean` | yes | Whether the final message hit its ingestion ceiling. |
+| `truncate_reason` | `string` \| `null` | yes | Reason for truncation (e.g. `max_final_message_bytes`), or `null`. |
+| `observed_effect` | `boolean` \| `null` | yes | Whether the observed stream showed agent output or tool activity; `null` when nothing was observed. |
+| `run_dir` | `string` | yes | Absolute path to the Run artifact directory. |
 | `stderr_path` | `string` | yes | Run-dir-relative path to the redacted stderr log (default `stderr.log`). |
-| `raw_event_path` | `string` | yes | Run-dir-relative path to the redacted acpx stdout NDJSON (default `acpx-stdout.ndjson`). |
+| `raw_event_path` | `string` | yes | Run-dir-relative path to the persisted event stream. Native emitters pass `events.jsonl`; the parameter is required, so no caller can inherit a default it did not choose. |
 | `redaction_report_path` | `string` | yes | Run-dir-relative path to the redaction report (default `redaction-report.json`). |
 
 <!-- result-json-keys:end -->
 
-`result.json` carries **no embedded `schema_version` field today**; compatibility
-is guaranteed by the additive-only rule in [§8](#8-caller-stability-contract).
-(The session *record* `session.json` does carry an integer `schema_version` — see
-[§2.3](#23-session-record-summary-list).)
+**There is no process-exit field.** API v3 results carry no `exit_code` and no
+key named after the retired runtime's exit code. It was the one field in a
+terminal that described *the child process* rather than the Run, and it left with
+the runtime that produced it — not renamed, not replaced. What survives about an
+abnormal end is the Run-level vocabulary: `status`, `detail_code`, `signal`, and
+`stop_reason`.
 
-## 2. Session result projections
+There is **no v1/v2 compatibility and no readability of an older record**. A
+`result.json` carrying that retired key — or any key this version does not
+define — is untrusted evidence: it is refused whole, never projected, never
+read, and never re-emitted, so no caller can observe it. Nothing migrates,
+rewrites, or resets a stored record; an untrusted terminal simply never becomes
+trusted evidence. Both directions are pinned by
+`tests/test_result_event_schema.py` and at the reachable `run/status` and
+`run/cancel` boundaries.
 
-The persistent-session runtime (`session_runtime.py`) returns a `result` dict per
-operation that the dev CLI prints verbatim. Every projection carries
-`business_verdict: null`.
+Native terminals may additionally carry the optional keys `session_id` and
+`failure_reason`. `failure_reason`, when present and non-null, is one of a fixed
+categorical allowlist (`result.ALLOWED_FAILURE_REASONS`) — never raw exception
+text, a path, a class name, or credential-shaped material.
 
-### 2.1 Session turn `result.json` (persisted)
+`result.json` carries **no embedded `schema_version` field today**; the closed
+field set in [§4](#4-caller-stability-contract) is what a reader validates
+against. (The session *record* `session.json` does carry an integer
+`schema_version`, and its field set is closed the same way.)
 
-`SessionRuntime._run_turn` builds the payload with `build_result_payload(...)`
-(all [§1](#1-resultjson-payload) keys) and then adds these **additive** keys before
-persisting `sessions/<session_id>/turns/<turn_id>/result.json` and returning it:
+## 2. Statuses and error codes
 
-| Key | Type | Meaning |
-|-----|------|---------|
-| `session_id` | `string` | Local session identifier. |
-| `turn_id` | `string` | Per-turn identifier (also the `run_id`). |
-| `prompt_kind` | `string` | `"slash_command"` when the AGENT would read the prompt as a slash command (e.g. a caller-sent literal slash prompt), else `"text"` (additive since S2; `--goal-file` sends compile to `"text"` for adapters without a native `/goal` command). |
-| `prompt_permission_mode` | `string` | `"policy"` when the turn compiled the role-derived `--permission-policy`, `"deny_all"` for an all-deny role (additive since S2; the compiled policy itself is persisted as the turn's `generated-policy.json`). |
-| `kill_reason` | `string` \| `null` | Watchdog/kill metadata: why the process was killed, if any. |
-| `kill_signal` | `number` \| `null` | Signal used to kill the process, if any. |
-| `grace_ms` | `number` | Watchdog grace window in milliseconds. |
-| `process_group_used` | `boolean` | Whether a process group was used for the kill. |
-| `stdout_closed` | `boolean` | Whether stdout was observed closed. |
-| `stderr_closed` | `boolean` | Whether stderr was observed closed. |
+Supervisor status is owned by `exit_classifier.AgentRunStatus` and is **never** the
+caller's business verdict.
 
-### 2.2 Management projections (`create` / `status` / `close` / `abort`)
+### 2.1 Status set (5)
 
-These are in-memory result dicts (not a persisted `result.json`); redacted
-management evidence is persisted separately under
-`sessions/<session_id>/management/`.
+`completed`, `failed`, `cancelled`, `timed_out`, `unknown` — the complete Native
+ACP terminal vocabulary of PRD R5, and deliberately nothing beside it.
 
-- **`create_session.result`**: `session_id`, `acpx_session_id`, `session_name`,
-  `state`, `kind`, `created`, `session_dir`, `business_verdict`.
-- **`status.result`**: `session_id`, `ok`, `acpx_exit_code`, `summary`,
-  `business_verdict`. `ok` is `true` only when the management `summary.status == "alive"`.
-- **`abort.result`**: `session_id`, `cancelled`, `kind`,
-  `business_verdict`. `cancelled: false` is reported honestly (nothing active to
-  cancel) and is **not** a business verdict.
+The wider status set this document once listed belonged to a process-exit
+classifier that mapped a retired runtime's exit codes onto supervisor statuses.
+That classifier, its exit-code table, and its statuses are removed from source
+rather than deprecated: a persisted record claiming one of them fails the enum
+lookup and is classified untrusted evidence.
 
-There is no `close.result`, because there is no Session close: Runs terminate and Sessions do not.
+`unknown` is the load-bearing one. A prompt that may have been dispatched without
+a trustworthy terminal ends as `status = unknown`, `retryable = false`, with its
+Session quarantined. It is never replayed, resumed, or retried automatically.
 
-The `summary` embedded above is the allow-listed management summary from
-`parser.summarize_management_json` / `_management_summary`:
-`kind`, `acpx_record_id`, `acpx_session_id`, `session_name`, `created`,
-`status`, `cancelled`, `code`, `acpx_code`, `top_level_keys`. It carries only
-scalar identity fields plus structural evidence (`top_level_keys` are
-`name:type` pairs) — never bulk payload, model catalogs, or message bodies.
-
-### 2.3 Session record summary (`list`)
-
-`SessionRuntime.list_sessions` returns `{ "sessions": [...], "count": <int>,
-"business_verdict": null }`, where each entry is a redacted record summary:
-`session_id`, `role_id`, `session_name`, `acpx_session_id`,
-`acpx_version`, `adapter_agent`, `created_at`, `updated_at`. There is no `state` key: a Session record
-carries no lifecycle state.
-
-The on-disk record `session.json` (`session.SessionRecord`) additionally carries:
-`schema_version` (integer), `role_hash`, `workspace_hash`, `policy_hash`,
-`effective_cwd`, `matched_root`.
-
-### 2.4 Replay projection (`_parse_result_payload`)
-
-`commands._parse_result_payload` projects a parsed stdout stream for the `replay`
-command and for the `doctor` `fixture_replay`. Keys:
-`protocol_error`, `protocol_error_reasons`, `final_message`, `usage`,
-`business_verdict`, `truncated`, `truncate_reason`, `unknown_update_types`,
-`permission_request_count`, `permission_denied_count`, `event_count`.
-
-### 2.5 Local caller wrapper projection (`CallerResult.to_dict`)
-
-I1 adds a generic local library wrapper in `caller.py`. `CallerResult.to_dict()`
-wraps existing supervisor payloads without changing their meaning and without adding
-platform/delivery fields. Keys:
-
-| Key | Type | Meaning |
-|-----|------|---------|
-| `mode` | `string` | Local caller invocation mode: `exec`, `exec_dry_run`, `session_create`, `session_send`, or `session_status`. |
-| `supervisor_status` | `string` \| `null` | Existing supervisor `status` when the wrapped payload has one; otherwise `null`. |
-| `result` | `object` | The existing run/session supervisor payload or projection. The caller wrapper does not parse raw acpx streams. |
-| `artifact_dir` | `string` \| `null` | Local artifact directory for the wrapped result, when applicable. |
-| `run_dir` | `string` \| `null` | Local run/turn artifact directory, when applicable. |
-| `session_dir` | `string` \| `null` | Local session artifact directory, when applicable. |
-| `business_verdict` | `null` | **Always `null`.** The caller owns business verdicts, rendering, and any delivery outside this library. |
-
-The caller wrapper intentionally carries no channel, webhook, recipient, Gateway,
-public-ingress, delivery, or platform state fields.
-
-## 3. Statuses and error codes
-
-Supervisor status is owned by `exit_classifier.py` and is **never** the caller's
-business verdict.
-
-### 3.1 Status set (11)
-
-`completed`, `no_op`, `runner_error`, `invalid_invocation`, `timed_out`,
-`no_session`, `permission_denied`, `interrupted`, `protocol_error`,
-`infrastructure_error`, `policy_error` (`exit_classifier.AgentRunStatus`).
-`no_op` is additive (S2); callers treating only `completed` as success remain
-correct and fail closed on it automatically.
-
-The base exit-code → status map, refined by acpx metadata and supervisor
-kill/timeout signals:
-
-| acpx exit code | Base supervisor status |
-|---:|---|
-| `0` | `completed` |
-| `1` | `runner_error` (refined by `acpxCode`/origin → `invalid_invocation`, `timed_out`, `no_session`, `permission_denied`, `infrastructure_error`) |
-| `2` | `invalid_invocation` |
-| `3` | `timed_out` |
-| `4` | `no_session` |
-| `5` | `permission_denied` |
-| `130` | `interrupted` |
-| other / unknown | `infrastructure_error` |
-
-Honesty refinements: exit `0` with a `protocol_error` in stdout becomes
-`protocol_error`; exit `0` with **no observed effect** — no agent message text
-and no tool activity (`parser.has_observed_effect`) — becomes `no_op`
-(protocol errors and supervisor kills take precedence); a supervisor
-watchdog/kill becomes `timed_out` (on timeout) or `infrastructure_error`, with
-`origin = supervisor`; nonzero exits never become `completed`.
-
-### 3.2 Error codes
+### 2.2 Error codes
 
 `result._ERROR_CODE_FOR_STATUS` maps each status to its `error_code`
 (`completed → null`):
@@ -218,308 +134,84 @@ watchdog/kill becomes `timed_out` (on timeout) or `infrastructure_error`, with
 | `status` | `error_code` | `retryable` default |
 |----------|--------------|---------------------|
 | `completed` | `null` | `false` |
-| `no_op` | `NO_OP` | `false` |
-| `runner_error` | `RUNNER_ERROR` | `true` |
-| `invalid_invocation` | `INVALID_INVOCATION` | `false` |
+| `failed` | `FAILED` | `false` |
+| `cancelled` | `CANCELLED` | `false` |
 | `timed_out` | `TIMED_OUT` | `true` |
-| `no_session` | `NO_SESSION` | `false` |
-| `permission_denied` | `PERMISSION_DENIED` | `false` |
-| `interrupted` | `INTERRUPTED` | `false` |
-| `protocol_error` | `PROTOCOL_ERROR` | `false` |
-| `infrastructure_error` | `INFRASTRUCTURE_ERROR` | `true` |
-| `policy_error` | `POLICY_ERROR` | `false` |
+| `unknown` | `UNKNOWN` | `false` |
 
-`retryable` is the status-derived default (`exit_classifier._RETRYABLE_DEFAULT`).
-`detail_code` carries the finer acpx/supervisor detail (e.g. `SUPERVISOR_KILL`,
-`PROTOCOL_ERROR`, or a passed-through `acpxCode`).
+`retryable` is the status-derived default (`exit_classifier._RETRYABLE_DEFAULT`);
+a terminal whose `retryable` disagrees with it is untrusted. `detail_code` carries
+the finer categorical detail.
 
-## 4. Normalized event families
+Trusted Native terminals must also satisfy an exact status/origin/stop/detail
+grammar (`result._native_terminal_semantic_grammar_ok`): `origin = acp` always
+requires ACP stop evidence, `completed` requires a completed-class `stop_reason`,
+`cancelled` requires `stop_reason = cancelled`, and `unknown` requires
+`origin = supervisor` with no ACP stop. A record outside the grammar is untrusted
+rather than repaired.
 
-`parser.py` normalizes the acpx JSON-RPC NDJSON stream into a flat list of event
-dicts persisted as `normalized-events.jsonl`. Each event has a `type` and a small
-allow-listed set of structural fields (never bulk content):
+## 3. Normalized event stream
 
-| `type` | Additional fields | Source |
-|--------|--------------------|--------|
-| `run_started` | `method`, `id` | `initialize` request |
-| `session_new_requested` | — | `session/new` |
-| `session_model_set` | — | `session/set_model` |
-| `session_prompt_sent` | — | `session/prompt` |
-| `run_completed` | `stop_reason` | result record with `stopReason`/`usage` |
-| `run_failed` | `code`, `acpx_code` | JSON-RPC error envelope |
-| `agent_message_delta` | `text_length` | `session/update` `agent_message_chunk` |
-| `agent_thought_delta` | — | `session/update` `agent_thought_chunk` |
-| `usage_updated` | — | `session/update` `usage_update` |
-| `available_commands_updated` | — | `session/update` `available_commands_update` |
-| `tool_started` | `tool_call_id`, `kind` | `session/update` `tool_call` |
-| `tool_updated` | `tool_call_id`, `status` | `tool_call_update` (in-progress) |
-| `tool_completed` | `tool_call_id`, `status` | `tool_call_update` (`completed`/`failed`) |
-| `permission_requested` | `tool_call_id`, `option_ids` | `session/request_permission` |
-| `permission_denied` | `option_id` | permission response with a reject option |
-| `rpc_result` | `id` | generic JSON-RPC result |
-| `unknown_update` | `update_type`, `key_summary` | unrecognized `sessionUpdate`/method (forward-compatible) |
+`native_acp/event_writer.py` owns each Run's `normalized-events.jsonl`: one
+writer, monotonic `seq` starting at `1`, bounded queues, and explicit truncation
+markers. Each line has a `type` and a small allow-listed set of structural
+fields — never bulk content, never raw agent text beyond the bounded, redacted
+fields the writer is given.
 
-`key_summary` on `unknown_update` is a comma-joined list of `path:type` structural
-hints only — never values. Watchdog/kill/lifecycle metadata is **not** emitted as
-a stream event; it is attached to the turn `result.json` (see
-[§2.1](#21-session-turn-resultjson-persisted)).
+`key_summary` on an `unknown_update` is a comma-joined list of `path:type`
+structural hints only — never values. Watchdog/kill/lifecycle metadata is not a
+stream event; it is attached to the Run `result.json`.
 
-### 4.1 Persisted event cursors and live progress
+## 4. Caller-stability contract
 
-When normalized events are persisted under a run/turn artifact directory, each
-line is augmented with an additive `seq` integer. `seq` is scoped to that artifact
-stream, starts at `1`, and increases monotonically in write order. Parser return
-values used by `replay` may omit `seq`; callers that need cursor semantics should
-read the persisted `normalized-events.jsonl` artifact.
-
-Live exec/session paths also maintain `progress.json` next to `result.json` while
-the child is running. Shape:
-
-| Key | Type | Meaning |
-|-----|------|---------|
-| `schema_version` | `number` | Progress artifact schema version (`1`). |
-| `state` | `string` | Current supervisor state projection: usually `running` while streaming, then the final supervisor status value. |
-| `last_seq` | `number` | Last persisted normalized-event `seq` observed for this artifact stream. |
-| `event_count` | `number` | Count of persisted normalized events. Equal to `last_seq` for v1 streams. |
-| `updated_at` | `string` | UTC ISO timestamp for the progress write. |
-
-`progress.json` never embeds raw AGENT text, tool output, secrets, delivery
-metadata, platform state, or business verdict. It is a local supervisor artifact
-only; it does not grant Gateway/IM/Sachima delivery behavior.
-
-### 4.2 Caller-side cursor/read API
-
-`agent_run_supervisor.hermes_caller.events` exposes a small, stable,
-**local/offline/read-only** cursor API over an artifact directory so a caller
-(future Sachima/Hermes) can poll live progress without re-parsing raw acpx
-streams or surfacing model text. The same surface serves one-shot run dirs and
-persistent-session turn dirs because both are artifact directories carrying the
-same live files. It reads only the already-persisted, already-redacted
-`normalized-events.jsonl` and `progress.json`; it launches nothing, opens no
-network/IM/Gateway path, and derives no business verdict.
-
-**`read_event_page(artifact_dir, *, after_seq=None, limit=100) -> EventPage`**
-
-Returns a bounded, cursor-paged window of structural `EventRecord` projections
-(each carries `seq` plus the same allow-listed structural fields as
-[§4](#4-normalized-event-families) — `family`, `kind`, `status`, `text_length`,
-`summary` — never raw text/body/content/message).
-
-| Concept | Semantics |
-|---------|-----------|
-| `after_seq` | **Exclusive** cursor. Only records whose cursor is strictly greater are returned. `None` starts at the beginning. Validated: `None` or a non-negative int. |
-| Cursor value | The persisted integer `seq` when present ([§4.1](#41-persisted-event-cursors-and-live-progress)); for legacy streams that predate `seq`, a stable 1-based line cursor. |
-| `limit` | Bounds the window; validated to `1..1000` (default `100`), else `ValueError`. |
-| `EventPage.records` | Tuple of `EventRecord` in stream order. |
-| `EventPage.next_cursor` | Cursor to pass back as `after_seq` to resume. The last returned record's `seq`, or the input cursor **unchanged** when the page is empty. |
-| `EventPage.has_more` | `True` when more matching records remain past this window. |
-
-A missing `normalized-events.jsonl` (e.g. a dry-run preview dir) yields an empty
-page with the cursor left unchanged — never an error.
-
-**`load_progress(artifact_dir) -> ProgressSnapshot | None`**
-
-Returns the [§4.1](#41-persisted-event-cursors-and-live-progress) `progress.json`
-fields (`schema_version`, `state`, `last_seq`, `event_count`, `updated_at`) as a
-`ProgressSnapshot`, or `None` when no progress artifact exists (not an error).
-Invalid required integer fields (`schema_version`, `last_seq`, `event_count`)
-fail closed with a clear `ValueError`. It never exposes raw AGENT text, platform
-state, or a business verdict.
-
-The pre-existing `load_events(artifact_dir) -> list[NormalizedEventView]`
-whole-stream projection is unchanged and remains the simplest read for callers
-that do not need cursors.
-
-## 5. `doctor` output
-
-`commands.cmd_doctor` prints a single JSON object. All probes are **read-only**:
-no probe launches an AGENT, runs `acpx exec`, sends a session prompt, or triggers
-an `npx` package fetch. `launched_real_agent` is always `false`.
-
-Top-level keys:
-
-| Key | Type | Notes |
-|-----|------|-------|
-| `ok` | `boolean` | Roll-up; see gating note below. |
-| `python_version` | `string` | Host Python version. |
-| `node_version_requirement` | `string` | Declared minimum (`>=22.12`). |
-| `launched_real_agent` | `boolean` | **Always `false`.** |
-| `event_store_probe` | `object` | `{ dir_mode_ok, file_mode_ok, atomic_write_ok }`. |
-| `fixture_replay` | `object` | `_parse_result_payload` projection ([§2.4](#24-replay-projection-_parse_result_payload)), or `{ protocol_error, protocol_error_reasons }` when the fixture is missing. |
-| `role_validation` | `object` \| `null` | `{ valid, role_id, role_hash }` when `--role` is supplied, else `null`. |
-| `node_probe` | `object` | `{ binary, requirement_minimum, available, version, ok, error_detail }`. |
-| `acpx_probe` | `object` | `{ binary, expected_version, available, version, ok, error_detail }`. |
-| `redaction_probe` | `object` | `{ ok, patterns_exercised, leaked, error_detail }`; `leaked == []` on success. |
-| `session_probe` | `object` | `{ ok, dir_mode_ok, file_mode_ok, lease_seconds, stale_locks, error_detail }`. |
-| `policy_probe` | `object` \| `null` | role-only; see below. |
-| `workspace_probe` | `object` \| `null` | role-only; see below. |
-| `npx_probe` | `object` \| `null` | role-only; see below. |
-| `adapter_probe` | `object` \| `null` | role-only; see below. |
-
-Role-dependent probe shapes (each `null` when `--role` is omitted):
-
-- **`policy_probe`**: `ok`, `parseable`, `default_action`, `auto_approve_count`,
-  `auto_deny_count`, `policy_hash`, `error_detail`. `ok` requires
-  `default_action == "deny"`.
-- **`workspace_probe`**: `ok`, `effective_cwd`, `matched_root`,
-  `allowed_roots_security_boundary` (always `false`), `disclaimer`,
-  `error_detail`. Never claims an OS/filesystem sandbox.
-- **`npx_probe`**: `ok`, `fetch_risk`, `npx_available`, `pinned_spec`,
-  `acpx_binary`, `error_detail`. `fetch_risk` is `true` only when no explicit
-  `acpx_binary` is set (the compiler would resolve `npx -y acpx@<version>` at run
-  time); the probe only runs `npx --version`, never `npx acpx`.
-- **`adapter_probe`**: `ok`, `adapter_agent`, `declared`, `hostable`, `detail`.
-  Availability means **declared + hostable** only; `detail` states the adapter
-  process is not launched.
-
-`session_probe` is `probe_session_readiness`: it checks `0700`/`0600` artifact
-modes on a throwaway temp store and reports `lease_seconds` for a persistent role.
-`stale_locks` (the W4 read-only detector — see [§6](#6-stale-lock-detector)) is
-populated only when a `sessions_dir` is supplied; `doctor` does not pass one, so
-`stale_locks` is `[]` in `doctor` output.
-
-**`ok` gating.** `ok` gates only on pure-local deterministic probes so the no-role
-CI gate keeps exiting `0` without `node`/`acpx`/`npx`: always-contributing =
-fixture replay (no `protocol_error`), `event_store_probe` modes,
-`redaction_probe`, role-less `session_probe` dir modes; contributing **only with
-`--role`** = `policy_probe`, `workspace_probe`. External-binary probes
-(`node_probe`, `acpx_probe`, `npx_probe`, `adapter_probe`) are **informational and
-never flip `ok`**. Exit code is `0` when `ok` is `true`, else `1`.
-
-## 6. Stale-lock detector
-
-`session.SessionStore.detect_stale_locks(now=None)` is read-only: it takes no
-lock, removes/rewrites nothing, **sends no terminating signal to recorded
-holders, and kills no prior holder**. The only syscall it issues against a recorded holder PID is a no-op
-`os.kill(pid, 0)` existence probe (POSIX delivers no signal for signal `0`). It
-returns a list with one entry per local record:
-
-| Key | Type | Meaning |
-|-----|------|---------|
-| `session_id` | `string` | Local session identifier. |
-| `quarantined` | `boolean` | Whether the record carries quarantine evidence. Not a lifecycle state. |
-| `lock_present` | `boolean` | Whether `lock.json` exists. |
-| `lease_expired` | `boolean` | `true` when `expires_at <= now`, or when the lock is unreadable/garbage (conservatively expired). A live (future) lease is `false`. |
-| `holder_liveness` | `string` \| `null` | K1 process-liveness classification of the recorded lock holder set: `alive`, `crashed`, or `unknown`; `null` when there is no lock. Composite supervisor+child locks classify as `crashed` only when both identities are provably crashed; if either is alive the result is `alive`, and if either is unverifiable the result is `unknown`. An unreadable/garbage lock classifies `unknown`. See [§6.1](#61-k1-holder-liveness-and-safe-recovery-posture). |
-| `recoverable` | `boolean` | `true` when the lease is TTL-expired (`lease_expired`) **or** the holder is provably `crashed` and the lock is reclaimable. An `alive`, `unknown`, or explicitly unreclaimable pending holder on a within-TTL lease is **not** `recoverable`. |
-| `tmp_debris` | `array<string>` | Leftover `.tmp-*` atomic-write debris file names in the session dir. |
-
-`holder_liveness` and `recoverable` are **additive** keys (K1); the
-`session_id`/`quarantined`/`lock_present`/`lease_expired`/`tmp_debris` keys carry the rest. The top-level holder identity is read from the additive `host`/`pid`/
-`process_start`/`boot_id` fields that `acquire_lock` now records into `lock.json`
-alongside the existing `token`/`owner`/`acquired_at`/`expires_at`. When the runtime
-spawns an acpx subprocess, it preserves that top-level supervisor identity and adds
-`child_host`/`child_pid`/`child_process_start`/`child_boot_id` fields; liveness
-recovery requires both supervisor and child identities to be provably crashed.
-
-### 6.1 K1 holder-liveness and safe-recovery posture
-
-K1 adds conservative, **read-only** crash detection plus opt-in, **provably-safe**
-lease recovery (`process_liveness.classify_holder`). The safety posture is:
-
-- **Detection is read-only.** `detect_stale_locks` launches nothing, takes no
-  lock, removes/rewrites nothing, sends **no terminating signal to recorded
-  holders**, and kills no prior holder. The only PID syscall is the no-op
-  `os.kill(pid, 0)` existence probe;
-  on Linux it also reads `/proc/<pid>/stat` field 22 (start time) and
-  `/proc/sys/kernel/random/boot_id` to defeat PID reuse / detect a reboot.
-- **`crashed` requires positive proof** — every recorded holder in the lock's holder
-  set is gone: the PID is absent, its recorded start time no longer matches (PID
-  reuse), or the machine rebooted since the lease. For supervisor+child locks,
-  both identities must independently classify `crashed`.
-- **`alive` and `unknown` are never recoverable via liveness.** A missing/foreign
-  PID, a different host, an unreadable start time, an indeterminate probe, or an
-  explicitly unreclaimable pending lock all classify or behave fail-safe → treated
-  as possibly-alive/unrecorded work → refused. Only TTL expiry can recover an
-  `unknown`/`alive`/pending-unreclaimable holder.
-- **No live-session takeover.** Reclamation of a within-TTL lease (opt-in
-  `acquire_lock(..., reclaim_crashed=True)`; on by default in `SessionRuntime`)
-  happens only when the holder is provably `crashed`, entirely under the existing
-  per-session `flock` guard. The strict TTL-only contract is preserved by
-  default at the store (`reclaim_crashed=False`).
-
-## 7. Cleanup plan / result
-
-`retention.py` plans and applies confined, dry-run-first **pruning of Run
-evidence**; the `agent-run-supervisor cleanup` command serializes it via
-`commands.cmd_cleanup`. Nothing is deleted wholesale: a Run directory always
-survives with its idempotency spine, and a Session directory is never a
-candidate at all.
-
-Command output (stdout JSON):
-
-- **Dry-run (default, no `--apply`)**: `{ "applied": false, "plan": <CleanupPlan> }`.
-- **Apply (`--apply`)**: `{ "applied": true, "pruned": [<run id>...],
-  "failed": [{ id, path, reason }...], "plan": <CleanupPlan> }`.
-
-`CleanupPlan` shape (`commands._plan_payload`):
-
-| Key | Type | Meaning |
-|-----|------|---------|
-| `root` | `string` | Resolved `.agent-run-supervisor` artifact root the tool is confined to. |
-| `runs_dir` | `string` | Resolved runs directory scanned. |
-| `sessions_dir` | `string` | Resolved sessions directory scanned. |
-| `prune` | `array<CleanupCandidate>` | Runs whose non-spine evidence is planned for removal. |
-| `skip` | `array<CleanupCandidate>` | Candidates retained/refused, with reasons. |
-
-`CleanupCandidate` shape: `kind` (`run` / `session`), `id`, `path`, `age_seconds`,
-`action` (`prune` / `skip`), `reason`. Reasons in use: `max_age_days`,
-`max_count` (prune reasons); `retained`, `symlink_escape`, `session_durable`,
-`no_trustworthy_terminal` (skip reasons).
-
-`retention.RUN_IDEMPOTENCY_SPINE` is the single allowlist a prune may never
-remove: `submission.json`, `spec.json`, `launch.json`, `result.json`,
-`prompt-dispatch-started`, `prompt-accepted`. Pruning is therefore never an
-idempotency reset — a repeated authenticated `request_id` stays recognized and
-stays non-dispatching.
-
-Safety posture (documented for callers): planning is read-only and removes
-nothing; `apply` prunes **only** `plan.prune` entries, re-reads the spine from
-source rather than from the plan, and re-verifies every safety invariant
-immediately before removal; the tool refuses to operate outside a resolved
-`.agent-run-supervisor` root, never follows a symlink out of root, and **never
-removes a Session directory, whatever its age, lease, or quarantine evidence**.
-
-## 8. Caller-stability contract
-
-- **`business_verdict` is always `null`.** Across every payload above (run result,
-  turn result, all session projections, replay projection), the supervisor never
-  sets a business verdict. Supervisor status (`status`/`error_code`) is **not** a
-  business pass/fail.
-- **Additive evolution only.** Future schema changes may *add* keys. Existing keys
-  are never renamed, removed, or repurposed, and their meaning is fixed. Callers
-  should ignore unknown keys rather than reject them. This governs how the emitters
-  described above evolve **while they exist**; it is not a commitment to keep the
-  legacy acpx line alive. Separately authorized removal of that code retires the
-  acpx-named keys together with the emitter that produces them — a removal
-  decision recorded elsewhere, not an exception to additive evolution and not a V4
-  compatibility obligation.
+- **`business_verdict` is always `null`.** The supervisor never sets a business
+  verdict. Supervisor status (`status`/`error_code`) is **not** a business
+  pass/fail.
+- **Closed field set.** Future schema changes may *add* keys here, in this
+  document, together with the emitter and the validator. Existing keys are never
+  renamed, removed, or repurposed, and their meaning is fixed. A persisted
+  terminal is judged against the closed set — an undefined key makes it
+  untrusted rather than tolerated.
+- **The field set of a persisted terminal is closed.** API v3 is the only
+  contract, so a `result.json` carrying a key this version does not define is
+  untrusted evidence rather than a tolerated extension. There is no reader for
+  an unknown key, no projection that strips one, and no alias. Nothing rewrites
+  or migrates a stored record: an untrusted terminal simply never becomes
+  trusted evidence, and the caller sees the same bounded error every other
+  malformed terminal produces.
+- **The acpx-named keys were removed with it.** Removing the retired runtime
+  retired the keys its emitters produced, as one authorized decision taken while
+  API v3 was unreleased — a deletion of an emitter, recorded here as history.
 - **Versioning / compatibility.** `result.json` has no embedded `schema_version`
-  today; compatibility rests on the additive-only rule. The session record
-  `session.json` carries an integer `schema_version` for record-format evolution.
-  Any future top-level `schema_version` on `result.json` would itself be an
-  additive change.
-- **Drift guard.** `tests/test_result_event_schema.py` pins the [§1](#1-resultjson-payload)
-  top-level key set against `result.build_result_payload`, so this contract cannot
-  drift from the code unnoticed.
+  today; a persisted terminal is validated against the closed field set, and so
+  is a session record. The session record `session.json` carries
+  an integer `schema_version` for record-format evolution.
+- **Drift guard.** `tests/test_result_event_schema.py` pins the
+  [§1](#1-resultjson-payload) top-level key set against
+  `result.build_result_payload`, so this contract cannot drift from the code
+  unnoticed.
 
-## 9. Native reset-line evidence rules
+The operator-facing command output — `agents validate`, `agents doctor`, and
+`run inspect` — is specified in
+[`agent-registry.md`](agent-registry.md), which owns the registry contract.
+
+## 5. Native reset-line evidence rules
 
 Normative for every Native emitter on the V4 boundary-reset line, and **merged on `main`**; published
 package/release facts come from live GitHub Releases and PyPI, and deployed/running facts come from
-operator-held runtime/live checks. Nothing in this section changes any key documented in §1–§8: those keys
-keep their names, types, and meanings, and the additive-only rule still holds.
+operator-held runtime/live checks. Nothing in this section changes any key documented in §1–§4: those keys
+keep their names, types, and meanings, and the closed field set still holds.
 
-### 9.1 Audit result — no launch, provenance, or attestation field, and no structured environment value
+### 5.1 Audit result — no launch, provenance, or attestation field, and no structured environment value
 
-The caller-stable contract in §1–§8 was audited field by field against the reset boundary. Result:
+The caller-stable contract in §1–§4 was audited field by field against the reset boundary. Result:
 
 | Looked for | Found |
 |---|---|
 | a launch/provenance/runtime-identity field (artifact path, version, digest, tree hash, interpreter identity, generation, slot hash, acceptance receipt) | **none.** No payload, projection, or event family above carries one |
 | an attestation or integrity field | **none** |
 | a **structured** environment key or value field (`fixed_env`, `permission_env`, an overlay literal, a pass-through value, a mediation pair) | **none.** No payload, projection, or event family above carries one, and ARS never serializes one out of the resolved carrier |
-| a field that could carry one **incidentally**, because an AGENT put it there | `detail_code`, `final_message`, `stop_reason`, `usage`, `unknown_update.key_summary`, and the `doctor` `error_detail` fields — all free-form or agent-supplied. These are **not** scanned against this Run's projected values (§9.2), so an agent echo can appear in one |
+| a field that could carry one **incidentally**, because an AGENT put it there | `detail_code`, `final_message`, `stop_reason`, `usage`, and `unknown_update.key_summary` — all free-form or agent-supplied. These are **not** scanned against this Run's projected values (§5.2), so an agent echo can appear in one |
 
 The retired Binding-era launch and attestation material lived in `launch.json` and `attestation.json`, which
 this document never described. It is retired with the architecture and preserved only under
@@ -528,13 +220,13 @@ this document never described. It is retired with the architecture and preserved
 On the reset line `launch.json` is a **value-blind launch snapshot** whose key set is closed by a schema-level
 allowlist: the declared `command`, the exact `argv`, profile identity, `agent_id`, the selector ids, the
 capability narrowing, the caller's `credential_refs`, the operator's `session_epoch`, the selected
-`mediation_id`, one `env` block of the shape described in §9.2, and — only when the resolved profile selected
+`mediation_id`, one `env` block of the shape described in §5.2, and — only when the resolved profile selected
 a launch-permission policy — the pair `launch_permission_policy_id` and `launch_permission_digest`.
 `fixed_env`, `permission_env`, `env_allowlist`, `expected_runtime`, and `runtime_provenance` are not merely
 absent — a document carrying one is rejected as not a production record, so none can be reintroduced by an
 additive edit. `attestation.json` is not written at all; the post-`initialize` artifact is
 `initialize_evidence.json`, which records the observation with an explicit `authoritative: false` and carries
-no expected-identity block to compare against (§9.5).
+no expected-identity block to compare against (§5.5).
 
 **The launch-permission pair is bound, not merely carried.** It is one fact in three places, and both the
 writer and the reader enforce all three together, so an inconsistent record is refused rather than
@@ -553,7 +245,7 @@ persisted. This is an internal-consistency contract over records ARS wrote, not 
 cryptographic-trust claim — an actor who can rewrite an ARS-owned Run artifact has already defeated every
 projection boundary downstream of it.
 
-### 9.2 Structured environment evidence is value-blind; free-form Run text is not scanned
+### 5.2 Structured environment evidence is value-blind; free-form Run text is not scanned
 
 Structured environment evidence is value-blind by construction: per name, the name, its source class, its
 precedence layer, and its redaction status, plus a resolved count, the mediation id, and the
@@ -572,15 +264,15 @@ those fields may have that value persisted.
 The canonical workspace root and the effective `cwd` remain complete literals and remain hash-covered —
 independently derived authority facts.
 
-### 9.3 Categorical withholding metadata
+### 5.3 Categorical withholding metadata
 
 Some emitters still withhold a whole field or record behind a **stable categorical marker** rather than
 emitting a partial value. Markers are fixed source literals that contain no input data.
 
 | Marker class | Meaning for a caller |
 |---|---|
-| legacy text evidence withheld | the record predates the reset and carries value-bearing material (§9.4) |
-| legacy value-bearing launch seal not verified | the record predates the reset, so no hash was recomputed over it (§9.4) |
+| legacy text evidence withheld | the record predates the reset and carries value-bearing material (§5.4) |
+| legacy value-bearing launch seal not verified | the record predates the reset, so no hash was recomputed over it (§5.4) |
 | launch permission cleanup failed | the private per-Run launch-permission material could not be removed after the child was proven reaped. Durable as `launch-permission-cleanup-failed.json` in the Run directory — `{"code", "run_id"}` and nothing else — and, when an event stream was still open, additionally as a `launch_permission_cleanup_failed` event carrying only `seq` and `type`. It is **hygiene, not a supervision verdict**: the Run's terminal status is unaffected. It is written once, so a later successful retry removes the leftover without erasing the fact that the in-order attempt failed |
 
 Two marker classes are **retired** with the per-Run literal guard: the generic "withheld field or record"
@@ -592,7 +284,7 @@ sensitive-collision refusal is retired with them: an id is now recorded as the a
 Callers should treat every marker as forward-compatible: new marker classes may be added, existing ones never
 change meaning.
 
-### 9.4 Legacy text withholding
+### 5.4 Legacy text withholding
 
 Pre-reset Run and Session records may contain environment values in their launch material and unguarded
 free-form text everywhere else. They are **immutable historical evidence**: the reset rewrites nothing,
@@ -616,7 +308,7 @@ Reset-line readers obey these rules:
 Direct filesystem access to old files by an authorized operator stays outside the daemon projection. Those
 bytes may contain historical values; that is an honest limit, not a covered surface.
 
-### 9.5 Policy-warning event
+### 5.5 Policy-warning event
 
 Observed facts never gate a Run and never block continuity, but drift is worth telling a human about. The
 reset line therefore adds one additive event family whose only purpose is to report an observation, never to
@@ -644,15 +336,15 @@ means no observed drift, never that a check was skipped.
 Adding a subject or a comparison is an ordinary additive change and extends the closed set here in the same
 commit as the emitter — the two are one contract, not a document that describes an implementation.
 
-### 9.6 What does not change
+### 5.6 What does not change
 
-The terminal vocabulary, the additive-only rule, `business_verdict: null`, owner scoping, event ordering with
+The terminal vocabulary, the closed field set, `business_verdict: null`, owner scoping, event ordering with
 its monotonic `seq`, bounded queues and truncation markers, and the caller-facing event grammar are unchanged
 by the reset. The reset changes what may appear *inside* a free-form field, adds withholding metadata and the
 policy-warning family, and moves the caller wire to `api_version` 3 for the reasons in the PRD — not the
 grammar a caller parses.
 
-### 9.7 The no-close Session projection
+### 5.7 The no-close Session projection
 
 `session_status` and `session_list` project identity, lease/activity facts, last-use observations, and
 optional quarantine evidence. They expose **no** synthetic Session lifecycle state, because none exists:

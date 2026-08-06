@@ -136,7 +136,6 @@ class CancelFake:
                     origin=origin,
                     detail_code=detail,
                     retryable=_RETRYABLE_DEFAULT[status],
-                    exit_code=None,
                     signal=None,
                     stop_reason=stop_reason,
                     usage=None,
@@ -1287,7 +1286,6 @@ def test_r5_b1_run_status_frame_encodes_truncated_native_result(tmp_path: Path) 
                 origin="acp",
                 detail_code=None,
                 retryable=False,
-                exit_code=0,
                 signal=None,
                 stop_reason="end_turn",
                 usage=None,
@@ -1691,7 +1689,6 @@ def _full_result(run_dir: Path, run_id: str, *, status="completed"):
         origin="acp" if status == "completed" else "supervisor",
         detail_code=None if status == "completed" else "X",
         retryable=_RETRYABLE_DEFAULT[status_enum],
-        exit_code=0 if status == "completed" else None,
         signal=None,
         stop_reason="end_turn" if status == "completed" else None,
         usage=None,
@@ -3183,6 +3180,142 @@ def test_an_unsafe_session_id_never_reaches_the_session_store(
             assert reached == [], reached
         finally:
             harness.session_store.open_session = real_open  # type: ignore[method-assign]
+            await harness.aclose()
+
+    run_async(case())
+
+
+# -- API v3 is the only contract: a retired/unknown field is untrusted evidence --
+#
+# The field set of a Native terminal is closed, so a record carrying the retired
+# process-exit key never becomes a trusted terminal and therefore never reaches a
+# wire response. Both reachable boundaries are pinned, because "the validator
+# refuses it" and "no caller can observe it" are different claims and only the
+# second is the one that matters to a caller.
+
+_RETIRED_EXIT_FIELD = "acpx" + "_exit_code"
+
+
+def _seed_terminal_with(run_dir: Path, run_id: str, key: str, value) -> None:
+    payload = _full_result(run_dir, run_id)
+    payload[key] = value
+    (run_dir / "result.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+@pytest.mark.parametrize("key", [_RETIRED_EXIT_FIELD, "exit_code", "future_extension"])
+def test_run_status_refuses_a_terminal_carrying_an_unknown_field(
+    tmp_path: Path, key: str
+) -> None:
+    async def case():
+        harness = Harness(tmp_path / key, mode="pending")
+        seed_session(harness.session_store, session_id="sess-arsd-1")
+        caller = caller_for(principal_a())
+        try:
+            reply = await harness.submit(caller, "unk-st-1")
+            run_id = reply["run_id"]
+            _seed_terminal_with(harness.run_dir(run_id), run_id, key, 137)
+            await expect_code(
+                harness,
+                caller,
+                "run_status",
+                "unk-st",
+                protocol.INTERNAL,
+                {"run_id": run_id},
+            )
+            assert (
+                harness.session_store.open_session("sess-arsd-1").quarantine
+                is not None
+            )
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_run_status_never_emits_the_retired_field(tmp_path: Path) -> None:
+    """The caller-visible proof, on both branches.
+
+    A record carrying the retired key yields a bounded error whose text carries
+    no field name, and a clean record yields a result whose key set is exactly
+    the closed contract — so there is no branch on which a caller can observe it.
+    """
+
+    async def case():
+        harness = Harness(tmp_path, mode="pending")
+        seed_session(harness.session_store, session_id="sess-arsd-1")
+        caller = caller_for(principal_a())
+        try:
+            reply = await harness.submit(caller, "unk-st-2")
+            run_id = reply["run_id"]
+            _seed_terminal_with(
+                harness.run_dir(run_id), run_id, _RETIRED_EXIT_FIELD, 0
+            )
+            err = await expect_code(
+                harness,
+                caller,
+                "run_status",
+                "unk-st-abs",
+                protocol.INTERNAL,
+                {"run_id": run_id},
+            )
+            assert _RETIRED_EXIT_FIELD not in err.message
+        finally:
+            await harness.aclose()
+
+        harness = Harness(tmp_path / "clean", mode="complete")
+        seed_session(harness.session_store, session_id="sess-arsd-1")
+        caller = caller_for(principal_a())
+        try:
+            reply = await harness.submit(caller, "unk-st-3")
+            run_id = reply["run_id"]
+            await asyncio.wait({harness.handlers.registry.task_for(run_id)})
+            body = await call(
+                harness, caller, "run_status", "unk-st-clean", {"run_id": run_id}
+            )
+            from agent_run_supervisor.result import (
+                _OPTIONAL_NATIVE_RESULT_FIELDS,
+                _REQUIRED_NATIVE_RESULT_FIELDS,
+            )
+
+            closed = set(_REQUIRED_NATIVE_RESULT_FIELDS) | set(
+                _OPTIONAL_NATIVE_RESULT_FIELDS
+            )
+            assert set(body["result"]) <= closed
+            assert _RETIRED_EXIT_FIELD not in json.dumps(body)
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_run_cancel_refuses_a_terminal_carrying_the_retired_field(
+    tmp_path: Path,
+) -> None:
+    async def case():
+        harness = Harness(tmp_path, mode="pending")
+        seed_session(harness.session_store, session_id="sess-arsd-1")
+        caller = caller_for(principal_a())
+        try:
+            reply = await harness.submit(caller, "unk-can-1")
+            run_id = reply["run_id"]
+            assert harness.handlers.registry.is_registered(run_id)
+            await asyncio.sleep(0.05)
+            _seed_terminal_with(
+                harness.run_dir(run_id), run_id, _RETIRED_EXIT_FIELD, 3
+            )
+            await expect_code(
+                harness,
+                caller,
+                "run_cancel",
+                "unk-can",
+                protocol.INTERNAL,
+                {"run_id": run_id},
+            )
+            assert (
+                harness.session_store.open_session("sess-arsd-1").quarantine
+                is not None
+            )
+        finally:
             await harness.aclose()
 
     run_async(case())

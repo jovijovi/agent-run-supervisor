@@ -5,8 +5,8 @@ maps registered ACP permission/filesystem request classes to deterministic
 allow/deny decisions, records every decision as redacted mediation evidence,
 and never widens or re-reads the grant at runtime (snapshot only). Unknown
 operation classes deny by default; an unmappable/unexpected permission
-prompt additionally flags the turn as failed, aligning with the acpx
-non-interactive fail semantics.
+prompt additionally flags the turn as failed, because a prompt nobody can answer
+is not a decision and must not read as one.
 
 Every allow is *once-scoped by construction*: the bridge selects an
 ``allow_once`` option or denies, so no decision can install an agent-side rule
@@ -200,8 +200,8 @@ class PermissionBridge:
         options = request.get("options") or []
 
         if not isinstance(kind, str) or not kind:
-            # Unexpected/unmappable prompt: deny and fail the turn, aligning
-            # with the acpx non-interactive fail semantics.
+            # Unexpected/unmappable prompt: deny and fail the turn. A prompt
+            # nobody can answer is not a decision, and must not read as one.
             self.turn_failed = True
             self.turn_failure_reason = "unmappable permission request"
             return self._deny_with_option(

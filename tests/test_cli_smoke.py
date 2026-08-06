@@ -40,12 +40,44 @@ def test_module_version_matches_pyproject() -> None:
     assert agent_run_supervisor.__version__ == data["project"]["version"]
 
 
-def test_cli_help_lists_subcommands() -> None:
+#: The complete installed operator surface (D2). Nothing else is a command.
+SUPPORTED_LEAVES = (("agents", "validate"), ("agents", "doctor"), ("run", "inspect"))
+#: Commands the acpx removal deleted. A regression here is a resurrection.
+REMOVED_LEAVES = ("validate-role", "replay", "doctor", "session", "cleanup")
+
+
+def test_cli_help_lists_only_the_supported_top_level_commands() -> None:
     completed = _run_cli("--help")
 
     assert completed.returncode == 0, completed.stderr
-    for subcommand in ("validate-role", "replay", "doctor", "run"):
-        assert subcommand in completed.stdout, completed.stdout
+    assert "agents" in completed.stdout, completed.stdout
+    assert "run" in completed.stdout, completed.stdout
+    assert "acpx" not in completed.stdout.lower(), completed.stdout
+
+
+def test_cli_help_names_no_removed_command() -> None:
+    """``--help`` is the surface an operator reads; it may not advertise a ghost."""
+    completed = _run_cli("--help")
+    words = set(completed.stdout.split())
+
+    for leaf in REMOVED_LEAVES:
+        assert leaf not in words, f"--help still advertises {leaf!r}\n{completed.stdout}"
+
+
+def test_removed_top_level_commands_are_rejected() -> None:
+    for leaf in ("validate-role", "replay", "doctor", "session", "cleanup"):
+        completed = _run_cli(leaf)
+        assert completed.returncode != 0, (leaf, completed.stdout)
+
+
+def test_run_without_inspect_is_rejected() -> None:
+    """``run`` survives only as the parent of ``inspect``; the exec leaf is gone."""
+    completed = _run_cli("run")
+    assert completed.returncode == 2
+    assert "inspect" in completed.stderr
+
+    completed = _run_cli("run", "--role", "role.json", "--prompt-file", "p.txt")
+    assert completed.returncode != 0
 
 
 def test_cli_no_subcommand_exits_nonzero() -> None:
@@ -61,18 +93,20 @@ def test_cli_unknown_subcommand_exits_nonzero() -> None:
     assert completed.returncode != 0
 
 
-def test_cli_subcommand_help_exits_zero() -> None:
-    for subcommand in ("validate-role", "replay", "doctor", "run"):
-        completed = _run_cli(subcommand, "--help")
-        assert completed.returncode == 0, (subcommand, completed.stderr)
+def test_supported_subcommand_help_exits_zero_and_is_acpx_free() -> None:
+    for leaf in SUPPORTED_LEAVES:
+        completed = _run_cli(*leaf, "--help")
+        assert completed.returncode == 0, (leaf, completed.stderr)
+        assert "acpx" not in completed.stdout.lower(), (leaf, completed.stdout)
 
 
-def test_run_help_describes_local_exec_boundary() -> None:
+def test_run_help_offers_inspect_and_no_exec_boundary() -> None:
     completed = _run_cli("run", "--help")
 
     assert completed.returncode == 0, completed.stderr
     help_text = completed.stdout.lower()
-    assert "supervise local acpx exec" in help_text
-    assert "refuses real agent launch" not in help_text
-    assert "real_run_disabled" not in help_text
+    assert "inspect" in help_text
+    assert "acpx" not in help_text
+    assert "--no-real-run" not in help_text
+    assert "--prompt-file" not in help_text
     assert "gateway" not in help_text

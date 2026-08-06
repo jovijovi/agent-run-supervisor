@@ -182,7 +182,7 @@ def classify_holder(
 def _child_holder_view(lock_data: Mapping[str, Any]) -> dict[str, Any] | None:
     """Project the additive child-subprocess identity, or ``None`` if absent.
 
-    After a supervisor spawns its acpx subprocess it records the child identity
+    After a supervisor spawns its supervised child it records the child identity
     in ``child_pid``/``child_process_start``/``child_boot_id``/``child_host``
     *alongside* (never replacing) its own top-level identity. This returns that
     child identity shaped like a holder for :func:`classify_holder`, or ``None``
@@ -221,8 +221,8 @@ def classify_lock(
     """Classify a lock's combined supervisor + child-subprocess liveness.
 
     The lock's top-level ``pid``/``process_start``/``boot_id``/``host`` identify
-    the *supervisor* that owns artifact mutation. Once it spawns its acpx
-    subprocess it ALSO records that child's identity in the additive ``child_*``
+    the *supervisor* that owns artifact mutation. Once it spawns its supervised
+    child it ALSO records that child's identity in the additive ``child_*``
     fields, WITHOUT dropping the supervisor identity. Such a composite lock is
     provably reclaimable only when **both** identities are provably crashed; if
     either is alive — or either cannot be proven crashed — the verdict is

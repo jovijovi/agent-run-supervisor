@@ -2,11 +2,10 @@
 
 # Documentation Index
 
-Total: 80 documents tracked across 2 statuses.
+Total: 81 documents tracked across 2 statuses.
 
-## Active (17)
+## Active (16)
 
-- [ARS Session No-Close Model Implementation Plan](plans/active/2026-08-06-session-no-close-model.md) — created 2026-08-06
 - [ARS agent registry — the operator contract](design/agent-registry.md) — created 2026-07-30
 - [agent-run-supervisor vNext System Architecture](design/architecture.md) — created 2026-07-21
 - [agent-run-supervisor vNext Technical Solution](design/technical-solution.md) — created 2026-07-21
@@ -24,8 +23,10 @@ Total: 80 documents tracked across 2 statuses.
 - [Engineering practices](practices/README.md) — created 2026-05-28
 - [Verification gates for implementation PRs](roadmap/verification.md) — created 2026-05-28
 
-## Archived (63)
+## Archived (65)
 
+- [Remove the legacy acpx runtime, package, and CLI surface](plans/archive/2026-08-06-remove-acpx-product-runtime-compat.md) — created 2026-08-06
+- [ARS Session No-Close Model Implementation Plan](plans/archive/2026-08-06-session-no-close-model.md) — created 2026-08-06
 - [Cursor cross-Run Session resume — restore process-per-Run continuity](plans/archive/2026-08-03-cursor-cross-run-session-resume.md) — created 2026-08-03
 - [Binding-era authority archive (2026-07)](archive/binding-era-2026-07/README.md) — created 2026-07-30
 - [Binding-era architecture sections 3.1-3.3 (retired)](archive/binding-era-2026-07/architecture-3.1-3.3.md) — created 2026-07-30

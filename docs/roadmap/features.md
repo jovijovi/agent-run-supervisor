@@ -2,7 +2,7 @@
 title: "ARS vNext Feature and Capability Tracker"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-04
+last_validated_at: 2026-08-06
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/features.md"
 ---
 # ARS vNext Feature and Capability Tracker
@@ -11,17 +11,16 @@ Only vNext direction and the authority-versus-source delta live here. Detailed v
 retained in the cold archive and Git history; it is not default development context.
 
 Status legend: **Done** · **Implemented** · **In review** · **Planned** · **Superseded** · **Retired** ·
-**Parked** · **Non-goal**
+**Removed** · **Parked** · **Non-goal**
 
 `Done` means merged on `main`; `Implemented` means the source exists on a task branch and is not merged.
-Every V4 boundary-reset row is `Done`. **Superseded** and
-**Retired** describe *authority*; the Remaining cell says what happened to the source, because for the
-boundary reset the two moved together. Exactly one row is `Implemented`: the Session no-close model, whose
-source lives on a task branch.
+Every V4 boundary-reset row is `Done`. **Superseded** and **Retired** describe *authority*, and the
+Remaining cell says what happened to the source, because for the boundary reset the two moved together.
+**Removed** is the stronger claim: the authority was retired *and* the source is deleted.
 
 | ID | Capability | Product | Impl | Evidence / authority | Remaining |
 |---|---|---|---|---|---|
-| F-LEGACY-COMPAT-001 | legacy v0.1.7 acpx line: no product, runtime, or compatibility authority | Not a product | Retired | GOAL acpx removal direction; board; archived authority snapshot | authority retired, source not deleted: the acpx code and its emitted fields stay on `main` until separately authorized removal, maintenance is separately approved, and only bounded differential/comparison fixtures remain as reference |
+| F-LEGACY-COMPAT-001 | the legacy acpx line | Not a product | Removed | GOAL boundary section; containment scanner; wheel/sdist manifest gates | source deleted on a task branch: runtime, CLI leaves, fixtures, and the process-exit result field. Audited keep set was empty, so no fixture remains |
 | F-VNEXT-ADMISSION-001 | structured admission → immutable AgentRunSpec sealed before spawn | Required | Done | PRD R1; archived plan C1/C4; freeze-order + spec-hash suites | merged; the resolution inputs change with F-AGENT-REGISTRY-001 |
 | F-VNEXT-PROCESS-001 | ManagedProcess live stdio supervision | Required | Done | PRD R2; archived plan C3; live-wire/group-kill/reap suite | merged; first released in 0.2.0 |
 | F-NATIVE-ACP-001 | Native ACP exact-config core through ars-core | Required | Done | PRD R2–R3; archived plan C1–C10; real B-grade acceptance | merged; live option domains land with F-BOUNDARY-RESET-001 |
@@ -45,34 +44,35 @@ source lives on a task branch.
 | F-ACP-SDK-012-001 | optional `native` extra pinned to `agent-client-protocol==0.12.0` (ACP schema v1.19) | Required | Done | PRD R12; technical solution §0/§11 | merged; sender hook, prompt causal boundary, update ordinal domain, delivery barrier, and SDK root-log containment are re-verified against 0.12.0; the SDK `http` extra stays uninstalled |
 | F-RECONCILE-ORDERED-001 | total ordered fail-closed startup reconciliation, absent ≠ corrupt | Required | Done | PRD R10; architecture §6.1–§6.2; technical solution §9 | merged; strictly more refusals than the tolerant reader it replaced |
 | F-ARSD-API-002 | api_version 2 with the eight-operation drain matrix | Required | Superseded | PRD R11; superseded by F-SESSION-NOCLOSE-001 | replaced by single-version `api_version` 3 admission; the drain matrix is deleted, not disabled, because no client population exists |
-| F-SESSION-NOCLOSE-001 | one durable resumable Session kind: Runs terminate, Sessions do not close | Required | Implemented | PRD R4/R5/R9/R11; GOAL contract 3; [plan](../plans/active/2026-08-06-session-no-close-model.md) | source on a task branch, not merged: optional `session_id`, deterministic prospective identity, one fully bound record before the dispatch marker, quarantine as independent evidence, Sessions excluded from retention deletion with a preserved Run idempotency spine, `api_version` 3. Runtime cutover, data reset, restart, canaries, and release each stay separately approved |
+| F-SESSION-NOCLOSE-001 | one durable resumable Session kind: Runs terminate, Sessions do not close | Required | Done | PRD R4/R5/R9/R11; GOAL contract 3; [plan](../plans/archive/2026-08-06-session-no-close-model.md) | merged: optional `session_id`, deterministic prospective identity, one fully bound record before the dispatch marker, quarantine as independent evidence, `api_version` 3. Runtime cutover, data reset, restart, canaries, and release each stay separately approved |
 | F-SACHIMA-ARSD-001 | Sachima socket backend | Later integration | Parked | GOAL/PRD stage boundary | ARS production acceptance closed; integration still requires its own separate approval |
 | F-NONGOAL-001 | public/root/TCP/multi-tenant/business-orchestration surfaces | Non-goal | Non-goal | GOAL; PRD §6; non-approvals | separate product decision only |
 
 ## Completion roll-up
 
-| Area | Done | Implemented | In review | Planned | Superseded | Retired | Parked | Non-goal |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Legacy acpx line — authority retired | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 |
-| Session no-close model | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 0 |
-| vNext Stage 0/1 | 7 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| Configuration fidelity, SDK pin, launch permission | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| vNext Stage 2 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| Registered per-agent profiles | 0 | 0 | 0 | 0 | 1 | 2 | 0 | 0 |
-| Runtime Binding era | 0 | 0 | 0 | 0 | 0 | 3 | 0 | 0 |
-| Boundary reset | 5 | 0 | 0 | 0 | 1 | 0 | 0 | 0 |
-| Later integration | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 |
-| Explicit exclusions | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
+| Area | Done | Implemented | In review | Planned | Superseded | Retired | Removed | Parked | Non-goal |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| The legacy acpx line | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 |
+| Session no-close model | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| vNext Stage 0/1 | 7 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| Configuration fidelity, SDK pin, launch permission | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| vNext Stage 2 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| Registered per-agent profiles | 0 | 0 | 0 | 0 | 1 | 2 | 0 | 0 | 0 |
+| Runtime Binding era | 0 | 0 | 0 | 0 | 0 | 3 | 0 | 0 | 0 |
+| Boundary reset | 5 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 |
+| Later integration | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 |
+| Explicit exclusions | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
 
-The one `Implemented` row is F-SESSION-NOCLOSE-001, whose source is on a task branch and not merged. The
-board still tracks planned acpx removal, which has no feature row here.
+No row is `Implemented`: the Session no-close model is merged on `main`.
+The acpx removal is implemented on a task branch. It is not merged, and
+F-LEGACY-COMPAT-001 records it as `Removed` in source terms only.
 
 **What Retired and Superseded mean here.** Both are **documentation-authority** states recorded by the
 boundary reset: `Retired` means the tracked architecture no longer targets the capability at all, and
 `Superseded` means a narrower capability replaces it. Where the Remaining cell says *deleted from `main`*,
 the deletion is real and merged. Nothing outside the repository moved — no Binding root or artifact tree
-was touched, no acpx module was removed, no `/opt` path was deleted, and no operator storage was migrated
-or removed.
+was touched, no `/opt` path was deleted, and no operator storage was migrated or removed.
+The removal of the retired runtime is a separate, later decision recorded by F-LEGACY-COMPAT-001.
 
 **Publication boundary.** `Done` means merged on `main` — nothing more. Published package/release facts
 come from live GitHub Releases and PyPI; deployed/running facts come from operator-held runtime/live checks.

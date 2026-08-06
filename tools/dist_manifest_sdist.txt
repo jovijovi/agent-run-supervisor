@@ -1,0 +1,66 @@
+# Exact manifest of the built sdist. Compared as a SET by
+# tools/check_dist_manifest.py, which runs inside scripts/verify_local.sh.
+# The distribution version is normalized out, so a version bump is not a diff.
+# Edit this file on purpose: there is no regeneration mode, because
+# regenerating it from whatever the build produced is the failure the gate
+# exists to prevent.
+LICENSE
+PKG-INFO
+README.md
+pyproject.toml
+setup.cfg
+src/agent_run_supervisor.egg-info/PKG-INFO
+src/agent_run_supervisor.egg-info/SOURCES.txt
+src/agent_run_supervisor.egg-info/dependency_links.txt
+src/agent_run_supervisor.egg-info/entry_points.txt
+src/agent_run_supervisor.egg-info/requires.txt
+src/agent_run_supervisor.egg-info/top_level.txt
+src/agent_run_supervisor/__init__.py
+src/agent_run_supervisor/__main__.py
+src/agent_run_supervisor/arsd/__init__.py
+src/agent_run_supervisor/arsd/__main__.py
+src/agent_run_supervisor/arsd/admission.py
+src/agent_run_supervisor/arsd/client.py
+src/agent_run_supervisor/arsd/handlers.py
+src/agent_run_supervisor/arsd/operand.py
+src/agent_run_supervisor/arsd/protocol.py
+src/agent_run_supervisor/arsd/reconcile.py
+src/agent_run_supervisor/arsd/server.py
+src/agent_run_supervisor/arsd/service_unit.py
+src/agent_run_supervisor/cli.py
+src/agent_run_supervisor/commands.py
+src/agent_run_supervisor/event_store.py
+src/agent_run_supervisor/exit_classifier.py
+src/agent_run_supervisor/managed_process.py
+src/agent_run_supervisor/native_acp/__init__.py
+src/agent_run_supervisor/native_acp/agent_registration.py
+src/agent_run_supervisor/native_acp/agent_registry.py
+src/agent_run_supervisor/native_acp/client.py
+src/agent_run_supervisor/native_acp/config_fidelity.py
+src/agent_run_supervisor/native_acp/driver.py
+src/agent_run_supervisor/native_acp/event_writer.py
+src/agent_run_supervisor/native_acp/events.py
+src/agent_run_supervisor/native_acp/launch_permissions.py
+src/agent_run_supervisor/native_acp/observation.py
+src/agent_run_supervisor/native_acp/permissions.py
+src/agent_run_supervisor/native_acp/profile.py
+src/agent_run_supervisor/native_acp/run_task.py
+src/agent_run_supervisor/native_acp/spec.py
+src/agent_run_supervisor/native_acp/storage.py
+src/agent_run_supervisor/process_liveness.py
+src/agent_run_supervisor/redaction.py
+src/agent_run_supervisor/result.py
+src/agent_run_supervisor/session.py
+tests/test_agents_cli.py
+tests/test_cli_smoke.py
+tests/test_dist_manifest.py
+tests/test_event_store.py
+tests/test_no_close_containment_scan.py
+tests/test_optin_harness_contract.py
+tests/test_process_liveness.py
+tests/test_redaction.py
+tests/test_reset_boundary_scans.py
+tests/test_result_event_schema.py
+tests/test_static_safety_scan.py
+tests/test_verifier_lock_gates.py
+tests/test_version_sync.py

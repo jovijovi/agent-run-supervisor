@@ -36,9 +36,6 @@ _ARCHIVE_PREFIXES = (
 )
 _HISTORY_FILES = ("CHANGELOG.md",)
 
-#: The active plan is the specification of the removal; it names what it removes.
-_SPEC_FILES = ("docs/plans/active/2026-08-06-session-no-close-model.md",)
-
 #: This file is the scan itself, and must name what it looks for.
 _SELF = "tests/test_no_close_containment_scan.py"
 
@@ -52,7 +49,6 @@ def _tracked_files() -> list[str]:
         for path in out
         if not path.startswith(_ARCHIVE_PREFIXES)
         and path not in _HISTORY_FILES
-        and path not in _SPEC_FILES
         and path != _SELF
     ]
 

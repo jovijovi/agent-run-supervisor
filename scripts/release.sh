@@ -46,5 +46,5 @@ if [[ "$TARGET" == "testpypi" ]]; then
   echo "  pip install --index-url https://test.pypi.org/simple/ \\"
   echo "              --extra-index-url https://pypi.org/simple/ \\"
   echo "              agent-run-supervisor==${version}"
-  echo "  agent-run-supervisor doctor"
+  echo "  agent-run-supervisor --help"
 fi

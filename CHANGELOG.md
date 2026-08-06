@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- The legacy acpx product, runtime, and compatibility surface: the runtime and
+  its package modules, the `validate-role`, `replay`, `doctor`, `run` (exec),
+  `session`, and `cleanup` CLI leaves, the packaged and repository fixture trees,
+  and the caller/retention/goal/policy/role/workspace modules that only those
+  paths reached. The audited differential/comparison keep set was empty, so no
+  acpx fixture was retained. One production architecture remains: `arsd` +
+  ars-core + Native ACP.
+- **Breaking (unreleased API v3):** `result.json` no longer carries the
+  `acpx_exit_code` process-exit field, and it is no longer required for a
+  terminal to be trusted. It is not renamed and not replaced — `status`,
+  `detail_code`, `signal`, and `stop_reason` carry what remains. API v3 is the
+  only contract: the persisted-terminal field set is closed, so a `result.json`
+  carrying the retired key — or any key this version does not define — is
+  untrusted evidence rather than a tolerated extension, and never reaches a
+  caller. There is no tolerant reader, projection, alias, or migration, and no
+  stored record is rewritten.
+- `AgentRunStatus` narrows to the five Native terminals (`completed`, `failed`,
+  `cancelled`, `timed_out`, `unknown`) with the exit classifier that produced the
+  others.
+
+### Added
+
+- An acpx containment category in `tools/static_safety_scan.py`, and exact wheel
+  and sdist manifest allowlists (`tools/check_dist_manifest.py`) asserted inside
+  `scripts/verify_local.sh`, so the removed surface cannot return in source, in a
+  shipped artifact, or in a current-authority document.
+
+### Changed
+
+- The installed console script exposes exactly `agents validate`,
+  `agents doctor`, and `run inspect`.
+- `scripts/smoke_installed_wheel.sh` becomes `scripts/smoke_installed_artifact.sh`
+  and smokes both the wheel and the sdist in isolated venvs.
+
 ## [0.6.3] - 2026-08-04
 
 ### Changed

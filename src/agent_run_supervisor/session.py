@@ -37,20 +37,12 @@ from agent_run_supervisor.event_store import (
     secure_mkdir,
 )
 from agent_run_supervisor import process_liveness as _liveness
-from agent_run_supervisor.mcp_config import (
-    McpConfigBinding,
-    McpConfigError,
-    resolve_mcp_config,
-)
-from agent_run_supervisor.policy import policy_hash
-from agent_run_supervisor.role import (
-    DEFAULT_SESSION_LEASE_SECONDS,
-    AgentRoleSpec,
-    role_hash,
-)
-from agent_run_supervisor.workspace import WorkspaceValidationResult, workspace_hash
 
 SCHEMA_VERSION = 1
+# Default lease length for :meth:`SessionStore.acquire_lock`. One Run holds a
+# Session at a time; the lease is what makes that true across processes, and it
+# is a store concern rather than a caller-supplied one.
+DEFAULT_SESSION_LEASE_SECONDS = 900
 SESSION_JSON = "session.json"
 LOCK_JSON = "lock.json"
 MUTATION_GUARD = ".mutation.guard"
@@ -119,8 +111,8 @@ class SessionNotFoundError(SessionError):
 class SessionBindingError(SessionError):
     """Raised when a persisted session no longer matches its role/workspace/policy.
 
-    Fails closed *before* any mutation so a drifted role can never reuse a
-    session bound to different permissions, workspace, adapter, or acpx version.
+    Fails closed *before* any mutation so a Run can never bind a Session whose
+    recorded identity no longer matches the identity it is being reused under.
     """
 
 
@@ -212,28 +204,32 @@ def build_quarantine_evidence(
 class SessionRecord:
     # Field order is unchanged; the persisted key set per record kind is the
     # contract (see ``_record_to_dict``), not dataclass default mechanics.
-    # Legacy acpx records always carry the role/policy/acpx fields; native
-    # records omit them entirely and never serialize null or sentinel values.
+    #
+    # The pre-reset record fields below have no writer any more. They stay
+    # *declared* for one reason: a record written before the V4 identity reset
+    # must deserialize so :func:`validate_native_binding` can refuse it by name
+    # with a stable code. Declaring a field is therefore a decision to keep
+    # reading it, never a courtesy — a key this dataclass does not declare makes
+    # the whole record unreadable (see :func:`_record_from_dict`), so a document
+    # the retired runtime wrote does not open at all.
     schema_version: int
     session_id: str
     role_id: str | None = None
     role_hash: str | None = None
     workspace_hash: str | None = None
     policy_hash: str | None = None
-    acpx_version: str | None = None
     adapter_agent: str | None = None
     effective_cwd: str | None = None
     matched_root: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
-    acpx_session_id: str | None = None
     session_name: str | None = None
     # Optional native --mcp-config binding: canonical config path + content
     # SHA captured at create time. Omitted from session.json when unset so
     # pre-feature records keep their exact serialized shape.
     mcp_config_path: str | None = None
     mcp_config_sha256: str | None = None
-    # Native session identity/observations (absent => legacy acpx record).
+    # Native session identity/observations (absent => a pre-reset record).
     # All optional, omitted when unset — the exact mcp_config_* pattern.
     session_kind: str | None = None
     native_profile_id: str | None = None
@@ -333,54 +329,6 @@ class SessionStore:
 
     # -- create / open ----------------------------------------------------
 
-    def create_session(
-        self,
-        *,
-        session_id: str,
-        role: AgentRoleSpec,
-        workspace_result: WorkspaceValidationResult,
-        acpx_session_id: str | None = None,
-        session_name: str | None = None,
-        mcp_binding: McpConfigBinding | None = None,
-        now: _dt.datetime | None = None,
-    ) -> SessionRecord:
-        session_dir = self._session_dir(session_id)
-        if (session_dir / SESSION_JSON).exists():
-            raise SessionExistsError(f"session {session_id!r} already exists")
-
-        moment = _ensure_aware(now or _utc_now()).isoformat()
-        record = SessionRecord(
-            schema_version=SCHEMA_VERSION,
-            session_id=session_id,
-            role_id=role.role_id,
-            role_hash=role_hash(role),
-            workspace_hash=workspace_hash(role, workspace_result),
-            policy_hash=policy_hash(role),
-            acpx_version=role.runner.acpx_version,
-            adapter_agent=role.runner.adapter_agent,
-            effective_cwd=str(workspace_result.effective_cwd),
-            matched_root=(
-                str(workspace_result.matched_root)
-                if workspace_result.matched_root is not None
-                else None
-            ),
-            created_at=moment,
-            updated_at=moment,
-            acpx_session_id=acpx_session_id,
-            session_name=session_name,
-            mcp_config_path=mcp_binding.path if mcp_binding is not None else None,
-            mcp_config_sha256=mcp_binding.sha256 if mcp_binding is not None else None,
-        )
-
-        secure_mkdir(session_dir)
-        try:
-            exclusive_create_bytes(
-                session_dir / SESSION_JSON, _json_bytes(_record_to_dict(record))
-            )
-        except FileExistsError as exc:
-            raise SessionExistsError(f"session {session_id!r} already exists") from exc
-        return record
-
     def create_native_session(
         self,
         *,
@@ -408,9 +356,9 @@ class SessionStore:
         Session at all — which is exactly what makes a failed creation
         distinguishable from an existing resumable Session.
 
-        Takes **no** ``AgentRoleSpec`` and never accepts, synthesizes, or
-        defaults any legacy role hash, policy hash, acpx version, adapter,
-        acpx session identifier, or sentinel value. Field provenance is fixed:
+        Never accepts, synthesizes, or defaults a pre-reset role hash, policy
+        hash, adapter, or any sentinel value — those writers are gone and this
+        one was never given their inputs. Field provenance is fixed:
         profile identity from the resolved frozen ``AgentProfile``, owner and
         namespace from the authenticated identity frozen in the Run spec, and
         the workspace binding from the spec's validated workspace (the spec's
@@ -643,7 +591,7 @@ class SessionStore:
     def list_records(self) -> list[SessionRecord]:
         """List every local session record under the sessions root.
 
-        Read-only and local: no acpx launch, no lock taken. Directories without
+        Read-only and local: nothing is launched, no lock taken. Directories without
         a ``session.json`` (and stray files) are skipped. Results are sorted by
         ``session_id`` for deterministic output. A missing root yields ``[]``.
         """
@@ -688,79 +636,6 @@ class SessionStore:
                 f"session {record.session_id!r} is quarantined; "
                 "it refuses all new work",
             )
-
-    # -- binding gate -----------------------------------------------------
-
-    def validate_binding(
-        self,
-        record: SessionRecord,
-        *,
-        role: AgentRoleSpec,
-        workspace_result: WorkspaceValidationResult,
-    ) -> McpConfigBinding | None:
-        """Refuse to proceed unless ``record`` still matches the live role.
-
-        Checks role hash, policy hash, workspace hash, acpx version, adapter,
-        and the optional mcp_config binding before any caller mutates the
-        session. Raises ``SessionBindingError`` on the first mismatch.
-
-        The mcp_config check re-reads the declared config file, so callers
-        that re-validate under their lease/mutation guard also recheck for
-        same-path content drift immediately before spawning acpx. On success
-        it returns the freshly verified :class:`McpConfigBinding` (``None``
-        for unbound roles); callers must compile the spawned argv from this
-        binding's canonical path so a declared symlink swapped after
-        validation can never redirect what acpx reads.
-        """
-        mismatches: list[str] = []
-        if record.role_hash != role_hash(role):
-            mismatches.append("role_hash")
-        if record.policy_hash != policy_hash(role):
-            mismatches.append("policy_hash")
-        if record.workspace_hash != workspace_hash(role, workspace_result):
-            mismatches.append("workspace_hash")
-        if record.acpx_version != role.runner.acpx_version:
-            mismatches.append("acpx_version")
-        if record.adapter_agent != role.runner.adapter_agent:
-            mismatches.append("adapter_agent")
-        mcp_mismatches, mcp_binding = self._mcp_binding_state(record, role)
-        mismatches.extend(mcp_mismatches)
-        if mismatches:
-            raise SessionBindingError(
-                f"session {record.session_id!r} binding mismatch: "
-                f"{', '.join(mismatches)} differ from the current role",
-            )
-        return mcp_binding
-
-    @staticmethod
-    def _mcp_binding_state(
-        record: SessionRecord, role: AgentRoleSpec
-    ) -> tuple[list[str], McpConfigBinding | None]:
-        """Compare the record's persisted mcp_config binding against the live role.
-
-        Fails closed on binding gain/loss, canonical-path change, and content
-        SHA drift (same path, different bytes — invisible to ``role_hash``).
-        A declared config that can no longer be verified is itself a binding
-        failure. Diagnostics carry mismatch names only, never config content.
-        Returns the mismatch names plus the freshly verified binding.
-        """
-        try:
-            current = resolve_mcp_config(role)
-        except McpConfigError as exc:
-            raise SessionBindingError(
-                f"session {record.session_id!r} mcp_config binding cannot be "
-                f"verified: {exc}",
-            ) from exc
-        if record.mcp_config_path is None and record.mcp_config_sha256 is None:
-            return (["mcp_config_gained"] if current is not None else [], current)
-        if current is None:
-            return (["mcp_config_lost"], None)
-        mismatches: list[str] = []
-        if record.mcp_config_path != current.path:
-            mismatches.append("mcp_config_path")
-        if record.mcp_config_sha256 != current.sha256:
-            mismatches.append("mcp_config_sha256")
-        return (mismatches, current)
 
     # -- stale-lock detection (W4, read-only) -----------------------------
 
@@ -877,7 +752,8 @@ class SessionStore:
         the fresh-create, TTL-expired, and reclaim paths alike. Evidence, or an
         unconverged quarantine fence, raises :class:`SessionQuarantinedError`
         and neither creates nor unlinks any lock. The default ``False``
-        preserves exact legacy behavior; no acpx call site is edited.
+        preserves the pre-quarantine acquire behavior for callers that do not
+        ask for the stricter gate.
         """
         session_dir = self._require_session_dir(session_id)
         if (
@@ -959,7 +835,7 @@ class SessionStore:
 
         The caller must prove ownership with the lease token. Runtime send/close
         acquire an initially unreclaimable supervisor lock, then call this after
-        the acpx subprocess has spawned. The supervisor identity remains the
+        the supervised child has spawned. The supervisor identity remains the
         top-level holder because it still owns artifact mutation after the child
         exits; the child identity is recorded additively. Liveness reclamation is
         safe only when the composite supervisor+child holder set is provably
@@ -1021,9 +897,7 @@ _LEGACY_ONLY_FIELDS = (
     "role_id",
     "role_hash",
     "policy_hash",
-    "acpx_version",
     "adapter_agent",
-    "acpx_session_id",
 )
 
 _NATIVE_FIELDS = (
@@ -1063,16 +937,15 @@ LEGACY_SESSION_IDENTITY = "LEGACY_SESSION_IDENTITY"
 def _record_to_dict(record: SessionRecord) -> dict[str, Any]:
     """Serialize a record, omitting kind-foreign and unset-optional fields.
 
-    Legacy acpx records keep their historical ``session.json`` key set minus the
-    deleted lifecycle ``state`` (native keys are all unset and omitted). Native
-    records omit the legacy role/policy/acpx keys entirely — never serialized as
-    null, never given sentinel values — plus any unset native optionals (the
-    mcp_config_* omit-when-unset pattern).
+    Native records omit the pre-reset role/policy keys entirely — never
+    serialized as null, never given sentinel values — plus any unset native
+    optionals (the mcp_config_* omit-when-unset pattern). The non-native branch
+    survives because a pre-reset record still has to round-trip through a read;
+    nothing writes one.
 
     ``quarantine`` is deliberately **kind-neutral**: it is the only remaining
-    refusal a Session can carry, so a record of either kind must be able to hold
-    it. Making it native-only would silently drop the evidence on write and
-    leave the acpx runtime with nothing to fail closed on.
+    refusal a Session can carry, so a record of either kind must be able to
+    hold it, and a read of a pre-reset record must not silently drop it.
     """
     data = asdict(record)
     if record.mcp_config_path is None and record.mcp_config_sha256 is None:
@@ -1129,9 +1002,34 @@ def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+#: The complete set of keys a ``session.json`` may carry: the fields this
+#: version declares, and nothing else. It spans the current Native record and
+#: the pre-reset fields that are still *declared* so a record written before the
+#: V4 identity reset deserializes and can then be refused by name — see
+#: :data:`LEGACY_SESSION_IDENTITY_FIELDS` and :func:`validate_native_binding`.
+_DECLARED_RECORD_FIELDS = frozenset(SessionRecord.__dataclass_fields__)
+
+
 def _record_from_dict(data: dict[str, Any]) -> SessionRecord:
-    fields = {key: data.get(key) for key in SessionRecord.__dataclass_fields__}
-    return SessionRecord(**fields)
+    """Deserialize a record, refusing any key this version does not declare.
+
+    Silently dropping an undeclared key is a projection, and a projection is a
+    tolerant reader under another name: the record would be accepted, its
+    foreign content discarded without evidence, and every caller downstream
+    would proceed on a document this version never defined. A record written by
+    the retired runtime is therefore not readable at all — the same fail-closed
+    rule the persisted terminal applies, and the reason nothing here needs a
+    migration.
+    """
+    if not isinstance(data, dict):
+        raise SessionRecordInvalidError("session record is not a JSON object")
+    undeclared = sorted(set(data) - _DECLARED_RECORD_FIELDS)
+    if undeclared:
+        # The field *names* are the evidence; their values never are.
+        raise SessionRecordInvalidError(
+            f"session record carries undeclared field(s) {', '.join(undeclared)}",
+        )
+    return SessionRecord(**{key: data.get(key) for key in _DECLARED_RECORD_FIELDS})
 
 
 def _profile_hash_of(profile: Any) -> Any:
@@ -1249,8 +1147,8 @@ def validate_native_binding(
     (``for_load=True``) the committed external ``agent_session_id`` must also be
     present. ``profile`` needs ``profile_id``/``revision``/``profile_hash``
     (attribute or zero-arg callable); ``workspace_result`` needs
-    ``workspace_hash``. The legacy role-based
-    :meth:`SessionStore.validate_binding` is untouched.
+    ``workspace_hash``. This is the only binding gate: the retired role-based
+    one was deleted with the runtime that called it.
 
     Epoch equality is **symmetric**, on purpose: a record that has an epoch is
     refused by a Run that has none, and a Run that has one is refused by a

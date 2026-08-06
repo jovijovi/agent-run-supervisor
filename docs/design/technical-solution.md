@@ -16,12 +16,14 @@ V4 external-AGENT boundary reset. The previous mixed v0.1.7/vNext solution is pr
 ARS stays Python and **stdlib-only at runtime**. `tomllib` is standard library on the supported Python
 floor, so the registry parser adds no dependency. The only declared dependency is the optional `native`
 extra, pinned exactly to `agent-client-protocol==0.12.0` (ACP schema v1.19); its own `http` extra is never
-installed, because ARS is stdio ACP only and adds no HTTP/WS transport. vNext extends the existing package
-additively. The legacy acpx path is still present in
-that package and is **not** a compatibility baseline, surface, or obligation, and never a Native driver,
-fallback, or session store: no module below owes it compatibility, removing it is separately authorized
-work this document does not perform, and it survives here only as a bounded differential/comparison-test
-reference.
+installed, because ARS is stdio ACP only and adds no HTTP/WS transport.
+The retired acpx path was removed from source.
+That removal took its runtime, parser, probe, policy, role, workspace, retention, caller, and fixture
+modules, its CLI leaves, and the result field named after its process exit. It was never a baseline,
+surface, or obligation, and never a Native driver, fallback, or session store; no module below owes it
+compatibility, and none may reintroduce one. `tools/static_safety_scan.py` refuses an import of a removed
+module, an argv naming that binary, a reference to a removed repository surface, and a present-tense
+capability claim in a current-authority document.
 
 **Authority and source are aligned on `main`.** Every module disposition below describes merged source:
 `native_acp/runtime_binding.py` and `native_acp/attestation.py` are deleted, `native_acp/agent_registry.py`
@@ -46,11 +48,11 @@ from a merge. This document grants no approval, and a green verification transfe
 | `exit_classifier.py` / `result.py` or Native superset boundary | losslessly carry `completed/failed/cancelled/timed_out/unknown`; persist `retryable=false` for `unknown`; accept stable detail codes rather than raw child or exception text |
 | `session.py` additive fields | Native Session identity, external session ID, owner, profile hash, `last_effective_model/effort`, persistent quarantine, optional operator `session_epoch`; legacy serialization unchanged when fields are absent |
 | existing `process_liveness.py` | full `ProcessIdentity` and fail-safe liveness classification — **unchanged by the reset** |
-| existing `event_store.py`, `live_stream.py`, `redaction.py` | atomic files, bounded projection/evidence primitives; reused through explicit Native roots |
+| existing `event_store.py`, `redaction.py` | atomic files, bounded projection/evidence primitives; reused through explicit Native roots |
 
-`runner.execute_subprocess` and `SubprocessOutcome` are legacy acpx-only code that the reset does not touch;
-leaving them unchanged is a scope statement, not a compatibility commitment, and their removal is separately
-authorized. Native code must not share their stdout consumer or wait-before-return contract.
+`runner.execute_subprocess` and `SubprocessOutcome` are **removed**, with the runtime they served. Their
+stdout consumer and wait-before-return contract could not carry Native ACP, and no Native module may
+reintroduce one.
 
 ### 1.2 `native_acp/` package — target module map
 
@@ -629,7 +631,7 @@ deleting the rest would silently drop the only real-agent continuity evidence.
 - Publication (tag, GitHub Release, PyPI) is separate from implementation, and a prepared version number is
   not a publication. The runtime remains stdlib-only apart from the optional `native` extra, which the
   locked-dependency and version-sync gates assert at every stage.
-- Rollback disables Native ingress; there is no auto-fallback to acpx and no terminal-fact rewrite.
+- Rollback disables Native ingress; there is no second runtime to fall back to and no terminal-fact rewrite.
 - Each reset gate is one revertable merge commit. Reverting the authority alignment restores the Binding-era
   authority chain exactly and touches no source, runtime, or deployment state. Reverting the fail-closed
   hardening restores baseline reuse and reconciliation behavior; its only non-revertable side-effect class is

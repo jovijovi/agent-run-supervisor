@@ -682,7 +682,7 @@ def test_render_preserves_the_operator_agents_file_spelling(
     """G-2 — lasting guard, **not** RED evidence: green before and after.
 
     The emitted ``ExecStart=`` is an operator-facing artifact that
-    ``scripts/smoke_installed_wheel.sh`` compares literally, so the admission
+    ``scripts/smoke_installed_artifact.sh`` compares literally, so the admission
     boundary must return frozen *text*. A ``Path`` round-trip would silently
     rewrite ``/opt/x/`` to ``/opt/x`` and ``/srv//x`` to ``/srv/x``; this guard
     is what makes a future ``-> Path`` return type fail loudly.

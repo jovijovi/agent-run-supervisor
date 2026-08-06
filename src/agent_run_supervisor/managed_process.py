@@ -3,9 +3,10 @@
 The supervision layer owns spawn, PID/PGID, full :class:`ProcessIdentity`,
 bounded stderr, group termination, wait, and reap. The ACP SDK exclusively
 owns the live stdin/stdout JSON-RPC wire, exposed here in the C1-pinned
-stream form (``asyncio.StreamWriter`` / ``asyncio.StreamReader``). The legacy
-completion-oriented ``runner.execute_subprocess`` stays acpx-only; nothing
-here touches it. Startup/turn timeouts are owned by the caller via
+stream form (``asyncio.StreamWriter`` / ``asyncio.StreamReader``). This is the
+only supervision layer: the completion-oriented ``execute_subprocess`` shape of
+the retired runtime is gone, and its stdout-drain / wait-before-return contract
+must not be reintroduced here. Startup/turn timeouts are owned by the caller via
 ``asyncio.wait_for``.
 """
 

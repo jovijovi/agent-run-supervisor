@@ -265,7 +265,6 @@ def _seed_result(
         origin=origin,
         detail_code=resolved_detail,
         retryable=_RETRYABLE_DEFAULT[status_enum],
-        exit_code=None,
         signal=None,
         stop_reason=stop_reason,
         usage=None,
@@ -1631,7 +1630,6 @@ def _complete_terminal(run_dir: Path, run_id: str, status: AgentRunStatus) -> di
         origin="supervisor",
         detail_code=None if status is AgentRunStatus.COMPLETED else "PROBE",
         retryable=_RETRYABLE_DEFAULT[status],
-        exit_code=None,
         signal=None,
         stop_reason=None,
         usage=None,
@@ -1671,7 +1669,6 @@ def _legal_trusted_terminal(
         origin=origin,
         detail_code=detail_code,
         retryable=_RETRYABLE_DEFAULT[status],
-        exit_code=None,
         signal=None,
         stop_reason=stop_reason,
         usage=None,
@@ -2504,7 +2501,6 @@ def test_no_replay_call_trace_over_every_converging_row(
         (SessionStore, "release_lock"),
         (SessionStore, "update_lock_holder"),
         (SessionStore, "create_native_session"),
-        (SessionStore, "create_session"),
         (SessionStore, "commit_last_effective"),
         (storage, "create_native_session"),
         (agent_registry, "load_agents_file"),
@@ -2517,6 +2513,11 @@ def test_no_replay_call_trace_over_every_converging_row(
         (NativeAcpDriver, "prompt_once"),
     ):
         monkeypatch.setattr(owner, attr, tripwire(f"{owner}.{attr}"))
+
+    # The retired role-bound creator needs no tripwire, because it cannot be
+    # called at all. Asserted rather than dropped silently: if it ever comes
+    # back, it comes back untripwired.
+    assert not hasattr(SessionStore, "create_session")
 
     import agent_run_supervisor.managed_process as managed_process
 

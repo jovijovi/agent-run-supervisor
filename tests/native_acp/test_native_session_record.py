@@ -1,5 +1,5 @@
 """C6: native session identity, quarantine, quarantine-atomic lease, and the
-zero-migration byte-identity proof for legacy acpx records."""
+read tolerance that keeps a pre-reset record openable without supporting it."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_run_supervisor import session_inspect
 from agent_run_supervisor.process_liveness import ProcessIdentity
 from agent_run_supervisor.session import (
     SESSION_JSON,
@@ -22,8 +21,6 @@ from agent_run_supervisor.session import (
     SessionRecord,
     SessionRecordInvalidError,
     SessionStore,
-    _json_bytes,
-    _record_to_dict,
     read_native_session_record,
     validate_native_binding,
     validate_native_session_record,
@@ -31,31 +28,30 @@ from agent_run_supervisor.session import (
 
 T0 = dt.datetime(2026, 7, 21, 0, 0, 0, tzinfo=dt.timezone.utc)
 
-# Golden bytes for the legacy acpx record shape. Re-baselined at the Session
-# no-close model: the lifecycle ``state`` key is **deleted**, so these bytes
-# deliberately differ from the pre-change ones by exactly that key. Everything
-# else about a legacy record is byte-for-byte unchanged, which is what these
-# goldens still prove — no other key moved, gained a null, or reordered.
-LEGACY_GOLDEN_MINIMAL = (
-    b'{\n  "acpx_session_id": null,\n  "acpx_version": "0.12.0",\n  "adapter_agent": "codex",\n'
-    b'  "created_at": "2026-07-21T00:00:00+00:00",\n  "effective_cwd": "/work/project",\n'
-    b'  "matched_root": "/work",\n  "policy_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",\n'
-    b'  "role_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",\n'
-    b'  "role_id": "doc-check",\n  "schema_version": 1,\n  "session_id": "legacy-sess-1",\n'
-    b'  "session_name": null,\n  "updated_at": "2026-07-21T00:00:00+00:00",\n'
-    b'  "workspace_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"\n}'
-)
-LEGACY_GOLDEN_WITH_MCP = (
-    b'{\n  "acpx_session_id": "acpx-abc",\n  "acpx_version": "0.12.0",\n  "adapter_agent": "codex",\n'
-    b'  "created_at": "2026-07-21T00:00:00+00:00",\n  "effective_cwd": "/work/project",\n'
-    b'  "matched_root": null,\n  "mcp_config_path": "/work/mcp.json",\n'
-    b'  "mcp_config_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",\n'
-    b'  "policy_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",\n'
-    b'  "role_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",\n'
-    b'  "role_id": "doc-check",\n  "schema_version": 1,\n  "session_id": "legacy-sess-2",\n'
-    b'  "session_name": "named",\n  "updated_at": "2026-07-21T01:00:00+00:00",\n'
-    b'  "workspace_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"\n}'
-)
+# A pre-reset Session record: written before the V4 identity reset, carrying the
+# three retired ARS-derived identity fields. It still deserializes — D6 requires
+# it to, so ``validate_native_binding`` can refuse it fail-closed by name — and
+# every key in it is a field this version declares.
+PRE_RESET_IDENTITY_RECORD = {
+    "schema_version": 1,
+    "session_id": "legacy-sess-1",
+    "workspace_hash": "b" * 64,
+    "effective_cwd": "/work/project",
+    "matched_root": "/work",
+    "created_at": "2026-07-21T00:00:00+00:00",
+    "updated_at": "2026-07-21T00:00:00+00:00",
+    "session_kind": "native",
+    "native_profile_id": "opencode-1.18.4",
+    "native_profile_revision": 1,
+    "native_profile_hash": "e" * 64,
+    "agent_session_id": "external-xyz",
+    "owner": "hermes",
+    "namespace": "hermes/doc-check",
+    "native_adapter_contract_hash": "f" * 64,
+}
+
+#: Keys the retired runtime wrote and this version does not declare.
+RETIRED_RUNTIME_KEYS = ("acpx_version", "acpx_session_id")
 
 NATIVE_KWARGS = dict(
     agent_session_id="external-xyz",
@@ -92,47 +88,75 @@ def _identity() -> ProcessIdentity:
     return ProcessIdentity(pid=4242, process_start="123", boot_id="boot", host="testhost")
 
 
-# -- zero-migration byte identity ------------------------------------------
+# -- deserialization is closed --------------------------------------------
 
 
-def test_legacy_records_serialize_byte_identical() -> None:
-    minimal = SessionRecord(
-        schema_version=1,
-        session_id="legacy-sess-1",
-        role_id="doc-check",
-        role_hash="a" * 64,
-        workspace_hash="b" * 64,
-        policy_hash="c" * 64,
-        acpx_version="0.12.0",
-        adapter_agent="codex",
-        effective_cwd="/work/project",
-        matched_root="/work",
-        created_at="2026-07-21T00:00:00+00:00",
-        updated_at="2026-07-21T00:00:00+00:00",
-        acpx_session_id=None,
-        session_name=None,
+@pytest.mark.parametrize("retired", RETIRED_RUNTIME_KEYS)
+def test_a_record_carrying_a_retired_runtime_key_fails_closed(
+    tmp_path: Path, retired: str
+) -> None:
+    """A record the retired runtime wrote is not readable at all.
+
+    Silently dropping an undeclared key is a projection, and a projection is a
+    tolerant reader wearing a different hat: the record is accepted, its foreign
+    content is discarded without evidence, and callers proceed on a document
+    this version never defined. Refusing it is the same fail-closed rule the
+    persisted terminal already applies.
+    """
+    store = _store(tmp_path)
+    session_dir = store.base_dir / "legacy-sess-1"
+    session_dir.mkdir(parents=True)
+    record = dict(PRE_RESET_IDENTITY_RECORD)
+    record[retired] = "0.12.0"
+    (session_dir / SESSION_JSON).write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(SessionRecordInvalidError):
+        store.open_session("legacy-sess-1")
+
+    # Fail closed *before use*: no Native path can obtain it either.
+    assert read_native_session_record(store, "legacy-sess-1") is None
+
+
+def test_an_undeclared_key_of_any_name_fails_closed(tmp_path: Path) -> None:
+    """The rule is the declared field set, not a blocklist of two names."""
+    store = _store(tmp_path)
+    session_dir = store.base_dir / "legacy-sess-1"
+    session_dir.mkdir(parents=True)
+    record = dict(PRE_RESET_IDENTITY_RECORD, future_extension="whatever")
+    (session_dir / SESSION_JSON).write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(SessionRecordInvalidError):
+        store.open_session("legacy-sess-1")
+
+
+def test_a_pre_reset_identity_record_still_opens_and_is_refused_for_binding(
+    tmp_path: Path,
+) -> None:
+    """D6, unchanged: it must open so the identity guard can refuse it by name.
+
+    Closing the field set may not close this path. The three retired identity
+    fields are *declared*, so the record deserializes, and
+    ``validate_native_binding`` then refuses it with its stable code.
+    """
+    store = _store(tmp_path)
+    session_dir = store.base_dir / "legacy-sess-1"
+    session_dir.mkdir(parents=True)
+    (session_dir / SESSION_JSON).write_text(
+        json.dumps(PRE_RESET_IDENTITY_RECORD), encoding="utf-8"
     )
-    assert _json_bytes(_record_to_dict(minimal)) == LEGACY_GOLDEN_MINIMAL
 
-    with_mcp = SessionRecord(
-        schema_version=1,
-        session_id="legacy-sess-2",
-        role_id="doc-check",
-        role_hash="a" * 64,
-        workspace_hash="b" * 64,
-        policy_hash="c" * 64,
-        acpx_version="0.12.0",
-        adapter_agent="codex",
-        effective_cwd="/work/project",
-        matched_root=None,
-        created_at="2026-07-21T00:00:00+00:00",
-        updated_at="2026-07-21T01:00:00+00:00",
-        acpx_session_id="acpx-abc",
-        session_name="named",
-        mcp_config_path="/work/mcp.json",
-        mcp_config_sha256="d" * 64,
-    )
-    assert _json_bytes(_record_to_dict(with_mcp)) == LEGACY_GOLDEN_WITH_MCP
+    record = store.open_session("legacy-sess-1")
+    assert record.native_adapter_contract_hash == "f" * 64
+
+    with pytest.raises(SessionBindingError) as err:
+        validate_native_binding(
+            record,
+            profile=_profile(),
+            workspace_result=_workspace(),
+            owner="hermes",
+            namespace="hermes/doc-check",
+        )
+    assert "LEGACY_SESSION_IDENTITY" in str(err.value)
 
 
 # -- native creation contract ----------------------------------------------
@@ -426,16 +450,17 @@ def test_refuse_quarantined_false_preserves_legacy_acquire_behavior(
         )
 
 
-# -- legacy inspection surface + last-effective ------------------------------
+# -- quarantine projection + last-effective ------------------------------
 
 
-def test_inspection_reports_quarantine_rather_than_a_state(tmp_path: Path) -> None:
-    """The inspection surface projects the one durable refusal, not a state."""
+def test_a_record_projects_quarantine_rather_than_a_state(tmp_path: Path) -> None:
+    """A record carries the one durable refusal, and no lifecycle value."""
     store = _store(tmp_path)
     _native(store)
-    assert session_inspect._read_quarantined(store, "native-1") is False
+    assert store.open_session("native-1").quarantine is None
     store.mark_quarantined("native-1", reason_code=QUARANTINE_DISPATCH_OBSERVATION_LOST, run_id="run-4", now=T0)
-    assert session_inspect._read_quarantined(store, "native-1") is True
+    assert store.open_session("native-1").quarantine is not None
+    assert not hasattr(store.open_session("native-1"), "state")
 
 
 def test_commit_last_effective_updates_atomically(tmp_path: Path) -> None:

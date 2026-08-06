@@ -25,13 +25,12 @@ trusted caller → arsd UDS → ars-core / Native ACP → one local process runn
 Installation, configuration, credentials, `HOME` and AGENT state, and upgrades belong to users and
 operators, outside ARS. ARS owns the process it starts, not the software it starts.
 
-The legacy v0.1.7 acpx paths are **not** an ARS product, runtime, fallback, Session store, compatibility
-baseline, or compatibility obligation, and they are not the design basis for new work. Their code and the
-fields it emits still exist on `main`, and this authority chain describes them only as current-source facts;
-removing that code and content is separately authorized work that this PRD neither performs nor approves.
-The only acpx material the product retains is a bounded differential/comparison-test reference. The former
-acpx authority is preserved under `docs/archive/pre-vnext-reset-2026-07-21/`, and the retired
-artifact/Binding-era authority under `docs/archive/binding-era-2026-07/`.
+acpx is not a product, runtime, or compatibility surface.
+The acpx runtime was removed from ARS.
+That removal took the CLI leaves it served, its fixtures, and the result field it emitted for a process
+exit; the audited keep set was empty, so no fixture was retained. The retired authority is preserved under
+`docs/archive/pre-vnext-reset-2026-07-21/`, and the artifact/Binding-era authority under
+`docs/archive/binding-era-2026-07/`. Neither directs new work.
 
 ## 2. Actors and authority
 
@@ -305,8 +304,8 @@ guarantees. ARS makes no isolation claim either way.
   its own `HOME`, cache, config, or Session state during a Run completes normally; attribution is by
   process, not by filesystem diff.
 - Native data lives only under explicit `native-runs/` and `native-sessions/` roots wired through one
-  storage seam. Native paths never read, write, import, migrate, mirror, or collide with legacy/acpx
-  stores; same textual IDs may coexist safely across roots.
+  storage seam. Native paths never read, write, import, migrate, mirror, or collide with any pre-existing
+  legacy store; same textual IDs may coexist safely across roots.
 
 ### R9 — Evidence and runtime ledger
 
@@ -384,11 +383,10 @@ guarantees. ARS makes no isolation claim either way.
 - No retroactive erasure of old bytes, no dual-write, no dual-read, no shim, no alias, and no silent
   fallback in either direction. Old `/opt` artifact trees and Binding roots simply stop being referenced;
   they are not deleted, and their removal is a separate operator decision.
-- Native ACP never calls acpx as driver, compatibility layer, Session store, or fallback, and no acpx
-  behavior is a V4 product obligation. Legacy acpx artifacts remain readable by their existing path;
-  Native artifacts are isolated. Any maintenance of the legacy line is separately approved, does not
-  reopen its archived requirements, and must not reintroduce legacy role/model binding as the vNext
-  product model.
+- There is one runtime, so there is nothing to call as driver, compatibility layer, Session store, or
+  fallback, and no retired behavior is a V4 product obligation. Artifacts written by the retired line stay
+  on disk, readable by their existing path and never rewritten or migrated; Native artifacts are isolated.
+  Its archived requirements do not reopen, and legacy role/model binding is not the vNext product model.
 
 ### R12 — Compatibility profiles: ACP semantics only
 
@@ -643,10 +641,8 @@ Lean task state, the active plan, and open gates live in
 [`docs/roadmap/current-status.md`](../roadmap/current-status.md); this section records only the coarse
 source position.
 
-- Legacy source without product authority: the v0.1.7 acpx one-shot/persistent paths are still implemented
-  on `main`. Their product, runtime, and compatibility authority is retired; removing that code and the
-  content describing it is separately authorized work, and only a bounded differential/comparison-test
-  reference is retained.
+- The retired acpx path was removed from source. That removal also took the documentation describing it
+  as available. One production architecture remains: `arsd` + ars-core + Native ACP.
 - vNext Stage 0/1 (Native ACP core) and Stage 2 (`arsd` UDS ingress, ownership, reconciliation,
   service/cgroup containment) are implemented on `main` with their acceptance closed.
 - **Authority and source are aligned on `main`.** Every requirement above, R13–R15 included, has merged
@@ -666,7 +662,7 @@ source position.
 Public ingress, root/TCP daemon, distributed or multi-tenant control plane, business orchestration,
 Feishu/Gateway semantics, broad RBAC, per-Run Worker, arbitrary command/argv/env/config passthrough from
 the wire, runtime adapter plugins, remote transport, attach-to-running-agent, plugin loading, containers,
-sandboxing, ARS credential resolution, acpx fallback, shared or imported acpx sessions, cross-AGENT Session
+sandboxing, ARS credential resolution, any second runtime or fallback, imported legacy sessions, cross-AGENT Session
 reuse, generalized Session rebind, automatic replay/retry/resume, a workspace content-digest service, a
 filesystem watcher, a second conversation database, and hostile-process sandbox claims.
 

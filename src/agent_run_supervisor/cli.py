@@ -6,61 +6,29 @@ from typing import Sequence
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """The complete installed operator surface: three read-only commands.
+
+    ``agents validate``, ``agents doctor``, and ``run inspect`` — the three the
+    design authority declares, and deliberately no fourth. Nothing here starts a
+    Run: production ingress is ``arsd`` over its local socket, and this console
+    script is the operator's read-only window onto the registry and onto one
+    Run's recorded launch evidence.
+    """
     parser = argparse.ArgumentParser(
         prog="agent-run-supervisor",
-        description="Supervise ACP/acpx external AGENT runs and sessions with redacted local evidence.",
+        description=(
+            "Read-only operator checks over the agent registry and per-Run "
+            "launch evidence. Runs are submitted to arsd, not to this command."
+        ),
     )
     subparsers = parser.add_subparsers(dest="command", metavar="command")
 
-    validate_role = subparsers.add_parser(
-        "validate-role",
-        help="Validate an AgentRoleSpec file.",
-    )
-    validate_role.add_argument("role_file", help="Path to a JSON AgentRoleSpec file.")
-
-    replay = subparsers.add_parser(
-        "replay",
-        help="Replay an observed acpx stdout NDJSON stream through the parser.",
-    )
-    replay.add_argument("events_file", help="Path to acpx stdout NDJSON file.")
-
-    doctor = subparsers.add_parser(
-        "doctor",
-        help="Run environment/fixture probes without launching a real AGENT.",
-    )
-    doctor.add_argument("--role", default=None, help="Optional role file to validate.")
-    doctor.add_argument(
-        "--fixtures",
-        default=None,
-        help="Optional fixture directory to replay.",
-    )
-
     run = subparsers.add_parser(
         "run",
-        help="Supervise local acpx exec or persist safe dry-run artifacts.",
-        description="Supervise local acpx exec under AgentRoleSpec policy, or persist safe dry-run artifacts with --no-real-run.",
+        help="Per-Run evidence (read-only).",
+        description="Read one Run's recorded evidence. Starts nothing.",
     )
-    # Not ``required`` at the parser level: ``run inspect`` is a sibling
-    # subcommand that needs neither, and argparse would demand them before it
-    # ever reached the subparser. ``cmd_run`` enforces both instead, so the
-    # legacy invocation is unchanged and the new one is expressible.
-    run.add_argument("--role", default=None, help="Path to AgentRoleSpec JSON file.")
-    run.add_argument("--prompt-file", default=None, help="Path to prompt text file.")
-    run.add_argument("--cwd", default=None, help="Override effective cwd for exec or dry-run compilation.")
-    run.add_argument(
-        "--no-real-run",
-        action="store_true",
-        help="Persist safe dry-run artifacts without launching local acpx exec.",
-    )
-    run.add_argument(
-        "--runs-dir",
-        default=None,
-        help="Directory that holds run artifacts (defaults to .agent-run-supervisor/runs).",
-    )
-
     _add_run_inspect_parser(run)
-    _add_session_parser(subparsers)
-    _add_cleanup_parser(subparsers)
     _add_agents_parser(subparsers)
     return parser
 
@@ -136,110 +104,6 @@ def _add_run_inspect_parser(run: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_cleanup_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Confined, dry-run-first Run evidence retention/pruning."""
-    cleanup = subparsers.add_parser(
-        "cleanup",
-        help="Plan (dry-run) or apply confined pruning of local Run evidence.",
-        description=(
-            "List Run artifacts under a .agent-run-supervisor root whose bulky "
-            "evidence a retention policy would prune. Dry-run by default; --apply "
-            "prunes only the planned, confined, terminated Runs, and always keeps "
-            "each Run's idempotency/attribution spine. Session records are durable "
-            "and are never removed."
-        ),
-    )
-    cleanup.add_argument(
-        "--runs-dir",
-        default=None,
-        help="Directory that holds run artifacts (defaults to .agent-run-supervisor/runs).",
-    )
-    cleanup.add_argument(
-        "--sessions-dir",
-        default=None,
-        help="Directory that holds session records (defaults to .agent-run-supervisor/sessions).",
-    )
-    cleanup.add_argument(
-        "--max-age-days",
-        type=int,
-        default=None,
-        help="Prune Run evidence strictly older than this many days.",
-    )
-    cleanup.add_argument(
-        "--max-count",
-        type=int,
-        default=None,
-        help="Keep only the newest N eligible Runs; prune the rest.",
-    )
-    cleanup.add_argument(
-        "--apply",
-        action="store_true",
-        help="Actually prune the planned Runs (default is a read-only dry-run).",
-    )
-
-
-def _add_session_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Durable-Session surface: ``session create|send|status|abort|list``."""
-    session = subparsers.add_parser(
-        "session",
-        help="Durable session surface (create / send / status / abort / list).",
-        description="Create a role-bound durable session, send a prompt turn, query status, abort/cancel active work, or list local session records. Sessions are durable and resumable; there is no close.",
-    )
-    session_sub = session.add_subparsers(dest="session_command", metavar="session_command")
-
-    def _add_common(sub: argparse.ArgumentParser) -> None:
-        sub.add_argument("--role", required=True, help="Path to AgentRoleSpec JSON file.")
-        sub.add_argument("--session-id", required=True, help="Local session id (safe path component).")
-        sub.add_argument("--cwd", default=None, help="Override effective cwd for session work.")
-        sub.add_argument(
-            "--sessions-dir",
-            default=None,
-            help="Directory that holds session records (defaults to .agent-run-supervisor/sessions).",
-        )
-
-    create = session_sub.add_parser("create", help="Create a local durable session.")
-    _add_common(create)
-    create.add_argument(
-        "--session-name",
-        default=None,
-        help="acpx session name (defaults to --session-id).",
-    )
-
-    send = session_sub.add_parser("send", help="Send one prompt turn to a session.")
-    _add_common(send)
-    prompt_source = send.add_mutually_exclusive_group(required=True)
-    prompt_source.add_argument("--prompt-file", help="Path to prompt text file.")
-    prompt_source.add_argument(
-        "--goal-file",
-        help=(
-            "Path to goal text; validated and compiled into the adapter-"
-            "appropriate goal turn (the goal-contract/v1 text template unless "
-            "the adapter natively supports a /goal command)."
-        ),
-    )
-
-    status = session_sub.add_parser("status", help="Query a session's status/show record.")
-    _add_common(status)
-
-    abort = session_sub.add_parser("abort", help="Cooperatively cancel/abort active session work.")
-    _add_common(abort)
-
-    list_sessions = session_sub.add_parser(
-        "list",
-        help="List local session records (read-only; does not launch acpx/AGENT work).",
-    )
-    list_sessions.add_argument(
-        "--sessions-dir",
-        default=None,
-        help="Directory that holds session records (defaults to .agent-run-supervisor/sessions).",
-    )
-    list_sessions.add_argument(
-        "--role",
-        default=None,
-        help="Optional role file; if given, list only records owned by that role.",
-    )
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -248,34 +112,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("error: a subcommand is required", file=sys.stderr)
         return 2
 
-    if args.command == "validate-role":
-        from agent_run_supervisor.commands import cmd_validate_role
-
-        return cmd_validate_role(args)
-    if args.command == "replay":
-        from agent_run_supervisor.commands import cmd_replay
-
-        return cmd_replay(args)
-    if args.command == "doctor":
-        from agent_run_supervisor.commands import cmd_doctor
-
-        return cmd_doctor(args)
     if args.command == "run":
-        if getattr(args, "run_command", None) == "inspect":
-            from agent_run_supervisor.commands import cmd_run_inspect
+        if getattr(args, "run_command", None) != "inspect":
+            parser.print_usage(sys.stderr)
+            print("error: run requires the inspect subcommand", file=sys.stderr)
+            return 2
+        from agent_run_supervisor.commands import cmd_run_inspect
 
-            return cmd_run_inspect(args)
-        from agent_run_supervisor.commands import cmd_run
-
-        return cmd_run(args)
-    if args.command == "session":
-        from agent_run_supervisor.commands import cmd_session
-
-        return cmd_session(args)
-    if args.command == "cleanup":
-        from agent_run_supervisor.commands import cmd_cleanup
-
-        return cmd_cleanup(args)
+        return cmd_run_inspect(args)
     if args.command == "agents":
         from agent_run_supervisor.commands import cmd_agents
 

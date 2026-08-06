@@ -1,47 +1,53 @@
-"""C2: additive Native terminal-status vocabulary (failed/cancelled/unknown).
+"""The Native terminal-status vocabulary, pinned as a closed set.
 
-Consumer-behavior pins follow the C1 G5 audit record: enum construction alone
-proves nothing about consumers, so every consumer classified intolerant or
-semantically meaningful gets a focused behavior test here. acpx classification
-must remain provably unchanged (zero-coercion sweep).
+``AgentRunStatus`` once carried a second, wider vocabulary: the statuses a
+process-exit classifier produced for the retired runtime. That classifier and
+every emitter of those statuses are gone, so the enum is now exactly the five
+Native terminals of PRD R5 — and *exactly* is the pin. A member that nothing can
+produce and nothing accepts is not a harmless leftover: it is a value a hostile
+or stale ``result.json`` can still claim, and the validator's trust decision is
+built on this set.
 """
 
 from __future__ import annotations
 
-import argparse
-import itertools
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-from agent_run_supervisor import commands, session_inspect
-from agent_run_supervisor.caller import CallerResult
-from agent_run_supervisor.exit_classifier import (
-    _RETRYABLE_DEFAULT,
-    AgentRunStatus,
-    ClassifierInput,
-    classify_exit,
+from agent_run_supervisor.exit_classifier import _RETRYABLE_DEFAULT, AgentRunStatus
+from agent_run_supervisor.result import (
+    _ERROR_CODE_FOR_STATUS,
+    _NATIVE_TERMINAL_STATUSES,
+    build_result_payload,
+    validate_native_terminal_result,
 )
-from agent_run_supervisor.hermes_caller.verdict import BusinessVerdict, derive_verdict
-from agent_run_supervisor.hermes_caller.view_model import (
-    CardPhase,
-    build_result_view_model,
+
+#: The complete vocabulary. PRD R5, and nothing beside it.
+NATIVE_TERMINALS = ("completed", "failed", "cancelled", "timed_out", "unknown")
+
+#: Statuses the retired process-exit classifier produced. None may return.
+RETIRED_STATUSES = (
+    "no_op",
+    "runner_error",
+    "invalid_invocation",
+    "no_session",
+    "permission_denied",
+    "interrupted",
+    "protocol_error",
+    "infrastructure_error",
+    "policy_error",
 )
-from agent_run_supervisor.result import RunOutcome, build_result_payload
-
-NEW_MEMBERS = ("failed", "cancelled", "unknown")
 
 
-def _payload(status: AgentRunStatus) -> dict:
-    return build_result_payload(
+def _payload(status: AgentRunStatus, **overrides) -> dict:
+    payload = build_result_payload(
         run_id="run-native-test",
         status=status,
         origin="supervisor",
         detail_code=None,
-        retryable=False,
-        exit_code=None,
+        retryable=_RETRYABLE_DEFAULT[status],
         signal=None,
         stop_reason=None,
         usage=None,
@@ -49,184 +55,88 @@ def _payload(status: AgentRunStatus) -> dict:
         truncated=False,
         truncate_reason=None,
         run_dir=Path("/tmp/run-native-test"),
+        raw_event_path="events.jsonl",
     )
+    payload.update(overrides)
+    return payload
 
 
-def _caller_result(status_value: str) -> CallerResult:
-    return CallerResult(
-        mode="exec",
-        supervisor_status=status_value,
-        result={"status": status_value, "final_message": "diagnostic text"},
-        artifact_dir=None,
-        run_dir="/tmp/run-native-test",
-        session_dir=None,
-    )
+# -- the enum is the vocabulary ----------------------------------------------
 
 
-@pytest.mark.parametrize("value", NEW_MEMBERS)
-def test_new_member_constructs_and_round_trips_json(value: str) -> None:
+def test_the_enum_is_exactly_the_native_terminal_vocabulary() -> None:
+    assert {status.value for status in AgentRunStatus} == set(NATIVE_TERMINALS)
+    assert _NATIVE_TERMINAL_STATUSES == set(AgentRunStatus)
+
+
+@pytest.mark.parametrize("value", RETIRED_STATUSES)
+def test_a_retired_status_is_no_longer_a_member(value: str) -> None:
+    with pytest.raises(ValueError):
+        AgentRunStatus(value)
+
+
+def test_the_derived_tables_narrowed_with_the_enum() -> None:
+    """A table row for a member that no longer exists is an unreachable branch."""
+    assert set(_RETRYABLE_DEFAULT) == set(AgentRunStatus)
+    assert set(_ERROR_CODE_FOR_STATUS) == set(AgentRunStatus)
+
+
+def test_the_exit_classifier_module_exports_no_classifier() -> None:
+    """The runtime that needed a process-exit classification is gone with it."""
+    import agent_run_supervisor.exit_classifier as exit_classifier
+
+    for name in ("classify_exit", "ClassifierInput", "ClassifierOutput"):
+        assert not hasattr(exit_classifier, name), name
+
+
+# -- payload behaviour per member --------------------------------------------
+
+
+@pytest.mark.parametrize("value", NATIVE_TERMINALS)
+def test_member_constructs_and_round_trips_json(value: str) -> None:
     status = AgentRunStatus(value)
     assert status.value == value
     assert json.loads(json.dumps({"status": status.value}))["status"] == value
 
 
-@pytest.mark.parametrize("value", NEW_MEMBERS)
-def test_retryable_default_is_false_for_new_members(value: str) -> None:
-    assert _RETRYABLE_DEFAULT[AgentRunStatus(value)] is False
-
-
 @pytest.mark.parametrize(
     ("value", "error_code"),
-    [("failed", "FAILED"), ("cancelled", "CANCELLED"), ("unknown", "UNKNOWN")],
+    [
+        ("completed", None),
+        ("failed", "FAILED"),
+        ("cancelled", "CANCELLED"),
+        ("timed_out", "TIMED_OUT"),
+        ("unknown", "UNKNOWN"),
+    ],
 )
-def test_result_payload_carries_new_members(value: str, error_code: str) -> None:
+def test_result_payload_carries_the_status_derived_error_code(
+    value: str, error_code: str | None
+) -> None:
     payload = _payload(AgentRunStatus(value))
     assert payload["status"] == value
-    assert payload["retryable"] is False
     assert payload["error_code"] == error_code
+    assert payload["retryable"] is _RETRYABLE_DEFAULT[AgentRunStatus(value)]
 
 
-@pytest.mark.parametrize("value", NEW_MEMBERS)
-def test_result_payload_round_trips_with_retryable_false(
-    tmp_path: Path, value: str
-) -> None:
+@pytest.mark.parametrize("value", NATIVE_TERMINALS)
+def test_result_payload_round_trips_through_disk(tmp_path: Path, value: str) -> None:
     payload = _payload(AgentRunStatus(value))
     path = tmp_path / "result.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     reread = json.loads(path.read_text(encoding="utf-8"))
     assert reread["status"] == value
-    assert reread["retryable"] is False
-    assert reread["error_code"] == value.upper()
+    assert reread["retryable"] is _RETRYABLE_DEFAULT[AgentRunStatus(value)]
 
 
-def test_classify_exit_never_returns_new_members() -> None:
-    # Zero-coercion guard: acpx classification is provably unchanged — no
-    # input combination in the bounded sweep produces a Native-only member.
-    new_members = {AgentRunStatus(value) for value in NEW_MEMBERS}
-    exit_codes = (0, 1, 2, 3, 4, 5, 99, 130)
-    acpx_codes = (
-        None,
-        "USAGE",
-        "TIMEOUT",
-        "NO_SESSION",
-        "PERMISSION_DENIED",
-        "INFRASTRUCTURE",
-        "SUPERVISOR",
-        "MYSTERY",
-    )
-    origins = (None, "supervisor", "acp")
-    flag_grid = tuple(itertools.product((False, True), repeat=4))
-    for exit_code, acpx_code, origin, flags in itertools.product(
-        exit_codes, acpx_codes, origins, flag_grid
-    ):
-        protocol_error, killed, timed_out, no_effect = flags
-        output = classify_exit(
-            ClassifierInput(
-                exit_code=exit_code,
-                acpx_code=acpx_code,
-                origin=origin,
-                protocol_error=protocol_error,
-                supervisor_killed=killed,
-                supervisor_timed_out=timed_out,
-                no_observed_effect=no_effect,
-            )
-        )
-        assert output.status not in new_members, (exit_code, acpx_code, flags)
-
-
-def test_known_turn_statuses_include_new_members() -> None:
-    # Documents the deliberate vocabulary growth of the derived frozenset.
-    assert set(NEW_MEMBERS) <= session_inspect._KNOWN_TURN_STATUSES
-
-
-@pytest.mark.parametrize("value", NEW_MEMBERS)
-def test_read_turn_status_returns_new_members(tmp_path: Path, value: str) -> None:
-    status = AgentRunStatus(value)
-    turn_dir = tmp_path / "turn-0001"
-    turn_dir.mkdir()
-    (turn_dir / "result.json").write_text(
-        json.dumps({"status": status.value}), encoding="utf-8"
-    )
-    assert session_inspect._read_turn_status(turn_dir) == value
-
-
-class _StatusRunner:
-    def __init__(self, status: AgentRunStatus) -> None:
-        self._status = status
-
-    def run(self, *, role, prompt, cwd, **_) -> RunOutcome:
-        return RunOutcome(
-            run_dir=Path("/tmp/run-native-test"),
-            status=self._status,
-            result={"status": self._status.value},
-        )
-
-
-@pytest.mark.parametrize("value", NEW_MEMBERS)
-def test_cmd_run_maps_new_members_to_exit_1(
-    monkeypatch: pytest.MonkeyPatch,
-    role_file: Path,
-    prompt_file: Path,
-    value: str,
+@pytest.mark.parametrize("value", RETIRED_STATUSES)
+def test_a_persisted_record_claiming_a_retired_status_is_untrusted(
+    tmp_path: Path, value: str
 ) -> None:
-    status = AgentRunStatus(value)
-    monkeypatch.setattr(commands, "SupervisorRunner", lambda **_: _StatusRunner(status))
-    args = argparse.Namespace(
-        role=str(role_file),
-        prompt_file=str(prompt_file),
-        no_real_run=False,
-        cwd=None,
-        runs_dir=None,
-    )
-    assert commands.cmd_run(args) == 1
+    """A record from the retired line is unreadable evidence, not a terminal.
 
-
-class _StatusRuntime:
-    def __init__(self, status_value: str) -> None:
-        self._value = status_value
-
-    def send(self, *, role, session_id, prompt, cwd=None, **_) -> SimpleNamespace:
-        return SimpleNamespace(result={"status": self._value})
-
-
-@pytest.mark.parametrize("value", NEW_MEMBERS)
-def test_cmd_session_send_maps_new_members_to_exit_1(
-    monkeypatch: pytest.MonkeyPatch,
-    role_file: Path,
-    prompt_file: Path,
-    value: str,
-) -> None:
-    status = AgentRunStatus(value)
-    monkeypatch.setattr(
-        commands, "SessionRuntime", lambda **_: _StatusRuntime(status.value)
-    )
-    args = argparse.Namespace(
-        session_command="send",
-        role=str(role_file),
-        prompt_file=str(prompt_file),
-        goal_file=None,
-        session_id="native-test-session",
-        cwd=None,
-        sessions_dir=None,
-    )
-    assert commands.cmd_session(args) == 1
-
-
-@pytest.mark.parametrize("value", NEW_MEMBERS)
-def test_verdict_treats_new_members_as_non_success(value: str) -> None:
-    status = AgentRunStatus(value)
-    decision = derive_verdict(_caller_result(status.value))
-    assert decision.verdict is not BusinessVerdict.PASS
-    assert decision.supervisor_status == value
-
-
-@pytest.mark.parametrize("value", NEW_MEMBERS)
-def test_view_model_treats_new_members_as_error_with_verbatim_chip(
-    value: str,
-) -> None:
-    status = AgentRunStatus(value)
-    result = _caller_result(status.value)
-    decision = derive_verdict(result)
-    view_model = build_result_view_model(result, [], decision)
-    assert view_model.phase is CardPhase.ERROR
-    assert view_model.supervisor_status == value
+    The enum lookup is what refuses it, so the refusal cannot be forgotten in a
+    branch: there is no member to compare against any more.
+    """
+    payload = _payload(AgentRunStatus.FAILED)
+    payload["status"] = value
+    assert validate_native_terminal_result(payload, run_id="run-native-test") is None
