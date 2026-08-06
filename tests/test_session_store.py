@@ -1466,3 +1466,53 @@ def test_a_terminal_run_never_ends_the_session(tmp_path: Path) -> None:
     assert reopened.quarantine is None
     again = store.acquire_lock(record.session_id, "hermes", refuse_quarantined=True)
     assert again.token != lock.token
+
+
+# -- the grammar is exact, including at the very end of the string -----------
+#
+# ``re.match`` with a trailing ``$`` accepts one trailing newline: ``$`` matches
+# at the end of the string *or* just before a final ``\n``. A Session id is a
+# directory name, so "almost the whole string" is not the rule — the whole
+# string is. Accepting ``"sess-ok\n"`` here would let an id the store cannot
+# use reach the store, and turn a caller mistake into a not-found answer.
+
+
+NEWLINE_SESSION_IDS = (
+    "sess-ok\n",
+    "sess-ok\r\n",
+    "sess-ok\n\n",
+    "sess-ok\nsess-evil",
+    "\nsess-ok",
+    "sess-ok\r",
+)
+
+
+@pytest.mark.parametrize("candidate", NEWLINE_SESSION_IDS)
+def test_a_session_id_carrying_a_newline_is_not_valid(candidate: str) -> None:
+    from agent_run_supervisor.session import is_valid_session_id
+
+    assert is_valid_session_id(candidate) is False
+
+
+@pytest.mark.parametrize("candidate", NEWLINE_SESSION_IDS)
+def test_the_store_refuses_a_newline_session_id_before_touching_a_path(
+    tmp_path: Path, candidate: str
+) -> None:
+    """The store's own guard agrees with the shared predicate, exactly."""
+    from agent_run_supervisor.session import InvalidSessionIdError
+
+    store = SessionStore(tmp_path / "sessions")
+    with pytest.raises(InvalidSessionIdError):
+        store.open_session(candidate)
+    # Nothing was created on the way to refusing.
+    assert not (tmp_path / "sessions").exists() or list(
+        (tmp_path / "sessions").iterdir()
+    ) == []
+
+
+def test_a_well_formed_id_is_still_valid() -> None:
+    """The control: tightening the end of the string changed nothing else."""
+    from agent_run_supervisor.session import is_valid_session_id
+
+    for good in ("sess-ok", "s", "S3ss_id-1", "sess-" + "a" * 64):
+        assert is_valid_session_id(good) is True

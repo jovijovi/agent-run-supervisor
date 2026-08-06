@@ -698,6 +698,11 @@ def test_s5_malformed_failing_isolation_then_success() -> None:
     with arsd_client.ArsdClient(sock) as cli:
         first = cli.submit(request_id=key, payload=idem_payload)
         run_id = first["run_id"]
+        # The Session that create actually bound. Naming it is what makes the
+        # second frame a *different* request under the same key, which is the
+        # conflict this leg exists to provoke.
+        idem_sess = first["session_id"]
+        assert idem_sess
     with arsd_client.ArsdClient(sock) as cli:
         with pytest.raises(arsd_client.ArsdIdempotencyConflictError):
             cli.submit(

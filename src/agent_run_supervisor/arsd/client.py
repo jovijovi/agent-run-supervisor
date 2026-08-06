@@ -228,10 +228,16 @@ class ArsdClient:
     ) -> dict[str, Any]:
         """Submit one Run. The ack carries ``run_id``, ``session_id``, ``accepted_at``.
 
-        ``payload["request"]["session_id"]`` is the whole Session choice: omit
-        it (or send ``None``) to create one new durable Session and run its
-        first Run, or send an existing Session id to reuse it. Reuse is
-        existing-only and never falls back to creating anything.
+        ``payload["request"]["session_id"]`` is the whole Session choice:
+        **omit the key** to create one new durable Session and run its first
+        Run, or send an existing Session id to reuse it. Reuse is existing-only
+        and never falls back to creating anything.
+
+        Omitting the key and sending ``None`` are **not** the same. Absent says
+        "I have no Session"; a present null says "my Session is the null value",
+        which is not a Session — so the daemon refuses it with
+        ``INVALID_REQUEST`` rather than quietly starting a second conversation
+        for a caller whose id-producing code returned ``None``.
 
         ``request_id`` is the idempotency key. Repeating it returns the same
         ``run_id``/``session_id`` facts and dispatches nothing a second time —

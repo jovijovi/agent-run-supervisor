@@ -23,15 +23,22 @@ The contract tests run the **registered** ``cursor-native-acp-v1``, not a
 test-local copy of it. That is the point: the profile *as registered* is what a
 deployment resolves, and every suite that missed this built its own.
 
-Scope, because "same Session" names two different things here. The **external
-AGENT** Session id is what these tests pin as continuous: two real child
-processes use one id, the second reaches its prompt through a real
-``session/load``, and the agent answers out of state it kept itself. The **ARS**
-Session record is only the controller's own record naming that external id, and
-the harness seeds Run 2's record the way an earlier Run would have left it (see
-``_two_runs``). That record's binding to the external id is therefore arranged
-here, not derived from Run 1's own record — record lineage is not what this file
-pins.
+Scope, because "same Session" names two things here, and this file pins **both**.
+The **external AGENT** Session id is continuous: two real child processes use one
+id, the second reaches its prompt through a real ``session/load``, and the agent
+answers out of state it kept itself. The **ARS** Session record is the
+controller's own record naming that external id, and Run 2 reuses *the identity
+Run 1 actually returned and persisted* — ``_two_runs`` passes
+``seed_session=False``, so nothing is arranged on Run 2's behalf. Record lineage
+is therefore part of the contract under test: if Run 1 fails to publish a durable
+bound record, Run 2 fails instead of quietly succeeding against a seeded one.
+
+The negative controls close the other half. With Run 1's binding **missing**,
+**corrupt**, **drifted** (a workspace hash that no longer matches), or
+**unbound** (no external id), Run 2 must fail *before* it prompts and *without*
+falling back to ``session/new`` — proven by the absence of a dispatch marker and
+of any ``session_new_requested``/``session_prompt_sent`` event. Reuse is
+existing-only: a broken binding is a refusal, never a fresh conversation.
 """
 
 from __future__ import annotations

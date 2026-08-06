@@ -3046,3 +3046,143 @@ def test_r12_register_vs_close_admission_atomic_no_orphan_dispatch(
                 await asyncio.wait_for(registry.wait_until_idle(), 1.0)
 
     run_async(case())
+
+
+# --- an unsafe Session id is a caller mistake, not a daemon fault ------------
+#
+# ``../x`` is not a Session that happens to be missing — it is not a Session id
+# at all, and the store refuses it before it will touch a path. That refusal
+# used to escape the handler as an unhandled exception, so the caller saw
+# ``INTERNAL`` and lost the connection: a request problem reported as a server
+# problem, with a reconnect as the only way forward. It must be a stable
+# ``INVALID_REQUEST`` on a live connection, and it must still not echo the
+# offending text back.
+
+UNSAFE_SESSION_IDS = (
+    "../escape",
+    "..",
+    "a/b",
+    "with space",
+    ".hidden",
+    "-leading",
+    "sess\x00null",
+    # A trailing newline is the quiet one: a regex anchored with ``$`` accepts
+    # it, so an id the store cannot use would reach the store and come back as
+    # "unknown session" — a caller mistake answered as a lookup miss.
+    "sess-ok\n",
+    "sess-ok\r\n",
+    "sess-ok\nsess-evil",
+)
+
+
+@pytest.mark.parametrize("session_id", UNSAFE_SESSION_IDS)
+def test_an_unsafe_session_id_is_invalid_request_not_internal(
+    tmp_path: Path, session_id: str
+) -> None:
+    async def case():
+        harness = Harness(tmp_path)
+        caller = caller_for(principal_a())
+        try:
+            for op in ("session_status",):
+                err = await expect_code(
+                    harness,
+                    caller,
+                    op,
+                    f"unsafe-{op}",
+                    protocol.INVALID_REQUEST,
+                    {"session_id": session_id},
+                )
+                # The offending value never comes back, and neither does the
+                # store's own path-shaped diagnostic.
+                assert session_id not in err.message
+                assert "/" not in err.message
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+@pytest.mark.parametrize("session_id", UNSAFE_SESSION_IDS)
+def test_an_unsafe_session_id_creates_no_session_and_no_run(
+    tmp_path: Path, session_id: str
+) -> None:
+    async def case():
+        harness = Harness(tmp_path)
+        caller = caller_for(principal_a())
+        try:
+            await expect_code(
+                harness,
+                caller,
+                "session_status",
+                "unsafe-side-effects",
+                protocol.INVALID_REQUEST,
+                {"session_id": session_id},
+            )
+            assert harness.session_store.list_records() == []
+            runs_root = Path(harness.event_store.base_dir)
+            assert not runs_root.exists() or list(runs_root.iterdir()) == []
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_an_unknown_but_well_formed_session_id_stays_unknown_session(
+    tmp_path: Path,
+) -> None:
+    """The other side of the line: a real id that names nothing is not invalid."""
+
+    async def case():
+        harness = Harness(tmp_path)
+        caller = caller_for(principal_a())
+        try:
+            await expect_code(
+                harness,
+                caller,
+                "session_status",
+                "well-formed-missing",
+                protocol.UNKNOWN_SESSION,
+                {"session_id": "sess-nothing-here"},
+            )
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_an_unsafe_session_id_never_reaches_the_session_store(
+    tmp_path: Path,
+) -> None:
+    """The refusal is a wire fact, so nothing may touch storage to discover it.
+
+    This is what separates ``INVALID_REQUEST`` from ``UNKNOWN_SESSION``: an id
+    that is not an id has no lookup to miss.
+    """
+
+    async def case():
+        harness = Harness(tmp_path)
+        caller = caller_for(principal_a())
+        reached: list[str] = []
+        real_open = harness.session_store.open_session
+
+        def spy(session_id):
+            reached.append(session_id)
+            return real_open(session_id)
+
+        harness.session_store.open_session = spy  # type: ignore[method-assign]
+        try:
+            for index, unsafe in enumerate(UNSAFE_SESSION_IDS):
+                await expect_code(
+                    harness,
+                    caller,
+                    "session_status",
+                    f"no-store-{index}",
+                    protocol.INVALID_REQUEST,
+                    {"session_id": unsafe},
+                )
+            assert reached == [], reached
+        finally:
+            harness.session_store.open_session = real_open  # type: ignore[method-assign]
+            await harness.aclose()
+
+    run_async(case())

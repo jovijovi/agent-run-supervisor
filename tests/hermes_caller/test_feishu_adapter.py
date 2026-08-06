@@ -64,7 +64,7 @@ def _view_model() -> CardViewModel:
             rationale="2 issues found; revision required.",
             supervisor_status="completed",
         ),
-        session_lifecycle="closed",
+        session_lifecycle="durable",
         evidence_ref="[REDACTED]",
     )
 

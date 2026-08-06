@@ -92,7 +92,11 @@ QUARANTINE_EVIDENCE_FIELDS = ("reason_code", "source_run_id", "recorded_at")
 # dots (rules out ``.``/``..``), no separators, no whitespace. This is the one
 # definition: the wire validates against it before any storage access, and the
 # store validates against it before touching a path.
-SESSION_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_\-]*$"
+SESSION_ID_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_\-]*"
+# Matched with ``fullmatch``: the WHOLE string is the id. An anchored ``match``
+# would not be the same rule — ``$`` also matches just before a final newline,
+# so ``"sess-ok\n"`` would pass a check that means to say "safe path
+# component" and then reach the store as a directory name it cannot use.
 _SESSION_ID_RE = re.compile(SESSION_ID_PATTERN)
 
 
@@ -152,7 +156,7 @@ def is_valid_session_id(session_id: Any) -> bool:
     *before* touching storage — the wire parser and the Spec validator — ask
     this; the store itself raises :class:`InvalidSessionIdError` instead.
     """
-    return type(session_id) is str and _SESSION_ID_RE.match(session_id) is not None
+    return type(session_id) is str and _SESSION_ID_RE.fullmatch(session_id) is not None
 
 
 # The prospective-Session derivation. A create names its Session by a pure,
@@ -291,7 +295,7 @@ def _ensure_aware(moment: _dt.datetime) -> _dt.datetime:
 
 
 def _validate_session_id(session_id: str) -> str:
-    if not isinstance(session_id, str) or not _SESSION_ID_RE.match(session_id):
+    if not is_valid_session_id(session_id):
         raise InvalidSessionIdError(
             f"session_id {session_id!r} must match {_SESSION_ID_RE.pattern} "
             "(safe path component: no traversal, separators, or whitespace)",

@@ -28,6 +28,7 @@ from agent_run_supervisor.native_acp.spec import LIMIT_MAX_EVENT_BYTES_MAX
 from agent_run_supervisor.session import (
     QUARANTINE_UNTRUSTED_TERMINAL_EVIDENCE,
     SessionNotFoundError,
+    is_valid_session_id,
     SessionQuarantinedError,
     SessionStore,
 )
@@ -1418,6 +1419,16 @@ class ArsdHandlers:
         if not isinstance(session_id, str) or not session_id:
             raise protocol.ProtocolError(
                 protocol.INVALID_REQUEST, "session_id is required"
+            )
+        if not is_valid_session_id(session_id):
+            # Not a Session that happens to be missing — not a Session id at
+            # all. The store refuses it before it will touch a path, and its
+            # diagnostic quotes both the offending value and the pattern, so
+            # the grammar is judged here instead: a caller mistake reported as
+            # one, on a live connection, naming nothing the caller sent.
+            raise protocol.ProtocolError(
+                protocol.INVALID_REQUEST,
+                "session_id is not a safe session-store path component",
             )
         try:
             record = self._session_store.open_session(session_id)
