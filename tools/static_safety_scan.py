@@ -421,7 +421,7 @@ ALLOWED_ACPX_STATEMENTS = frozenset(
         "acpx as native production driver, fallback, compatibility layer, or shared/imported session store",
         "source removal of the acpx product, runtime, and compatibility content",
         "not approved by that decision: expanding the acpx cleanup",
-        "the acpx removal is implemented on a task branch",
+        "the acpx removal is merged on main",
         "the legacy acpx line",
     }
 )

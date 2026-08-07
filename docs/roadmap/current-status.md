@@ -2,7 +2,7 @@
 title: "ARS vNext Roadmap Current Status"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-06
+last_validated_at: 2026-08-07
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 ---
 # ARS vNext Roadmap Current Status
@@ -25,16 +25,16 @@ active_plan: (none)
 - The Session no-close model is closed on `main`: Runs terminate while Sessions remain durable and
   resumable, with one Session kind, no one-shot or ephemeral Session, and no normal Session terminal state.
   Quarantine is independent safety evidence, and `api_version` 3 is the sole caller wire.
-- Authority and source are being brought onto that model together in one candidate. Source implementation
-  authorizes source, tests, and docs only — it authorizes no runtime-data reset, service restart, release,
-  deployment, real-agent canary, push/PR/merge, or caller integration.
+- Authority and source are aligned on `main` for that model. Source implementation authorizes source,
+  tests, and docs only — it authorizes no runtime-data reset, service restart, release, deployment,
+  real-agent canary, push/PR/merge, or caller integration.
 - The retired acpx path was removed from source. That removal took the runtime and its package modules, the
   CLI leaves, the fixtures, and the API v3 process-exit result field. The audited keep set was empty, so no
   fixture was retained. One production architecture remains, `arsd` + ars-core + Native ACP, and a
   containment scanner plus exact wheel/sdist manifest gates refuse a second one. API v3 is the only
   contract: a persisted terminal carrying an undefined key is untrusted evidence, and nothing migrates or
-  rewrites a stored record. Source only: no runtime-data change, service action, release, deployment, or
-  merge.
+  rewrites a stored record. The removal is merged on `main`. Source only: no runtime-data change, service
+  action, release, or deployment.
 
 ## Open decisions and gates
 
@@ -46,7 +46,7 @@ None is approved by this board.
   development Run/Session state, restarting `arsd`, and real Claude/Codex canaries each stay separate.
 - **Decision 3 — lifetime of the pre-reset line.** Open operator decision.
 - **Sachima `ArsdBackend` integration.** Parked; requires separate approval and evidence.
-- **Removal landing.** Source, tests, and docs are authorized and implemented on a task branch. Review, merge, release, deployment, and any runtime-data decision each stay separate and unapproved.
+- **Removal landing.** Source, tests, and docs are merged on `main`. Release, publication, deployment, and any runtime-data decision each stay separate and unapproved.
 - **Per-agent and operational gates.** The denied-action canary remains required before a registered agent's
   use; release, publication, deployment, service, migration, and runtime actions each require separate
   authorization.

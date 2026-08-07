@@ -2,7 +2,7 @@
 title: "ARS vNext Feature and Capability Tracker"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-06
+last_validated_at: 2026-08-07
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/features.md"
 ---
 # ARS vNext Feature and Capability Tracker
@@ -20,7 +20,7 @@ Remaining cell says what happened to the source, because for the boundary reset 
 
 | ID | Capability | Product | Impl | Evidence / authority | Remaining |
 |---|---|---|---|---|---|
-| F-LEGACY-COMPAT-001 | the legacy acpx line | Not a product | Removed | GOAL boundary section; containment scanner; wheel/sdist manifest gates | source deleted on a task branch: runtime, CLI leaves, fixtures, and the process-exit result field. Audited keep set was empty, so no fixture remains |
+| F-LEGACY-COMPAT-001 | the legacy acpx line | Not a product | Removed | GOAL boundary section; containment scanner; wheel/sdist manifest gates | merged; source deleted from `main`: runtime, CLI leaves, fixtures, and the process-exit result field. Audited keep set was empty, so no fixture remains |
 | F-VNEXT-ADMISSION-001 | structured admission → immutable AgentRunSpec sealed before spawn | Required | Done | PRD R1; archived plan C1/C4; freeze-order + spec-hash suites | merged; the resolution inputs change with F-AGENT-REGISTRY-001 |
 | F-VNEXT-PROCESS-001 | ManagedProcess live stdio supervision | Required | Done | PRD R2; archived plan C3; live-wire/group-kill/reap suite | merged; first released in 0.2.0 |
 | F-NATIVE-ACP-001 | Native ACP exact-config core through ars-core | Required | Done | PRD R2–R3; archived plan C1–C10; real B-grade acceptance | merged; live option domains land with F-BOUNDARY-RESET-001 |
@@ -64,15 +64,15 @@ Remaining cell says what happened to the source, because for the boundary reset 
 | Explicit exclusions | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
 
 No row is `Implemented`: the Session no-close model is merged on `main`.
-The acpx removal is implemented on a task branch. It is not merged, and
-F-LEGACY-COMPAT-001 records it as `Removed` in source terms only.
+The acpx removal is merged on `main`. F-LEGACY-COMPAT-001 records it as
+`Removed` in source terms only.
 
 **What Retired and Superseded mean here.** Both are **documentation-authority** states recorded by the
 boundary reset: `Retired` means the tracked architecture no longer targets the capability at all, and
 `Superseded` means a narrower capability replaces it. Where the Remaining cell says *deleted from `main`*,
 the deletion is real and merged. Nothing outside the repository moved — no Binding root or artifact tree
 was touched, no `/opt` path was deleted, and no operator storage was migrated or removed.
-The removal of the retired runtime is a separate, later decision recorded by F-LEGACY-COMPAT-001.
+The removal of the retired runtime was a separate, later decision recorded by F-LEGACY-COMPAT-001.
 
 **Publication boundary.** `Done` means merged on `main` — nothing more. Published package/release facts
 come from live GitHub Releases and PyPI; deployed/running facts come from operator-held runtime/live checks.
