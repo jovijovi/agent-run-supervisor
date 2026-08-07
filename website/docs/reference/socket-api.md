@@ -1,0 +1,161 @@
+---
+title: Socket API
+description: The arsd API v3 wire contract — envelope, operations, request fields, and bounds.
+---
+
+# Socket API
+
+`arsd` speaks one line-framed JSON protocol over a local `AF_UNIX` stream
+socket. This page is the wire contract; the [Python client](api/client.md)
+implements it.
+
+## Transport
+
+| Property | Value |
+|---|---|
+| Address family | `AF_UNIX`, `SOCK_STREAM` |
+| Socket mode | `0600`, inside a `0700` directory |
+| Default path | `$XDG_RUNTIME_DIR/agent-run-supervisor/arsd.sock`, falling back to `<supervisor-root>/arsd/arsd.sock` |
+| Authentication | peer credentials, mapped to a principal by operator `--caller-mapping` entries |
+
+There is no TCP listener and no other transport.
+
+## The request envelope
+
+Every request is one JSON object with exactly these four keys:
+
+```json
+{
+  "api_version": 3,
+  "op": "submit",
+  "request_id": "my-caller-request-id",
+  "payload": { }
+}
+```
+
+| Key | Type | Rule |
+|---|---|---|
+| `api_version` | `int` | Must be `3`. Anything else is refused with `UNSUPPORTED_API_VERSION` rather than guessed — for every operation, including `server_info` |
+| `op` | `string` | One of the operations below, else `UNKNOWN_OP` |
+| `request_id` | `string` | Caller-owned. Matches `[A-Za-z0-9._-]{1,128}`. **This is the idempotency key** |
+| `payload` | `object` | Operation-specific. Unknown keys are refused |
+
+Result and error frames carry the correlating `request_id`, **not** a version.
+
+### Bounds
+
+| Bound | Value |
+|---|---|
+| Maximum frame size | 1 048 576 bytes (`FRAME_TOO_LARGE`) |
+| Maximum prompt size | 262 144 bytes |
+| Maximum `request_id` length | 128 characters |
+| Maximum error message length | 512 characters |
+| Maximum JSON nesting depth | 64 |
+
+## Operations
+
+Seven, and deliberately no eighth.
+
+| `op` | Payload | Returns |
+|---|---|---|
+| `server_info` | `{}` | protocol and version handshake facts |
+| `submit` | see below | `{"run_id", "session_id", "accepted_at"}` |
+| `run_status` | `{"run_id"}` | admission state, or the terminal result |
+| `run_events` | `{"run_id", "from_seq", "limit", "follow", "follow_idle_seconds"}` | a bounded `seq`-ordered page, or a follow stream |
+| `run_cancel` | `{"run_id"}` | cooperative cancel; never rewrites a terminal fact |
+| `session_status` | `{"session_id"}` | the Session projection |
+| `session_list` | `{}` | owner-scoped Session projections |
+
+Runs and Sessions are owner-scoped: reaching another owner's is `OWNER_MISMATCH`.
+
+## `submit`
+
+The payload key set is closed:
+
+| Key | Required | Meaning |
+|---|---|---|
+| `request` | yes | the `AgentRunRequest` object below |
+| `prompt_text` | yes | the prompt, within the prompt bound |
+| `workspace_root` | yes | the canonical workspace root |
+| `cwd` | no | the effective working directory |
+| `retry_of_run_id` | no | caller-declared provenance |
+
+### The `request` object
+
+Closed and complete. Unknown keys are refused.
+
+```json
+{
+  "owner": "my-team",
+  "namespace": "my-team/docs",
+  "agent_id": "my-agent",
+  "expected_binding_hash": null,
+  "input_refs": [{"ref": "prompt:inline", "content_hash": "sha256:<64 hex>"}],
+  "requested_model": "<model-the-agent-advertises>",
+  "requested_effort": "<effort-the-agent-advertises>",
+  "grant_ref": "grant:my-grant-1",
+  "grant_hash": "sha256:<64 hex>",
+  "grant_role_hash": "sha256:<64 hex>",
+  "grant_capabilities": ["read"],
+  "mcp_snapshot_hashes": [],
+  "credential_refs": [],
+  "limits": {},
+  "evidence_policy_hash": "sha256:<64 hex>",
+  "recovery_policy_hash": "sha256:<64 hex>"
+}
+```
+
+`limits` accepts `max_stderr_bytes`, `max_event_bytes`, and `max_events`; `{}`
+takes the sealed defaults.
+
+!!! contract "What is not on the wire, by construction"
+
+    There is no shell text, argv, environment name or value, executable path, or
+    credential material on a request. **Those fields do not exist.** `command`,
+    `args`, and environment declarations are the operator's, carried by the
+    registry; `credential_refs` are *references* recorded as admission evidence
+    and never resolved to values.
+
+### `session_id` — the whole Session choice
+
+| Form | Behaviour |
+|---|---|
+| the key is **omitted** | atomically create one new durable Session and run its first Run |
+| an existing Session id | reuse it, existing-only; never falls back to creating one |
+| present, but `null` | refused with `INVALID_REQUEST` |
+
+Absent and present-null are different caller statements. Collapsing them would
+let a caller whose id-producing code returned `None` silently start a second
+conversation. See [Runs and Sessions](../concepts/runs-and-sessions.md).
+
+### Idempotency
+
+`request_id` is the idempotency key. Repeating one returns the same `run_id` and
+`session_id` facts and dispatches nothing a second time. Reusing it for a
+*different* request is `IDEMPOTENCY_CONFLICT`. If the outcome cannot be
+determined safely you get `SUBMISSION_INDETERMINATE` rather than a guess —
+resubmit the *same* `request_id` to learn the real outcome, never a new one.
+
+## `run_events`
+
+```json
+{"run_id": "...", "from_seq": 0, "limit": 100, "follow": false}
+```
+
+- Non-follow reads return a bounded page in `seq` order, starting at `from_seq`.
+- `follow: true` opens a stream on that connection. The subscription is
+  connection-exclusive and never sends `run_cancel` on your behalf.
+- A subscriber that falls too far behind its bounded queue is dropped with
+  `EVENT_BACKLOG_EXCEEDED`.
+
+## Errors
+
+Every error frame carries a stable code and a bounded message. Server-side text
+is never echoed back into a client exception — the client raises a typed
+exception with local, stable text only.
+
+```json
+{"request_id": "my-caller-request-id", "error": {"code": "SESSION_BUSY", "message": "..."}}
+```
+
+Full vocabulary: [Error codes](error-codes.md).

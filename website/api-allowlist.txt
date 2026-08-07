@@ -1,0 +1,28 @@
+# Permitted mkdocstrings identifiers for the public Python API reference.
+#
+# One dotted identifier per line. `tools/check_docs_site.py` enforces both
+# directions:
+#
+#   1. every `::: <identifier>` block in the site uses an identifier listed here;
+#   2. every identifier listed here resolves to a real attribute of a real
+#      module in `src/`, checked without importing the package (the check reads
+#      source and matches top-level definitions and assignments).
+#
+# The list is the *supported caller boundary* only. Internal modules — the
+# daemon server, handlers, admission, reconciliation, the Native ACP driver, and
+# the storage layer — are deliberately absent: they are not a caller-stable
+# surface and documenting them would advertise one.
+agent_run_supervisor.arsd.client.ArsdClient
+agent_run_supervisor.arsd.client.ArsdFollowSubscription
+agent_run_supervisor.arsd.client.ArsdClientError
+agent_run_supervisor.arsd.client.ERROR_CODE_TO_EXCEPTION
+agent_run_supervisor.arsd.client.raise_for_error_code
+agent_run_supervisor.arsd.protocol.ARSD_API_VERSION
+agent_run_supervisor.arsd.protocol.SUPPORTED_API_VERSIONS
+agent_run_supervisor.arsd.protocol.OPERATIONS
+agent_run_supervisor.arsd.protocol.ERROR_CODES
+agent_run_supervisor.arsd.protocol.MAX_FRAME_BYTES
+agent_run_supervisor.arsd.protocol.MAX_PROMPT_BYTES
+agent_run_supervisor.arsd.protocol.MAX_REQUEST_ID_CHARS
+agent_run_supervisor.arsd.protocol.encode_frame
+agent_run_supervisor.arsd.protocol.decode_frame

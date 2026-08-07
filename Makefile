@@ -1,4 +1,4 @@
-.PHONY: help sync verify build smoke bump release-test release-tag clean clean-all
+.PHONY: help sync verify docs-sync docs-check docs docs-serve build smoke bump release-test release-tag clean clean-all
 
 VERSION := $(shell grep '^version' pyproject.toml | sed -n 's/version = "\(.*\)"/\1/p')
 
@@ -7,6 +7,8 @@ help:
 	@echo ""
 	@echo "  make sync          Install dev + release extras (uv sync)"
 	@echo "  make verify        Full local gates (same as CI)"
+	@echo "  make docs          Validate and build the public documentation site"
+	@echo "  make docs-serve    Serve the public documentation site locally"
 	@echo "  make build         sdist/wheel + twine check"
 	@echo "  make smoke         build + manifest gate + wheel/sdist smoke"
 	@echo "  make clean         Remove build artifacts, caches, local runtime scratch"
@@ -22,6 +24,18 @@ sync:
 
 verify: sync
 	./scripts/verify_local.sh
+
+docs-sync:
+	uv sync --locked --extra docs
+
+docs-check:
+	uv run python tools/check_docs_site.py
+
+docs: docs-sync docs-check
+	uv run mkdocs build --strict
+
+docs-serve: docs-sync
+	uv run mkdocs serve
 
 build: sync
 	rm -rf dist build src/agent_run_supervisor.egg-info

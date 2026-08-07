@@ -1,0 +1,46 @@
+# Public navigation allowlist for the ARS documentation site.
+#
+# One `docs_dir`-relative Markdown path per line, in navigation order. This file
+# is authoritative in both directions and `tools/check_docs_site.py` enforces
+# three facts against `mkdocs.yml` and `website/docs/`:
+#
+#   1. every page reachable from `nav:` appears here;
+#   2. every path here is reachable from `nav:`;
+#   3. every Markdown file under `docs_dir` appears here — so a page cannot be
+#      published by dropping a file into the tree and forgetting the nav.
+#
+# Publishing a page is therefore always a deliberate two-file edit. Internal
+# roadmap, active plans, lessons, archives, superseded documents, and private
+# runtime detail are not listed, are not reachable, and are not copied into the
+# build output: they live under the repository's governed `docs/` tree, which is
+# not this site's `docs_dir`.
+index.md
+overview.md
+quickstart.md
+concepts/index.md
+concepts/agents.md
+concepts/runs-and-sessions.md
+concepts/profiles-and-binding.md
+concepts/native-acp.md
+how-to/index.md
+how-to/register-an-agent.md
+how-to/claude-code.md
+how-to/codex-cli.md
+how-to/opencode.md
+how-to/cursor-cli.md
+deployment/index.md
+deployment/local-daemon.md
+deployment/systemd.md
+reference/index.md
+reference/socket-api.md
+reference/agents-file.md
+reference/events.md
+reference/results.md
+reference/error-codes.md
+reference/api/index.md
+reference/api/client.md
+reference/api/protocol.md
+contributing/index.md
+contributing/testing.md
+contributing/publishing.md
+about/licenses.md

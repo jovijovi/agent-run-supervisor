@@ -1,0 +1,225 @@
+# Product-contract assertions for the public documentation site.
+#
+# The site restates the current product authority in neutral public language. The
+# statements below are the ones that are easiest to soften by accident and most
+# damaging when softened, so each is pinned to the page that must carry it.
+# `tools/check_docs_site.py` reads this file with `tomllib` and fails the build
+# when a required literal disappears from its page or a forbidden literal shows
+# up anywhere in the site.
+#
+# A literal is matched after Markdown inline markup (`` ` ``, `*`, `_`, `~`) is
+# stripped and whitespace is collapsed, so re-wrapping a paragraph or emphasising
+# a word does not break an assertion, while deleting or negating the claim does.
+
+# ---------------------------------------------------------------------------
+# Required — page must carry the statement
+# ---------------------------------------------------------------------------
+
+[[required]]
+page = "index.md"
+literal = "Supervise local AGENT runs. Preserve context. Recover with evidence."
+reason = "The approved homepage hero, exact."
+
+[[required]]
+page = "index.md"
+literal = "Agent → Session → Run → Events → Result"
+reason = "The homepage trajectory is a static illustration of the product model."
+
+[[required]]
+page = "overview.md"
+literal = "ARS supervises external ACP AGENTs it does not own"
+reason = "Ownership boundary — ARS does not own the agent software it starts."
+
+[[required]]
+page = "overview.md"
+literal = "It does not install, package, or upgrade that software, and it does not own an agent's home directory, credentials, plugins, caches, configuration, or conversation store."
+reason = "The full non-ownership list, enumerated rather than gestured at."
+
+[[required]]
+page = "overview.md"
+literal = "ARS exposes no public network service and no web console."
+reason = "No public ingress claim, no console claim."
+
+[[required]]
+page = "overview.md"
+literal = "cooperative policy enforcement, not an OS sandbox"
+reason = "Mediation is cooperative; the site makes no isolation claim."
+
+[[required]]
+page = "concepts/runs-and-sessions.md"
+literal = "Runs terminate. Sessions do not."
+reason = "The load-bearing lifecycle distinction."
+
+[[required]]
+page = "concepts/runs-and-sessions.md"
+literal = "A Session is durable and resumable indefinitely. It has no normal close, no expiry, and no terminal lifecycle state"
+reason = "Sessions have no lifecycle — stated positively, not implied."
+
+[[required]]
+page = "concepts/runs-and-sessions.md"
+literal = "Quarantine, the concurrency lease, and retention are orthogonal concerns. None of them is a Session lifecycle."
+reason = "The three things most often mistaken for a Session lifecycle."
+
+[[required]]
+page = "concepts/profiles-and-binding.md"
+literal = "cooperative policy enforcement, not an OS sandbox"
+reason = "Repeated where an integrator reads about permissions."
+
+[[required]]
+page = "concepts/native-acp.md"
+literal = "ACP Protocol v1"
+reason = "The downstream protocol line, named exactly."
+
+[[required]]
+page = "concepts/native-acp.md"
+literal = "session/load (stored external session id)"
+reason = "Reuse sends the stored id; load does not mint or return a replacement id."
+
+[[required]]
+page = "concepts/native-acp.md"
+literal = "session id + initial config options"
+reason = "Only session/new returns the newly minted external id."
+
+[[required]]
+page = "concepts/native-acp.md"
+literal = "session/load receives the stored external session id from ARS and returns initial config options, not a replacement session id."
+reason = "Reuse consumes load-time options without minting or accepting a replacement id."
+
+[[required]]
+page = "deployment/local-daemon.md"
+literal = "events.jsonl # the persisted normalized, seq-ordered event stream"
+reason = "Native ACP persists one event stream, not a second normalized-events file."
+
+[[required]]
+page = "deployment/systemd.md"
+literal = "The service cgroup closes that gap only for descendants that remain inside it"
+reason = "Crash containment must not extend across a supervisor, namespace, or cgroup boundary."
+
+[[required]]
+page = "reference/error-codes.md"
+literal = "Every wire code in the first four sections has a generated exception type in ERROR_CODE_TO_EXCEPTION"
+reason = "Only arsd wire codes map to Python client exceptions."
+
+[[required]]
+page = "reference/error-codes.md"
+literal = "Registry refusals and Run/result detail codes are evidence and diagnostics, not keys in that client mapping."
+reason = "Non-wire evidence codes must remain outside the Python wire-exception mapping."
+
+[[required]]
+page = "reference/error-codes.md"
+literal = "The first four sections below — through Capacity and lifecycle — enumerate the complete arsd wire-error set."
+reason = "Completeness is claimed only for the closed wire-error vocabulary."
+
+[[required]]
+page = "quickstart.md"
+literal = "Steps 1–3 create only the installation, checkout, and registry files you explicitly request; they do not write ARS runtime state or submit a Run."
+reason = "Install, clone, and file creation are not mislabeled as globally read-only."
+
+[[required]]
+page = "contributing/publishing.md"
+literal = "Why no publication workflow is committed yet"
+reason = "Publication remains absent rather than represented by a nonexistent dormant workflow."
+
+[[required]]
+page = "how-to/index.md"
+literal = "These four guides are an initial set, not a protocol boundary."
+reason = "The AGENT list is not a closed universe."
+
+[[required]]
+page = "how-to/index.md"
+literal = "ARS supervises the command an operator registered; it does not install, package, or endorse any agent."
+reason = "Guides describe integration, not vendoring."
+
+[[required]]
+page = "reference/socket-api.md"
+literal = "api_version"
+reason = "Every request envelope carries it."
+
+[[required]]
+page = "reference/results.md"
+literal = "business_verdict"
+reason = "Always null and caller-owned."
+
+[[required]]
+page = "contributing/publishing.md"
+literal = "Publishing the documentation site is not enabled."
+reason = "Publication is dormant until separately authorized."
+
+# ---------------------------------------------------------------------------
+# Forbidden — must not appear in the published site sources
+#
+# Scope is `website/docs/**` and `website/overrides/**` — the files that become
+# the site. This control file is excluded from its own scan, or every pattern
+# below would match its own declaration.
+#
+# Each pattern targets an *affirmative capability claim*, never a word. The site
+# has to be able to say "ARS is not a sandbox", "there is no operation that
+# closes a Session", and "ARS exposes no public network service": those are the
+# contract. A pattern that also banned the refusal would push the page into
+# vagueness, which is the failure mode these assertions exist to prevent.
+# ---------------------------------------------------------------------------
+
+[[forbidden]]
+id = "open-console"
+pattern = "(?i)\\bopen console\\b"
+reason = "ARS has no web console; there is no console link or button anywhere."
+
+[[forbidden]]
+id = "live-run-data"
+pattern = "(?i)\\b(?:live|real-?time) (?:run|session) (?:data|feed|dashboard)\\b"
+reason = "The site shows no live Run data and is not a dashboard."
+
+[[forbidden]]
+id = "sandbox-claim"
+pattern = "(?i)\\bARS (?:provides|offers|gives you|is) an? (?:OS )?sandbox\\b"
+reason = "ARS makes no sandbox or hostile-code isolation claim."
+
+[[forbidden]]
+id = "isolation-guarantee"
+pattern = "(?i)\\bARS (?:sandboxes|isolates|contains|confines) the agent\\b"
+reason = "Mediation is cooperative; the agent runs with the daemon UID's authority."
+
+[[forbidden]]
+id = "public-ingress"
+pattern = "(?i)\\b(?:exposes|provides|offers|serves|listens on|binds) (?:a |an )?(?:public|remote|network|tcp|http)\\b"
+reason = "Ingress is a local Unix-domain socket only."
+
+[[forbidden]]
+id = "session-close-operation"
+pattern = "(?i)\\bsession[/_-]close\\b|\\bclose[_-]session\\b"
+reason = "No such operation exists on the wire or in the client."
+
+[[forbidden]]
+id = "session-close-advice"
+pattern = "(?i)\\b(?:you|callers?|clients?|applications?) (?:can|may|should|must) (?:close|end|expire|terminate)\\b[^.]{0,40}\\bsession\\b"
+reason = "Sessions have no close or expiry operation to advise callers to use."
+
+[[forbidden]]
+id = "session-lifecycle-state"
+pattern = "(?i)\\bsession (?:state|status) is (?:open|active|closed|expired)\\b"
+reason = "A Session has no open/active/closed state."
+
+[[forbidden]]
+id = "credential-management"
+pattern = "(?i)\\bARS (?:stores|manages|resolves|refreshes|mints) (?:your )?credentials\\b"
+reason = "ARS resolves, mints, refreshes, and stores no credential."
+
+[[forbidden]]
+id = "deployment-status"
+pattern = "(?i)\\b(?:currently|now) (?:deployed|running in production|live at)\\b"
+reason = "The site is documentation, not a deployment-status board."
+
+[[forbidden]]
+id = "duplicate-normalized-event-file"
+pattern = "(?i)normalized-events\\.jsonl"
+reason = "Native ACP persists its normalized stream as events.jsonl; no second file exists."
+
+[[forbidden]]
+id = "all-codes-map-to-client-exceptions"
+pattern = "(?i)every code above has a generated exception type"
+reason = "Only the arsd wire-error set is represented in ERROR_CODE_TO_EXCEPTION."
+
+[[forbidden]]
+id = "nonexistent-disabled-publication-workflow"
+pattern = "(?i)disabled publication workflow"
+reason = "The repository has no dormant publication workflow; activation will be a separate reviewed change."
