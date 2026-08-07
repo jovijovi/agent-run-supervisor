@@ -266,6 +266,18 @@ def test_post_dispatch_uncertainty_quarantines_and_refuses_the_next_run(
         harness.task(run_id="run-f2", request=_request(session_id=result.session_id))
     )
     assert retried.status is AgentRunStatus.FAILED
+    # The documented refusal, not a generic exception: a caller has to be
+    # able to tell "this Session refuses work" from "something threw", and
+    # only the first of those is worth acting on.
+    assert retried.payload["detail_code"] == "SESSION_QUARANTINED"
+    assert retried.payload["retryable"] is False
+    # The same sanitized categorical phrase every session-reuse refusal
+    # projects; ``detail_code`` is what tells them apart.
+    assert retried.payload["failure_reason"] == "run failed"
+    assert retried.payload["session_id"] == result.session_id
+    assert retried.session_quarantined is True
+    # Refusing the reuse neither ended, repaired, nor re-evidenced it.
+    assert store.open_session(result.session_id).quarantine == evidence
 
 
 # -- 10: nothing leaks --------------------------------------------------------

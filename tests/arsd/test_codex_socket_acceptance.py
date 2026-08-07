@@ -200,7 +200,10 @@ NEGATIVE_CASES: tuple[NegativeCase, ...] = (
     NegativeCase(
         "n7_reuse_of_a_quarantined_session",
         "n7",
-        "SESSION_BINDING_MISMATCH",
+        # Its own code, not the mismatch one: a quarantined Session is a
+        # different refusal from a Session bound to another identity, and
+        # the caller acts on them differently.
+        "SESSION_QUARANTINED",
         "session_bind",
         seeded=True,
     ),

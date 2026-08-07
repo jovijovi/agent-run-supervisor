@@ -215,6 +215,7 @@ def test_every_negative_case_names_a_refusal_that_still_exists():
         "SESSION_RECORD_INVALID",
         "SESSION_EXTERNAL_ID_MISSING",
         "SESSION_BINDING_MISMATCH",
+        "SESSION_QUARANTINED",
         "COMMAND_NOT_FOUND",
         "COMMAND_NOT_EXECUTABLE",
         "SPAWN_FAILED",
