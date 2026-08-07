@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Reusing a quarantined Session now reports the stable `SESSION_QUARANTINED`
+  detail code with `retryable=false`, instead of falling through to the generic
+  `RUN_EXCEPTION`. `SessionQuarantinedError` is a *sibling* of
+  `SessionBindingError` under `SessionError`, and the reuse path caught only the
+  latter, so the documented refusal reached the per-Run exception guard and told
+  a caller nothing more than "something threw". Both reuse seams are covered:
+  the pre-lease `validate_native_binding()` check, and the reuse-only lease
+  acquisition, where either committed evidence or an unconverged
+  quarantine-pending fence refuses inside the session guard. Nothing else moves
+  — the refusal stays pre-dispatch with no child, no `session/new`,
+  no `session/load`, no prompt, no fallback Session, and no surviving lease; the
+  stored Session bytes, its quarantine evidence, and any pending fence are left
+  exactly as they were; and `SESSION_NOT_FOUND_FOR_REUSE`,
+  `SESSION_RECORD_INVALID`, `SESSION_EXTERNAL_ID_MISSING`, and
+  `SESSION_BINDING_MISMATCH` keep their existing meanings. `failure_reason` is
+  the allow-listed categorical `run failed` its four siblings already project —
+  `detail_code` stays the contract that distinguishes them — so no exception
+  text, path, or quarantine evidence value reaches a caller.
+
 ## [0.7.0] - 2026-08-07
 
 ### Removed

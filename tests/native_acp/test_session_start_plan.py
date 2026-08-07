@@ -48,7 +48,14 @@ from agent_run_supervisor.native_acp.spec import (  # noqa: E402
     RunLimits,
     RunSpecAssembler,
 )
-from agent_run_supervisor.session import SESSION_JSON, SessionStore  # noqa: E402
+from agent_run_supervisor.result import ALLOWED_FAILURE_REASONS  # noqa: E402
+from agent_run_supervisor.session import (  # noqa: E402
+    LOCK_JSON,
+    QUARANTINE_DISPATCH_WITHOUT_TERMINAL,
+    QUARANTINE_PENDING_JSON,
+    SESSION_JSON,
+    SessionStore,
+)
 
 FAKE_AGENT_PATH = Path(__file__).with_name("fake_agent.py")
 RUN_TASK_SOURCE = (
@@ -367,6 +374,9 @@ REUSE_FAILURES = [
     pytest.param(
         "session_id_conflict", "SESSION_RECORD_INVALID", id="session_id_conflict"
     ),
+    pytest.param(
+        "quarantined_record", "SESSION_QUARANTINED", id="quarantined_record"
+    ),
 ]
 
 
@@ -391,6 +401,13 @@ def test_reuse_failure_never_creates_a_session_or_calls_session_new(
         harness.seed_session(namespace="hermes/other")
     elif arrangement == "session_id_conflict":
         _conflicting_internal_id(harness.seed_session())
+    elif arrangement == "quarantined_record":
+        harness.seed_session()
+        harness.session_store().mark_quarantined(
+            "sess-plan-1",
+            reason_code=QUARANTINE_DISPATCH_WITHOUT_TERMINAL,
+            run_id="run-quarantine-source",
+        )
 
     new_sessions = _new_session_spy(monkeypatch)
     leases = _lease_spy(monkeypatch)
@@ -412,6 +429,159 @@ def test_reuse_failure_never_creates_a_session_or_calls_session_new(
         == sessions_before
     )
     assert not (harness.run_dir() / DISPATCH_STARTED_MARKER).exists()
+
+
+# ---------------------------------------------------------------------------
+# SR07 — a quarantined reuse carries its own stable code, not RUN_EXCEPTION
+# ---------------------------------------------------------------------------
+
+# Everything the refusal knows and the caller must never be told: the raised
+# messages interpolate the Session id, and the durable evidence names the Run
+# that quarantined it and the moment it did.
+QUARANTINE_LEAK_FRAGMENTS = (
+    "is quarantined",
+    "binding validation refuses it",
+    "no new lease is ever minted",
+    "quarantine-pending fence",
+    "SessionQuarantinedError",
+    "Traceback",
+)
+
+
+def _result_payload(harness: Harness, run_id: str = "run-plan-1") -> dict:
+    return json.loads(
+        (harness.run_dir(run_id) / "result.json").read_text(encoding="utf-8")
+    )
+
+
+def test_reuse_of_a_stored_quarantine_projects_the_quarantine_detail_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seam 1: ``validate_native_binding`` refuses, before the lease.
+
+    A quarantined Session is a refusal a caller can act on, so it carries its
+    own stable code. Collapsing it into ``RUN_EXCEPTION`` said only that
+    something threw — the one thing a documented refusal must never say.
+    """
+    harness = Harness(tmp_path, monkeypatch)
+    session_dir = harness.seed_session()
+    store = harness.session_store()
+    store.mark_quarantined(
+        "sess-plan-1",
+        reason_code=QUARANTINE_DISPATCH_WITHOUT_TERMINAL,
+        run_id="run-quarantine-source-9d41",
+    )
+    record_before = (session_dir / SESSION_JSON).read_bytes()
+    evidence_before = store.open_session("sess-plan-1").quarantine
+    assert evidence_before is not None
+
+    new_sessions = _new_session_spy(monkeypatch)
+    leases = _lease_spy(monkeypatch)
+    spawns = _spawn_spy(monkeypatch)
+
+    result = _run(harness.task())
+
+    payload = _result_payload(harness)
+    assert result.status is AgentRunStatus.FAILED
+    assert payload["status"] == "failed"
+    assert payload["detail_code"] == "SESSION_QUARANTINED"
+    assert payload["retryable"] is False
+    # The requested Session id is caller-facing: the refusal is *about* it.
+    assert payload["session_id"] == "sess-plan-1"
+    assert result.session_id == "sess-plan-1"
+    # Committed evidence, so the projection answers true.
+    assert result.session_quarantined is True
+
+    # Fixed and categorical: no exception text, no path, no evidence value.
+    # The sanitized categorical phrase its four documented siblings also
+    # project: none of the session-reuse reasons is allow-listed, so the
+    # allowlist collapses them all to one fixed phrase and ``detail_code``
+    # stays the thing that distinguishes them.
+    assert payload["failure_reason"] == "run failed"
+    assert payload["failure_reason"] in ALLOWED_FAILURE_REASONS
+    serialized = json.dumps(payload)
+    for fragment in QUARANTINE_LEAK_FRAGMENTS:
+        assert fragment not in serialized, fragment
+    assert "run-quarantine-source-9d41" not in serialized
+    assert evidence_before["recorded_at"] not in serialized
+    assert QUARANTINE_DISPATCH_WITHOUT_TERMINAL not in serialized
+    assert str(session_dir) not in serialized
+
+    # No ACP work, no child, no fallback Session, no lease at all.
+    assert new_sessions == []
+    assert leases == []
+    assert spawns == []
+    assert harness.methods() == []
+    assert not (harness.run_dir() / DISPATCH_STARTED_MARKER).exists()
+    assert not (session_dir / LOCK_JSON).exists()
+    # The stored Session is byte-identical and its evidence still stands.
+    assert (session_dir / SESSION_JSON).read_bytes() == record_before
+    assert store.open_session("sess-plan-1").quarantine == evidence_before
+
+
+def test_reuse_blocked_by_a_pending_quarantine_fence_projects_the_same_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seam 2: the reuse-only lease acquisition is what refuses.
+
+    An interrupted quarantine leaves the fence standing without the committed
+    evidence, so binding validation passes and
+    ``acquire_lock(refuse_quarantined=True)`` is the gate that fails closed.
+    The caller-facing code is the same one: which internal seam noticed is not
+    a distinction a caller can see, or should have to.
+    """
+    harness = Harness(tmp_path, monkeypatch)
+    session_dir = harness.seed_session()
+    store = harness.session_store()
+    store.write_quarantine_pending(
+        "sess-plan-1",
+        reason_code=QUARANTINE_DISPATCH_WITHOUT_TERMINAL,
+        run_id="run-fence-source-4b7e",
+    )
+    record_before = (session_dir / SESSION_JSON).read_bytes()
+    fence_before = (session_dir / QUARANTINE_PENDING_JSON).read_bytes()
+    # The record itself carries nothing yet — only the fence does.
+    assert store.open_session("sess-plan-1").quarantine is None
+
+    new_sessions = _new_session_spy(monkeypatch)
+    leases = _lease_spy(monkeypatch)
+    spawns = _spawn_spy(monkeypatch)
+
+    result = _run(harness.task())
+
+    payload = _result_payload(harness)
+    assert result.status is AgentRunStatus.FAILED
+    assert payload["status"] == "failed"
+    assert payload["detail_code"] == "SESSION_QUARANTINED"
+    assert payload["retryable"] is False
+    assert payload["session_id"] == "sess-plan-1"
+    # The sanitized categorical phrase its four documented siblings also
+    # project: none of the session-reuse reasons is allow-listed, so the
+    # allowlist collapses them all to one fixed phrase and ``detail_code``
+    # stays the thing that distinguishes them.
+    assert payload["failure_reason"] == "run failed"
+    assert payload["failure_reason"] in ALLOWED_FAILURE_REASONS
+    # A fence is not yet a quarantine: the projection answers for what is
+    # committed, and converges when reconciliation commits the evidence.
+    assert result.session_quarantined is False
+
+    serialized = json.dumps(payload)
+    for fragment in QUARANTINE_LEAK_FRAGMENTS:
+        assert fragment not in serialized, fragment
+    assert "run-fence-source-4b7e" not in serialized
+    assert QUARANTINE_DISPATCH_WITHOUT_TERMINAL not in serialized
+
+    # The lease was reached and refused, and nothing survived it.
+    assert leases == ["sess-plan-1"]
+    assert not (session_dir / LOCK_JSON).exists()
+    # Still no ACP work and no child: the refusal is pre-spawn.
+    assert new_sessions == []
+    assert spawns == []
+    assert harness.methods() == []
+    assert not (harness.run_dir() / DISPATCH_STARTED_MARKER).exists()
+    # Stored bytes unchanged, and the fence intact for convergence.
+    assert (session_dir / SESSION_JSON).read_bytes() == record_before
+    assert (session_dir / QUARANTINE_PENDING_JSON).read_bytes() == fence_before
 
 
 def test_reuse_with_a_bound_record_loads_and_never_calls_session_new(

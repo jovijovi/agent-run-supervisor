@@ -27,6 +27,7 @@ pytest.importorskip("acp")
 
 from agent_run_supervisor.exit_classifier import AgentRunStatus
 from agent_run_supervisor.native_acp import storage
+from agent_run_supervisor.result import ALLOWED_FAILURE_REASONS
 
 from .test_run_task import HAPPY_SCRIPT, Harness, _run
 
@@ -131,6 +132,50 @@ def test_cleanup_error_projection_is_categorical(
     assert result.status is AgentRunStatus.FAILED
     payload = json.loads((harness.run_dir() / "result.json").read_text())
     assert marker not in json.dumps(payload)
+    assert marker not in captured_logs.text()
+
+
+
+def test_quarantined_reuse_projection_is_categorical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, captured_logs
+) -> None:
+    """A refused quarantined reuse names its code, never its evidence.
+
+    The refusal is raised with a message that interpolates the Session id, and
+    the durable evidence carries the id of the Run that quarantined it, the
+    moment it did, and the reason code it did it under. None of that is
+    caller-facing: the terminal carries the stable code and one fixed
+    categorical reason, and the Session id it already publishes on its own.
+    """
+    from agent_run_supervisor.session import QUARANTINE_DISPATCH_WITHOUT_TERMINAL
+
+    marker = "quarantine-source-6f2a"
+    harness = Harness(tmp_path, monkeypatch, dict(HAPPY_SCRIPT))
+    task = harness.task()
+    store = harness.session_store()
+    store.mark_quarantined(
+        "sess-native-1",
+        reason_code=QUARANTINE_DISPATCH_WITHOUT_TERMINAL,
+        run_id=marker,
+    )
+    evidence = store.open_session("sess-native-1").quarantine
+    assert evidence is not None
+
+    result = _run(task)
+
+    assert result.status is AgentRunStatus.FAILED
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    assert payload["detail_code"] == "SESSION_QUARANTINED"
+    assert payload["retryable"] is False
+    # Allow-listed, so it cannot be exception text however it was built.
+    assert payload["failure_reason"] in ALLOWED_FAILURE_REASONS
+    assert payload["failure_reason"] == "run failed"
+
+    serialized = json.dumps(payload)
+    assert marker not in serialized
+    assert evidence["recorded_at"] not in serialized
+    assert QUARANTINE_DISPATCH_WITHOUT_TERMINAL not in serialized
+    assert "is quarantined" not in serialized
     assert marker not in captured_logs.text()
 
 

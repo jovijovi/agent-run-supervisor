@@ -60,6 +60,7 @@ from agent_run_supervisor.session import (
     SessionBindingError,
     SessionLock,
     SessionNotFoundError,
+    SessionQuarantinedError,
     SessionRecordInvalidError,
     SessionStore,
     validate_native_binding,
@@ -306,6 +307,7 @@ _CATEGORICAL_FAILURE_REASON_BY_DETAIL: dict[str, str] = {
     "SESSION_RECORD_INVALID": "session record invalid",
     "SESSION_EXTERNAL_ID_MISSING": "session external id missing",
     "SESSION_BINDING_MISMATCH": "session binding mismatch",
+    "SESSION_QUARANTINED": "session quarantined",
     "CONFIG_FIDELITY": "config fidelity failed",
     "EVIDENCE_PIPELINE": "evidence pipeline failed",
     "SUPERVISOR_CANCELLED": "supervisor cancellation",
@@ -857,7 +859,18 @@ class RunTask:
         if isinstance(plan, LoadSessionPlan):
             # Only a reuse has a Session to lease at this point. A create leases
             # in ``_startup_sequence``, the instant its one bound record exists.
-            self._acquire_lease(ctx, plan.ar_session_id, spec.identity.owner)
+            try:
+                self._acquire_lease(ctx, plan.ar_session_id, spec.identity.owner)
+            except SessionQuarantinedError as exc:
+                # Committed evidence the pre-lease validation could not have
+                # seen, or an unconverged quarantine fence, which is not
+                # evidence yet and so passes that validation by design. The
+                # in-guard refusal is the correctness mechanism; the caller
+                # is owed the same code either way. Nothing was leased, so
+                # there is nothing to release.
+                raise _PreDispatchFailure(
+                    "session is quarantined", "SESSION_QUARANTINED"
+                ) from exc
             # What this Session observed last time, loaded once, under the
             # lease. Read-only and warning-only: it reaches nothing that
             # decides admission, and a Session's first Run simply has none.
@@ -942,6 +955,15 @@ class RunTask:
                 expected_epoch=epoch,
                 expected_agent_id=spec.agent.agent_id,
             )
+        except SessionQuarantinedError as exc:
+            # A sibling of SessionBindingError, not a kind of it: the record
+            # matches this Run perfectly and is refused anyway, because
+            # continuity was machine-proven unsafe. Caught by its own type
+            # so it keeps its own caller-facing code instead of falling
+            # through to the generic run-exception guard.
+            raise _PreDispatchFailure(
+                "session is quarantined", "SESSION_QUARANTINED"
+            ) from exc
         except SessionBindingError as exc:
             raise _PreDispatchFailure(
                 "session binding mismatch", "SESSION_BINDING_MISMATCH"
