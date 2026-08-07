@@ -2,7 +2,7 @@
 title: "ARS vNext Roadmap Governance"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-07-21
+last_validated_at: 2026-08-07
 ---
 # ARS vNext Roadmap Governance
 
@@ -14,6 +14,7 @@ last_validated_at: 2026-07-21
 | [`features.md`](features.md) | vNext capability completion plus one legacy-compatibility row |
 | [`non-approvals.md`](non-approvals.md) | explicit current non-approvals |
 | [`verification.md`](verification.md) | deterministic implementation/PR gates |
+| [`session-reuse-acceptance.md`](session-reuse-acceptance.md) | opt-in real-AGENT Session continuity, refusal, concurrency, and recovery acceptance |
 | [`../plans/active/`](../plans/active/) | board-linked current executable plan |
 
 ## Cold archive — never default context
