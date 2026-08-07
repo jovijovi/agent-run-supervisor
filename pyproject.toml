@@ -43,7 +43,7 @@ docs = [
   "mkdocs-material>=9.5,<10",
   "mkdocstrings>=0.26,<1",
   "mkdocstrings-python>=1.11,<2",
-  "pymdown-extensions>=10.9,<11",
+  "pymdown-extensions>=10.9,<12",
 ]
 
 [project.scripts]
