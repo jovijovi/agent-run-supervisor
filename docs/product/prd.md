@@ -670,8 +670,13 @@ source position.
 - **Merge, publication, and deployment stay three separate facts.** Published package/release facts come
   from live GitHub Releases and PyPI; deployed/running facts come from operator-held runtime/live checks. A
   merge is not a publication, a publication is not a deployment, and none of them approves the next one.
-- The lifetime of the pre-reset line is an open human decision. Implementation status is never an approval
-  for the next stage.
+- The lifetime of the pre-reset line is closed by a later, distinct operator decision: no old runtime or
+  configuration line is active, and unreferenced older runtime and configuration were retired from active
+  use. Historical Session/Run state and evidence remain preserved — not deleted, migrated, re-hashed,
+  rewritten, or purged — and unrelated retired artifact trees and Binding roots remain governed by their own
+  decisions. That completed act exhausts itself: every future release, publication, deployment, install,
+  restart, migration, cutover, runtime cleanup, canary, or integration still requires separate
+  authorization. Implementation status is never an approval for the next stage.
 
 ## 6. Non-goals
 

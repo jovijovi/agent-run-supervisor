@@ -122,7 +122,8 @@ a value-blind production projection at all, which is what selects the digest pat
 - **Not approved: any further cutover, migration, or rollout act.** Decision 2 — production cutover with its
   one-time legacy-Session load refusal — was taken by the operator; deployed/running facts remain
   operator-held runtime/live checks. Nothing about that transfers to the next deployment, restart, or
-  migration, and the **legacy line's lifetime** (Decision 3) remains an open operator decision.
+  migration, and the **legacy line's lifetime** (Decision 3) is closed by the later operator decision
+  recorded below: no old runtime line is active.
 - **Not approved: touching the retired deployment.** The `/opt` artifact trees, the Binding roots, their
   promoted generations, and every historical Run and Session byte are untouched migration source. The reset
   stops referencing them; it deletes, migrates, re-hashes, and rewrites nothing, and their removal is a
@@ -160,6 +161,17 @@ a value-blind production projection at all, which is what selects the digest pat
   is untrusted evidence rather than a tolerated extension. No tolerant reader, passthrough, projection,
   alias, migration, or dual format is authorized. No shim, alias, flag, bridge, dual runtime, dual-format writer, or renamed replacement field is
   authorized, now or later.
+
+- **Decided (2026-08-07): the Session no-close runtime cutover and the pre-reset execution line's lifetime
+  (Decision 3).** The operator took the cutover as one controlled action and closed Decision 3: no old
+  runtime or configuration line is active, and unreferenced older runtime and configuration were retired
+  from active use. Historical Session/Run state and evidence remain preserved — nothing was deleted,
+  migrated, re-hashed, rewritten, or purged — and unrelated retired artifact trees and Binding roots stay
+  governed by their own decisions. This decision is recorded distinctly from the earlier source-only
+  decisions above: those decisions truly authorized source, tests, and documentation only, and their
+  non-approvals keep their historical meaning. The completed act exhausts itself — every future release,
+  publication, deployment, install, restart, migration, cutover, runtime cleanup, canary, or integration
+  still requires its own separate authorization.
 
 The standing rule is unchanged: **an active plan is not approval to land source, to publish, to deploy, or
 to run a real provider.** Activating a plan records only that it is the board-linked planning artifact, and
