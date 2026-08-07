@@ -2,10 +2,11 @@
 
 # Documentation Index
 
-Total: 83 documents tracked across 2 statuses.
+Total: 84 documents tracked across 2 statuses.
 
-## Active (17)
+## Active (18)
 
+- [ARS Public Documentation Site Design](design/documentation-site.md) — created 2026-08-07
 - [Session reuse acceptance test plan](roadmap/session-reuse-acceptance.md) — created 2026-08-07
 - [ARS agent registry — the operator contract](design/agent-registry.md) — created 2026-07-30
 - [agent-run-supervisor vNext System Architecture](design/architecture.md) — created 2026-07-21
