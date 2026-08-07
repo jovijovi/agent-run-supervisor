@@ -30,6 +30,7 @@ uv run python -m compileall -q src scripts tests
 uv run python tools/build_docs_index.py --check
 uv run python tools/docs_drift_signal.py --check
 uv run python tools/static_safety_scan.py
+uv run python tools/check_docs_site.py
 uv run python tools/check_version_sync.py
 uv run python -m build
 uv run python -m twine check dist/*
@@ -51,6 +52,14 @@ their own throwaway venvs and smoked for the three supported commands
 `agent_run_supervisor.arsd` import, and the `--print-service-unit` refusal.
 Neither smoke installs into an operator environment, enables a service, or starts
 a real AGENT.
+
+**Public documentation boundary.** `tools/check_docs_site.py` is a stdlib-only
+content gate that runs without installing the optional documentation toolchain.
+It proves the public `website/docs/` tree is isolated from governed internal
+documentation, matches the explicit navigation allowlist, resolves local links
+and API symbols, serves fonts and Mermaid locally, and contains no enabled Pages
+publication workflow. The separate `make docs` target installs the `docs` extra
+and runs the strict MkDocs build; it does not publish or deploy the result.
 
 **pip fallback** (without uv): replace `uv run …` with `PYTHONPATH=src python3 -m …` or installed
 console scripts after `pip install -e '.[dev,release,native]'` (the `uv lock --check` step is

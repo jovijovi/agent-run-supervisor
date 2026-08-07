@@ -1,0 +1,592 @@
+/* ===========================================================================
+   Agent Run Supervisor — "flight recorder / precision instrument" theme.
+
+   Bounded on purpose. This file carries the brand and nothing else: colour
+   tokens, the self-hosted type stack, the homepage shell, and a small number of
+   reading affordances (ruled code blocks, an extra admonition, tick rules).
+   It adds no layout framework, no component library, and no behaviour.
+
+   Palette (approved): deep ink #111820, warm paper #F7F6F2,
+   cool teal #17A6A6, amber #D8922B. Teal and amber are calibrated per surface
+   below, because the brand values themselves do not all reach 4.5:1 as text.
+   =========================================================================== */
+
+/* --- 1. Self-hosted type. No external font request is made anywhere. ------- */
+
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("../fonts/ibm-plex-sans-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url("../fonts/ibm-plex-sans-400-italic.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("../fonts/ibm-plex-sans-600.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("../fonts/ibm-plex-sans-700.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("../fonts/ibm-plex-mono-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("../fonts/ibm-plex-mono-600.woff2") format("woff2");
+}
+
+/* --- 2. Brand tokens ------------------------------------------------------ */
+
+:root {
+  --ars-ink: #111820;
+  --ars-ink-2: #1b2531;
+  --ars-ink-3: #27333f;
+  --ars-paper: #f7f6f2;
+  --ars-paper-2: #efeee8;
+  --ars-paper-3: #e3e1d8;
+  --ars-teal: #17a6a6;
+  --ars-teal-deep: #0b6b6b; /* 5.9:1 on paper — link/text safe */
+  --ars-teal-bright: #2fc7c7; /* 8.6:1 on ink — link/text safe */
+  --ars-amber: #d8922b; /* marker only: rules, dots, borders */
+  --ars-amber-deep: #8a5a08; /* 4.6:1 on paper — text safe */
+  --ars-amber-bright: #f0b354;
+
+  --md-text-font: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --md-code-font: "IBM Plex Mono", ui-monospace, "SFMono-Regular", "Menlo", monospace;
+
+  --ars-rule: 1px;
+  --ars-radius: 4px;
+  --ars-measure: 46rem;
+}
+
+/* Light — warm paper. */
+[data-md-color-scheme="default"] {
+  --md-default-bg-color: var(--ars-paper);
+  --md-default-bg-color--light: var(--ars-paper-2);
+  --md-default-bg-color--lighter: var(--ars-paper-3);
+  --md-default-fg-color: rgba(17, 24, 32, 0.88);
+  --md-default-fg-color--light: rgba(17, 24, 32, 0.66);
+  --md-default-fg-color--lighter: rgba(17, 24, 32, 0.36);
+  --md-default-fg-color--lightest: rgba(17, 24, 32, 0.1);
+
+  --md-primary-fg-color: var(--ars-ink);
+  --md-primary-fg-color--light: var(--ars-ink-2);
+  --md-primary-fg-color--dark: #0a1016;
+  --md-primary-bg-color: var(--ars-paper);
+  --md-primary-bg-color--light: rgba(247, 246, 242, 0.72);
+
+  --md-accent-fg-color: var(--ars-teal-deep);
+  --md-accent-fg-color--transparent: rgba(11, 107, 107, 0.1);
+  --md-accent-bg-color: var(--ars-paper);
+
+  --md-typeset-a-color: var(--ars-teal-deep);
+  --md-typeset-mark-color: rgba(216, 146, 43, 0.28);
+  --md-code-bg-color: #f0efe9;
+  --md-code-fg-color: #202b36;
+  --md-code-hl-color: rgba(23, 166, 166, 0.16);
+  --md-footer-bg-color: var(--ars-ink);
+  --md-footer-bg-color--dark: #0a1016;
+
+  --ars-surface: #fffefb;
+  --ars-border: rgba(17, 24, 32, 0.14);
+  --ars-border-strong: rgba(17, 24, 32, 0.3);
+  --ars-eyebrow: rgba(17, 24, 32, 0.55);
+  --ars-signal: var(--ars-teal-deep);
+  --ars-marker: var(--ars-amber-deep);
+}
+
+/* Dark — deep ink. */
+[data-md-color-scheme="slate"] {
+  --md-hue: 210;
+  --md-default-bg-color: var(--ars-ink);
+  --md-default-bg-color--light: var(--ars-ink-2);
+  --md-default-bg-color--lighter: var(--ars-ink-3);
+  --md-default-fg-color: rgba(233, 237, 241, 0.92);
+  --md-default-fg-color--light: rgba(233, 237, 241, 0.7);
+  --md-default-fg-color--lighter: rgba(233, 237, 241, 0.4);
+  --md-default-fg-color--lightest: rgba(233, 237, 241, 0.12);
+
+  --md-primary-fg-color: #0c131a;
+  --md-primary-fg-color--light: var(--ars-ink-2);
+  --md-primary-fg-color--dark: #070c11;
+  --md-primary-bg-color: var(--ars-paper);
+  --md-primary-bg-color--light: rgba(247, 246, 242, 0.72);
+
+  --md-accent-fg-color: var(--ars-teal-bright);
+  --md-accent-fg-color--transparent: rgba(47, 199, 199, 0.12);
+
+  --md-typeset-a-color: var(--ars-teal-bright);
+  --md-typeset-mark-color: rgba(216, 146, 43, 0.3);
+  --md-code-bg-color: #0d141b;
+  --md-code-fg-color: #dde4ea;
+  --md-code-hl-color: rgba(47, 199, 199, 0.16);
+  --md-footer-bg-color: #0a1016;
+  --md-footer-bg-color--dark: #070c11;
+
+  --ars-surface: #172029;
+  --ars-border: rgba(233, 237, 241, 0.14);
+  --ars-border-strong: rgba(233, 237, 241, 0.3);
+  --ars-eyebrow: rgba(233, 237, 241, 0.6);
+  --ars-signal: var(--ars-teal-bright);
+  --ars-marker: var(--ars-amber-bright);
+}
+
+/* --- 3. Reading column and headings --------------------------------------- */
+
+.md-typeset {
+  font-size: 0.8rem;
+  line-height: 1.7;
+}
+
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-typeset h4 {
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  color: var(--md-default-fg-color);
+}
+
+.md-typeset h1 {
+  font-weight: 700;
+  font-size: 1.85rem;
+  line-height: 1.2;
+  margin-bottom: 0.6em;
+}
+
+/* Tick rule: the instrument-panel divider that separates major sections. */
+.md-typeset h2 {
+  font-size: 1.28rem;
+  margin-top: 2.2em;
+  padding-top: 0.85em;
+  border-top: var(--ars-rule) solid var(--ars-border);
+  position: relative;
+}
+
+.md-typeset h2::before {
+  content: "";
+  position: absolute;
+  top: -1px;
+  left: 0;
+  width: 2.2rem;
+  height: 2px;
+  background: var(--ars-signal);
+}
+
+.md-typeset h3 {
+  font-size: 1.03rem;
+  margin-top: 1.7em;
+}
+
+.md-typeset a {
+  text-underline-offset: 0.18em;
+  text-decoration-thickness: 1px;
+}
+
+.md-typeset a:hover {
+  text-decoration: underline;
+}
+
+/* --- 4. Recorder-style code ------------------------------------------------ */
+
+.md-typeset code {
+  font-feature-settings: "liga" 0, "calt" 0;
+  border-radius: 3px;
+  font-size: 0.86em;
+}
+
+.md-typeset pre > code {
+  border-left: 2px solid var(--ars-signal);
+  border-radius: 0 var(--ars-radius) var(--ars-radius) 0;
+  padding-left: 0.8rem;
+}
+
+.md-typeset .highlight span.filename {
+  font-family: var(--md-code-font);
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ars-eyebrow);
+  background: transparent;
+  border-bottom: var(--ars-rule) solid var(--ars-border);
+  padding: 0.3rem 0 0.3rem 0.05rem;
+}
+
+/* Long lines scroll inside the block; the page never does. */
+.md-typeset pre {
+  max-width: 100%;
+}
+
+.md-typeset .highlighttable .linenos {
+  border-right: var(--ars-rule) solid var(--ars-border);
+}
+
+/* --- 5. Admonitions, plus one extra type: Contract ------------------------- */
+
+.md-typeset .admonition,
+.md-typeset details {
+  border-width: 0 0 0 2px;
+  border-radius: 0 var(--ars-radius) var(--ars-radius) 0;
+  box-shadow: none;
+  background: var(--ars-surface);
+  font-size: 0.75rem;
+}
+
+.md-typeset .admonition-title,
+.md-typeset summary {
+  font-weight: 600;
+  letter-spacing: 0.005em;
+}
+
+:root {
+  --md-admonition-icon--contract: url('data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M6 2h9l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm8 1.5V8h4.5L14 3.5zM8 12h8v1.6H8V12zm0 4h8v1.6H8V16z"/></svg>');
+}
+
+.md-typeset .admonition.contract,
+.md-typeset details.contract {
+  border-color: var(--ars-marker);
+}
+
+.md-typeset .contract > .admonition-title,
+.md-typeset .contract > summary {
+  background-color: rgba(216, 146, 43, 0.11);
+}
+
+.md-typeset .contract > .admonition-title::before,
+.md-typeset .contract > summary::before {
+  background-color: var(--ars-marker);
+  -webkit-mask-image: var(--md-admonition-icon--contract);
+  mask-image: var(--md-admonition-icon--contract);
+}
+
+/* --- 6. Tables ------------------------------------------------------------- */
+
+.md-typeset table:not([class]) {
+  border: var(--ars-rule) solid var(--ars-border);
+  border-radius: var(--ars-radius);
+  box-shadow: none;
+  font-size: 0.72rem;
+}
+
+.md-typeset table:not([class]) th {
+  background: var(--md-default-bg-color--light);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.md-typeset table:not([class]) td {
+  border-top: var(--ars-rule) solid var(--ars-border);
+}
+
+/* A wide table scrolls in its own box (wrapper added by assets/javascript/ars.js). */
+.ars-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.ars-scroll:focus-visible {
+  outline: 2px solid var(--ars-signal);
+  outline-offset: 2px;
+}
+
+/* --- 7. Chrome ------------------------------------------------------------- */
+
+.md-header {
+  border-bottom: var(--ars-rule) solid rgba(247, 246, 242, 0.13);
+  box-shadow: none;
+}
+
+.md-header__title {
+  font-weight: 600;
+  letter-spacing: -0.006em;
+}
+
+.md-nav__title {
+  font-family: var(--md-code-font);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ars-eyebrow);
+}
+
+.md-nav__link--active {
+  font-weight: 600;
+}
+
+.md-footer-meta {
+  background: var(--md-footer-bg-color--dark);
+}
+
+/* --- 8. Homepage ----------------------------------------------------------- */
+
+/* The landing page drops the left nav and the TOC (website/overrides/home.html),
+   so its content column is free to run wider than an article column. */
+.ars-home {
+  max-width: 58rem;
+}
+
+.ars-hero {
+  padding: 3.2rem 0 2.4rem;
+  border-bottom: var(--ars-rule) solid var(--ars-border);
+}
+
+.ars-eyebrow {
+  font-family: var(--md-code-font);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ars-eyebrow);
+  margin: 0 0 0.9rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.ars-eyebrow::before {
+  content: "";
+  width: 1.6rem;
+  height: 2px;
+  background: var(--ars-signal);
+  flex: none;
+}
+
+.ars-hero__headline {
+  font-size: clamp(1.7rem, 1.15rem + 2.1vw, 2.65rem);
+  font-weight: 700;
+  line-height: 1.14;
+  letter-spacing: -0.024em;
+  margin: 0 0 0.85rem;
+  max-width: 20ch;
+  color: var(--md-default-fg-color);
+}
+
+.ars-hero__lede {
+  font-size: 0.88rem;
+  line-height: 1.65;
+  max-width: 56ch;
+  color: var(--md-default-fg-color--light);
+  margin: 0 0 1.6rem;
+}
+
+.ars-cta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.ars-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.52rem 1.05rem;
+  border-radius: var(--ars-radius);
+  border: var(--ars-rule) solid transparent;
+  font-size: 0.76rem;
+  font-weight: 600;
+  line-height: 1.3;
+  text-decoration: none;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.md-typeset .ars-btn--primary {
+  background: var(--ars-signal);
+  color: var(--ars-paper);
+}
+
+[data-md-color-scheme="slate"] .md-typeset .ars-btn--primary {
+  color: var(--ars-ink);
+}
+
+.md-typeset .ars-btn--primary:hover {
+  background: var(--ars-ink);
+  color: var(--ars-paper);
+}
+
+[data-md-color-scheme="slate"] .md-typeset .ars-btn--primary:hover {
+  background: var(--ars-paper);
+  color: var(--ars-ink);
+}
+
+.md-typeset .ars-btn--ghost {
+  border-color: var(--ars-border-strong);
+  color: var(--md-default-fg-color);
+}
+
+.md-typeset .ars-btn--ghost:hover {
+  border-color: var(--ars-signal);
+  color: var(--ars-signal);
+}
+
+.ars-btn:focus-visible,
+.md-typeset a:focus-visible {
+  outline: 2px solid var(--ars-signal);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* Static trajectory: an illustration of the model, never a live console. */
+.ars-trajectory {
+  margin: 2.4rem 0;
+}
+
+.md-typeset ol.ars-trajectory__track {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 0.5rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.md-typeset .ars-stage {
+  flex: 1 1 8.5rem;
+  min-width: 0;
+  position: relative;
+  padding: 0.75rem 0.85rem;
+  background: var(--ars-surface);
+  border: var(--ars-rule) solid var(--ars-border);
+  border-top: 2px solid var(--ars-border-strong);
+  border-radius: 0 0 var(--ars-radius) var(--ars-radius);
+}
+
+.ars-stage--signal {
+  border-top-color: var(--ars-signal);
+}
+
+.ars-stage--marker {
+  border-top-color: var(--ars-marker);
+}
+
+.ars-stage__name {
+  font-family: var(--md-code-font);
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  margin: 0 0 0.28rem;
+  color: var(--md-default-fg-color);
+}
+
+.ars-stage__note {
+  font-size: 0.68rem;
+  line-height: 1.5;
+  margin: 0;
+  color: var(--md-default-fg-color--light);
+}
+
+.ars-trajectory__caption {
+  font-size: 0.68rem;
+  line-height: 1.55;
+  color: var(--md-default-fg-color--light);
+  margin: 0.8rem 0 0;
+}
+
+/* Panel grid used for the homepage entry points. */
+.ars-panels {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 0.8rem;
+  margin: 1.4rem 0 2.6rem;
+}
+
+.md-typeset .ars-panel {
+  display: block;
+  padding: 1rem 1.1rem;
+  border: var(--ars-rule) solid var(--ars-border);
+  border-radius: var(--ars-radius);
+  background: var(--ars-surface);
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 120ms ease;
+}
+
+.md-typeset .ars-panel:hover {
+  border-color: var(--ars-signal);
+}
+
+.md-typeset .ars-panel:focus-visible {
+  outline: 2px solid var(--ars-signal);
+  outline-offset: 2px;
+}
+
+.ars-panel__name {
+  font-size: 0.83rem;
+  font-weight: 600;
+  margin: 0 0 0.3rem;
+  color: var(--ars-signal);
+}
+
+.ars-panel__note {
+  font-size: 0.72rem;
+  line-height: 1.55;
+  margin: 0;
+  color: var(--md-default-fg-color--light);
+}
+
+/* --- 9. Small screens ------------------------------------------------------ */
+
+@media screen and (max-width: 44.9375em) {
+  .ars-hero {
+    padding: 2.2rem 0 1.8rem;
+  }
+
+  .ars-hero__headline {
+    max-width: none;
+  }
+
+  .ars-btn {
+    flex: 1 1 100%;
+    justify-content: center;
+  }
+
+  .md-typeset .ars-stage {
+    flex: 1 1 100%;
+  }
+
+  .md-typeset table:not([class]) {
+    font-size: 0.68rem;
+  }
+}
+
+/* --- 10. Motion and print --------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+@media print {
+  .ars-hero,
+  .ars-panels {
+    break-inside: avoid;
+  }
+}

@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+
+{#
+  One override, one reason: load the vendored Mermaid bundle before the theme
+  bundle runs. Material only fetches Mermaid from a third-party CDN when
+  `window.mermaid` is still undefined, so defining it first keeps the built site
+  free of external asset requests. `assets/javascript/mermaid.min.js` is
+  vendored under website/docs/assets/javascript/ and recorded in
+  website/ASSET-PROVENANCE.md.
+#}
+{% block scripts %}
+  <script src="{{ 'assets/javascript/mermaid.min.js' | url }}"></script>
+  {{ super() }}
+{% endblock %}

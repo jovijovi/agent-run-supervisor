@@ -1,0 +1,188 @@
+# Public documentation site for agent-run-supervisor.
+#
+# `docs_dir` is deliberately NOT the repository's `docs/` tree. `docs/` holds the
+# governed product authority chain (product, design, roadmap, plans, lessons,
+# archives) and `mkdocs build` copies *every* file under `docs_dir` into the
+# output regardless of nav membership. Pointing the site at `docs/` would publish
+# internal governance surfaces at real URLs and would make the public allowlist
+# decorative. Public content therefore lives in its own `website/docs` tree.
+site_name: Agent Run Supervisor
+site_description: >-
+  Supervise local AGENT runs. Preserve context. Recover with evidence.
+site_author: the agent-run-supervisor authors
+site_url: https://jovijovi.github.io/agent-run-supervisor/
+repo_url: https://github.com/jovijovi/agent-run-supervisor
+repo_name: jovijovi/agent-run-supervisor
+edit_uri: edit/main/website/docs/
+copyright: >-
+  &copy; the agent-run-supervisor authors — MIT.
+  Documentation only; ARS exposes no public network service and no web console.
+
+docs_dir: website/docs
+site_dir: site
+
+# Every relaxation here is deliberate: `mkdocs build --strict` promotes each
+# `warn` to a build failure, so an unlisted page, a dead internal link, a broken
+# anchor, or an absolute internal link fails the build rather than shipping.
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+    absolute_links: warn
+  links:
+    not_found: warn
+    anchors: warn
+    absolute_links: warn
+    unrecognized_links: warn
+
+theme:
+  name: material
+  custom_dir: website/overrides
+  language: en
+  logo: assets/logo/ars-mark.svg
+  favicon: assets/logo/favicon.svg
+  # `false` removes the theme's Google Fonts <link>. Every face is served from
+  # website/docs/assets/fonts by assets/stylesheets/ars.css.
+  font: false
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/circle-slice-4
+        name: Switch to dark
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/circle-slice-8
+        name: Switch to light
+  features:
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - content.action.edit
+
+extra_css:
+  - assets/stylesheets/ars.css
+
+extra_javascript:
+  - assets/javascript/ars.js
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/jovijovi/agent-run-supervisor
+      name: agent-run-supervisor on GitHub
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/agent-run-supervisor/
+      name: agent-run-supervisor on PyPI
+
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            docstring_section_style: table
+            filters: ["!^_"]
+            members_order: source
+            merge_init_into_class: true
+            separate_signature: true
+            show_signature_annotations: true
+            signature_crossrefs: true
+            show_root_heading: true
+            show_root_full_path: false
+            show_source: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            heading_level: 3
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      permalink_title: Link to this section
+      toc_depth: 3
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify {kwds: {case: lower}}
+
+# The public navigation allowlist. `website/nav-allowlist.txt` mirrors it and
+# `tools/check_docs_site.py` asserts the two agree, so adding a page to the site
+# is always a deliberate two-file edit. Internal roadmap, plans, lessons,
+# archives, and superseded documents are not reachable from here and are not
+# copied into the output, because they live outside `docs_dir` entirely.
+nav:
+  - Home: index.md
+  - Overview: overview.md
+  - Quickstart: quickstart.md
+  - Core Concepts:
+      - concepts/index.md
+      - concepts/agents.md
+      - concepts/runs-and-sessions.md
+      - concepts/profiles-and-binding.md
+      - concepts/native-acp.md
+  - How-to Guides:
+      - how-to/index.md
+      - how-to/register-an-agent.md
+      - how-to/claude-code.md
+      - how-to/codex-cli.md
+      - how-to/opencode.md
+      - how-to/cursor-cli.md
+  - Deployment:
+      - deployment/index.md
+      - deployment/local-daemon.md
+      - deployment/systemd.md
+  - Reference:
+      - reference/index.md
+      - reference/socket-api.md
+      - reference/agents-file.md
+      - reference/events.md
+      - reference/results.md
+      - reference/error-codes.md
+  - API Reference:
+      - reference/api/index.md
+      - reference/api/client.md
+      - reference/api/protocol.md
+  - Contributing:
+      - contributing/index.md
+      - contributing/testing.md
+      - contributing/publishing.md
+  - About:
+      - about/licenses.md

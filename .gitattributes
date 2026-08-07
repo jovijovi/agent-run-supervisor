@@ -1,0 +1,3 @@
+# Vendored minified browser bundle. Treat as binary so Git does not rewrite or
+# whitespace-check upstream template literals embedded in the generated file.
+website/docs/assets/javascript/mermaid.min.js binary

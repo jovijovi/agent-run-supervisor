@@ -1,0 +1,10 @@
+{% extends "main.html" %}
+
+{#
+  Landing-page shell. It changes chrome only: the left navigation and the table
+  of contents are dropped so the homepage reads as one column. All homepage
+  copy — the hero, the trajectory, the entry points — lives in
+  website/docs/index.md, so the public product statements stay in a reviewable
+  Markdown file that the content gate can assert against.
+#}
+{% block site_nav %}{% endblock %}

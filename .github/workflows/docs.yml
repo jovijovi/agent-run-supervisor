@@ -1,0 +1,64 @@
+name: Docs
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/docs.yml'
+      - 'mkdocs.yml'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'website/**'
+      - 'tools/check_docs_site.py'
+      - 'tests/docs_site/**'
+  push:
+    branches:
+      - main
+      - 'docs/**'
+    paths:
+      - '.github/workflows/docs.yml'
+      - 'mkdocs.yml'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'website/**'
+      - 'tools/check_docs_site.py'
+      - 'tests/docs_site/**'
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+# Build validation only. This workflow intentionally has no Pages permission,
+# environment, artifact upload, or deploy action. Publication remains a separate
+# operator decision.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3
+        with:
+          enable-cache: true
+          python-version: '3.11'
+
+      - name: Install documentation toolchain
+        run: uv sync --locked --extra docs --extra dev
+
+      - name: Run documentation content tests
+        run: uv run pytest -q tests/docs_site
+
+      - name: Validate public content boundary
+        run: uv run python tools/check_docs_site.py
+
+      - name: Build documentation strictly
+        run: uv run mkdocs build --strict
