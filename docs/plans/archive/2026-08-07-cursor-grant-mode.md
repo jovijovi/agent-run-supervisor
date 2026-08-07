@@ -1,7 +1,8 @@
 ---
 title: "Grant-driven Cursor permission mode — ask for read-only grants, agent otherwise"
-status: active
+status: archived
 created_at: 2026-08-07
+archived_at: 2026-08-07
 plan_kind: behaviour-closure-plan
 base_branch: main
 task_branch: fix/cursor-grant-mode
