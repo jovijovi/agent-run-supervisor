@@ -665,7 +665,12 @@ class RunTask:
         ctx.instance = instance
         # Selector ids come from the instance, so a source-frozen profile and an
         # operator-registered agent take the identical code path with different
-        # data — there is no agent-aware branch anywhere below this line.
+        # data — there is no agent-aware branch anywhere below this line. The
+        # required permission mode is the profile's answer for this Run's
+        # sealed frozen grant: static profiles answer their frozen literal,
+        # policy profiles compute from the grant, and because the machine is
+        # built per Run the answer is recomputed and re-proven on every Run,
+        # session/new and session/load alike.
         try:
             ctx.machine = ConfigFidelityMachine(
                 model_selector_id=instance.model_selector_id,
@@ -675,7 +680,11 @@ class RunTask:
                 permission_mode_selector_id=(
                     instance.profile.permission_mode_selector_id
                 ),
-                required_permission_mode=instance.profile.required_permission_mode,
+                required_permission_mode=(
+                    instance.profile.required_permission_mode_for(
+                        spec.execution_grant.capabilities
+                    )
+                ),
                 fidelity_mode=instance.config_fidelity_mode,
             )
         except ConfigFidelityError as exc:
@@ -1210,11 +1219,17 @@ class RunTask:
                 # The rollback runs the declared mode, so a model-only Session
                 # is restored by the same model-only sequence.
                 fidelity_mode=ctx.instance.config_fidelity_mode,
-                # The rollback re-runs the full exact sequence, so a frozen
-                # permission mode is re-proven too — a rollback must never
-                # leave the session in an unproven mode.
+                # The rollback re-runs the full exact sequence, so the
+                # required permission mode — frozen literal or grant-computed,
+                # from the same sealed grant, hence the same value within this
+                # Run — is re-proven too: a rollback must never leave the
+                # session in an unproven mode.
                 permission_mode_selector_id=ctx.profile.permission_mode_selector_id,
-                required_permission_mode=ctx.profile.required_permission_mode,
+                required_permission_mode=(
+                    ctx.profile.required_permission_mode_for(
+                        self._spec.execution_grant.capabilities
+                    )
+                ),
             )
             rollback_machine.record_initial_options(latest_options)
             # Rollback is itself exact-readback gated.

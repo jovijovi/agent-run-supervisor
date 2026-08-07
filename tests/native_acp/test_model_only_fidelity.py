@@ -169,12 +169,13 @@ def test_cursor_native_acp_v1_is_registered_and_model_only() -> None:
     assert "cursor-native-acp-v1" in DEFAULT_REGISTRY.ids()
 
 
-def test_the_cursor_profile_deviates_only_in_effort_fidelity() -> None:
-    """Its one proven deviation, and nothing else.
+def test_the_cursor_profile_deviates_only_in_its_two_proven_terms() -> None:
+    """Its two proven deviations, and nothing else.
 
-    Everything a profile freezes other than configuration fidelity must equal
-    the standard conformance contract, or the deviation would be broader than
-    the evidence supports.
+    Configuration fidelity (model-only) and the grant-driven permission-mode
+    selection are the profile's evidenced deviations. Everything else a profile
+    freezes must equal the standard conformance contract, or the deviation
+    would be broader than the evidence supports.
     """
     standard = STANDARD_NATIVE_ACP_V1.snapshot()
     cursor = CURSOR_NATIVE_ACP_V1.snapshot()
@@ -190,15 +191,21 @@ def test_the_cursor_profile_deviates_only_in_effort_fidelity() -> None:
     assert cursor["profile_id"] == "cursor-native-acp-v1"
     assert cursor["effort_selector_id"] is None
     assert cursor["config_fidelity_mode"] == FIDELITY_MODEL_ONLY
-    # No frozen session metadata, no required permission mode, and no
-    # launch-permission policy: the deviation is effort fidelity, full stop.
+    # The second deviation is the grant-driven mode policy — a policy id, never
+    # a frozen literal, because the required mode is computed per Run from the
+    # frozen grant. No frozen session metadata and no launch-permission policy.
+    assert cursor["permission_mode_selector_id"] == "mode"
+    assert cursor["permission_mode_policy_id"] == (
+        "read-only-grant-ask-else-agent-v1"
+    )
+    assert "required_permission_mode" not in cursor
     assert "session_meta" not in cursor
-    assert "permission_mode_selector_id" not in cursor
     assert "launch_permission_policy_id" not in cursor
-    # Revision 2 is the record of removing the launch-permission selection that
-    # revision 1 carried. It is the only frozen term that no longer equals the
-    # standard contract's, and it is not a deviation in ACP semantics.
-    assert cursor["revision"] == 2
+    # Revision 2 recorded removing the launch-permission selection revision 1
+    # carried; revision 3 records adding the grant-driven mode selection, which
+    # is a deviation in ACP permission-mediation semantics and therefore moved
+    # this profile's hash.
+    assert cursor["revision"] == 3
     assert standard["revision"] == 1
 
 

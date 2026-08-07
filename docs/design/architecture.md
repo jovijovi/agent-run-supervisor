@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext System Architecture"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-04
+last_validated_at: 2026-08-07
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/architecture.md"
 ---
 # agent-run-supervisor vNext System Architecture
@@ -29,11 +29,14 @@ attestation module, and three per-agent profiles are deleted from source. The fo
 source" marker is therefore retired; `docs/archive/binding-era-2026-07/` holds the retired architecture as
 cold history.
 
-Three later decisions are folded in: the per-Run exact-literal guard over free-form Run text is **removed**
+Four later decisions are folded in: the per-Run exact-literal guard over free-form Run text is **removed**
 (PRD R15); a profile now declares a **configuration-fidelity mode**, with `cursor-native-acp-v1`
-registered for the one evidenced model-only deviation (PRD R3/R12); and the artificial Session closing
+registered for the one evidenced model-only deviation (PRD R3/R12); the artificial Session closing
 lifecycle is **deleted** in favour of one durable, resumable Session kind on `api_version` 3 (PRD R4/R5/R11)
-— Runs terminate, Sessions do not close.
+— Runs terminate, Sessions do not close; and `cursor-native-acp-v1` revision 3 drives Cursor's cooperative
+ACP `mode` from the Run's frozen grant — `ask` when the grant is exactly a subset of `{read, search}`,
+`agent` otherwise — proven by exact readback before the model and re-proven after it (PRD R7/R12), a
+cooperative mitigation and never a sandbox claim.
 
 Merge, publication, deployment, and activation stay separate facts; a merge implies none of the others, and
 each is its own explicit decision. Published package/release facts come from live GitHub Releases and PyPI;
@@ -586,6 +589,17 @@ policy is read-only — write and shell execution denied explicitly, reads untou
 faithfully enforce refuses the Run before spawn rather than widening. `launch.json` binds the policy id and a
 content digest, never the directory or the document, and the material is removed only after the child is
 proven reaped. It adds no writable surface: it lives inside the first of the two.
+
+🟦 **Grant-driven permission mode, where launch material cannot be selected.** The Cursor backend's
+launch-permission key is the agent's whole configuration root, so no registered profile selects launch
+material (it would relocate agent-owned Session state and break `session/load` continuity). For that
+profile the remaining pre-side-effect line is the agent's own cooperative `mode` selector:
+`cursor-native-acp-v1` revision 3 computes the required mode per Run from the frozen grant through one
+closed source-owned policy — `ask` for a grant that is exactly a subset of `{read, search}`, `agent` for
+every other valid grant — sets it before the model, proves it by exact readback, re-proves it after the
+model set, and fails pre-prompt as `CONFIG_FIDELITY` otherwise, on `session/new` and `session/load` Runs
+alike. It is a cooperative temporary mitigation riding the agent's own mode machinery, not an OS sandbox
+and not a strong hostile-agent boundary; the bridge and the completion backstop are unchanged.
 
 **Honest limit.** Mediation is cooperative. An agent that ignores the knob, or one with no registered
 binding, can execute in-process tools with no ACP permission event and the bridge will never see them. A

@@ -147,13 +147,19 @@ Every value above is a **placeholder**. The closed field set is `profile`, `comm
 `forbidden_capabilities`, and `session_epoch` — nothing else, and an unknown key at any level is
 refused. An agent whose CLI is not natively ACP is no different: point `command` at the ACP adapter you
 installed and use the same profile, because the adapter is a deployment fact, not a source constant.
-Two profiles differ, each for one evidenced deviation and nothing more:
+Two profiles differ, each only for evidenced deviations:
 `claude-agent-acp-compat-v1` carries its ACP-level compatibility differences, and
-`cursor-native-acp-v1` uses model-only configuration fidelity — its model selector *is* the whole
-configuration, with no separate effort selector. That is its only deviation: like every other
-profile, it adds no startup permission policy and never repoints your agent's own configuration
-root, so agent-owned Session state stays where the agent put it and resumes through a real
-`session/load`. `standard-native-acp-v1` behaves ordinarily.
+`cursor-native-acp-v1` deviates twice. It uses model-only configuration fidelity — its model selector
+*is* the whole configuration, with no separate effort selector — and, at revision 3, it drives
+Cursor's own ACP `mode` from the Run's frozen grant: a Run whose grant capabilities are exactly a
+subset of `{read, search}` must run in `ask` mode, every other valid grant runs in `agent` mode, and
+the mode is set and exact-read-back before the model and re-proven after it, failing before any
+prompt otherwise. That mode selection is a **cooperative mitigation** of an agent that can complete
+an edit in `agent` mode without asking — it is not an OS sandbox and not a strong permission
+guarantee, and ACP permission mediation plus the post-completion violation detector stay the
+enforcement line. Like every other profile, it adds no startup permission policy and never repoints
+your agent's own configuration root, so agent-owned Session state stays where the agent put it and
+resumes through a real `session/load`. `standard-native-acp-v1` behaves ordinarily.
 
 - **Your command is launched exactly as declared.** `argv[0]` is the declared string byte-for-byte, and
   a bare name is found by ordinary PATH lookup over the *child's* projected `PATH`, so shims, symlink
