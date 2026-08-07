@@ -2,10 +2,11 @@
 
 # Documentation Index
 
-Total: 82 documents tracked across 2 statuses.
+Total: 83 documents tracked across 2 statuses.
 
-## Active (17)
+## Active (18)
 
+- [Grant-driven Cursor permission mode — ask for read-only grants, agent otherwise](plans/active/2026-08-07-cursor-grant-mode.md) — created 2026-08-07
 - [Session reuse acceptance test plan](roadmap/session-reuse-acceptance.md) — created 2026-08-07
 - [ARS agent registry — the operator contract](design/agent-registry.md) — created 2026-07-30
 - [agent-run-supervisor vNext System Architecture](design/architecture.md) — created 2026-07-21

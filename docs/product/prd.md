@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext PRD"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-04
+last_validated_at: 2026-08-07
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/prd.md"
 ---
 # agent-run-supervisor vNext PRD
@@ -252,6 +252,14 @@ no unquarantine tool.
   stable code rather than being widened or narrowed silently. This is defense in depth — the permission
   bridge and the completion backstop are unchanged — and it is not a permission framework: there is no
   dynamic or per-tool approval, no path-level write policy, and no new write capability.
+- **A compatibility profile may require a permission mode, static or grant-driven.** Where cited
+  evidence shows an agent whose permissive mode acts without asking, the profile freezes the agent's ACP
+  permission-mode selector and the required value — one frozen literal, or a value computed per Run from the
+  frozen grant by one closed source-owned policy (R12). The mode is set before the model, proven by exact
+  readback, re-proven after the model set, and recomputed on every Run including Session reuse; any failure
+  is a pre-prompt `CONFIG_FIDELITY` with zero prompt. This is a **cooperative** mitigation riding the
+  agent's own mode machinery — not a sandbox, not a strong hostile-agent boundary — and it replaces neither
+  mediation nor the post-completion violation detector.
 - **Mediation is cooperative.** An agent that ignores the knob, or one with no registered binding, can
   execute in-process tools with no ACP permission event, and the permission bridge will never see them.
 
@@ -397,7 +405,8 @@ guarantees. ARS makes no isolation claim either way.
   ACP protocol major; required capabilities; a forbidden-capability floor; session semantics including
   required real `session/load` and never `session/new` on a reuse path; default selector-id conventions;
   the base environment allowlist; permission-mediation semantics; and — only where evidenced — frozen ACP
-  session metadata and a required permission-mode selector.
+  session metadata and a required permission-mode selector, whose required value is either one frozen
+  literal or computed per Run from the Run's frozen grant by one closed, source-owned grant-driven policy.
 - A profile contains **no** path, version, digest, model literal, agent name, value domain, launch kind,
   artifact identity, or deployment fact. `profile_hash` therefore moves **only when ACP semantics move**,
   which is why an ordinary ARS release leaves every Session identity field untouched.
@@ -406,10 +415,17 @@ guarantees. ARS makes no isolation claim either way.
 - The target registry is a closed set of three: `standard-native-acp-v1` for every agent, native or
   adapter-reached; `claude-agent-acp-compat-v1` for one evidenced ACP-semantic deviation — frozen session
   metadata sent on **both** `session/new` and `session/load`, plus a required permission-mode selector proven
-  by exact readback; and `cursor-native-acp-v1` for one evidenced configuration-fidelity deviation —
-  `model-only`, with no independent effort selector. Every other frozen term of the Cursor profile equals the
-  standard contract, and adding the mode moved no existing profile's `profile_hash`, so no live Session
-  identity changed.
+  by exact readback; and `cursor-native-acp-v1` for two evidenced deviations — configuration fidelity
+  (`model-only`, with no independent effort selector) and, at revision 3, a **grant-driven** required
+  permission mode: one closed source-owned policy requires the agent's cooperative `ask` mode when the Run's
+  frozen `grant_capabilities` are exactly a subset of `{read, search}` and its `agent` mode for every other
+  valid grant, set before the model, proven by exact readback, and re-proven after the model set. That mode
+  selection is a cooperative temporary mitigation of an agent that can complete an edit in `agent` mode
+  without asking — never a sandbox or a strong permission guarantee (R7's non-guarantees apply unchanged).
+  Every other frozen term of the Cursor profile equals the standard contract. Declaring configuration
+  fidelity moved no existing profile's `profile_hash`; the revision-3 grant-driven mode deliberately moved
+  **only** the Cursor profile's hash, so existing revision-2 Cursor Sessions are refused for reuse by the
+  ordinary profile-binding mismatch, with no migration or compatibility logic.
 - A profile may also declare **one launch-permission policy id** (R7), because how an agent must be
   configured to honour a permission decision before it acts is a permission-mediation semantic. It is an id
   from a closed source-owned set, keyed by the capability family it enforces and never by an agent name; the

@@ -139,11 +139,16 @@ forbidden_capabilities = ["terminal"]
 `env_passthrough`、`env_overlay`、`model_selector`、`effort_selector`、`forbidden_capabilities` 与
 `session_epoch` —— 除此以外没有别的，任何层级上的未知键都会被拒绝。CLI 本身不讲 ACP 的 agent 也没有
 区别：把 `command` 指向你安装的那个 ACP 适配器，profile 照旧，因为适配器是部署事实而不是源码常量。
-有两个 profile 不同，各自只对应一处有据可查的偏差：`claude-agent-acp-compat-v1` 保留它既有的
-ACP 层兼容性差异；`cursor-native-acp-v1` 使用 model-only 配置保真 —— 它的 model 选择器**就是**
-全部配置，没有独立的 effort 选择器。这也是它唯一的偏差：和其他 profile 一样，它不附加任何启动
-权限策略，也从不改指你 agent 自己的配置根目录，因此 agent 自己拥有的 Session 状态仍留在 agent
-放置它的地方，并通过真实的 `session/load` 复用。`standard-native-acp-v1` 的行为一如往常。
+有两个 profile 不同，且只对应有据可查的偏差：`claude-agent-acp-compat-v1` 保留它既有的
+ACP 层兼容性差异；`cursor-native-acp-v1` 有两处偏差。其一是 model-only 配置保真 —— 它的 model
+选择器**就是**全部配置，没有独立的 effort 选择器；其二（revision 3 起）是由 Run 的冻结授权驱动
+Cursor 自己的 ACP `mode`：授权能力恰好是 `{read, search}` 子集的 Run 必须运行在 `ask` 模式，其余
+一切有效授权运行在 `agent` 模式，且 mode 在 model 之前设置并逐字读回验证、在 model 设置之后再次
+复验，否则在任何 prompt 之前失败。这一模式选择是对"`agent` 模式下可以不经询问就完成编辑"的
+agent 的**协作式缓解** —— 它不是操作系统沙箱，也不是强权限保证；ACP 权限中介与完成后违规检测器
+仍是执法线。和其他 profile 一样，它不附加任何启动权限策略，也从不改指你 agent 自己的配置根目录，
+因此 agent 自己拥有的 Session 状态仍留在 agent 放置它的地方，并通过真实的 `session/load` 复用。
+`standard-native-acp-v1` 的行为一如往常。
 
 - **你的命令按声明原样启动。** `argv[0]` 逐字节就是你声明的那个字符串；裸名字由**子进程**投影出的
   `PATH` 按普通查找定位，因此 shim、符号链接农场以及 agent 自更新都照常可用。这里没有任何预检解析；

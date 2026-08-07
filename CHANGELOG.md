@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `cursor-native-acp-v1` is revision 3: the profile now drives Cursor's ACP
+  `mode` selector from the Run's frozen grant through one closed source-owned
+  policy — `ask` when `grant_capabilities` are exactly a subset of
+  `{read, search}` (including `read` and `read+search`), `agent` for every
+  other valid grant. The mode is set before the model, proven by exact
+  readback, and re-proven after the model set; a missing selector, an
+  unadvertised target, a rejected set, a wrong readback, or a model-set side
+  effect that moves the mode fails before any prompt as `CONFIG_FIDELITY` with
+  zero prompt. The required mode is recomputed from the frozen grant on every
+  Run, including real `session/load` reuse Runs, and model-only fidelity is
+  untouched — no effort selector, effective effort stays `N/A`. `ask` is a
+  **cooperative mode mitigation** of an agent that can complete an edit in
+  `agent` mode without asking; it is not an OS sandbox and not a strong
+  permission guarantee, and ACP permission mediation plus the post-completion
+  violation detector are unchanged. Moving the mode into profile semantics
+  moves only the Cursor `profile_hash`: existing revision-2 Cursor Sessions
+  are refused for reuse by the existing profile-binding mismatch, deliberately,
+  with no migration or compatibility logic.
+
 ### Fixed
 
 - Reusing a quarantined Session now reports the stable `SESSION_QUARANTINED`

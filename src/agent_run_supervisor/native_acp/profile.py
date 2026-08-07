@@ -32,8 +32,16 @@ SDK's permission rules and tool surface. Neither half is sufficient alone.
 ``cursor-native-acp-v1`` exists for the one other cited ACP-semantic deviation:
 an agent whose model selector *is* the whole configuration, with no independent
 effort selector to discover or set. That is expressed as a declared
-configuration-fidelity mode, and it is the profile's only deviation — every
-other frozen term equals the standard contract.
+configuration-fidelity mode. Revision 3 adds this profile's second frozen term:
+its ``mode`` selector is driven by one closed, source-owned, grant-driven
+permission-mode policy — ``ask`` when the Run's frozen grant is exactly a
+subset of ``{read, search}``, ``agent`` for every other valid grant — proven by
+exact readback before the model and re-proven after it. That selection is a
+cooperative mitigation of an agent that can complete an edit in ``agent`` mode
+without ever asking; it is not an OS sandbox and not a strong hostile-agent
+boundary, and the ACP permission bridge and the post-completion violation
+detector remain the enforcement line. Every other frozen term equals the
+standard contract.
 
 The ``-v1`` suffix is load-bearing: the id carries the ACP protocol generation,
 construction refuses a profile whose frozen protocol disagrees with it, and a
@@ -48,7 +56,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from .config_fidelity import (
     EFFORT_NOT_APPLICABLE,
@@ -135,6 +143,47 @@ def mediation_pairs(mediation_id: str | None) -> tuple[tuple[str, str], ...]:
 
 
 # ---------------------------------------------------------------------------
+# Grant-driven permission-mode policies — source-owned and closed
+# ---------------------------------------------------------------------------
+
+# A profile may freeze a required permission mode as one literal (the Claude
+# compat profile does), but for an agent whose safe mode depends on what the
+# Run is allowed to do, one literal is wrong in one direction or the other:
+# always-``ask`` breaks writable development Runs, always-``agent`` leaves
+# read-only Runs one unasked edit from a post-hoc violation. So the profile may
+# instead select one **policy** from this closed table, and the Run's frozen
+# ``grant_capabilities`` — already sealed, immutable, and caller-authorized —
+# become the policy's only input. The policy is source-owned in id and body;
+# neither a registry entry nor a caller can author, select, or replace one, and
+# generic runtime code asks the profile rather than branching on an agent name.
+#
+# The one registered policy implements the exact-subset rule and nothing else:
+# a grant that is exactly a subset of ``{read, search}`` (including the empty
+# grant) requires the agent's cooperative ``ask`` mode; every other valid grant
+# requires ``agent``. There are no further grant classes. The mode values are
+# the agent's own advertised ACP ``mode`` literals, set and read back opaquely
+# by the fidelity machine like every other selector value.
+_READ_ONLY_GRANT_CAPABILITIES: frozenset[str] = frozenset({"read", "search"})
+
+
+def _read_only_grant_ask_else_agent(capabilities: Iterable[str]) -> str:
+    return (
+        "ask"
+        if frozenset(capabilities) <= _READ_ONLY_GRANT_CAPABILITIES
+        else "agent"
+    )
+
+
+PERMISSION_MODE_POLICY_READ_ONLY_ASK = "read-only-grant-ask-else-agent-v1"
+
+_PERMISSION_MODE_POLICIES: dict[str, Callable[[Iterable[str]], str]] = {
+    PERMISSION_MODE_POLICY_READ_ONLY_ASK: _read_only_grant_ask_else_agent,
+}
+
+PERMISSION_MODE_POLICY_IDS: frozenset[str] = frozenset(_PERMISSION_MODE_POLICIES)
+
+
+# ---------------------------------------------------------------------------
 # The base environment allowlist
 # ---------------------------------------------------------------------------
 
@@ -213,10 +262,17 @@ class AcpCompatProfile:
     # a fiction into every launch snapshot.
     model_selector_id: str = "model"
     effort_selector_id: str | None = "effort"
-    # Declared together or not at all: a selector with no required literal
-    # proves nothing, and a required literal with no selector cannot be set.
+    # A selector is declared with exactly one mode authority, or not at all: a
+    # selector with no required mode proves nothing, a required mode with no
+    # selector cannot be set, and two authorities for one selector could
+    # disagree. ``required_permission_mode`` freezes one literal;
+    # ``permission_mode_policy_id`` selects one closed, source-owned policy
+    # that computes the per-Run required mode from the Run's frozen grant
+    # capabilities. The grant is only ever an input — the profile never learns
+    # from it.
     permission_mode_selector_id: str | None = None
     required_permission_mode: str | None = None
+    permission_mode_policy_id: str | None = None
     # An optional, closed, source-owned launch-permission policy id. Absent by
     # default. When present, ARS compiles that policy from the Run's frozen
     # grant and hands the child a private per-Run configuration *before* the
@@ -324,10 +380,30 @@ class AcpCompatProfile:
     def _validate_permission_mode(self) -> None:
         selector = self.permission_mode_selector_id
         required = self.required_permission_mode
-        if (selector is None) != (required is None):
+        policy_id = self.permission_mode_policy_id
+        if policy_id is not None:
+            # Judged before the lookup and before any formatting, exactly like
+            # the launch-permission policy id: categorical refusals only.
+            if type(policy_id) is not str:
+                raise ProfileValidationError(
+                    "permission_mode_policy_id must be a str when it is present"
+                )
+            if policy_id not in PERMISSION_MODE_POLICY_IDS:
+                raise ProfileValidationError(
+                    f"unregistered permission mode policy: {policy_id!r}"
+                )
+        declared = (required is not None) + (policy_id is not None)
+        if selector is None:
+            if declared:
+                raise ProfileValidationError(
+                    "a required permission mode or permission-mode policy must "
+                    "be declared together with permission_mode_selector_id"
+                )
+            return
+        if declared != 1:
             raise ProfileValidationError(
-                "permission_mode_selector_id and required_permission_mode must "
-                "be declared together"
+                "permission_mode_selector_id must be declared with exactly one "
+                "of required_permission_mode or permission_mode_policy_id"
             )
         for name, value in (
             ("permission_mode_selector_id", selector),
@@ -379,6 +455,38 @@ class AcpCompatProfile:
                 f"base allowlist collides with reserved mediation keys: {collisions}"
             )
 
+    # -- required permission mode ------------------------------------------
+
+    def required_permission_mode_for(
+        self, grant_capabilities: Iterable[str]
+    ) -> str | None:
+        """The mode this Run must prove, or ``None`` for a modeless profile.
+
+        One answer for both declaration forms, so no caller learns which kind
+        of profile it holds: a static profile answers its frozen literal for
+        every grant, a policy profile computes from the Run's frozen grant, and
+        a profile with no selector answers ``None``. Asked once per machine
+        construction, which is what makes the required mode a recomputed
+        per-Run fact rather than remembered state.
+        """
+        if self.permission_mode_selector_id is None:
+            return None
+        if self.required_permission_mode is not None:
+            return self.required_permission_mode
+        # Construction admitted exactly one authority, so the policy id is
+        # present and registered here.
+        assert self.permission_mode_policy_id is not None
+        if isinstance(grant_capabilities, (str, bytes)):
+            # ``str`` is an iterable of characters: text here would quietly
+            # compute from letters and land on the permissive answer. Refuse
+            # toward zero prompt instead.
+            raise ConfigFidelityError(
+                "grant_capabilities must be an iterable of capability tokens, "
+                "not text"
+            )
+        policy = _PERMISSION_MODE_POLICIES[self.permission_mode_policy_id]
+        return policy(grant_capabilities)
+
     # -- frozen session metadata ------------------------------------------
 
     def session_meta_payload(self) -> dict[str, Any] | None:
@@ -425,7 +533,10 @@ class AcpCompatProfile:
             payload["launch_permission_policy_id"] = self.launch_permission_policy_id
         if self.permission_mode_selector_id is not None:
             payload["permission_mode_selector_id"] = self.permission_mode_selector_id
-            payload["required_permission_mode"] = self.required_permission_mode
+            if self.required_permission_mode is not None:
+                payload["required_permission_mode"] = self.required_permission_mode
+            if self.permission_mode_policy_id is not None:
+                payload["permission_mode_policy_id"] = self.permission_mode_policy_id
         if self.session_meta is not None:
             payload["session_meta"] = json.loads(self.session_meta)
         return payload
@@ -654,15 +765,32 @@ CLAUDE_AGENT_ACP_COMPAT_V1 = AcpCompatProfile(
 # the ACP ``PermissionBridge``, the frozen-grant default-deny mediation, the
 # post-completion violation detector, and the mandatory per-agent denied-action
 # canary. See ``launch_permissions`` for the constraint on any future selection.
+#
+# Revision 3 freezes the grant-driven ``mode`` selection. Cited ACP-level
+# evidence: in its ``agent`` mode this agent can complete an edit without ever
+# emitting ``session/request_permission``, so on a read-only grant the
+# permission bridge decides nothing and the violation is detected only after
+# the file exists; in its advertised ``ask`` mode the agent itself asks before
+# acting. The required mode is therefore computed per Run by the one closed
+# grant-driven policy above — ``ask`` when the frozen grant is exactly a subset
+# of ``{read, search}``, ``agent`` for every other valid grant — set before the
+# model, proven by exact readback, and re-proven after the model set, exactly
+# like the compat profile's frozen literal. This is a **cooperative temporary
+# mitigation**: it is not an OS sandbox, not a strong hostile-agent boundary,
+# and not a launch-permission replacement, and the enforcement line named above
+# is unchanged. Moving the mode into profile semantics moved this profile's
+# hash — a deliberate identity change for existing revision-2 Sessions.
 CURSOR_NATIVE_ACP_V1 = AcpCompatProfile(
     profile_id="cursor-native-acp-v1",
-    revision=2,
+    revision=3,
     acp_protocol_version="1",
     required_capabilities=("loadSession",),
     forbidden_capabilities=(),
     requires_session_load=True,
     config_fidelity_mode=FIDELITY_MODEL_ONLY,
     effort_selector_id=None,
+    permission_mode_selector_id="mode",
+    permission_mode_policy_id=PERMISSION_MODE_POLICY_READ_ONLY_ASK,
 )
 
 DEFAULT_REGISTRY = ProfileRegistry(
