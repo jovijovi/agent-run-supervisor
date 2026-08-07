@@ -10,6 +10,10 @@ last_validated_at: 2026-08-06
 Canonical local entry: [`scripts/verify_local.sh`](../../scripts/verify_local.sh)
 (mirrors CI `Verify` workflow).
 
+Real external-AGENT Session continuity, refusal, concurrency, and recovery acceptance is defined separately in
+[`session-reuse-acceptance.md`](session-reuse-acceptance.md). That opt-in procedure is not part of the default
+hermetic implementation gate and never runs model calls implicitly.
+
 Primary local entry (after `make sync`, i.e.
 `uv sync --locked --extra dev --extra release --extra native`):
 
