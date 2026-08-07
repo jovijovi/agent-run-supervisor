@@ -1,5 +1,5 @@
 """agent-run-supervisor: local supervision of external ACP AGENT runs and sessions."""
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 __all__ = ["__version__"]

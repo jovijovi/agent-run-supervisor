@@ -4,9 +4,8 @@
 
 Total: 83 documents tracked across 2 statuses.
 
-## Active (18)
+## Active (17)
 
-- [Grant-driven Cursor permission mode — ask for read-only grants, agent otherwise](plans/active/2026-08-07-cursor-grant-mode.md) — created 2026-08-07
 - [Session reuse acceptance test plan](roadmap/session-reuse-acceptance.md) — created 2026-08-07
 - [ARS agent registry — the operator contract](design/agent-registry.md) — created 2026-07-30
 - [agent-run-supervisor vNext System Architecture](design/architecture.md) — created 2026-07-21
@@ -25,8 +24,9 @@ Total: 83 documents tracked across 2 statuses.
 - [Engineering practices](practices/README.md) — created 2026-05-28
 - [Verification gates for implementation PRs](roadmap/verification.md) — created 2026-05-28
 
-## Archived (65)
+## Archived (66)
 
+- [Grant-driven Cursor permission mode — ask for read-only grants, agent otherwise](plans/archive/2026-08-07-cursor-grant-mode.md) — created 2026-08-07
 - [Remove the legacy acpx runtime, package, and CLI surface](plans/archive/2026-08-06-remove-acpx-product-runtime-compat.md) — created 2026-08-06
 - [ARS Session No-Close Model Implementation Plan](plans/archive/2026-08-06-session-no-close-model.md) — created 2026-08-06
 - [Cursor cross-Run Session resume — restore process-per-Run continuity](plans/archive/2026-08-03-cursor-cross-run-session-resume.md) — created 2026-08-03

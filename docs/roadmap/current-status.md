@@ -12,7 +12,7 @@ supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 
 ```text
 base_branch: main
-active_plan: docs/plans/active/2026-08-07-cursor-grant-mode.md
+active_plan: none
 ```
 
 ## Current position
@@ -22,14 +22,14 @@ active_plan: docs/plans/active/2026-08-07-cursor-grant-mode.md
 - Cursor cross-Run Session resume is closed on `main`: `cursor-native-acp-v1` uses model-only fidelity and
   no registered profile selects per-Run launch-permission material, preserving the AGENT-owned Session state
   needed for real `session/load` continuity.
-- Grant-driven Cursor permission mode is implemented on the task branch `fix/cursor-grant-mode`
-  (uncommitted; F-CURSOR-GRANT-MODE-001): `cursor-native-acp-v1` revision 3 requires Cursor ACP mode `ask`
+- Grant-driven Cursor permission mode is closed on `main` (F-CURSOR-GRANT-MODE-001):
+  `cursor-native-acp-v1` revision 3 requires Cursor ACP mode `ask`
   when the Run's frozen grant is exactly a subset of `{read, search}` and `agent` for every other valid
   grant, set and exact-read-back before the model, re-proven after the model set, failing pre-Prompt as
   `CONFIG_FIDELITY` otherwise, recomputed on every Run including real `session/load` reuse. `ask` is a
   cooperative mode mitigation, not a permission/sandbox guarantee; mediation and the completion backstop
-  are unchanged. Source, tests, and docs only: commit, push, PR, merge, release, deployment, restart, and
-  any real Cursor canary each remain separately unapproved.
+  are unchanged. Release, deployment, restart, and any real Cursor canary each remain separately
+  unapproved.
 - The Session no-close model is closed on `main`: Runs terminate while Sessions remain durable and
   resumable, with one Session kind, no one-shot or ephemeral Session, and no normal Session terminal state.
   Quarantine is independent safety evidence, and `api_version` 3 is the sole caller wire.

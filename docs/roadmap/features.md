@@ -40,7 +40,7 @@ Remaining cell says what happened to the source, because for the boundary reset 
 | F-OBSERVED-EVIDENCE-001 | observed runtime facts are evidence or a policy warning, never a gate | Required | Done | PRD R14; architecture §3.3; result/event schema §9.5 | merged; exactly five observation-based refusals remain, and agentInfo is not one |
 | F-ENV-EVIDENCE-001 | environment values never enter sealed material, hash input, or the rendered carrier | Required | Done | PRD R15; technical solution §7; result/event schema §9.2 | merged; the dynamic per-Run literal guard is removed, and agent-authored free-form text may retain projected values as stated in PRD R15 |
 | F-MODEL-ONLY-FIDELITY-001 | declared configuration-fidelity modes + `cursor-native-acp-v1` | Required | Done | PRD R3/R12; technical solution §5; [registry contract](../design/agent-registry.md) | merged; model-only stops at the exact model readback, dispatches no effort RPC, and reports the shared `N/A` sentinel. Existing profiles keep separate selectors and their `profile_hash` |
-| F-CURSOR-GRANT-MODE-001 | grant-driven Cursor permission mode: `ask` for read-only grants, `agent` otherwise | Required | Implemented | PRD R7/R12; [active plan](../plans/active/2026-08-07-cursor-grant-mode.md); hermetic grant-mode suite | on `fix/cursor-grant-mode`, uncommitted; `cursor-native-acp-v1` revision 3 moves only Cursor's `profile_hash`; a cooperative mode mitigation, not a permission/sandbox guarantee; mediation and the completion backstop unchanged |
+| F-CURSOR-GRANT-MODE-001 | grant-driven Cursor permission mode: `ask` for read-only grants, `agent` otherwise | Required | Done | PRD R7/R12; [archived plan](../plans/archive/2026-08-07-cursor-grant-mode.md); hermetic grant-mode suite | merged on `main`; `cursor-native-acp-v1` revision 3 moves only Cursor's `profile_hash`; a cooperative mode mitigation, not a permission/sandbox guarantee; mediation and the completion backstop unchanged |
 | F-LAUNCH-PERMISSION-001 | profile-selected per-Run launch permission material | Required | Done | PRD R7/R12; technical solution §1.2/§5; [registry contract](../design/agent-registry.md) §7 | merged; one closed read-only policy is available, but no registered profile selects it because the affected backend's configuration-root key would break cross-Run `session/load` continuity |
 | F-ACP-SDK-012-001 | optional `native` extra pinned to `agent-client-protocol==0.12.0` (ACP schema v1.19) | Required | Done | PRD R12; technical solution §0/§11 | merged; sender hook, prompt causal boundary, update ordinal domain, delivery barrier, and SDK root-log containment are re-verified against 0.12.0; the SDK `http` extra stays uninstalled |
 | F-RECONCILE-ORDERED-001 | total ordered fail-closed startup reconciliation, absent ≠ corrupt | Required | Done | PRD R10; architecture §6.1–§6.2; technical solution §9 | merged; strictly more refusals than the tolerant reader it replaced |
@@ -56,7 +56,7 @@ Remaining cell says what happened to the source, because for the boundary reset 
 | The legacy acpx line | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 |
 | Session no-close model | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | vNext Stage 0/1 | 7 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| Configuration fidelity, SDK pin, launch permission | 3 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| Configuration fidelity, SDK pin, launch permission | 4 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | vNext Stage 2 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | Registered per-agent profiles | 0 | 0 | 0 | 0 | 1 | 2 | 0 | 0 | 0 |
 | Runtime Binding era | 0 | 0 | 0 | 0 | 0 | 3 | 0 | 0 | 0 |
@@ -64,7 +64,7 @@ Remaining cell says what happened to the source, because for the boundary reset 
 | Later integration | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 |
 | Explicit exclusions | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
 
-One row is `Implemented`: F-CURSOR-GRANT-MODE-001 exists on its task branch and is not merged.
+No row is `Implemented`: F-CURSOR-GRANT-MODE-001 is merged on `main`.
 The acpx removal is merged on `main`. F-LEGACY-COMPAT-001 records it as
 `Removed` in source terms only.
 
