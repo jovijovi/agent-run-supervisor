@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import re
 import sys
@@ -128,14 +129,24 @@ REMOTE_FONT_PATTERNS = {
     "font_cdn": re.compile(r"(?:use\.typekit|cdn\.jsdelivr\.net/npm/@fontsource)", re.I),
 }
 
-#: Publication markers. Present in an active workflow, each one means the
-#: repository can deploy the site, which is not authorized.
+#: Publication markers. Present in an active workflow, each one means that
+#: workflow can deploy the site. Exactly one workflow may carry them — the
+#: reviewed manual publication workflow named by ``PUBLICATION_WORKFLOW`` —
+#: and only the artifact-based markers in ``REVIEWED_PUBLICATION_MARKERS``.
+#: Every other active workflow must stay free of every marker, and
+#: ``check_publication_dormant`` additionally requires the reviewed workflow
+#: to exist and holds it to its reviewed canonical shape: manual-only
+#: triggering, a pinned narrow token, exact deploy topology, and no YAML
+#: indirection.
 #:
 #: Every marker is Pages-specific. ``id-token: write`` is deliberately *not*
 #: one: the package release workflow needs it for PyPI Trusted Publishing, so
 #: matching it here would fail the gate on a legitimate, pre-existing, unrelated
 #: workflow. `pages: write` is the permission that actually grants a site
-#: deploy, and it is matched.
+#: deploy, and it is matched. ``actions/configure-pages`` is the enablement
+#: surface: forbidden in every other workflow, allowed exactly once in the
+#: reviewed one, and ``enablement`` may never carry any value but ``false``
+#: anywhere.
 PUBLICATION_MARKERS = {
     "deploy_pages_action": re.compile(r"actions/deploy-pages", re.I),
     "upload_pages_artifact": re.compile(r"actions/upload-pages-artifact", re.I),
@@ -143,7 +154,114 @@ PUBLICATION_MARKERS = {
     "gh_deploy_command": re.compile(r"mkdocs\s+gh-deploy", re.I),
     "pages_environment": re.compile(r"environment:\s*\n?\s*(?:name:\s*)?github-pages", re.I),
     "pages_permission": re.compile(r"^\s*pages:\s*write\s*$", re.I | re.M),
+    "configure_pages_action": re.compile(r"actions/configure-pages", re.I),
+    "pages_enablement": re.compile(r"^\s*enablement:(?!\s*false\s*$).*$", re.I | re.M),
 }
+
+#: The one reviewed manual publication workflow, by file name under
+#: ``WORKFLOWS_DIR``. Deleting or renaming it re-forbids every marker here.
+PUBLICATION_WORKFLOW = "pages-publish.yml"
+
+#: SHA-256 of the complete, reviewed publication workflow bytes. The workflow
+#: is intentionally tiny and rarely changed; any trigger, permission, action,
+#: input, job placement, or comment edit must update this reviewed digest.
+PUBLICATION_WORKFLOW_SHA256 = (
+    "6254a6eafffe2c6f2f1d8933ca2806bd388d9ef50c40400ced3614e757f687f9"
+)
+
+#: Markers that *are* the reviewed workflow's mechanism — the official
+#: artifact-based Pages pattern, including its ``configure-pages`` step,
+#: whose canonical fragment below pins ``enablement: false``. The
+#: ``gh-pages``-branch mechanisms (``peaceiris/actions-gh-pages``,
+#: ``mkdocs gh-deploy``) and any non-``false`` ``enablement`` stay forbidden
+#: everywhere, including in the reviewed workflow.
+REVIEWED_PUBLICATION_MARKERS = frozenset(
+    {
+        "deploy_pages_action",
+        "upload_pages_artifact",
+        "pages_environment",
+        "pages_permission",
+        "configure_pages_action",
+    }
+)
+
+#: The only trigger the reviewed workflow may declare. Any other trigger
+#: would make publication automatic.
+PUBLICATION_TRIGGERS = frozenset({"workflow_dispatch"})
+
+#: The only ``write`` grants the reviewed workflow may hold — the two
+#: ``actions/deploy-pages`` itself requires. Everything else stays read-only.
+PUBLICATION_WRITE_GRANTS = frozenset({"pages", "id-token"})
+
+#: The root permission map, byte-exact. The reviewed workflow must carry this
+#: block exactly once, and no other ``permissions`` mapping may exist at any
+#: level, so a job cannot re-widen what the root pinned. Without it, jobs
+#: would inherit the repository's default ``GITHUB_TOKEN`` grants, which this
+#: gate cannot see.
+PUBLICATION_ROOT_PERMISSIONS = (
+    "\npermissions:\n  contents: read\n  pages: write\n  id-token: write\n"
+)
+
+#: The reviewed workflow's critical topology, newline-anchored, byte-exact,
+#: and each fragment exactly once: the manual trigger block, the two jobs,
+#: the three official Pages steps with their pinned inputs (``enablement:
+#: false``, ``path: site``, the ``deployment`` step id), and ``deploy``'s
+#: dependency and environment. Editing prose comments stays legal; changing
+#: a version, input, name, dependency, or count does not.
+PUBLICATION_CANONICAL_FRAGMENTS = (
+    ("manual_trigger_block", "\non:\n  workflow_dispatch:\n"),
+    ("jobs_header", "\njobs:\n  build:\n"),
+    (
+        "configure_pages_step",
+        "\n      - name: Configure GitHub Pages\n"
+        "        uses: actions/configure-pages@v5\n"
+        "        with:\n"
+        "          enablement: false\n",
+    ),
+    (
+        "upload_artifact_step",
+        "\n      - name: Upload Pages artifact\n"
+        "        uses: actions/upload-pages-artifact@v4\n"
+        "        with:\n"
+        "          path: site\n",
+    ),
+    (
+        "deploy_step",
+        "\n      - name: Deploy to GitHub Pages\n"
+        "        id: deployment\n"
+        "        uses: actions/deploy-pages@v4\n",
+    ),
+    (
+        "deploy_job_topology",
+        "\n  deploy:\n"
+        "    needs: build\n"
+        "    runs-on: ubuntu-latest\n"
+        "    environment:\n"
+        "      name: github-pages\n",
+    ),
+)
+
+#: Deploy surfaces counted over the whole file: exactly one of each, so a
+#: duplicate step, a second ``on:``/``jobs:`` mapping, or a second Pages
+#: surface cannot ride along beside the canonical ones.
+PUBLICATION_UNIQUE_SURFACES = (
+    ("on_key", "\non:\n"),
+    ("jobs_key", "\njobs:\n"),
+    ("configure_pages_action", "actions/configure-pages"),
+    ("upload_pages_artifact_action", "actions/upload-pages-artifact"),
+    ("deploy_pages_action", "actions/deploy-pages"),
+    ("pages_environment_name", "github-pages"),
+)
+
+_ON_LINE = re.compile(r"^(?:on|[\"']on[\"'])\s*:(.*)$")
+_TRIGGER_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_INLINE_TRIGGERS = re.compile(r"[A-Za-z0-9_,\s\[\]]+")
+_BLOCK_KEY = re.compile(r"^(\s+)([A-Za-z_][A-Za-z0-9_]*)\s*:(?:\s|$)")
+_BLOCK_ITEM = re.compile(r"^(\s+)-\s+([A-Za-z_][A-Za-z0-9_]*)\s*$")
+_WRITE_GRANT = re.compile(r"[\"']?([A-Za-z-]+)[\"']?\s*:\s*[\"']?write(?:-all)?\b", re.I)
+_PERMISSIONS_KEY = re.compile(r"^\s*[\"']?permissions[\"']?\s*:", re.M)
+_YAML_INDIRECTION = re.compile(r"[&*%!]|<<|^---\s*$|^\.\.\.\s*$", re.M)
+_YAML_ESCAPE = re.compile(r"\\(?:x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})")
 
 _INLINE_MARKUP = re.compile(r"[`*_~]")
 _WHITESPACE = re.compile(r"\s+")
@@ -620,23 +738,193 @@ def check_external_assets(root: Path) -> list[Finding]:
     return findings
 
 
-def check_publication_dormant(root: Path) -> list[Finding]:
-    """No enabled workflow can publish the site.
+def _workflow_triggers(text: str) -> set[str]:
+    """Every trigger name a workflow file declares, in any accepted spelling.
 
-    A ``.yml.disabled`` artifact may contain the steps — that is the point of
-    keeping one — but nothing a runner loads may.
+    GitHub accepts ``on: push``, ``on: [push]``, and a nested mapping, and
+    raw text can repeat ``on:``, so every occurrence is read and merged.
+    Like the ``mkdocs.yml`` helpers above, this scans lines rather than
+    importing a YAML parser. Anything it cannot read — a flow value, a
+    quoted item, a folded scalar, an anchor or alias — contributes an
+    ``<unreadable>`` token instead of being skipped, so no spelling can slip
+    past the caller's exact ``workflow_dispatch`` comparison. The reviewed
+    workflow additionally refuses YAML indirection outright, so an alias can
+    never stand in for a trigger name there.
+    """
+    triggers: set[str] = set()
+    lines = text.splitlines()
+    for number, line in enumerate(lines):
+        match = _ON_LINE.match(line)
+        if not match:
+            continue
+        inline = match.group(1).split("#", 1)[0].strip()
+        if inline:
+            if _INLINE_TRIGGERS.fullmatch(inline):
+                triggers.update(_TRIGGER_NAME.findall(inline))
+            else:
+                triggers.add("<unreadable>")
+            continue
+        entries: list[tuple[int, str]] = []
+        for nested in lines[number + 1:]:
+            stripped = nested.strip()
+            if stripped and not nested[:1].isspace():
+                break
+            if not stripped or stripped.startswith("#"):
+                continue
+            entry = _BLOCK_KEY.match(nested) or _BLOCK_ITEM.match(nested)
+            if entry is None:
+                triggers.add("<unreadable>")
+                continue
+            entries.append((len(entry.group(1)), entry.group(2)))
+        if entries:
+            top = min(indent for indent, _ in entries)
+            triggers.update(name for indent, name in entries if indent == top)
+    return triggers
+
+
+def _check_publication_workflow(
+    rel: Path, text: str, raw_bytes: bytes
+) -> list[Finding]:
+    """The reviewed publication workflow keeps its reviewed canonical shape.
+
+    This is deliberately a byte-exact contract, not YAML semantics: the file
+    is small and reviewed, so its complete SHA-256 is pinned. Any edit must
+    update the reviewed digest. The older focused checks remain to produce
+    useful findings for common mistakes.
     """
     findings: list[Finding] = []
+    digest = hashlib.sha256(raw_bytes).hexdigest()
+    if digest != PUBLICATION_WORKFLOW_SHA256:
+        findings.append(
+            Finding(
+                rel.as_posix(),
+                0,
+                "publication:workflow_digest",
+                f"expected {PUBLICATION_WORKFLOW_SHA256}, found {digest}",
+            )
+        )
+    for match in _YAML_INDIRECTION.finditer(text):
+        line = _line_of(text, match.start())
+        findings.append(
+            Finding(
+                rel.as_posix(),
+                line,
+                "publication:yaml_indirection",
+                _snippet(text, line),
+            )
+        )
+    triggers = _workflow_triggers(text)
+    if triggers != PUBLICATION_TRIGGERS:
+        findings.append(
+            Finding(
+                rel.as_posix(),
+                0,
+                "publication:not_manual_only",
+                "on: must declare exactly workflow_dispatch; found "
+                + (", ".join(sorted(triggers)) or "no recognizable trigger"),
+            )
+        )
+    for match in _WRITE_GRANT.finditer(text):
+        if match.group(1).lower() not in PUBLICATION_WRITE_GRANTS:
+            line = _line_of(text, match.start())
+            findings.append(
+                Finding(
+                    rel.as_posix(),
+                    line,
+                    "publication:broadened_permission",
+                    _snippet(text, line),
+                )
+            )
+    if len(_PERMISSIONS_KEY.findall(text)) != 1:
+        findings.append(
+            Finding(
+                rel.as_posix(),
+                0,
+                "publication:permissions_not_pinned",
+                "exactly one permissions mapping: the root token pin",
+            )
+        )
+    if text.count(PUBLICATION_ROOT_PERMISSIONS) != 1:
+        findings.append(
+            Finding(
+                rel.as_posix(),
+                0,
+                "publication:permissions_not_pinned",
+                "root permission map must be exactly contents: read, "
+                "pages: write, id-token: write",
+            )
+        )
+    for label, fragment in PUBLICATION_CANONICAL_FRAGMENTS:
+        count = text.count(fragment)
+        if count != 1:
+            findings.append(
+                Finding(
+                    rel.as_posix(),
+                    0,
+                    "publication:canonical_fragment",
+                    f"{label}: expected exactly once, found {count}",
+                )
+            )
+    for label, token in PUBLICATION_UNIQUE_SURFACES:
+        count = text.count(token)
+        if count != 1:
+            findings.append(
+                Finding(
+                    rel.as_posix(),
+                    0,
+                    "publication:canonical_fragment",
+                    f"{label}: expected exactly once, found {count}",
+                )
+            )
+    return findings
+
+
+def check_publication_dormant(root: Path) -> list[Finding]:
+    """Publication stays a manual operator act.
+
+    Exactly one reviewed workflow — ``PUBLICATION_WORKFLOW`` — must exist
+    and carry the official artifact-based Pages pattern in its reviewed
+    canonical shape: ``workflow_dispatch`` as the only trigger, the exact
+    root token pin, the exact deploy topology, and no YAML indirection.
+    Every other active workflow must stay free of every publication marker.
+    A ``.yml.disabled`` artifact may contain steps — nothing else a runner
+    loads may.
+    """
+    findings: list[Finding] = []
+    reviewed_rel = WORKFLOWS_DIR / PUBLICATION_WORKFLOW
+    missing = Finding(
+        reviewed_rel.as_posix(),
+        0,
+        "publication:workflow_missing",
+        "the reviewed manual publication workflow must exist",
+    )
     workflows = root / WORKFLOWS_DIR
     if not workflows.is_dir():
-        return findings
+        return [missing]
 
+    reviewed_seen = False
     for path in sorted(workflows.iterdir()):
         if not path.is_file() or path.suffix not in {".yml", ".yaml"}:
             continue
-        text = _read(path)
+        raw_bytes = path.read_bytes()
+        text = raw_bytes.decode("utf-8", errors="replace")
         rel = _rel(root, path)
+        reviewed = path.name == PUBLICATION_WORKFLOW
+        if reviewed:
+            reviewed_seen = True
+        for match in _YAML_ESCAPE.finditer(text):
+            line = _line_of(text, match.start())
+            findings.append(
+                Finding(
+                    rel.as_posix(),
+                    line,
+                    "publication:yaml_escape",
+                    _snippet(text, line),
+                )
+            )
         for name, pattern in PUBLICATION_MARKERS.items():
+            if reviewed and name in REVIEWED_PUBLICATION_MARKERS:
+                continue
             for match in pattern.finditer(text):
                 line = _line_of(text, match.start())
                 findings.append(
@@ -647,6 +935,10 @@ def check_publication_dormant(root: Path) -> list[Finding]:
                         _snippet(text, line),
                     )
                 )
+        if reviewed:
+            findings.extend(_check_publication_workflow(rel, text, raw_bytes))
+    if not reviewed_seen:
+        findings.append(missing)
     return findings
 
 

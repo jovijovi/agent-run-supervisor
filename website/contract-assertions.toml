@@ -117,8 +117,13 @@ reason = "Install, clone, and file creation are not mislabeled as globally read-
 
 [[required]]
 page = "contributing/publishing.md"
-literal = "Why no publication workflow is committed yet"
-reason = "Publication remains absent rather than represented by a nonexistent dormant workflow."
+literal = "one reviewed publication workflow exists: pages-publish.yml, whose only trigger is workflow_dispatch"
+reason = "The single publication surface is manual-only; nothing publishes on merge, push, or schedule."
+
+[[required]]
+page = "contributing/publishing.md"
+literal = "That digest is a drift detector, not a substitute for code review"
+reason = "The byte-exact workflow lock is documented without overstating it as an independent trust boundary."
 
 [[required]]
 page = "how-to/index.md"
@@ -220,6 +225,6 @@ pattern = "(?i)every code above has a generated exception type"
 reason = "Only the arsd wire-error set is represented in ERROR_CODE_TO_EXCEPTION."
 
 [[forbidden]]
-id = "nonexistent-disabled-publication-workflow"
+id = "disabled-publication-workflow"
 pattern = "(?i)disabled publication workflow"
-reason = "The repository has no dormant publication workflow; activation will be a separate reviewed change."
+reason = "The committed publication workflow is manual, not disabled; calling it disabled would misstate how dormancy is enforced."
