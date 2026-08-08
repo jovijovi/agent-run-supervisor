@@ -1,6 +1,6 @@
 ---
 title: Publishing
-description: How releases and documentation publication are authorized — and why neither happens automatically.
+description: How releases and documentation publication are governed — releases stay manual; the documentation site publishes from main under one pinned workflow.
 ---
 
 # Publishing
@@ -9,9 +9,9 @@ Two separate pipelines exist, and **neither triggers the other**. A
 documentation change never implies a package release, and a package release never
 implies a documentation deploy.
 
-## Nothing publishes itself
+## Releases never publish themselves
 
-!!! danger "Publication is an explicit human decision, every time"
+!!! danger "A package release is an explicit human decision, every time"
 
     Git tag creation, GitHub Release publication, and PyPI package publishing are
     **not** part of implementation work. They happen only after explicit
@@ -59,38 +59,43 @@ make release-test
 
 ## Publishing this documentation site
 
-Publishing the documentation site is not enabled.
+The documentation site publishes automatically: every push to `main` runs the
+reviewed publication workflow, which re-validates the content boundary, builds
+strictly, and deploys the result to GitHub Pages. The published site is
+[jovijovi.github.io/agent-run-supervisor](https://jovijovi.github.io/agent-run-supervisor/).
 
-The repository builds the site on pull requests and on `main` as a **validation
-step only** (`docs.yml`), with read-only permissions. Alongside it, one reviewed
-publication workflow exists: `pages-publish.yml`, whose only trigger is
-`workflow_dispatch`. Publication happens when a human dispatches that workflow
-by hand — never because a pull request merges, a branch is pushed, or a
-schedule fires.
+Publication deploys only from `refs/heads/main` — never from a pull request,
+another branch, a tag, or a schedule. Pull requests build and validate the
+site (`docs.yml`) with read-only permissions and deploy nothing. The
+publication trigger deliberately has no path filter: the API reference is
+generated from source docstrings, so a change outside `website/` can still
+change the site.
 
-The capability stays dormant until two further human decisions are taken:
-configuring GitHub Pages in the repository settings, and manually dispatching
-the workflow. Committing the workflow took neither decision — it enabled
-nothing and deployed nothing.
+Exactly one reviewed publication workflow exists: `pages-publish.yml`,
+triggered by a push to `main` and by manual `workflow_dispatch`. The manual
+trigger is a re-run path — an operator can republish `main` by hand, for
+example after a Pages incident — not a second publication surface: both of
+the workflow's jobs are guarded to `refs/heads/main`, so dispatching it from
+any other ref builds nothing and deploys nothing.
 
 | Exists | Does not exist |
 |---|---|
-| a build-and-validate workflow (`docs.yml`) that runs `mkdocs build --strict` and the content gate | any automatic publication trigger — nothing deploys on merge, push, or schedule |
-| one manual publication workflow (`pages-publish.yml`), triggered by `workflow_dispatch` only | a configured Pages site, or any deployment that has happened |
-| a content gate that pins publication to that one manual workflow | a `gh-pages` branch or `mkdocs gh-deploy` anywhere |
+| a validation workflow (`docs.yml`) that runs the content gate and `mkdocs build --strict` on pull requests, deploying nothing | a deploy from a pull request, another branch, a tag, or a schedule |
+| one reviewed publication workflow (`pages-publish.yml`): push to `main`, plus manual `workflow_dispatch` as a re-run path | a second workflow that can publish, or a publication surface outside the reviewed one |
+| a content gate that pins publication to that one reviewed workflow | a `gh-pages` branch or `mkdocs gh-deploy` anywhere |
 
-!!! contract "Publication stays a manual human act"
+!!! contract "Publication is automatic on main, and pinned to exactly that"
 
-    The publication workflow runs only when a maintainer manually dispatches it.
-    The content gate enforces that shape: a publication marker in any other
-    active workflow, a trigger other than `workflow_dispatch` on the publication
-    workflow, a write grant beyond `pages` and `id-token`, or a permissions
+    The content gate holds the workflow to exactly that decision: a publication
+    marker in any other active workflow, a trigger beyond push-to-`main` and
+    `workflow_dispatch`, a widened branch filter, a missing `refs/heads/main`
+    job guard, a write grant beyond `pages` and `id-token`, or a permissions
     block that is missing or widened fails the repository gate. The complete
-    `pages-publish.yml` file is also pinned by SHA-256, so changing a step,
-    input, job placement, or even a comment requires an explicit digest update
-    in the same reviewed change. That digest is a drift detector, not a
+    `pages-publish.yml` file is also pinned by SHA-256, so changing a trigger,
+    step, input, job placement, or even a comment requires an explicit digest
+    update in the same reviewed change. That digest is a drift detector, not a
     substitute for code review: reviewers must examine workflow and digest
-    changes together. Dormancy is enforced rather than merely intended.
+    changes together.
 
 ## Local preview
 

@@ -2,7 +2,7 @@
 title: "Verification gates for implementation PRs"
 status: active
 created_at: 2026-05-28
-last_validated_at: 2026-08-06
+last_validated_at: 2026-08-08
 ---
 
 # Verification gates for implementation PRs
@@ -57,8 +57,9 @@ a real AGENT.
 content gate that runs without installing the optional documentation toolchain.
 It proves the public `website/docs/` tree is isolated from governed internal
 documentation, matches the explicit navigation allowlist, resolves local links
-and API symbols, serves fonts and Mermaid locally, and contains no enabled Pages
-publication workflow. The separate `make docs` target installs the `docs` extra
+and API symbols, serves fonts and Mermaid locally, and confines Pages
+publication to the one reviewed, SHA-256-pinned workflow that deploys only
+`refs/heads/main`. The separate `make docs` target installs the `docs` extra
 and runs the strict MkDocs build; it does not publish or deploy the result.
 
 **pip fallback** (without uv): replace `uv run …` with `PYTHONPATH=src python3 -m …` or installed

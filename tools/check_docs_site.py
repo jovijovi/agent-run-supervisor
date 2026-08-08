@@ -18,7 +18,7 @@ It exists because the repository's own gates do not cover ``website/``:
 * Nothing else checks that the public navigation allowlist, the published file
   tree, and ``mkdocs.yml`` agree; that internal links resolve; that every
   documented API symbol exists; that no external asset is loaded; or that
-  publication stays dormant.
+  publication stays confined to the one reviewed workflow.
 
 Exit status is ``0`` with no findings and ``1`` otherwise. The report is JSON on
 stdout, in the same shape ``static_safety_scan`` uses.
@@ -131,13 +131,13 @@ REMOTE_FONT_PATTERNS = {
 
 #: Publication markers. Present in an active workflow, each one means that
 #: workflow can deploy the site. Exactly one workflow may carry them — the
-#: reviewed manual publication workflow named by ``PUBLICATION_WORKFLOW`` —
+#: reviewed publication workflow named by ``PUBLICATION_WORKFLOW`` —
 #: and only the artifact-based markers in ``REVIEWED_PUBLICATION_MARKERS``.
 #: Every other active workflow must stay free of every marker, and
-#: ``check_publication_dormant`` additionally requires the reviewed workflow
-#: to exist and holds it to its reviewed canonical shape: manual-only
-#: triggering, a pinned narrow token, exact deploy topology, and no YAML
-#: indirection.
+#: ``check_publication_boundary`` additionally requires the reviewed workflow
+#: to exist and holds it to its reviewed canonical shape: push-to-main plus
+#: manual-dispatch triggering, both jobs guarded to refs/heads/main, a pinned
+#: narrow token, exact deploy topology, and no YAML indirection.
 #:
 #: Every marker is Pages-specific. ``id-token: write`` is deliberately *not*
 #: one: the package release workflow needs it for PyPI Trusted Publishing, so
@@ -158,7 +158,7 @@ PUBLICATION_MARKERS = {
     "pages_enablement": re.compile(r"^\s*enablement:(?!\s*false\s*$).*$", re.I | re.M),
 }
 
-#: The one reviewed manual publication workflow, by file name under
+#: The one reviewed publication workflow, by file name under
 #: ``WORKFLOWS_DIR``. Deleting or renaming it re-forbids every marker here.
 PUBLICATION_WORKFLOW = "pages-publish.yml"
 
@@ -166,7 +166,7 @@ PUBLICATION_WORKFLOW = "pages-publish.yml"
 #: is intentionally tiny and rarely changed; any trigger, permission, action,
 #: input, job placement, or comment edit must update this reviewed digest.
 PUBLICATION_WORKFLOW_SHA256 = (
-    "6254a6eafffe2c6f2f1d8933ca2806bd388d9ef50c40400ced3614e757f687f9"
+    "196189a5934ac72fbb044c364ba9a540691318e366c0b5285f8a63eb4a25ac03"
 )
 
 #: Markers that *are* the reviewed workflow's mechanism — the official
@@ -185,9 +185,10 @@ REVIEWED_PUBLICATION_MARKERS = frozenset(
     }
 )
 
-#: The only trigger the reviewed workflow may declare. Any other trigger
-#: would make publication automatic.
-PUBLICATION_TRIGGERS = frozenset({"workflow_dispatch"})
+#: The only triggers the reviewed workflow may declare: automatic publication
+#: when main advances, plus manual re-publication by dispatch. The canonical
+#: byte fragments below pin the push branch and both job guards exactly.
+PUBLICATION_TRIGGERS = frozenset({"push", "workflow_dispatch"})
 
 #: The only ``write`` grants the reviewed workflow may hold — the two
 #: ``actions/deploy-pages`` itself requires. Everything else stays read-only.
@@ -203,14 +204,20 @@ PUBLICATION_ROOT_PERMISSIONS = (
 )
 
 #: The reviewed workflow's critical topology, newline-anchored, byte-exact,
-#: and each fragment exactly once: the manual trigger block, the two jobs,
-#: the three official Pages steps with their pinned inputs (``enablement:
-#: false``, ``path: site``, the ``deployment`` step id), and ``deploy``'s
-#: dependency and environment. Editing prose comments stays legal; changing
-#: a version, input, name, dependency, or count does not.
+#: and each fragment exactly once: the push-to-main plus manual-dispatch trigger
+#: block, both jobs' refs/heads/main guards, the three official Pages steps with
+#: their pinned inputs, and ``deploy``'s dependency and environment.
 PUBLICATION_CANONICAL_FRAGMENTS = (
-    ("manual_trigger_block", "\non:\n  workflow_dispatch:\n"),
-    ("jobs_header", "\njobs:\n  build:\n"),
+    (
+        "trigger_block",
+        "\non:\n  push:\n    branches:\n      - main\n  workflow_dispatch:\n",
+    ),
+    (
+        "build_job_main_guard",
+        "\njobs:\n  build:\n"
+        "    if: github.ref == 'refs/heads/main'\n"
+        "    runs-on: ubuntu-latest\n",
+    ),
     (
         "configure_pages_step",
         "\n      - name: Configure GitHub Pages\n"
@@ -235,6 +242,7 @@ PUBLICATION_CANONICAL_FRAGMENTS = (
         "deploy_job_topology",
         "\n  deploy:\n"
         "    needs: build\n"
+        "    if: github.ref == 'refs/heads/main'\n"
         "    runs-on: ubuntu-latest\n"
         "    environment:\n"
         "      name: github-pages\n",
@@ -747,7 +755,7 @@ def _workflow_triggers(text: str) -> set[str]:
     importing a YAML parser. Anything it cannot read — a flow value, a
     quoted item, a folded scalar, an anchor or alias — contributes an
     ``<unreadable>`` token instead of being skipped, so no spelling can slip
-    past the caller's exact ``workflow_dispatch`` comparison. The reviewed
+    past the caller's exact trigger-set comparison. The reviewed
     workflow additionally refuses YAML indirection outright, so an alias can
     never stand in for a trigger name there.
     """
@@ -819,8 +827,9 @@ def _check_publication_workflow(
             Finding(
                 rel.as_posix(),
                 0,
-                "publication:not_manual_only",
-                "on: must declare exactly workflow_dispatch; found "
+                "publication:unreviewed_triggers",
+                "on: must declare exactly push (branches: main) and "
+                "workflow_dispatch; found "
                 + (", ".join(sorted(triggers)) or "no recognizable trigger"),
             )
         )
@@ -879,16 +888,15 @@ def _check_publication_workflow(
     return findings
 
 
-def check_publication_dormant(root: Path) -> list[Finding]:
-    """Publication stays a manual operator act.
+def check_publication_boundary(root: Path) -> list[Finding]:
+    """Publication stays confined to the one reviewed workflow.
 
     Exactly one reviewed workflow — ``PUBLICATION_WORKFLOW`` — must exist
     and carry the official artifact-based Pages pattern in its reviewed
-    canonical shape: ``workflow_dispatch`` as the only trigger, the exact
-    root token pin, the exact deploy topology, and no YAML indirection.
-    Every other active workflow must stay free of every publication marker.
-    A ``.yml.disabled`` artifact may contain steps — nothing else a runner
-    loads may.
+    canonical shape: push to main plus ``workflow_dispatch`` as the only
+    triggers, both jobs guarded to refs/heads/main, the exact root token pin,
+    the exact deploy topology, and no YAML indirection. Every other active
+    workflow must stay free of every publication marker.
     """
     findings: list[Finding] = []
     reviewed_rel = WORKFLOWS_DIR / PUBLICATION_WORKFLOW
@@ -896,7 +904,7 @@ def check_publication_dormant(root: Path) -> list[Finding]:
         reviewed_rel.as_posix(),
         0,
         "publication:workflow_missing",
-        "the reviewed manual publication workflow must exist",
+        "the reviewed publication workflow must exist",
     )
     workflows = root / WORKFLOWS_DIR
     if not workflows.is_dir():
@@ -1034,7 +1042,7 @@ CHECKS = (
     check_mermaid,
     check_fonts,
     check_external_assets,
-    check_publication_dormant,
+    check_publication_boundary,
     check_contract_assertions,
     check_reused_repo_rules,
 )

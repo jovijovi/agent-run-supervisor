@@ -45,8 +45,8 @@ def test_current_site_passes_all_content_checks() -> None:
         ("website/docs/index.md", "\n[missing](missing-page.md)\n", "links:unresolved"),
         (".github/workflows/docs.yml", "\n  pages: write\n", "publication:pages_permission"),
         (".github/workflows/verify.yml", "\n      - uses: actions/deploy-pages@v4\n", "publication:deploy_pages_action"),
-        (".github/workflows/pages-publish.yml", "\non:\n  push:\n    branches: [main]\n", "publication:not_manual_only"),
-        (".github/workflows/pages-publish.yml", "\non:\n  push: {branches: [main]}\n", "publication:not_manual_only"),
+        (".github/workflows/pages-publish.yml", "\non:\n  pull_request:\n", "publication:unreviewed_triggers"),
+        (".github/workflows/pages-publish.yml", "\non:\n  push: {branches: [docs]}\n", "publication:canonical_fragment"),
         (".github/workflows/pages-publish.yml", "\npermissions:\n  contents: write\n", "publication:broadened_permission"),
         (".github/workflows/pages-publish.yml", "\npermissions: { contents: write }\n", "publication:broadened_permission"),
         (".github/workflows/pages-publish.yml", "\n      - uses: peaceiris/actions-gh-pages@v4\n", "publication:gh_pages_action"),
@@ -73,10 +73,16 @@ def test_gate_rejects_an_unallowlisted_public_page(tmp_path: Path) -> None:
     assert "nav:page_not_allowlisted" in _kinds(root)
 
 
-def test_publication_workflow_declares_exactly_workflow_dispatch() -> None:
+def test_publication_workflow_declares_exactly_push_main_and_dispatch() -> None:
     workflow = ROOT / ".github" / "workflows" / check_docs_site.PUBLICATION_WORKFLOW
     text = workflow.read_text(encoding="utf-8")
-    assert check_docs_site._workflow_triggers(text) == {"workflow_dispatch"}
+    assert check_docs_site._workflow_triggers(text) == {"push", "workflow_dispatch"}
+
+
+def test_publication_workflow_guards_both_jobs_to_main() -> None:
+    workflow = ROOT / ".github" / "workflows" / check_docs_site.PUBLICATION_WORKFLOW
+    text = workflow.read_text(encoding="utf-8")
+    assert text.count("    if: github.ref == 'refs/heads/main'\n") == 2
 
 
 @pytest.mark.parametrize(
@@ -88,6 +94,13 @@ def test_publication_workflow_declares_exactly_workflow_dispatch() -> None:
         ("      name: github-pages\n", "", "publication:canonical_fragment"),
         ("          path: site", "          path: docs", "publication:canonical_fragment"),
         ("  contents: read\n", "", "publication:permissions_not_pinned"),
+        ("\non:\n  push:\n", "\non:\n  pull_request:\n  push:\n", "publication:unreviewed_triggers"),
+        ("  workflow_dispatch:\n", "  workflow_dispatch:\n  schedule:\n", "publication:unreviewed_triggers"),
+        ("    branches:\n      - main\n", "    branches:\n      - main\n      - docs\n", "publication:canonical_fragment"),
+        ("    branches:\n      - main\n", "    tags:\n      - v1\n", "publication:canonical_fragment"),
+        ("  build:\n    if: github.ref == 'refs/heads/main'\n", "  build:\n", "publication:canonical_fragment"),
+        ("    needs: build\n    if: github.ref == 'refs/heads/main'\n", "    needs: build\n", "publication:canonical_fragment"),
+        ("'refs/heads/main'", "'refs/heads/docs'", "publication:canonical_fragment"),
     ],
 )
 def test_gate_rejects_publication_workflow_mutations(

@@ -38,7 +38,7 @@ uv run python tools/check_docs_site.py             # the documentation-site gate
 | compile | every source, script, and test file imports |
 | docs index and drift | the generated index and drift report are current |
 | static safety scan | secrets, stale phrases, forbidden imports, removed surfaces |
-| documentation site | navigation allowlist, content rules, links, API symbols, assets, dormant publication |
+| documentation site | navigation allowlist, content rules, links, API symbols, assets, the pinned publication workflow |
 | version sync | `pyproject.toml`, the package `__version__`, and the lock agree |
 | build | sdist and wheel, plus `twine check` |
 | distribution manifest | both artifacts compared against committed allowlists as an exact set, in both directions |
