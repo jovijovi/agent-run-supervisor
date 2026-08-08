@@ -102,8 +102,8 @@ without being listed.
     governance surfaces; no host paths or private runtime state; internal links
     resolve; every `:::` API identifier is allowlisted and resolves in `src/`;
     Mermaid is configured and locally vendored; fonts are local-only; no external
-    asset is loaded; publication stays dormant; and a set of product-contract
-    statements is present and un-negated.
+    asset is loaded; publication stays pinned to the one reviewed workflow; and a
+    set of product-contract statements is present and un-negated.
 
     It is standard library only and runs inside `make verify`, so it does not
     require the documentation extra to be installed.

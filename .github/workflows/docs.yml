@@ -27,8 +27,8 @@ concurrency:
   cancel-in-progress: true
 
 # Build validation only. This workflow intentionally has no Pages permission,
-# environment, artifact upload, or deploy action. Publication remains a separate
-# operator decision.
+# environment, artifact upload, or deploy action. Publication belongs solely to
+# the reviewed pages-publish.yml workflow.
 permissions:
   contents: read
 

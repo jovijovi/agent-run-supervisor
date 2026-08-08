@@ -1,29 +1,35 @@
 name: Pages Publish
 
-# Manual publication of the already-validated MkDocs site to GitHub Pages.
-# The only trigger is workflow_dispatch: publication happens when a human
-# dispatches this workflow, never because a pull request merges, a branch
-# advances, or a schedule fires. It stays dormant until the repository's
-# Pages settings are configured and a human dispatches it; dispatched before
-# that, it fails at "Configure GitHub Pages" without deploying anything.
+# Publication of the already-validated MkDocs site to GitHub Pages.
+# Two triggers, one deployable ref: a push to main republishes the site
+# automatically, and workflow_dispatch stays the manual re-run path.
+# There is deliberately no path filter: the API reference is generated from
+# source docstrings, so a change outside website/ still changes the site.
+# Both jobs are guarded to refs/heads/main, so a dispatch from any other ref
+# builds nothing and deploys nothing.
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 # The official artifact-based Pages pattern needs exactly these grants.
-# tools/check_docs_site.py holds this file to workflow_dispatch-only
-# triggering, requires this exact token pin, and refuses anything wider.
+# tools/check_docs_site.py holds this file to push-to-main plus
+# workflow_dispatch triggering, requires this exact token pin, and refuses
+# anything wider.
 permissions:
   contents: read
   pages: write
   id-token: write
 
-# One publication at a time; a dispatched deploy is never cancelled mid-run.
+# One publication at a time; an in-flight deploy is never cancelled mid-run.
 concurrency:
   group: pages-publish
   cancel-in-progress: false
 
 jobs:
   build:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -61,6 +67,7 @@ jobs:
 
   deploy:
     needs: build
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

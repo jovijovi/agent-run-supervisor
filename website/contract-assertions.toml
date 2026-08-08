@@ -117,8 +117,8 @@ reason = "Install, clone, and file creation are not mislabeled as globally read-
 
 [[required]]
 page = "contributing/publishing.md"
-literal = "one reviewed publication workflow exists: pages-publish.yml, whose only trigger is workflow_dispatch"
-reason = "The single publication surface is manual-only; nothing publishes on merge, push, or schedule."
+literal = "Exactly one reviewed publication workflow exists: pages-publish.yml, triggered by a push to main and by manual workflow_dispatch"
+reason = "The single publication surface: automatic on main, manual re-run by dispatch, and nothing else."
 
 [[required]]
 page = "contributing/publishing.md"
@@ -147,8 +147,8 @@ reason = "Always null and caller-owned."
 
 [[required]]
 page = "contributing/publishing.md"
-literal = "Publishing the documentation site is not enabled."
-reason = "Publication is dormant until separately authorized."
+literal = "Publication deploys only from refs/heads/main — never from a pull request, another branch, a tag, or a schedule"
+reason = "The deployed ref is exactly main; every other event class is named and refused."
 
 # ---------------------------------------------------------------------------
 # Forbidden — must not appear in the published site sources
@@ -227,4 +227,9 @@ reason = "Only the arsd wire-error set is represented in ERROR_CODE_TO_EXCEPTION
 [[forbidden]]
 id = "disabled-publication-workflow"
 pattern = "(?i)disabled publication workflow"
-reason = "The committed publication workflow is manual, not disabled; calling it disabled would misstate how dormancy is enforced."
+reason = "The committed publication workflow is active — push to main plus manual re-run — not disabled; calling it disabled would misstate how publication is bounded."
+
+[[forbidden]]
+id = "publication-not-enabled"
+pattern = "(?i)documentation site is not enabled"
+reason = "Publication is live and automatic on main; the dormant-era claim must not return."
