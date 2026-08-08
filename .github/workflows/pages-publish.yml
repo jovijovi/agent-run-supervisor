@@ -1,0 +1,71 @@
+name: Pages Publish
+
+# Manual publication of the already-validated MkDocs site to GitHub Pages.
+# The only trigger is workflow_dispatch: publication happens when a human
+# dispatches this workflow, never because a pull request merges, a branch
+# advances, or a schedule fires. It stays dormant until the repository's
+# Pages settings are configured and a human dispatches it; dispatched before
+# that, it fails at "Configure GitHub Pages" without deploying anything.
+on:
+  workflow_dispatch:
+
+# The official artifact-based Pages pattern needs exactly these grants.
+# tools/check_docs_site.py holds this file to workflow_dispatch-only
+# triggering, requires this exact token pin, and refuses anything wider.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One publication at a time; a dispatched deploy is never cancelled mid-run.
+concurrency:
+  group: pages-publish
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3
+        with:
+          enable-cache: true
+          python-version: '3.11'
+
+      - name: Install documentation toolchain
+        run: uv sync --locked --extra docs
+
+      - name: Validate public content boundary
+        run: uv run python tools/check_docs_site.py
+
+      - name: Build documentation strictly
+        run: uv run mkdocs build --strict
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: false
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

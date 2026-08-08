@@ -62,26 +62,35 @@ make release-test
 Publishing the documentation site is not enabled.
 
 The repository builds the site on pull requests and on `main` as a **validation
-step only**. There is no active job that deploys anything, no Pages environment
-in use, and no `gh-pages` branch — the build produces an artifact that is checked
-and discarded.
+step only** (`docs.yml`), with read-only permissions. Alongside it, one reviewed
+publication workflow exists: `pages-publish.yml`, whose only trigger is
+`workflow_dispatch`. Publication happens when a human dispatches that workflow
+by hand — never because a pull request merges, a branch is pushed, or a
+schedule fires.
+
+The capability stays dormant until two further human decisions are taken:
+configuring GitHub Pages in the repository settings, and manually dispatching
+the workflow. Committing the workflow took neither decision — it enabled
+nothing and deployed nothing.
 
 | Exists | Does not exist |
 |---|---|
-| a build-and-validate workflow that runs `mkdocs build --strict` and the content gate | any workflow job that publishes, deploys, or uploads a Pages artifact |
-| an explicit content gate that rejects Pages publication markers in active workflows | an enabled deploy trigger, a Pages environment, or `pages: write` permission on an active workflow |
+| a build-and-validate workflow (`docs.yml`) that runs `mkdocs build --strict` and the content gate | any automatic publication trigger — nothing deploys on merge, push, or schedule |
+| one manual publication workflow (`pages-publish.yml`), triggered by `workflow_dispatch` only | a configured Pages site, or any deployment that has happened |
+| a content gate that pins publication to that one manual workflow | a `gh-pages` branch or `mkdocs gh-deploy` anywhere |
 
-Enabling publication would take three separate decisions — configuring the
-repository's Pages settings, enabling the workflow, and authorizing the first
-deploy — and none of them follows from this documentation, from a merged change,
-or from a green build.
+!!! contract "Publication stays a manual human act"
 
-!!! contract "Why no publication workflow is committed yet"
-
-    The eventual publication workflow will be a separate reviewed change after
-    Pages configuration and the first deploy are explicitly authorized. Until
-    then, the site's gate asserts that no active workflow acquires a deploy job;
-    dormancy is enforced rather than merely intended.
+    The publication workflow runs only when a maintainer manually dispatches it.
+    The content gate enforces that shape: a publication marker in any other
+    active workflow, a trigger other than `workflow_dispatch` on the publication
+    workflow, a write grant beyond `pages` and `id-token`, or a permissions
+    block that is missing or widened fails the repository gate. The complete
+    `pages-publish.yml` file is also pinned by SHA-256, so changing a step,
+    input, job placement, or even a comment requires an explicit digest update
+    in the same reviewed change. That digest is a drift detector, not a
+    substitute for code review: reviewers must examine workflow and digest
+    changes together. Dormancy is enforced rather than merely intended.
 
 ## Local preview
 
