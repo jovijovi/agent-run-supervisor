@@ -9,13 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.7.2] - 2026-08-09
 
-### Added
-
 ### Changed
 
-### Fixed
-
-### Notes
+- The default per-Run hard turn timeout is now 21,600 seconds (6 hours),
+  up from 600 seconds, and the inclusive configured ceiling is now 604,800
+  seconds (7 days), up from 86,400 seconds. Wire/API/schema versions and
+  shapes, Session lifecycle semantics, and the 10-second cancellation grace
+  remain unchanged.
 
 ## [0.7.1] - 2026-08-07
 
