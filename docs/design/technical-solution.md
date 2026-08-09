@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext Technical Solution"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-07
+last_validated_at: 2026-08-09
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/technical-solution.md"
 ---
 # agent-run-supervisor vNext Technical Solution
@@ -324,6 +324,13 @@ class ManagedProcess:
 The supervision layer starts a new POSIX session/process group, records identity immediately, and owns
 SIGTERM→grace→SIGKILL escalation. ACP framing begins while the child is alive. There is exactly one stdout
 protocol consumer, and exactly one `ManagedProcess` per Run from spawn to reap.
+
+`RunLimits` seals six existing fields per Run. Its `turn_timeout_seconds` default is `21_600.0` (6 hours)
+and its inclusive maximum is `604_800.0` (7 days). The dispatch path applies that hard bound around the
+complete `NativeAcpDriver.prompt_once` operation, including the AGENT's Prompt / tool multi-loop; expiry
+uses the existing process-group terminate → `cancel_grace_seconds` → kill/reap sequence. It is not a
+Session timeout. A later `session/load` Run seals a new independent `RunLimits`, and changing these numeric
+policy values moves no wire, request, Spec, or launch schema version.
 
 The reset drops the descriptor-based interpreter exec so the declared `command` and `argv[0]` survive
 exactly as declared, accepts `ResolvedEnvironment` only at the spawn seam, never formats the environment

@@ -390,6 +390,31 @@ def test_parse_submit_minimal_defaults() -> None:
     assert command.retry_of_run_id is None
 
 
+def test_parse_submit_empty_limits_use_the_six_hour_turn_default() -> None:
+    payload = valid_submit_payload()
+    payload["request"]["limits"] = {}
+
+    command = protocol.parse_submit(payload)
+
+    assert command.request.limits.turn_timeout_seconds == 21_600.0
+
+
+def test_parse_submit_accepts_the_seven_day_turn_timeout_maximum() -> None:
+    payload = valid_submit_payload()
+    payload["request"]["limits"] = {"turn_timeout_seconds": 604_800.0}
+
+    command = protocol.parse_submit(payload)
+
+    assert command.request.limits.turn_timeout_seconds == 604_800.0
+
+
+def test_parse_submit_rejects_a_turn_timeout_above_seven_days() -> None:
+    payload = valid_submit_payload()
+    payload["request"]["limits"] = {"turn_timeout_seconds": 604_800.1}
+
+    _reject("INVALID_REQUEST", protocol.parse_submit, payload)
+
+
 def test_parse_submit_requires_every_non_defaulted_request_field() -> None:
     required = [
         field.name

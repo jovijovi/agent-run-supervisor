@@ -2,7 +2,7 @@
 title: "ARS vNext Roadmap Current Status"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-07
+last_validated_at: 2026-08-09
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 ---
 # ARS vNext Roadmap Current Status
@@ -13,11 +13,15 @@ supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 
 ```text
 base_branch: main
-active_plan: none
+active_plan: docs/plans/active/2026-08-09-long-run-timeout-limits.md
 ```
 
 ## Current position
 
+- The long-Run timeout-limit source task remains active and unmerged on `feat/long-run-timeout-limits`:
+  the locally implemented candidate changes the omitted per-Run turn timeout to 21,600 seconds and the inclusive ceiling to
+  604,800 seconds while preserving hard Run timeout and Session lifecycle semantics. It carries no release,
+  publication, deployment, service, migration, cutover, real-provider, or caller-integration claim.
 - The V4 external-AGENT boundary reset and its relevant refinements are implemented on `main`; the
   [feature tracker](features.md) records their current capability state.
 - Cursor cross-Run Session resume is closed on `main`: `cursor-native-acp-v1` uses model-only fidelity and
@@ -50,6 +54,9 @@ active_plan: none
 None is approved by this board.
 
 - **Sachima `ArsdBackend` integration.** Parked; requires separate approval and evidence.
+- **Long-Run timeout candidate.** Local implementation and gates do not close the active task: the
+  candidate remains unmerged under its active plan, and merge plus every downstream side effect remain
+  separately unapproved.
 - **Per-agent and operational gates.** The denied-action canary remains required before a registered agent's
   use; any future release, publication, deployment, service, migration, or runtime action requires separate
   authorization.
