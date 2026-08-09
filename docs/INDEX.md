@@ -4,9 +4,8 @@
 
 Total: 85 documents tracked across 2 statuses.
 
-## Active (19)
+## Active (18)
 
-- [Long-Run timeout limits implementation](plans/active/2026-08-09-long-run-timeout-limits.md) — created 2026-08-09
 - [ARS Public Documentation Site Design](design/documentation-site.md) — created 2026-08-07
 - [Session reuse acceptance test plan](roadmap/session-reuse-acceptance.md) — created 2026-08-07
 - [ARS agent registry — the operator contract](design/agent-registry.md) — created 2026-07-30
@@ -26,8 +25,9 @@ Total: 85 documents tracked across 2 statuses.
 - [Engineering practices](practices/README.md) — created 2026-05-28
 - [Verification gates for implementation PRs](roadmap/verification.md) — created 2026-05-28
 
-## Archived (66)
+## Archived (67)
 
+- [Long-Run timeout limits implementation](plans/archive/2026-08-09-long-run-timeout-limits.md) — created 2026-08-09
 - [Grant-driven Cursor permission mode — ask for read-only grants, agent otherwise](plans/archive/2026-08-07-cursor-grant-mode.md) — created 2026-08-07
 - [Remove the legacy acpx runtime, package, and CLI surface](plans/archive/2026-08-06-remove-acpx-product-runtime-compat.md) — created 2026-08-06
 - [ARS Session No-Close Model Implementation Plan](plans/archive/2026-08-06-session-no-close-model.md) — created 2026-08-06
