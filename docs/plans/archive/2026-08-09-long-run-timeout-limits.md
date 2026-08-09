@@ -1,8 +1,9 @@
 ---
 title: "Long-Run timeout limits implementation"
-status: active
+status: archived
 created_at: 2026-08-09
 last_validated_at: 2026-08-09
+archived_at: 2026-08-09
 ---
 # Long-Run timeout limits implementation
 
