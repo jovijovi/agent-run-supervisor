@@ -105,8 +105,28 @@ Closed and complete. Unknown keys are refused.
 }
 ```
 
-`limits` accepts `max_stderr_bytes`, `max_event_bytes`, and `max_events`; `{}`
-takes the sealed defaults.
+`limits` is required as an object, but each of its six fields is optional. `{}` takes all
+sealed defaults; an omitted field takes its own default independently.
+
+| Field | Type | Sealed default | Accepted bound | What it limits |
+|---|---|---:|---:|---|
+| `startup_timeout_seconds` | number | `60.0` | `0 < value <= 3_600.0` | initialize, Session start/load, and exact configuration before Prompt dispatch |
+| `turn_timeout_seconds` | number | `21_600.0` (6 hours) | `0 < value <= 604_800.0` (7 days) | the complete Prompt / AGENT multi-loop execution of this Run |
+| `cancel_grace_seconds` | number | `10.0` | `0 < value <= 300.0` | the grace window after termination begins and before forced kill |
+| `max_stderr_bytes` | integer | `262_144` | `1 <= value <= 67_108_864` | retained bounded stderr bytes |
+| `max_event_bytes` | integer | `65_536` | `256 <= value <= 1_048_576` | one normalized event record |
+| `max_events` | integer | `10_000` | `1 <= value <= 1_000_000` | events reserved for the Run |
+
+The combined event budget must also satisfy
+`max_event_bytes * max_events <= 1_073_741_824`. Unknown limit keys, invalid
+numeric types, non-finite or non-positive values, and values above an inclusive
+maximum are refused with `INVALID_REQUEST`.
+
+`turn_timeout_seconds` is a hard **Run** timeout, not a Session lifetime. It
+starts at Prompt dispatch and covers the complete AGENT tool/multi-turn loop
+inside that Prompt operation. Expiry preserves the supervisor's existing
+process-group terminate → `cancel_grace_seconds` → kill/reap sequence. Reusing a
+Session starts a new Run whose limits are sealed independently.
 
 !!! contract "What is not on the wire, by construction"
 

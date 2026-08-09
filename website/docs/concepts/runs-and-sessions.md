@@ -35,6 +35,21 @@ Session quarantined. It is never replayed, resumed, or retried automatically.
 Supervisor status is never a business verdict: `business_verdict` is always
 `null` and belongs to your application.
 
+### The hard Run timeout
+
+`turn_timeout_seconds` bounds the complete Prompt operation for one Run,
+including the external AGENT's tool/multi-turn loop. Omitting it seals a
+21,600-second (6-hour) timeout; callers may explicitly request up to the
+inclusive 604,800-second (7-day) maximum. A value above that is refused before
+admission.
+
+Expiry terminates the supervised process group, waits the sealed cancellation
+grace, then force-kills if needed and reaps the child. This is deliberately a
+Run limit, not a Session lifetime: a terminal `timed_out` Run does not close its
+Session, and a later reuse starts a new Run with newly sealed limits.
+
+See [Socket API](../reference/socket-api.md) for all six fields and bounds.
+
 ## A Session
 
 A **Session** is durable conversation continuity across Runs, owned by the

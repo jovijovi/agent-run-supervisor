@@ -2,10 +2,11 @@
 
 # Documentation Index
 
-Total: 84 documents tracked across 2 statuses.
+Total: 85 documents tracked across 2 statuses.
 
-## Active (18)
+## Active (19)
 
+- [Long-Run timeout limits implementation](plans/active/2026-08-09-long-run-timeout-limits.md) — created 2026-08-09
 - [ARS Public Documentation Site Design](design/documentation-site.md) — created 2026-08-07
 - [Session reuse acceptance test plan](roadmap/session-reuse-acceptance.md) — created 2026-08-07
 - [ARS agent registry — the operator contract](design/agent-registry.md) — created 2026-07-30

@@ -147,6 +147,10 @@ def test_the_request_carries_no_model_or_effort_domain_check():
     _request(requested_effort="whatever")
 
 
+def test_run_limits_default_to_a_six_hour_turn_timeout():
+    assert RunLimits().turn_timeout_seconds == 21_600.0
+
+
 # -- freeze order -------------------------------------------------------------
 
 

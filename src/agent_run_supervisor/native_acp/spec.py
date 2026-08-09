@@ -78,7 +78,7 @@ _MAX_FIELD_LENGTH = 512
 
 # Finite operational ceilings for sealed RunLimits.
 LIMIT_STARTUP_TIMEOUT_SECONDS_MAX = 3600.0
-LIMIT_TURN_TIMEOUT_SECONDS_MAX = 86400.0
+LIMIT_TURN_TIMEOUT_SECONDS_MAX = 604800.0
 LIMIT_CANCEL_GRACE_SECONDS_MAX = 300.0
 LIMIT_MAX_STDERR_BYTES_MAX = 64 * 1024 * 1024
 LIMIT_MAX_EVENT_BYTES_MAX = 1024 * 1024
@@ -181,7 +181,7 @@ class InputRef:
 @dataclass(frozen=True)
 class RunLimits:
     startup_timeout_seconds: float = 60.0
-    turn_timeout_seconds: float = 600.0
+    turn_timeout_seconds: float = 21600.0
     cancel_grace_seconds: float = 10.0
     max_stderr_bytes: int = 262_144
     max_event_bytes: int = 65_536

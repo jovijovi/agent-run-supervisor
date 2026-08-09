@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext PRD"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-07
+last_validated_at: 2026-08-09
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/prd.md"
 ---
 # agent-run-supervisor vNext PRD
@@ -78,6 +78,13 @@ A technical `completed` result never means the caller's business task succeeded.
 - Every Run owns exactly one local `ManagedProcess` and exactly one stdio ACP driver, from spawn to reap.
   The process is non-optional after spawn: there is no endpoint abstraction, no optional process
   ownership, no no-op termination path, and no remote-oriented indirection anywhere in the runtime.
+- Each Run seals its own hard Prompt / AGENT multi-loop timeout. Omitting
+  `limits.turn_timeout_seconds` seals `21_600.0` seconds (6 hours); callers may request any positive finite
+  value through the inclusive `604_800.0`-second (7-day) ceiling, and a value above that ceiling is refused
+  at the protocol boundary with `INVALID_REQUEST`. The bound covers the complete Prompt execution, not the
+  Session: reusing a Session starts a new Run with independently sealed limits. Expiry retains the existing
+  terminate → cancellation-grace → kill/reap path. This numeric policy change does not move a wire, request,
+  Spec, or launch schema version.
 
 ### R3 — Exact configuration fidelity
 
