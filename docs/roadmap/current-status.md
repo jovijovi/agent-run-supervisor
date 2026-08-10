@@ -2,7 +2,7 @@
 title: "ARS vNext Roadmap Current Status"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-09
+last_validated_at: 2026-08-10
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 ---
 # ARS vNext Roadmap Current Status
@@ -22,7 +22,7 @@ active_plan: none
   21,600 seconds, with an inclusive 604,800-second ceiling, while preserving hard Run timeout and Session
   lifecycle semantics. The merged source carries no release, publication, deployment, service, migration,
   cutover, real-provider, or caller-integration claim.
-- Session reuse under AGENT history replay is **implemented on a task branch and not merged**
+- Session reuse under AGENT history replay is closed on `main`
   (F-SESSION-REPLAY-BACKPRESSURE-001). A third-party adapter's `session/load` conversation replay is
   identity-validated and then separated from the current Run: it produces no per-event execution evidence,
   no permission accounting, no tool-call closure, and no `final_message`, and is retained as one bounded

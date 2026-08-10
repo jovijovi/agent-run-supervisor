@@ -93,6 +93,21 @@ operation — a Run reaching a terminal never ends it. What can stop reuse is na
 a live lease means one Run at a time, and *quarantine* is durable evidence that continuity was proven
 unsafe.
 
+**Replayed history is not this Run's evidence.** An agent that replays a whole conversation while serving
+`session/load` has every replayed frame validated against the expected Session identity first, and then
+separated from the current Run: replay contributes no per-event execution evidence, no permission
+mediation accounting, no tool-call closure, and no `final_message`, so a tool call that completed in an
+earlier Run is never charged to this Run's frozen grant. A Run that observed replay keeps exactly one
+bounded `session_replay_summary` event, carrying aggregate counts and no replayed content.
+
+**Current-Run evidence is admitted through a bounded serial ledger.** An accepted event takes its real
+`seq` and its final NDJSON line at acceptance, so the count and the exact bytes charged are the ones
+actually written, and both stay charged until the durable append returns. Event-count and byte ceilings
+are enforced independently — 1024 → 8192 events alongside 8 → 64 MiB — and expand only while the
+persisting sink keeps making durable progress. A temporarily full ledger gives each accepted event one
+absolute FIFO deadline, so a stalled or failed evidence sink is never hidden by a bigger buffer: it fails
+closed, and the Run reports a bounded `EVIDENCE_PIPELINE` failure.
+
 ## Requirements
 
 | Need | Requirement |

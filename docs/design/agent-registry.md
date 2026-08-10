@@ -469,7 +469,7 @@ Seven, and each needs an explicit note in your own runbook:
 
 Additionally, at a cutover: every **live Session ends**. Legacy Sessions carrying the retired ARS-derived
 identity hashes are refused for `session/load` with a stable code while staying owner-scoped
-`status`/`list`/`close`-readable, and continuing that work means a new Session with caller-owned context
+`status`/`list`-readable, and continuing that work means a new Session with caller-owned context
 handoff. That is a deliberate one-time continuity loss and an open human decision, not a technical detail.
 
 ## 13. `session_epoch` — the continuity rule, exactly
