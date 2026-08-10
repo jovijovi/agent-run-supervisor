@@ -22,6 +22,20 @@ active_plan: none
   21,600 seconds, with an inclusive 604,800-second ceiling, while preserving hard Run timeout and Session
   lifecycle semantics. The merged source carries no release, publication, deployment, service, migration,
   cutover, real-provider, or caller-integration claim.
+- Session reuse under AGENT history replay is **implemented on a task branch and not merged**
+  (F-SESSION-REPLAY-BACKPRESSURE-001). A third-party adapter's `session/load` conversation replay is
+  identity-validated and then separated from the current Run: it produces no per-event execution evidence,
+  no permission accounting, no tool-call closure, and no `final_message`, and is retained as one bounded
+  `session_replay_summary`. The per-Run evidence path is now one event-loop-owned Bounded Serial Ledger: it
+  allocates the actual sequence and canonical NDJSON bytes at acceptance, holds in-flight count/bytes through
+  durable `append_text` acknowledgement, separates admission from persistence outcomes, and applies FIFO
+  absolute producer deadlines before room or growth. Its policy rungs remain 1024→8192 events and 8→64 MiB,
+  expanding only for a live consumer making durable progress. Observer cancellation cannot mutate accepted
+  evidence; failure is absorbing and ordinal-ranked; close synchronously cuts off producers, joins the
+  consumer, and succeeds only after every accepted event is durably acknowledged. A stalled or failed sink
+  still reaches bounded `EVIDENCE_PIPELINE`. This is callback/evidence-layer backpressure only: the locked ACP
+  SDK dispatches one task per notification and applies no transport backpressure. No wire, API,
+  schema-version, or Session lifecycle change; no release, deployment, or publication claim.
 - The V4 external-AGENT boundary reset and its relevant refinements are implemented on `main`; the
   [feature tracker](features.md) records their current capability state.
 - Cursor cross-Run Session resume is closed on `main`: `cursor-native-acp-v1` uses model-only fidelity and

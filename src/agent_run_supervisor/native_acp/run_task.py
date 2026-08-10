@@ -26,7 +26,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Mapping
 
 from agent_run_supervisor.event_store import RunHandle
 from agent_run_supervisor.exit_classifier import _RETRYABLE_DEFAULT, AgentRunStatus
@@ -377,6 +377,71 @@ class FinalMessageAccumulator:
         return self._byte_len
 
 
+#: Source-owned replay update kinds — the locked SDK's closed ``sessionUpdate``
+#: set, written out here rather than derived from the SDK at import time. A
+#: tally key is never agent-authored text: any kind outside this set aggregates
+#: under ``other``, so a replayed frame cannot put a string it chose into this
+#: Run's evidence, and an SDK upgrade that widens the set is a change this
+#: repository makes deliberately instead of inheriting.
+REPLAY_UPDATE_KINDS = (
+    "agent_message_chunk",
+    "agent_thought_chunk",
+    "available_commands_update",
+    "config_option_update",
+    "current_mode_update",
+    "plan",
+    "plan_removed",
+    "plan_update",
+    "session_info_update",
+    "tool_call",
+    "tool_call_update",
+    "usage_update",
+    "user_message_chunk",
+)
+
+#: The one event family that survives bootstrap/history replay.
+REPLAY_SUMMARY_EVENT = "session_replay_summary"
+
+
+@dataclass
+class _ReplayLedger:
+    """Bounded aggregate of the AGENT's bootstrap/history replay.
+
+    A third-party adapter may replay an entire conversation at
+    ``session/load``. That history is not this Run's execution: it is not
+    evidence of what this Run did, it did not ask this Run's mediation for
+    anything, and its tool records opened and closed in Runs that are already
+    over. So the Run keeps counts and nothing else — no raw content, and a key
+    space bounded by :data:`REPLAY_UPDATE_KINDS` rather than by what the
+    AGENT sends.
+    """
+
+    updates: int = 0
+    by_kind: dict[str, int] = field(default_factory=dict)
+    emitted: bool = False
+
+    def record(self, update: Mapping[str, Any]) -> None:
+        self.updates += 1
+        kind = update.get("sessionUpdate")
+        key = kind if isinstance(kind, str) and kind in REPLAY_UPDATE_KINDS else "other"
+        self.by_kind[key] = self.by_kind.get(key, 0) + 1
+
+    def summary_event(self) -> dict[str, Any]:
+        return {
+            "type": REPLAY_SUMMARY_EVENT,
+            "updates": self.updates,
+            "by_kind": dict(sorted(self.by_kind.items())),
+        }
+
+
+@dataclass
+class _PendingEmit:
+    """One RunTask-owned observation with its original emission ordinal."""
+
+    ordinal: int
+    observation: Awaitable[None]
+
+
 @dataclass
 class _RunContext:
     handle: Any = None
@@ -411,6 +476,14 @@ class _RunContext:
     # observed frame); compared against the driver's prompt boundary.
     updates_delivered: int = 0
     marker_ordinal: int = 0
+    # Bootstrap/history replay this Run observed but never executed.
+    replay: _ReplayLedger = field(default_factory=_ReplayLedger)
+    # Deferred evidence admissions started from a synchronous emit that had
+    # nowhere to await. Finalization settles them before the writer closes.
+    pending_emits: set[Any] = field(default_factory=set)
+    # Assigned synchronously at every EventWriter submission attempt.  It is
+    # independent of observer completion order and spans every settle batch.
+    emit_ordinal: int = 0
     stop_reason: str | None = None
     usage: dict[str, Any] | None = None
     supervisor_cancelled: bool = False
@@ -420,6 +493,7 @@ class _RunContext:
     observation_interrupted: bool = False
     pre_dispatch: _PreDispatchFailure | None = None
     pipeline_error: BaseException | None = None
+    pipeline_error_rank: tuple[int, int] | None = None
     final_message_acc: FinalMessageAccumulator = field(
         default_factory=FinalMessageAccumulator
     )
@@ -1269,11 +1343,14 @@ class RunTask:
         # unknown/quarantine — never overclaim predispatch after this point.
         # Do not treat consumer_queue_healthy as this barrier.
         if ctx.writer is not None:
+            ctx.emit_ordinal += 1
+            prompt_evidence_ordinal = ctx.emit_ordinal
             try:
                 await ctx.writer.emit_awaited({"type": "session_prompt_sent"})
             except Exception as exc:
-                if ctx.pipeline_error is None:
-                    ctx.pipeline_error = exc
+                self._record_pipeline_error(
+                    ctx, exc, ordinal=prompt_evidence_ordinal
+                )
                 return
         if ctx.pipeline_error is not None:
             return
@@ -1334,27 +1411,191 @@ class RunTask:
 
     # -- sinks -------------------------------------------------------------
 
-    def _emit(self, ctx: _RunContext, event: dict[str, Any]) -> None:
+    def _emit(
+        self,
+        ctx: _RunContext,
+        event: dict[str, Any],
+        pending: list[_PendingEmit] | None = None,
+    ) -> None:
+        """Admit one event in wire order; a bounded wait is never a drop.
+
+        The writer admits synchronously whenever it can. When it cannot, it
+        hands back a bounded wait that somebody has to hold: a caller with an
+        awaiting context (the update sink) collects it into ``pending`` and
+        awaits it in order, and a caller without one (the lifecycle emits) gets
+        a tracked task that finalization settles before the writer closes.
+        Either way the event is persisted or the Run fails closed — it is never
+        dropped while the Run still claims success.
+        """
         if ctx.writer is None:
             return
+        ctx.emit_ordinal += 1
+        ordinal = ctx.emit_ordinal
         try:
-            ctx.writer.emit_nowait(event)
+            awaitable = ctx.writer.emit_ordered(event)
         except EventWriterOverflow as exc:
-            if ctx.pipeline_error is None:
-                ctx.pipeline_error = exc
+            self._record_pipeline_error(ctx, exc, ordinal=ordinal)
+            return
+        if awaitable is None:
+            return
+        deferred = _PendingEmit(ordinal=ordinal, observation=awaitable)
+        if pending is not None:
+            pending.append(deferred)
+            return
+        try:
+            task = asyncio.ensure_future(self._settle_admissions(ctx, [deferred]))
+        except RuntimeError as exc:
+            # No running loop to hold the wait: the admission cannot be
+            # completed, so it is an evidence-pipeline failure, not a silence.
+            self._record_pipeline_error(ctx, exc, ordinal=ordinal)
+            return
+        ctx.pending_emits.add(task)
+        task.add_done_callback(lambda done: self._pending_emit_done(ctx, done))
+
+    async def _settle_admissions(
+        self, ctx: _RunContext, pending: list[_PendingEmit]
+    ) -> None:
+        """Settle one batch of deferred admissions together; never raise.
+
+        Started concurrently, because each ticket's producer timeout runs from
+        the moment the ticket was taken. Awaiting them one at a time would
+        leave a later ticket unwatched while an earlier one waits out its
+        window, and then hand it a fresh window of its own — the configured
+        bound would stop bounding anything.
+
+        Concurrency is safe for ordering: the tickets entered the writer's
+        pending FIFO synchronously, in wire order, before any of this runs, and
+        the ledger alone decides who is admitted first. Nothing here can
+        reorder admission or persistence.
+
+        Every outcome is consumed, so no bounded wait is abandoned and no task
+        exception is left unretrieved. A failure becomes ``pipeline_error`` —
+        the same signal a synchronous overflow produces — chosen by the
+        minimum original emission ordinal across *all* batches. Cancellation
+        never cancels the observation tasks: ledger-owned absolute deadlines
+        remain authoritative, all observations are joined, and cancellation is
+        propagated only after their outcomes have been recorded.
+        """
+        if not pending:
+            return
+        tasks = [
+            asyncio.ensure_future(deferred.observation) for deferred in pending
+        ]
+        outcomes, caller_cancelled = await self._gather_without_cancelling(tasks)
+        observed_cancelled = False
+        for deferred, outcome in zip(pending, outcomes, strict=True):
+            if not isinstance(outcome, BaseException):
+                continue
+            if isinstance(outcome, asyncio.CancelledError):
+                observed_cancelled = True
+                continue
+            self._record_pipeline_error(ctx, outcome, ordinal=deferred.ordinal)
+        if caller_cancelled or observed_cancelled:
+            raise asyncio.CancelledError()
+
+    async def _gather_without_cancelling(
+        self, tasks: list[asyncio.Future[Any]]
+    ) -> tuple[list[Any], bool]:
+        """Join all owned tasks under shield and remember caller cancellation."""
+        gathered = asyncio.gather(*tasks, return_exceptions=True)
+        caller_cancelled = False
+        while not gathered.done():
+            try:
+                await asyncio.shield(gathered)
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    caller_cancelled = True
+                    current.uncancel()
+                    continue
+                if gathered.done():
+                    break
+                raise
+        return list(gathered.result()), caller_cancelled
+
+    @staticmethod
+    def _pipeline_failure_category(exc: BaseException) -> int:
+        """One fixed categorical tie order after original emission ordinal."""
+        if isinstance(exc, EventWriterOverflow):
+            return 10
+        if isinstance(exc, asyncio.CancelledError):
+            return 20
+        return 30
+
+    def _record_pipeline_error(
+        self,
+        ctx: _RunContext,
+        exc: BaseException,
+        *,
+        ordinal: int | None = None,
+    ) -> None:
+        """Project the globally earliest failure, never completion-order wins."""
+        if ordinal is None:
+            projected = getattr(exc, "ordinal", 0)
+            ordinal = (
+                projected
+                if isinstance(projected, int) and projected > 0
+                else getattr(ctx, "emit_ordinal", 0) + 1
+            )
+        rank = (ordinal, self._pipeline_failure_category(exc))
+        current_error = getattr(ctx, "pipeline_error", None)
+        current_rank = getattr(ctx, "pipeline_error_rank", None)
+        if current_error is not None and current_rank is None:
+            # A caller-created context with an unranked pre-existing error is
+            # conservatively treated as preceding new work.
+            current_rank = (0, 0)
+            ctx.pipeline_error_rank = current_rank
+        if current_rank is None or rank < current_rank:
+            ctx.pipeline_error = exc
+            ctx.pipeline_error_rank = rank
+
+    def _pending_emit_done(
+        self, ctx: _RunContext, task: asyncio.Task[None]
+    ) -> None:
+        ctx.pending_emits.discard(task)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except BaseException as exc:
+            self._record_pipeline_error(ctx, exc)
+
+    async def _drain_pending_emits(self, ctx: _RunContext) -> None:
+        """Join every tracked observation; ledger deadlines own the bound."""
+        caller_cancelled = False
+        while ctx.pending_emits:
+            tasks = list(ctx.pending_emits)
+            _outcomes, cancelled = await self._gather_without_cancelling(tasks)
+            caller_cancelled = caller_cancelled or cancelled
+            for task in tasks:
+                self._pending_emit_done(ctx, task)
+        if caller_cancelled:
+            raise asyncio.CancelledError()
+
+    def _flush_replay_summary(self, ctx: _RunContext) -> None:
+        """Emit the one bounded replay summary, once, after every replay
+        callback has run and before the writer closes."""
+        if ctx.replay.emitted or ctx.replay.updates == 0:
+            return
+        ctx.replay.emitted = True
+        self._emit(ctx, ctx.replay.summary_event())
 
     @staticmethod
     def _current_turn_chunk(ctx: _RunContext) -> bool:
         """Whether the update being delivered is causally after the prompt.
 
-        session/load history replay (and any other pre-prompt chunk) stays
-        normalized event evidence but never contributes to this Run's
-        ``final_message``. The boundary is snapshotted in exact wire order by
-        the driver's stream observer, so a pre-prompt update whose queued
-        callback executes late can still never pass this gate. The observer
-        counts only frames the locked SDK will actually dispatch, so a
-        suppressed pre-prompt frame can never shift the boundary onto a
-        genuine current-turn chunk.
+        This is the whole replay/current classification, not merely a
+        ``final_message`` gate: an update at or below the frozen prompt wire
+        boundary was received before the prompt could have reached the AGENT,
+        so it is bootstrap/history replay — session/load conversation replay,
+        pre-prompt chatter — and belongs to Runs that are already over. Only
+        updates above the boundary are this Run's Turn.
+
+        The boundary is snapshotted in exact wire order by the driver's stream
+        observer, so a pre-prompt update whose queued callback executes late
+        can still never pass this gate. The observer counts only frames the
+        locked SDK will actually dispatch, so a suppressed pre-prompt frame can
+        never shift the boundary onto a genuine current-turn update.
         """
         driver = ctx.driver
         if driver is None:
@@ -1363,29 +1604,46 @@ class RunTask:
         return boundary is not None and ctx.updates_delivered > boundary
 
     def _update_sink(self, ctx: _RunContext, normalizer: NativeAcpEventNormalizer):
-        def sink(session_id: str, update: dict[str, Any]) -> None:
+        def sink(
+            session_id: str, update: dict[str, Any]
+        ) -> Awaitable[None] | None:
             # One callback per SDK-dispatched session/update frame, in wire
             # order; count before any processing so a failing update keeps
             # ordinals aligned with the driver's observed count (which
             # includes only frames the locked SDK actually dispatches —
             # suppressed frames never leave phantom ordinals).
             ctx.updates_delivered += 1
+            pending: list[_PendingEmit] = []
             try:
-                text: Any = None
+                if not self._current_turn_chunk(ctx):
+                    # Bootstrap/history replay. The client already validated
+                    # Session identity for it — replay is separated *after*
+                    # identity, never instead of it — and from here it is
+                    # counted and dropped: it enters neither this Run's
+                    # per-event execution evidence, nor PermissionBridge tool
+                    # accounting, nor tool-call closure, nor final_message.
+                    # None of those could be true of it: the calls it describes
+                    # were mediated (or not) by Runs that have already ended.
+                    ctx.replay.record(update)
+                    return None
                 if update.get("sessionUpdate") == "agent_message_chunk":
                     content = update.get("content") or {}
                     text = content.get("text")
-                    if isinstance(text, str) and self._current_turn_chunk(ctx):
+                    if isinstance(text, str):
                         ctx.final_message_acc.ingest(text)
-                event = normalizer.normalize_update(update)
-                self._emit(ctx, event)
+                self._emit(ctx, normalizer.normalize_update(update), pending)
                 if ctx.bridge is not None:
                     violation = ctx.bridge.observe_tool_update(update)
                     if violation is not None:
-                        self._emit(ctx, violation)
+                        self._emit(ctx, violation, pending)
             except Exception as exc:
-                if ctx.pipeline_error is None:
-                    ctx.pipeline_error = exc
+                self._record_pipeline_error(ctx, exc)
+            # A collected bounded wait is never abandoned, even after an
+            # unexpected failure above: an un-awaited admission would hold its
+            # ticket until the producer timeout. Handing the wait back to the
+            # client is what turns a full queue into backpressure rather than
+            # a lost event.
+            return self._settle_admissions(ctx, pending) if pending else None
 
         return sink
 
@@ -1394,8 +1652,7 @@ class RunTask:
             try:
                 self._emit(ctx, event.to_event())
             except Exception as exc:
-                if ctx.pipeline_error is None:
-                    ctx.pipeline_error = exc
+                self._record_pipeline_error(ctx, exc)
 
         return sink
 
@@ -1847,6 +2104,10 @@ class RunTask:
         # into the evidence pipeline; then freeze final state/payload once.
         # Never emit after close.
         if ctx.writer is not None:
+            # Every replay callback has run by now (the driver's pre-response
+            # delivery barrier, or the wire being closed above), so the one
+            # bounded summary can state final counts.
+            self._flush_replay_summary(ctx)
             provisional = self._observations(ctx)
             provisional_status, _ = finalize_run_state(provisional)
             if (
@@ -1865,11 +2126,13 @@ class RunTask:
                         }.get(provisional_status, "FAILED"),
                     },
                 )
+            # Deferred admissions are bounded observations, not detached work:
+            # settle them concurrently before close establishes its cutoff.
+            await self._drain_pending_emits(ctx)
             try:
                 await ctx.writer.close()
             except Exception as exc:
-                if ctx.pipeline_error is None:
-                    ctx.pipeline_error = exc
+                self._record_pipeline_error(ctx, exc)
 
         observations = self._observations(ctx)
         status, disposition = finalize_run_state(observations)

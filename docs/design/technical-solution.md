@@ -69,7 +69,7 @@ reintroduce one.
 | `client.py` | official SDK callback implementation. Synchronous fail-closed identity rejection at callback entry for every ID-bearing update, permission, filesystem, terminal, and session-scoped elicitation surface, using exact pinned SDK signatures rather than varargs; categorical violations carry no IDs |
 | `permissions.py` | frozen-grant → default-deny mediation; deterministic mediation evidence; every decision reason is ARS-authored and stable |
 | `events.py` | ACP update normalization into the caller-stable event families without copying thought/raw bulk bodies |
-| `event_writer.py` | one bounded writer per Run, monotonic `seq`, truncation markers preserving lifecycle/permission/error events |
+| `event_writer.py` | one event-loop-owned **Bounded Serial Ledger** per Run: atomic actual-sequence allocation; one retained canonical newline-terminated NDJSON `str`; exact UTF-8 count/byte charging through the durable `append_text` acknowledgement; separate admission/persistence ticket outcomes; FIFO absolute producer deadlines checked before room or growth; progress-earned policy rungs; value-only cancellation-isolated observers; one serial consumer; absorbing ordinal-ranked failure; and a private healthy-close stop distinct from failure drain |
 | `run_task.py` | admission assembly, the closed start plan, lease, process/driver coordination, dispatch markers, timeout/cancel, finalization, quarantine, top-level exception boundary; once-only environment resolution; Spec-then-launch write order preserved; `agentInfo` name/version recorded as evidence and gating nothing |
 
 **Deleted by the reset:** `runtime_binding.py` and `attestation.py`. No module may re-create artifact
@@ -305,6 +305,33 @@ non-dispatching after pruning.
 One Run owns one immutable Spec, one launch snapshot, one observed-state record, one EventWriter, zero or
 one Turn, two dispatch markers, and one irreversible result. A retry is an independent Run linked by
 `retry_of_run_id`.
+
+### Bounded event ledger
+
+The production `QueuePolicy` remains fixed at 1024 → 2048 → 4096 → 8192 admitted-unacknowledged events and
+8 → 16 → 32 → 64 MiB. One durable acknowledgement earns at most one growth rung; a stalled or dead sink
+earns none. The pending FIFO is separately capped by `policy.max_event_capacity`, and pending plus admitted
+canonical bytes may never exceed `policy.max_queued_bytes`. Generic ledger logic reads those fields rather
+than embedding the production numbers.
+
+Acceptance is non-awaiting and commits one ticket with its actual sequence, final `ndjson_line(...)` string,
+exact encoded size, and absolute `monotonic + producer_timeout_seconds` deadline. A single head timer is
+sound because the timeout is constant and FIFO acceptance on a monotonic clock produces non-decreasing
+deadlines; every actual pump still checks deadline equality or expiry before capacity, growth, or admission.
+The consumer passes the cached string unchanged to `RunHandle.append_text`; the in-flight ticket stays
+charged until that call returns successfully. `last_seq` is therefore the durable contiguous-prefix high-water
+mark.
+
+Admission and persistence are independent ticket outcomes. Their external observers store values only and
+are shielded from caller cancellation; cancelling one cannot mutate the ticket, byte charge, deadline, or
+close result. RunTask starts deferred observations concurrently and records the minimum original emission
+ordinal across every batch, without fresh timeout windows or an independent cancellation timeout.
+
+`close()` establishes its submit cutoff synchronously. It waits for pending deadlines, uses a private
+zero-capacity healthy stop only behind every admitted ticket, and otherwise drains the already-admitted lower
+prefix before failure exit. It always joins and observes the consumer. An empty never-started writer is the
+only no-consumer clean case; any accepted-but-unacknowledged ticket, primary failure, or other consumer exit
+fails close.
 
 ## 4. Managed process and ACP wire
 

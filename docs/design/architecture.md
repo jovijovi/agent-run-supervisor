@@ -67,7 +67,7 @@ plan, and open gates. No marker here is an approval.
 ║  RunTask ──── ManagedProcess (PID/PGID · bounded stderr · timeout · signals)  ║
 ║          ──── NativeAcpDriver (stdio JSON-RPC · exact-config machine)         ║
 ║          ──── PermissionBridge (default-deny against the frozen grant)        ║
-║          ──── EventWriter (bounded · monotonic · redacted)                    ║
+║          ──── EventWriter (bounded serial ledger · durable ordered prefix)   ║
 ║  ARS-OWNED WRITABLE SURFACES — exactly two:                                   ║
 ║     <supervisor_root>/native-runs/ · native-sessions/                         ║
 ║     the configured UDS runtime path (dir create · socket · chmod · replace)   ║
@@ -666,6 +666,21 @@ and truncating or tokenising them would break workspace binding, reconciliation 
 The runtime ledger records supervision facts, not AGENT conversation memory. v1 no-change acceptance uses a
 disposable known-empty workspace and direct pre/post directory listing; `workspace_hash` is only a binding
 hash. No content-digest service or filesystem watcher is part of ARS.
+
+Each Run's EventWriter is one event-loop-owned **Bounded Serial Ledger**, not an `asyncio.Queue` plus a
+second waiter protocol. At atomic acceptance it assigns the real sequence, freezes the final newline-terminated
+NDJSON `str`, charges its exact UTF-8 bytes, and binds one absolute producer deadline. The pending FIFO may
+admit only its head, and every pump checks `now >= head.deadline` before room or growth. The admitted FIFO
+includes the in-flight append in its count and byte charge until `RunHandle.append_text` returns after its
+durability work. Consequently the durable high-water mark is always one contiguous prefix, and
+`progress.json:last_seq` never advertises an unacknowledged line.
+
+Producer awaitables are disposable value-only observations of either admission or persistence; cancellation
+cannot remove a ticket or change ledger truth. Failure is absorbing and ordered by original ordinal, while an
+already-admitted lower prefix may drain. Healthy close uses a private constant stop condition only after the
+pending FIFO is empty; failure drain uses no stop token. Clean close means either an unused, never-started
+writer with zero accepted tickets, or a consumer that exited through healthy close with every accepted ticket
+durably acknowledged. In all other cases close joins and observes the consumer and fails closed.
 
 Evidence grades: A — pre-implementation compatibility context; B — direct-drive real-AGENT evidence; C —
 `arsd` socket-path production acceptance. No lower grade can claim a higher one.

@@ -153,7 +153,7 @@ rather than repaired.
 ## 3. Normalized event stream
 
 `native_acp/event_writer.py` owns each Run's `normalized-events.jsonl`: one
-writer, monotonic `seq` starting at `1`, bounded queues, and explicit truncation
+bounded serial ledger, monotonic `seq` starting at `1`, and explicit truncation
 markers. Each line has a `type` and a small allow-listed set of structural
 fields — never bulk content, never raw agent text beyond the bounded, redacted
 fields the writer is given.
@@ -336,15 +336,45 @@ means no observed drift, never that a check was skipped.
 Adding a subject or a comparison is an ordinary additive change and extends the closed set here in the same
 commit as the emitter — the two are one contract, not a document that describes an implementation.
 
-### 5.6 What does not change
+### 5.6 Session replay summary event
+
+A third-party ACP adapter may replay an entire conversation history as `session/update` frames during
+`session/load`. Those frames are causally at or before the frozen prompt wire boundary, so they describe
+turns of Runs that are already over — not this Run's execution. They still pass Session identity
+validation, and are then separated out: replay contributes **no** per-event execution evidence, **no**
+`PermissionBridge` tool accounting, **no** tool-call closure, and **no** `final_message` text for the
+current Run.
+
+Replay is not discarded silently. Each Run that observed any retains exactly one additive event:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `type` | `string` | the family name — always `session_replay_summary` |
+| `updates` | `number` | how many bootstrap/history replay updates this Run observed |
+| `by_kind` | `object` | counts keyed by ACP `sessionUpdate` kind, from a closed source-owned set; any other kind aggregates under `other` |
+
+At most one such event exists per Run, and a Run that observed no replay emits none — zero events means no
+replay was observed, never that a check was skipped. The event carries counts only: no replayed text, no
+tool identifier, no digest, no length, and no key an AGENT chose, because `by_kind`'s key space is
+source-owned rather than taken from the wire. Nothing branches on it; it is a record for a human reading
+the stream, exactly like the policy-warning family above.
+
+### 5.7 What does not change
 
 The terminal vocabulary, the closed field set, `business_verdict: null`, owner scoping, event ordering with
-its monotonic `seq`, bounded queues and truncation markers, and the caller-facing event grammar are unchanged
-by the reset. The reset changes what may appear *inside* a free-form field, adds withholding metadata and the
-policy-warning family, and moves the caller wire to `api_version` 3 for the reasons in the PRD — not the
-grammar a caller parses.
+its monotonic `seq`, bounded buffering and truncation markers, and the caller-facing event grammar are unchanged
+by the reset. The reset changes what may appear *inside* a free-form field, adds withholding metadata, the
+policy-warning family, and the replay-summary family, and moves the caller wire to `api_version` 3 for the
+reasons in the PRD — not the grammar a caller parses.
 
-### 5.7 The no-close Session projection
+The bounded serial ledger assigns the actual accepted `seq` before serialization and retains that exact
+newline-terminated NDJSON string. Its encoded size is the per-event size and remains charged while the
+single `append_text` call is in flight. Admission waits in FIFO order under one acceptance-time absolute
+deadline; a delayed timer cannot permit late admission because every pump checks the head deadline before
+room or growth. The production rungs remain 1024→8192 events and 8→64 MiB, growth still requires durable
+progress, and failure remains fail-closed. External observers receive values only; they do not own tickets.
+
+### 5.8 The no-close Session projection
 
 `session_status` and `session_list` project identity, lease/activity facts, last-use observations, and
 optional quarantine evidence. They expose **no** synthetic Session lifecycle state, because none exists:

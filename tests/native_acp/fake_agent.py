@@ -25,6 +25,17 @@ Script keys (all optional):
 - ``replay_on_load``: list of texts emitted as ``agent_message_chunk``
   session updates before the session/load response (models the official
   adapters' history replay).
+- ``replay_updates``: raw session-update dicts emitted before the session/load
+  response — history replay that is not an assistant chunk (tool lifecycle
+  records of *previous* turns, including dangling, duplicated, and orphan
+  ones).
+- ``replay_burst``: ``{"count": N, "text": ...}`` — N ``agent_message_chunk``
+  history-replay updates before the session/load response. Models a
+  third-party adapter replaying a large conversation.
+- ``prompt_update_burst``: ``{"count": N, "prefix": ...}`` — N
+  ``tool_call_update`` updates emitted during the prompt before the final
+  message, each carrying ``<prefix><ordinal>`` as its ``toolCallId``, so a test
+  can pin exact wire-ordinal delivery order of a current-Turn burst.
 - ``final_message``: agent_message_chunk text before end_turn.
 - ``nonce_memory``: echo previously prompted nonce text back (used by C9
   switching tests to model context continuity).
@@ -303,6 +314,20 @@ class FakeAgent:
                     "content": {"type": "text", "text": text},
                 }
             )
+        for update in self.script.get("replay_updates", []):
+            # Replayed non-chunk history: tool lifecycle records of previous
+            # turns, exactly as an adapter re-sends them.
+            self._notify_update(update)
+        burst = self.script.get("replay_burst")
+        if burst:
+            burst_text = burst.get("text", "H")
+            for _ in range(int(burst.get("count", 0))):
+                self._notify_update(
+                    {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": burst_text},
+                    }
+                )
         _result(request_id, {"configOptions": self._options_list()})
 
     def _capture_config(self, config_id: Any, value: Any) -> None:
@@ -358,6 +383,21 @@ class FakeAgent:
         self._save_session_quarantined(params.get("sessionId") or self.session_id)
         for update in self.script.get("prompt_tool_updates", []):
             self._notify_update(update)
+        burst = self.script.get("prompt_update_burst")
+        if burst:
+            prefix = burst.get("prefix", "burst-")
+            for ordinal in range(int(burst.get("count", 0))):
+                # Identity-carrying current-Turn updates: the normalized event
+                # keeps ``tool_call_id``, so a test can assert exact order
+                # rather than only a count. No ``kind`` and a non-terminal
+                # status, so this burst asks nothing of permission mediation.
+                self._notify_update(
+                    {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": f"{prefix}{ordinal}",
+                        "status": "in_progress",
+                    }
+                )
         if self.script.get("ask_permission"):
             ask = self.script["ask_permission"]
             self.pending_permission_prompt_id = request_id
