@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Session reuse now survives an AGENT that replays a large conversation
+  history during `session/load`. Those replayed `session/update` frames are
+  still validated against the expected external Session identity, and are then
+  separated from the current Run: they contribute no per-event execution
+  evidence, no permission mediation accounting, no tool-call closure, and no
+  `final_message` text, so a replayed tool call that completed in an earlier
+  Run can no longer be charged to this Run's frozen grant. Each Run that
+  observed replay retains exactly one bounded `session_replay_summary` event
+  carrying aggregate counts and no replayed content.
+
+### Changed
+
+- The per-Run evidence path is one event-loop-owned Bounded Serial Ledger. At
+  acceptance it allocates the actual sequence and freezes the final
+  newline-terminated NDJSON string, so the per-event cap and all retained-byte
+  accounting govern exactly what `append_text` receives. Admitted count and
+  bytes include the in-flight append until its durability work returns. The
+  ledger enforces event-count and byte ceilings independently and expands
+  1024 → 2048 → 4096 → 8192 events
+  alongside 8 → 16 → 32 → 64 MiB — but only while the persisting consumer is
+  live and making progress, so a stalled or failed evidence sink is never
+  hidden by a bigger buffer and still reaches a bounded `EVIDENCE_PIPELINE`
+  failure. A temporarily full ledger gives each accepted ticket one absolute
+  five-second FIFO deadline, checked before room or growth on every pump.
+  Admission and persistence are separate outcomes, producer observations are
+  cancellation-isolated value edges, and failures are absorbing and selected
+  by original ordinal across concurrent RunTask batches. Close establishes its
+  cutoff synchronously, joins the consumer even on failure, and succeeds only
+  when every accepted event is durably acknowledged. This is
+  callback/evidence-layer backpressure only — the locked ACP SDK dispatches one
+  task per incoming notification and applies no transport backpressure.
+
+  Wire/API/schema versions, Session lifecycle semantics, terminal vocabulary,
+  and per-event truncation semantics are unchanged.
+
 ## [0.7.2] - 2026-08-09
 
 ### Changed

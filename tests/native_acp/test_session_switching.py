@@ -535,9 +535,15 @@ def test_load_replay_history_never_enters_current_final_message(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # B1 (2026-07-24): official adapters replay conversation history as
-    # agent_message_chunk updates before session/prompt. Replay stays
-    # historical event evidence, but only chunks causally belonging to the
-    # current prompt/Turn may reach this Run's final_message (PRD R9).
+    # agent_message_chunk updates before session/prompt. Only chunks causally
+    # belonging to the current prompt/Turn may reach this Run's final_message
+    # (PRD R9).
+    #
+    # Replay separation extends that to the whole Run: history is not this
+    # Run's execution, so it produces no per-event evidence either. It is not
+    # discarded silently — one bounded summary records the aggregate — but a
+    # replayed chunk is never an ``agent_message_delta`` of this Run. See
+    # ``test_session_replay_backpressure.py`` for the full contract.
     harness = SwitchHarness(tmp_path, monkeypatch)
     harness.prepare_session()
 
@@ -553,8 +559,6 @@ def test_load_replay_history_never_enters_current_final_message(
     assert payload["final_message"] == "RUN2_OK"
     assert payload["truncated"] is False
 
-    # Replay is not silently discarded: every replayed chunk still lands in
-    # the normalized event evidence alongside the current-turn delta.
     events = [
         json.loads(line)
         for line in (run_dir / "events.jsonl").read_text().splitlines()
@@ -564,13 +568,13 @@ def test_load_replay_history_never_enters_current_final_message(
         for event in events
         if event["type"] == "agent_message_delta"
     )
-    assert delta_lengths == sorted(
-        [
-            len("HISTORY_ASSISTANT_ONE "),
-            len("HISTORY_ASSISTANT_TWO "),
-            len("RUN2_OK"),
-        ]
-    )
+    assert delta_lengths == [len("RUN2_OK")]
+    summaries = [
+        event for event in events if event["type"] == "session_replay_summary"
+    ]
+    assert len(summaries) == 1
+    assert summaries[0]["updates"] == 2
+    assert summaries[0]["by_kind"] == {"agent_message_chunk": 2}
 
 
 def test_load_replay_never_consumes_current_final_message_budget(

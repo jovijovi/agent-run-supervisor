@@ -19,6 +19,19 @@ class EventStoreError(RuntimeError):
     """Raised when EventStore cannot satisfy its security/integrity contract."""
 
 
+def ndjson_line(record: Mapping[str, Any]) -> str:
+    """The exact durable text of one appended NDJSON record, newline included.
+
+    The single definition of an appended record's wire form. Anything that has
+    to know how many bytes a record will occupy — a per-event byte cap, a
+    queued-byte budget — must measure *this*: a second serializer with
+    different options (``ensure_ascii``, separators, key order) or a fixed
+    allowance for the keys added later measures a string nobody persists, and
+    a record can then pass a cap it will exceed on disk.
+    """
+    return json.dumps(record, sort_keys=True) + "\n"
+
+
 @dataclass
 class RunHandle:
     run_id: str
@@ -37,7 +50,7 @@ class RunHandle:
 
     def append_ndjson(self, name: str, record: Mapping[str, Any]) -> None:
         """Append one NDJSON record only after a crash-durable ``append_text``."""
-        self.append_text(name, json.dumps(record, sort_keys=True) + "\n")
+        self.append_text(name, ndjson_line(record))
 
     def append_text(self, name: str, value: str) -> None:
         """Nofollow regular-file append with write-all + file fsync (and parent).

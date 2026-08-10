@@ -1,6 +1,6 @@
 ---
 title: Events
-description: The normalized, seq-ordered event stream — ordering, bounds, truncation, and the policy-warning family.
+description: The normalized, seq-ordered event stream — ordering, bounds, truncation, history-replay separation, and the additive event families.
 ---
 
 # Events
@@ -15,7 +15,9 @@ monotonic `seq` starting at `1`.
 | Ordering | monotonic `seq`, starting at `1`, never reordered |
 | Fields | a `type` plus a small allow-listed set of structural fields |
 | Content | never bulk content, and never raw agent text beyond the bounded, redacted fields the writer is given |
-| Queues | bounded, with explicit truncation markers |
+| Buffering | one bounded serial ledger with explicit truncation markers. It assigns the actual sequence before retaining the canonical line, charges exact UTF-8 bytes through durable acknowledgement, and grows only through approved rungs while the writer is making durable progress |
+| Backpressure | FIFO admission gets one absolute five-second deadline at acceptance; every pump checks an overdue head before room or growth. Caller cancellation cannot remove an accepted event |
+| Close truth | clean close certifies that every accepted sequence was durably acknowledged; a failed, expired, or unacknowledged ticket makes the Run fail closed |
 
 Reading is either a bounded page (`from_seq` + `limit`) or a follow
 subscription. A follow subscriber that falls too far behind its bounded queue is
@@ -48,6 +50,11 @@ dropping:
 
 Ceilings come from the Run's `limits` (`max_stderr_bytes`, `max_event_bytes`,
 `max_events`), or the sealed defaults when the caller sent `{}`.
+
+The retained line already contains its actual `seq` and trailing newline. The
+writer passes that same string to the durable append seam; no consumer-side
+serialization or maximum-sequence estimate can change the bytes after
+accounting. `last_seq` reports only the durably acknowledged contiguous prefix.
 
 ## The policy-warning family
 
@@ -87,6 +94,36 @@ all**. It names *which* fact drifted, never what the fact was.
 
     A caller may read the `code` token or the `subject`/`comparison` pair; they
     are the same fact, and `code` does not replace the pair.
+
+## The session-replay-summary family
+
+An AGENT that supports Session reuse may replay its conversation history when
+ARS loads the Session. Those updates describe turns of Runs that already
+finished, so they are **not** this Run's execution: they produce no per-event
+evidence, no permission-mediation records, no tool-call activity, and no
+`final_message` text here. They are still checked against the expected external
+Session identity first — separation happens after that check, never instead of
+it.
+
+Replay is not dropped silently either. A Run that observed any keeps exactly one
+event:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `type` | `string` | always `session_replay_summary` |
+| `updates` | `number` | how many replayed updates this Run observed |
+| `by_kind` | `object` | counts keyed by ACP `sessionUpdate` kind, from a closed set; anything else counts under `other` |
+
+```json
+{"seq": 3, "type": "session_replay_summary", "updates": 412, "by_kind": {"agent_message_chunk": 380, "tool_call": 32}}
+```
+
+!!! contract "How a caller must treat it"
+
+    Counts only — no replayed text, no tool identifier, no digest, and no key the
+    AGENT chose. At most one per Run, and a Run that saw no replay emits none:
+    zero means no replay was observed, never that a check was skipped. Nothing in
+    ARS branches on it.
 
 ## Free-form fields are agent-authored
 

@@ -1270,10 +1270,10 @@ def test_r5_b2_consumer_dead_before_dispatch_never_prompts(
     assert result.status is AgentRunStatus.FAILED
 
 
-def test_r5_b2_queue_full_before_dispatch_never_prompts(
+def test_r5_b2_writer_cannot_accept_before_dispatch_never_prompts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Exact-full queue makes can_accept false at the dispatch gate; no prompt."""
+    """A false writer admission gate prevents the prompt without mutating it."""
     from agent_run_supervisor.native_acp.event_writer import EventWriter
 
     harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
@@ -1291,11 +1291,8 @@ def test_r5_b2_queue_full_before_dispatch_never_prompts(
 
     async def dispatch_with_full_queue(self, ctx, turn_timeout):
         assert ctx.writer is not None
-        # Saturate the real queue to the exact-full condition, then force the
-        # gated property so the pre-prompt check matches production semantics.
-        while not ctx.writer._queue.full():
-            ctx.writer._queue.put_nowait({"type": "pad"})
-        assert ctx.writer._queue.full()
+        # Queue-policy tests exercise real ledger saturation. This RunTask
+        # boundary test pins only the pre-prompt reaction to can_accept=False.
         ctx.writer._r5_simulate_queue_full = True
         return await real_dispatch(self, ctx, turn_timeout)
 
@@ -1343,7 +1340,6 @@ def test_r5_b2_session_prompt_sent_enqueue_fail_skips_prompt(
 
     async def emit_fail_prompt_sent(self, event):
         if event.get("type") == "session_prompt_sent":
-            self.overflowed = True
             raise EventWriterOverflow("injected session_prompt_sent enqueue failure")
         return await real_emit(self, event)
 
@@ -1403,14 +1399,15 @@ def test_r6_b1_append_failure_after_marker_skips_prompt(
 
     monkeypatch.setattr(NativeAcpDriver, "prompt_once", counting_prompt)
 
-    real_append = RunHandle.append_ndjson
+    real_append = RunHandle.append_text
 
-    def boom_prompt_sent(self, name, record):
-        if isinstance(record, dict) and record.get("type") == "session_prompt_sent":
+    def boom_prompt_sent(self, name, value):
+        record = json.loads(value)
+        if record.get("type") == "session_prompt_sent":
             raise OSError("injected session_prompt_sent append failure")
-        return real_append(self, name, record)
+        return real_append(self, name, value)
 
-    monkeypatch.setattr(RunHandle, "append_ndjson", boom_prompt_sent)
+    monkeypatch.setattr(RunHandle, "append_text", boom_prompt_sent)
 
     result = _run(harness.task())
     assert prompt_calls["n"] == 0
@@ -2550,18 +2547,18 @@ def test_r14_finalize_cancel_waits_for_event_writer_close_before_emergency(
     entered_append = threading.Event()
     entered_close = asyncio.Event()
     real_close = EventWriter.close
-    real_append = RunHandle.append_ndjson
+    real_append = RunHandle.append_text
     closing = {"on": False}
 
-    def gated_append(self, name, record):
+    def gated_append(self, name, value):
         if closing["on"] and name == "events.jsonl":
             entered_append.set()
             assert release_append.wait(timeout=60), "append gate was not released"
-        return real_append(self, name, record)
+        return real_append(self, name, value)
 
     async def close_with_blocked_append(self):
         closing["on"] = True
-        # Ensure the consumer must perform a gated append before sentinel drain.
+        # Ensure the consumer must finish a gated append before healthy stop.
         pad = asyncio.ensure_future(self.emit({"type": "r14_finalize_pad"}))
         for _ in range(400):
             if entered_append.is_set():
@@ -2577,7 +2574,7 @@ def test_r14_finalize_cancel_waits_for_event_writer_close_before_emergency(
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await pad
 
-    monkeypatch.setattr(RunHandle, "append_ndjson", gated_append)
+    monkeypatch.setattr(RunHandle, "append_text", gated_append)
     monkeypatch.setattr(EventWriter, "close", close_with_blocked_append)
 
     async def case() -> None:

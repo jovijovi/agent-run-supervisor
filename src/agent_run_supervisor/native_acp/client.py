@@ -20,7 +20,12 @@ from typing import Any, Awaitable, Callable
 
 from . import require_sdk
 
-UpdateSink = Callable[[str, dict[str, Any]], None]
+# The sink runs **synchronously** at callback entry — that is what assigns the
+# wire delivery ordinal before anything can suspend. It may additionally hand
+# back an awaitable when the Run's bounded evidence queue made it wait; the
+# callback then awaits that before completing, which is the only place
+# evidence-layer backpressure can reach the SDK's notification task.
+UpdateSink = Callable[[str, dict[str, Any]], "Awaitable[None] | None"]
 PermissionHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 FsReadHandler = Callable[[dict[str, Any]], Awaitable[str]]
 FsWriteHandler = Callable[[dict[str, Any]], Awaitable[None]]
@@ -112,9 +117,17 @@ class NativeAcpClient:
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
         try:
             # Identity first: a rejected frame is never dumped, normalized, or
-            # handed to the sink.
+            # handed to the sink. This holds for replay frames too: a Run
+            # separates history from its own Turn *after* identity, never
+            # instead of it.
             self._require_session_id(session_id)
-            self._on_update(session_id, self._dump(update))
+            pending = self._on_update(session_id, self._dump(update))
+            if pending is not None:
+                # Bounded evidence backpressure. Waiting here is deliberate:
+                # it delays this frame's completion counter, and therefore the
+                # driver's pre-response delivery barrier, instead of dropping
+                # the event or letting the queue grow without limit.
+                await pending
         except Exception as exc:
             if self.callback_failure is None:
                 self.callback_failure = f"session_update callback failed: {exc}"
