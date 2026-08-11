@@ -11,7 +11,7 @@ It contains no path, version, digest, model literal, agent name, value domain,
 launch kind, artifact identity, or deployment fact. Every AGENT is instead one
 operator-owned registry entry.
 
-Exactly two profiles are registered. The three per-agent profiles
+Exactly four profiles are registered. The three retired per-agent profiles
 (``opencode-native-acp``, ``codex-acp-1.1.7``, ``claude-agent-acp-0.63.0``) are
 retired by deletion — not by an alias, a redirect, a disable flag, or any other
 mechanism capable of retiring one.
@@ -70,14 +70,14 @@ def entry(**overrides):
 
 # -- WP3.3: a closed, enumerated registry -----------------------------------
 #
-# The registry stays closed and small. It is three entries now: the conformance
-# contract, the one profile with an evidenced ACP-semantic deviation, and the
-# one with an evidenced configuration-fidelity deviation.
+# The registry stays closed and small. It is four entries now: the conformance
+# contract and the three profiles with evidenced ACP-semantic deviations.
 
 
-def test_registry_holds_exactly_the_three_registered_profiles():
+def test_registry_holds_exactly_the_four_registered_profiles():
     assert DEFAULT_REGISTRY.ids() == (
         "claude-agent-acp-compat-v1",
+        "codex-agent-acp-compat-v1",
         "cursor-native-acp-v1",
         "standard-native-acp-v1",
     )
@@ -87,6 +87,9 @@ def test_registry_is_a_closed_set():
     assert DEFAULT_REGISTRY.get("standard-native-acp-v1") is STANDARD_NATIVE_ACP_V1
     assert DEFAULT_REGISTRY.get("claude-agent-acp-compat-v1") is CLAUDE_AGENT_ACP_COMPAT_V1
     assert DEFAULT_REGISTRY.get("cursor-native-acp-v1") is CURSOR_NATIVE_ACP_V1
+    assert DEFAULT_REGISTRY.get("codex-agent-acp-compat-v1").profile_id == (
+        "codex-agent-acp-compat-v1"
+    )
     with pytest.raises(UnknownProfileError):
         DEFAULT_REGISTRY.get("mystery-agent-9.9")
 

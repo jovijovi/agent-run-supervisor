@@ -19,7 +19,7 @@ That split is what makes an AGENT or adapter upgrade behind an unchanged
 registered command cost no ARS action at all: no identity field anywhere derives
 from what the agent turned out to be.
 
-Three profiles are registered. ``standard-native-acp-v1`` is the ACP-v1
+Four profiles are registered. ``standard-native-acp-v1`` is the ACP-v1
 conformance contract every standards-conforming agent runs under.
 ``claude-agent-acp-compat-v1`` exists because one adapter carries a cited
 ACP-semantic deviation: it resolves its initial permission mode from ambient
@@ -29,7 +29,17 @@ proven by exact readback before any prompt, and the frozen session metadata
 removes the ambient setting sources that would otherwise define the underlying
 SDK's permission rules and tool surface. Neither half is sufficient alone.
 
-``cursor-native-acp-v1`` exists for the one other cited ACP-semantic deviation:
+``codex-agent-acp-compat-v1`` exists because the adapter exposes a
+permission-mode selector whose read-only literal differs from the other
+profiles. Its ``mode`` is driven by a closed grant policy: ``read-only`` when
+the frozen grant is exactly a subset of ``{read, search}``, and ``agent``
+otherwise. The mode is proven before the separate model and effort selectors
+and re-proven once, after both are configured, at the post-effort readback.
+The advertised ``agent-full-access`` literal is evidence only and is never
+selected. The adapter's ambient initial mode is not authority because every
+Run performs the set and exact readback.
+
+``cursor-native-acp-v1`` exists for another cited ACP-semantic deviation:
 an agent whose model selector *is* the whole configuration, with no independent
 effort selector to discover or set. That is expressed as a declared
 configuration-fidelity mode. Revision 3 adds this profile's second frozen term:
@@ -157,12 +167,13 @@ def mediation_pairs(mediation_id: str | None) -> tuple[tuple[str, str], ...]:
 # neither a registry entry nor a caller can author, select, or replace one, and
 # generic runtime code asks the profile rather than branching on an agent name.
 #
-# The one registered policy implements the exact-subset rule and nothing else:
+# The two registered policies implement the exact-subset rule and nothing else:
 # a grant that is exactly a subset of ``{read, search}`` (including the empty
-# grant) requires the agent's cooperative ``ask`` mode; every other valid grant
-# requires ``agent``. There are no further grant classes. The mode values are
-# the agent's own advertised ACP ``mode`` literals, set and read back opaquely
-# by the fidelity machine like every other selector value.
+# grant) requires the selected profile's cooperative read-only mode
+# (``ask`` or ``read-only``); every other valid grant requires ``agent``.
+# There are no further grant classes. The mode values are the agent's own
+# advertised ACP ``mode`` literals, set and read back opaquely by the fidelity
+# machine like every other selector value.
 _READ_ONLY_GRANT_CAPABILITIES: frozenset[str] = frozenset({"read", "search"})
 
 
@@ -174,10 +185,24 @@ def _read_only_grant_ask_else_agent(capabilities: Iterable[str]) -> str:
     )
 
 
+def _read_only_grant_read_only_else_agent(
+    capabilities: Iterable[str],
+) -> str:
+    return (
+        "read-only"
+        if frozenset(capabilities) <= _READ_ONLY_GRANT_CAPABILITIES
+        else "agent"
+    )
+
+
 PERMISSION_MODE_POLICY_READ_ONLY_ASK = "read-only-grant-ask-else-agent-v1"
+PERMISSION_MODE_POLICY_READ_ONLY_MODE = (
+    "read-only-grant-read-only-else-agent-v1"
+)
 
 _PERMISSION_MODE_POLICIES: dict[str, Callable[[Iterable[str]], str]] = {
     PERMISSION_MODE_POLICY_READ_ONLY_ASK: _read_only_grant_ask_else_agent,
+    PERMISSION_MODE_POLICY_READ_ONLY_MODE: _read_only_grant_read_only_else_agent,
 }
 
 PERMISSION_MODE_POLICY_IDS: frozenset[str] = frozenset(_PERMISSION_MODE_POLICIES)
@@ -741,6 +766,31 @@ CLAUDE_AGENT_ACP_COMPAT_V1 = AcpCompatProfile(
     ),
 )
 
+# The Codex compatibility profile keeps every standard ACP-v1 term, including
+# separate model and effort selectors, and freezes one evidenced deviation.
+#
+# Cited ACP-level evidence: the adapter advertises a select option named
+# ``mode`` with exact literals ``read-only``, ``agent``, and
+# ``agent-full-access``; a zero-prompt exchange set and exactly read back both
+# ``read-only`` and ``agent``. The adapter's initial mode is ambient and may
+# be ``agent``, so initial selection alone cannot make a Run correct.
+#
+# Every Run therefore derives and proves its mode from its frozen grant before
+# model and effort: exactly the subsets of ``{read, search}`` require
+# ``read-only``, every other valid grant requires ``agent``, and
+# ``agent-full-access`` is never a policy output. This is a cooperative
+# adapter-side mode, not a sandbox or a replacement for mediation.
+CODEX_AGENT_ACP_COMPAT_V1 = AcpCompatProfile(
+    profile_id="codex-agent-acp-compat-v1",
+    revision=1,
+    acp_protocol_version="1",
+    required_capabilities=("loadSession",),
+    forbidden_capabilities=(),
+    requires_session_load=True,
+    permission_mode_selector_id="mode",
+    permission_mode_policy_id=PERMISSION_MODE_POLICY_READ_ONLY_MODE,
+)
+
 # The one profile whose *configuration fidelity* deviates, with cited evidence.
 #
 # The agent advertises a single model selector whose value carries the whole
@@ -794,5 +844,10 @@ CURSOR_NATIVE_ACP_V1 = AcpCompatProfile(
 )
 
 DEFAULT_REGISTRY = ProfileRegistry(
-    (STANDARD_NATIVE_ACP_V1, CLAUDE_AGENT_ACP_COMPAT_V1, CURSOR_NATIVE_ACP_V1)
+    (
+        STANDARD_NATIVE_ACP_V1,
+        CLAUDE_AGENT_ACP_COMPAT_V1,
+        CODEX_AGENT_ACP_COMPAT_V1,
+        CURSOR_NATIVE_ACP_V1,
+    )
 )

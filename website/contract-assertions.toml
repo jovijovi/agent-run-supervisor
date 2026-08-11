@@ -136,6 +136,11 @@ literal = "ARS supervises the command an operator registered; it does not instal
 reason = "Guides describe integration, not vendoring."
 
 [[required]]
+page = "how-to/index.md"
+literal = "Operator-installed ACP adapter executable; evidenced ACP mode semantics use codex-agent-acp-compat-v1."
+reason = "Codex registration keeps the executable operator-owned while selecting the source-owned compatibility profile."
+
+[[required]]
 page = "reference/socket-api.md"
 literal = "api_version"
 reason = "Every request envelope carries it."
