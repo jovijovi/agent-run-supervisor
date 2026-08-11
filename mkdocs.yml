@@ -165,6 +165,8 @@ nav:
       - how-to/codex-cli.md
       - how-to/opencode.md
       - how-to/cursor-cli.md
+      - how-to/oh-my-pi.md
+      - how-to/reasonix.md
   - Deployment:
       - deployment/index.md
       - deployment/local-daemon.md

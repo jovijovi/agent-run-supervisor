@@ -421,7 +421,7 @@ guarantees. ARS makes no isolation claim either way.
   which is why an ordinary ARS release leaves every Session identity field untouched.
 - A profile also declares its **configuration-fidelity mode** (R3), because how an agent is configured is an
   ACP semantic. It is the only place that fact may live.
-- The target registry is a closed set of four:
+- The target registry is a closed set of five:
   - `standard-native-acp-v1` is the ACP-v1 conformance contract for every agent without an evidenced
     deviation;
   - `claude-agent-acp-compat-v1` freezes session metadata on **both** `session/new` and `session/load`,
@@ -434,11 +434,16 @@ guarantees. ARS makes no isolation claim either way.
     never selected by this policy;
   - `cursor-native-acp-v1` carries model-only configuration fidelity and, at revision 3, a grant-driven
     permission mode: `ask` for exactly the `{read, search}` subsets and `agent` otherwise, set before and
-    re-proven after the model.
+    re-proven after the model;
+  - `reasonix-agent-acp-compat-v1` keeps the standard separate model and effort selectors and freezes
+    Reasonix's `tool_approval` selector to the static literal `ask`, set and exactly read back before model
+    and effort on every Run, including both `session/new` and real `session/load`. It does not select
+    `work_mode`, `auto`, or `yolo`.
   Both grant-driven modes are cooperative mitigations, never sandboxes or strong permission guarantees
   (R7's non-guarantees apply unchanged). Every other frozen term of the Codex and Cursor profiles equals
   the standard contract. Adding Codex moves no existing profile hash. Selecting it changes Session identity
-  through ordinary profile binding, with no alias, migration, or special continuation logic.
+  through ordinary profile binding, with no alias, migration, or special continuation logic. Selecting
+  the Reasonix profile likewise changes Session identity through ordinary binding and no special path.
 - A profile may also declare **one launch-permission policy id** (R7), because how an agent must be
   configured to honour a permission decision before it acts is a permission-mediation semantic. It is an id
   from a closed source-owned set, keyed by the capability family it enforces and never by an agent name; the

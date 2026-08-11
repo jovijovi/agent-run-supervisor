@@ -278,6 +278,42 @@ def _run(task: RunTask):
     return asyncio.run(case())
 
 
+@pytest.mark.parametrize(
+    ("session_id", "expected_method"),
+    [(None, "session/new"), ("sess-native-1", "session/load")],
+    ids=("new", "load"),
+)
+def test_symlink_workspace_is_canonical_on_the_agent_session_wire(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_id: str | None,
+    expected_method: str,
+) -> None:
+    capture = tmp_path / "session-cwd.jsonl"
+    script = dict(HAPPY_SCRIPT)
+    script["capture_cwd_path"] = str(capture)
+    harness = Harness(tmp_path, monkeypatch, script)
+    real_cwd = harness.workspace / "nested"
+    real_cwd.mkdir()
+    linked_workspace = tmp_path / "workspace-link"
+    linked_workspace.symlink_to(harness.workspace, target_is_directory=True)
+
+    result = _run(
+        harness.task(
+            request=_request(session_id=session_id),
+            workspace_root=linked_workspace,
+            cwd=str(linked_workspace / "nested"),
+        )
+    )
+
+    assert result.status is AgentRunStatus.COMPLETED
+    captured = [json.loads(line) for line in capture.read_text().splitlines()]
+    assert captured == [{"method": expected_method, "cwd": str(real_cwd.resolve())}]
+    spec = json.loads((harness.run_dir() / "spec.json").read_text())
+    assert spec["workspace"]["canonical_root"] == str(harness.workspace.resolve())
+    assert spec["workspace"]["cwd"] == str(real_cwd.resolve())
+
+
 def test_happy_vertical_produces_full_artifact_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2700,16 +2736,16 @@ def test_unmediated_write_family_completion_emits_no_run_completed(
     assert run_failed[0]["code"] == "FAILED"
 
 
-def test_write_family_ask_is_client_mediated_denied(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("kind", ["edit", "delete", "move", "execute"])
+def test_read_only_grant_denies_write_family_asks_before_side_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
-    # The prevention path in hermetic form: when the agent routes its edit
-    # through session/request_permission (what OPENCODE_PERMISSION forces on
-    # real OpenCode), the frozen read-only grant denies BEFORE the side
-    # effect — sentinel absent, deny mediation evidence durable.
-    sentinel_name = "ARS_S2_STYLE_SENTINEL_MUST_NOT_EXIST"
+    # The prevention path in hermetic form: when an agent routes a write-family
+    # operation through session/request_permission, the frozen read-only grant
+    # denies BEFORE the side effect — sentinel absent, deny evidence durable.
+    sentinel_name = f"ARS_{kind.upper()}_SENTINEL_MUST_NOT_EXIST"
     script = dict(HAPPY_SCRIPT)
-    script["ask_permission"] = {"kind": "edit", "path": sentinel_name}
+    script["ask_permission"] = {"kind": kind, "path": sentinel_name}
     harness = Harness(tmp_path, monkeypatch, script)
     result = _run(harness.task())
 
@@ -2725,7 +2761,8 @@ def test_write_family_ask_is_client_mediated_denied(
     write_denies = [
         e
         for e in mediation
-        if e.get("decision") == "deny" and e.get("requested_op") == "permission:edit"
+        if e.get("decision") == "deny"
+        and e.get("requested_op") == f"permission:{kind}"
     ]
     assert write_denies, "expected a write-family deny mediation event"
     assert write_denies[0]["tool_call_id"] == "perm-call-1"
@@ -3179,3 +3216,193 @@ def test_post_load_mode_fidelity_failure_refuses_before_prompt(
     captured = _captured_meta(capture)
     assert captured[-1]["method"] == "session/load"
     assert captured[-1]["meta"] == FROZEN_CLAUDE_SESSION_META
+
+
+# -- Reasonix: registered static approval fidelity on new and load -----------
+
+
+def _reasonix_shaped_script(**overrides) -> dict:
+    script = {
+        "initial_options": [
+            {
+                "id": "model",
+                "name": "Model",
+                "type": "select",
+                "currentValue": "reasonix/base",
+                "options": [
+                    {"value": "reasonix/base", "name": "Base"},
+                    {"value": "reasonix/target", "name": "Target"},
+                ],
+            },
+            {
+                "id": "effort",
+                "name": "Effort",
+                "type": "select",
+                "currentValue": "auto",
+                "options": [
+                    {"value": "auto", "name": "Auto"},
+                    {"value": "high", "name": "High"},
+                ],
+            },
+            {
+                "id": "work_mode",
+                "name": "Work mode",
+                "type": "select",
+                "currentValue": "balanced",
+                "options": [
+                    {"value": "balanced", "name": "Balanced"},
+                    {"value": "delivery", "name": "Delivery"},
+                ],
+            },
+            {
+                "id": "tool_approval",
+                "name": "Tool approval",
+                "type": "select",
+                "currentValue": "yolo",
+                "options": [
+                    {"value": "ask", "name": "Ask"},
+                    {"value": "auto", "name": "Auto"},
+                    {"value": "yolo", "name": "Yolo"},
+                ],
+            },
+        ],
+        "final_message": "REASONIX_COMPAT_OK",
+    }
+    script.update(overrides)
+    return script
+
+
+def _reasonix_harness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script: dict
+) -> Harness:
+    harness = Harness(tmp_path, monkeypatch, script)
+    profile = profile_module.DEFAULT_REGISTRY.get("reasonix-agent-acp-compat-v1")
+    harness.registry = ProfileRegistry((profile,))
+    harness.entry = _test_entry(
+        profile_id=profile.profile_id,
+        env_passthrough=("FAKE_AGENT_SCRIPT", "FAKE_AGENT_TRACE"),
+    )
+    return harness
+
+
+def _reasonix_request(**overrides) -> AgentRunRequest:
+    kwargs = dict(requested_model="reasonix/target", requested_effort="high")
+    kwargs.update(overrides)
+    return _request(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("session_id", "expected_session_method"),
+    [(None, "session/new"), ("sess-native-1", "session/load")],
+    ids=("new", "load"),
+)
+def test_registered_reasonix_sets_ask_then_model_then_effort_before_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_id: str | None,
+    expected_session_method: str,
+) -> None:
+    capture = tmp_path / "reasonix-config-order.txt"
+    script = _reasonix_shaped_script(capture_config_path=str(capture))
+    harness = _reasonix_harness(tmp_path, monkeypatch, script)
+
+    result = _run(harness.task(request=_reasonix_request(session_id=session_id)))
+
+    assert result.status is AgentRunStatus.COMPLETED
+    assert capture.read_text(encoding="utf-8").splitlines() == [
+        "tool_approval=ask",
+        "model=reasonix/target",
+        "effort=high",
+    ]
+    methods = harness.methods_seen()
+    assert methods == [
+        "initialize",
+        expected_session_method,
+        "session/set_config_option",
+        "session/set_config_option",
+        "session/set_config_option",
+        "session/prompt",
+    ]
+    effective = json.loads((harness.run_dir() / "effective.json").read_text())
+    snapshots = {
+        row["label"]: {option["id"]: option for option in row["options"]}
+        for row in effective["discovery_snapshots"]
+    }
+    assert list(snapshots) == ["initial", "post_mode", "post_model", "post_effort"]
+    assert snapshots["initial"]["tool_approval"]["currentValue"] == "yolo"
+    assert snapshots["post_mode"]["tool_approval"]["currentValue"] == "ask"
+    assert snapshots["post_effort"]["tool_approval"]["currentValue"] == "ask"
+    assert "work_mode" not in capture.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("hostile_readback", ["auto", "yolo"])
+def test_registered_reasonix_refuses_auto_or_yolo_readback_before_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hostile_readback: str,
+) -> None:
+    capture = tmp_path / "reasonix-hostile-readback.txt"
+    script = _reasonix_shaped_script(
+        capture_config_path=str(capture),
+        wrong_readback={"tool_approval": hostile_readback},
+    )
+    harness = _reasonix_harness(tmp_path, monkeypatch, script)
+
+    result = _run(
+        harness.task(request=_reasonix_request(session_id=None))
+    )
+
+    assert result.status is AgentRunStatus.FAILED
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    assert payload["detail_code"] == "CONFIG_FIDELITY"
+    assert capture.read_text(encoding="utf-8").splitlines() == [
+        "tool_approval=ask"
+    ]
+    assert "session/prompt" not in harness.methods_seen()
+    assert not (harness.run_dir() / DISPATCH_STARTED_MARKER).exists()
+
+
+def test_registered_reasonix_refuses_a_missing_approval_selector_before_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _reasonix_shaped_script()
+    script["initial_options"] = [
+        option
+        for option in script["initial_options"]
+        if option["id"] != "tool_approval"
+    ]
+    harness = _reasonix_harness(tmp_path, monkeypatch, script)
+
+    result = _run(
+        harness.task(request=_reasonix_request(session_id=None))
+    )
+
+    assert result.status is AgentRunStatus.FAILED
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    assert payload["detail_code"] == "CONFIG_FIDELITY"
+    assert "session/set_config_option" not in harness.methods_seen()
+    assert "session/prompt" not in harness.methods_seen()
+
+
+def test_registered_reasonix_load_without_config_options_is_zero_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The fake agent stores external Session state under this configured root.
+    # The seeded ARS record has no corresponding external file, so session/load
+    # succeeds but reports configOptions=null: the real load-only failure shape.
+    missing_agent_state = tmp_path / "reasonix-empty-state"
+    script = _reasonix_shaped_script(config_home_env=["REASONIX_STATE_HOME"])
+    harness = _reasonix_harness(tmp_path, monkeypatch, script)
+    harness.entry = _test_entry(
+        profile_id="reasonix-agent-acp-compat-v1",
+        env_passthrough=("FAKE_AGENT_SCRIPT", "FAKE_AGENT_TRACE"),
+        env_overlay=(("REASONIX_STATE_HOME", str(missing_agent_state)),),
+    )
+
+    result = _run(harness.task(request=_reasonix_request()))
+
+    assert result.status is AgentRunStatus.FAILED
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    assert payload["detail_code"] == "CONFIG_FIDELITY"
+    assert harness.methods_seen() == ["initialize", "session/load"]
+    assert not (harness.run_dir() / DISPATCH_STARTED_MARKER).exists()

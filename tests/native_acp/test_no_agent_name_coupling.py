@@ -28,7 +28,9 @@ SCANNED_PACKAGES = (SRC / "native_acp", SRC / "arsd")
 # Real agent names plus the two fabricated ones: a fixture identity must never
 # leak into shipped source either.
 AGENT_NAME_RE = re.compile(
-    r"(\bopencode\b|\bcursor\b|fake-alpha|fake-beta)", re.IGNORECASE
+    r"(\bopencode\b|\bcursor\b|\breasonix\b|\boh-my-pi\b|\bomp\b|"
+    r"fake-alpha|fake-beta)",
+    re.IGNORECASE,
 )
 
 # The one module allowed to carry agent-named data at all, and only as

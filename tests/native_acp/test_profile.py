@@ -11,7 +11,7 @@ It contains no path, version, digest, model literal, agent name, value domain,
 launch kind, artifact identity, or deployment fact. Every AGENT is instead one
 operator-owned registry entry.
 
-Exactly four profiles are registered. The three retired per-agent profiles
+Exactly five profiles are registered. The three retired per-agent profiles
 (``opencode-native-acp``, ``codex-acp-1.1.7``, ``claude-agent-acp-0.63.0``) are
 retired by deletion — not by an alias, a redirect, a disable flag, or any other
 mechanism capable of retiring one.
@@ -70,15 +70,16 @@ def entry(**overrides):
 
 # -- WP3.3: a closed, enumerated registry -----------------------------------
 #
-# The registry stays closed and small. It is four entries now: the conformance
-# contract and the three profiles with evidenced ACP-semantic deviations.
+# The registry stays closed and small. It is five entries now: the conformance
+# contract and the four profiles with evidenced ACP-semantic deviations.
 
 
-def test_registry_holds_exactly_the_four_registered_profiles():
+def test_registry_holds_exactly_the_five_registered_profiles():
     assert DEFAULT_REGISTRY.ids() == (
         "claude-agent-acp-compat-v1",
         "codex-agent-acp-compat-v1",
         "cursor-native-acp-v1",
+        "reasonix-agent-acp-compat-v1",
         "standard-native-acp-v1",
     )
 
@@ -199,6 +200,54 @@ def test_compat_profile_keeps_its_cited_acp_deviation():
             }
         }
     }
+
+
+def test_reasonix_profile_freezes_only_static_ask_approval() -> None:
+    profile = DEFAULT_REGISTRY.get("reasonix-agent-acp-compat-v1")
+
+    assert profile.revision == 1
+    assert profile.acp_protocol_version == "1"
+    assert profile.required_capabilities == ("loadSession",)
+    assert profile.requires_session_load is True
+    assert profile.permission_mode_selector_id == "tool_approval"
+    assert profile.required_permission_mode == "ask"
+    assert profile.permission_mode_policy_id is None
+    assert profile.model_selector_id == "model"
+    assert profile.effort_selector_id == "effort"
+    assert profile.session_meta is None
+
+
+def test_adding_reasonix_does_not_move_existing_profile_identity() -> None:
+    assert {
+        profile_id: DEFAULT_REGISTRY.get(profile_id).profile_hash()
+        for profile_id in (
+            "claude-agent-acp-compat-v1",
+            "codex-agent-acp-compat-v1",
+            "cursor-native-acp-v1",
+            "standard-native-acp-v1",
+        )
+    } == {
+        "claude-agent-acp-compat-v1": (
+            "c9e9258bfcc01e2962b87466c803d0a3ae25a1676936864bdbd78b75a544a241"
+        ),
+        "codex-agent-acp-compat-v1": (
+            "de3c26137e30319336c271710d47e235fd895ce43253c364782f6b007900b309"
+        ),
+        "cursor-native-acp-v1": (
+            "9ec329a6ac5844ea9df789344fbaeeab7ec2cca7b704da66f470a118a68063e4"
+        ),
+        "standard-native-acp-v1": (
+            "fcf4d46c2c072ba9bd23b198beb096cb9748e62e8168c2a48e5c76432d55f9b9"
+        ),
+    }
+
+
+def test_reasonix_profile_identity_is_pinned() -> None:
+    assert DEFAULT_REGISTRY.get(
+        "reasonix-agent-acp-compat-v1"
+    ).profile_hash() == (
+        "f4ec5820964391fe6e8bd269bbbf5cef553f842a03f71165745de27bb500ff68"
+    )
 
 
 def test_compat_session_meta_is_sent_on_both_session_calls():

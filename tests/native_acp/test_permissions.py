@@ -487,6 +487,12 @@ CLAUDE_SHAPED_OPTIONS = [
     {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
     {"optionId": "reject", "name": "Reject", "kind": "reject_once"},
 ]
+OMP_SHAPED_OPTIONS = [
+    {"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
+    {"optionId": "allow_always", "name": "Always allow", "kind": "allow_always"},
+    {"optionId": "reject_once", "name": "Reject once", "kind": "reject_once"},
+    {"optionId": "reject_always", "name": "Always reject", "kind": "reject_always"},
+]
 
 
 def test_allow_once_is_preferred_over_an_earlier_allow_always(
@@ -550,6 +556,21 @@ def test_execute_allows_once_only_when_the_grant_carries_execute(
         is None
     )
     assert bridge.grant_violation is False
+
+
+def test_omp_shaped_execute_selects_allow_once_and_never_allow_always(
+    tmp_path: Path,
+) -> None:
+    bridge, _, _ = _bridge(tmp_path, capabilities=("read", "execute"))
+    decision = bridge.decide_permission_request(
+        _request("execute", options=OMP_SHAPED_OPTIONS)
+    )
+
+    assert decision == {
+        "decision": "allow",
+        "reason": "execute permitted once by the frozen grant",
+        "option_id": "allow_once",
+    }
 
 
 def test_execute_denies_without_the_execute_grant(tmp_path: Path) -> None:

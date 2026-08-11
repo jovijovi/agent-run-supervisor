@@ -84,7 +84,7 @@ ARS has no web console.
 
 <a class="ars-panel" href="how-to/">
   <p class="ars-panel__name">Agent guides</p>
-  <p class="ars-panel__note">Registering Claude Code, Codex CLI, OpenCode, and Cursor CLI as supervised agents.</p>
+  <p class="ars-panel__note">Registering Claude Code, Codex CLI, OpenCode, Cursor CLI, oh-my-pi, and Reasonix as supervised agents.</p>
 </a>
 
 <a class="ars-panel" href="reference/socket-api/">

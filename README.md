@@ -163,7 +163,7 @@ Every value above is a **placeholder**. The closed field set is `profile`, `comm
 refused. For an agent whose CLI is not natively ACP, point `command` at the ACP adapter you installed.
 The adapter executable remains an operator-owned deployment fact. Select `standard-native-acp-v1` only
 when the ACP behavior it exposes conforms to that contract; an evidenced ACP-semantic deviation selects
-the corresponding source-owned compatibility profile. Three compatibility profiles differ from the
+the corresponding source-owned compatibility profile. Four compatibility profiles differ from the
 standard contract:
 `claude-agent-acp-compat-v1` carries its ACP-level compatibility differences.
 `codex-agent-acp-compat-v1` keeps separate model and effort selectors while deriving Codex's ACP `mode`
@@ -182,7 +182,16 @@ an edit in `agent` mode without asking — it is not an OS sandbox and not a str
 guarantee, and ACP permission mediation plus the post-completion violation detector stay the
 enforcement line. Like every other profile, it adds no startup permission policy and never repoints
 your agent's own configuration root, so agent-owned Session state stays where the agent put it and
-resumes through a real `session/load`. `standard-native-acp-v1` behaves ordinarily.
+resumes through a real `session/load`.
+`reasonix-agent-acp-compat-v1` keeps separate model and effort selectors and sets
+`tool_approval=ask`, with exact readback, before model and effort on every new or loaded Session. It
+never automatically selects Reasonix `auto`, `yolo`, or `work_mode`. `standard-native-acp-v1`
+behaves ordinarily.
+
+A concrete operator example for the installed OMP and Reasonix commands is
+[`examples/agents.omp-reasonix.toml`](examples/agents.omp-reasonix.toml). OMP uses the standard profile
+with its `thinking` effort selector; Reasonix uses the compatibility profile above. ARS does not install
+either command or write an operator's live registry.
 
 - **Your command is launched exactly as declared.** `argv[0]` is the declared string byte-for-byte, and
   a bare name is found by ordinary PATH lookup over the *child's* projected `PATH`, so shims, symlink

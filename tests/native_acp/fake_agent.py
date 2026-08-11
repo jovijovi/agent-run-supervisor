@@ -85,6 +85,8 @@ Script keys (all optional):
 - ``capture_meta_path``: append one JSON line per session/new and
   session/load recording the exact ``_meta`` the client sent (``null`` when
   the argument was absent) — proves the frozen session metadata on the wire.
+- ``capture_cwd_path``: append one JSON line per session/new and session/load
+  recording the exact workspace ``cwd`` received on the ACP wire.
 """
 
 from __future__ import annotations
@@ -167,6 +169,15 @@ class FakeAgent:
                 + "\n"
             )
 
+    def _capture_cwd(self, method: str, params: dict[str, Any]) -> None:
+        path = self.script.get("capture_cwd_path")
+        if not path:
+            return
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps({"method": method, "cwd": params.get("cwd")}) + "\n"
+            )
+
     def _options_list(self) -> list[dict[str, Any]]:
         return [dict(option) for option in self.options.values()]
 
@@ -242,9 +253,11 @@ class FakeAgent:
             self._on_initialize(request_id, params)
         elif method == "session/new":
             self._capture_meta(method, params)
+            self._capture_cwd(method, params)
             self._on_new(request_id)
         elif method == "session/load":
             self._capture_meta(method, params)
+            self._capture_cwd(method, params)
             self._on_load(request_id, params)
         elif method == "session/set_config_option":
             self._on_set_config(request_id, params)
