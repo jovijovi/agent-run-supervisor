@@ -160,10 +160,18 @@ forbidden_capabilities = ["terminal"]
 Every value above is a **placeholder**. The closed field set is `profile`, `command`, `args`,
 `mediation`, `env_passthrough`, `env_overlay`, `model_selector`, `effort_selector`,
 `forbidden_capabilities`, and `session_epoch` — nothing else, and an unknown key at any level is
-refused. An agent whose CLI is not natively ACP is no different: point `command` at the ACP adapter you
-installed and use the same profile, because the adapter is a deployment fact, not a source constant.
-Two profiles differ, each only for evidenced deviations:
-`claude-agent-acp-compat-v1` carries its ACP-level compatibility differences, and
+refused. For an agent whose CLI is not natively ACP, point `command` at the ACP adapter you installed.
+The adapter executable remains an operator-owned deployment fact. Select `standard-native-acp-v1` only
+when the ACP behavior it exposes conforms to that contract; an evidenced ACP-semantic deviation selects
+the corresponding source-owned compatibility profile. Three compatibility profiles differ from the
+standard contract:
+`claude-agent-acp-compat-v1` carries its ACP-level compatibility differences.
+`codex-agent-acp-compat-v1` keeps separate model and effort selectors while deriving Codex's ACP `mode`
+from each Run's frozen grant: any subset of `{read, search}`, including empty, requires `read-only`;
+every other valid grant requires `agent`, and the policy never selects `agent-full-access`. ARS sets
+the mode and reads it back exactly before the model, then configures model and effort and re-proves it once
+at the post-effort readback before any prompt. The mode is recomputed on every Run, including
+`session/load`.
 `cursor-native-acp-v1` deviates twice. It uses model-only configuration fidelity — its model selector
 *is* the whole configuration, with no separate effort selector — and, at revision 3, it drives
 Cursor's own ACP `mode` from the Run's frozen grant: a Run whose grant capabilities are exactly a

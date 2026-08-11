@@ -19,7 +19,7 @@ every guide below assumes. Then pick the guide for the agent you installed.
 
 <a class="ars-panel" href="codex-cli.md">
   <p class="ars-panel__name">Codex CLI</p>
-  <p class="ars-panel__note">Reached through an ACP adapter you install, on the standard profile.</p>
+  <p class="ars-panel__note">Operator-installed ACP adapter executable; evidenced ACP mode semantics use codex-agent-acp-compat-v1.</p>
 </a>
 
 <a class="ars-panel" href="opencode.md">

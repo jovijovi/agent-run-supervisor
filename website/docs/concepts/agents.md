@@ -44,9 +44,12 @@ self-update logic all keep working.
 
 ## An agent whose CLI is not natively ACP
 
-There is no separate category for it. Point `command` at the ACP adapter you
-installed and use the same profile: the adapter is a deployment fact, not a
-source constant.
+There is no separate executable category for it. Point `command` at the ACP
+adapter you installed; that executable remains an operator deployment fact.
+Select `standard-native-acp-v1` only when the ACP behavior it exposes conforms
+to that contract. An evidenced ACP-semantic deviation selects its source-owned
+compatibility profile — for Codex's grant-driven `mode`, that is
+`codex-agent-acp-compat-v1`.
 
 ```toml
 [agents.adapter-backed-agent]

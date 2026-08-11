@@ -150,9 +150,16 @@ forbidden_capabilities = ["terminal"]
 上面每个值都是**占位符**。完整且封闭的字段集是 `profile`、`command`、`args`、`mediation`、
 `env_passthrough`、`env_overlay`、`model_selector`、`effort_selector`、`forbidden_capabilities` 与
 `session_epoch` —— 除此以外没有别的，任何层级上的未知键都会被拒绝。CLI 本身不讲 ACP 的 agent 也没有
-区别：把 `command` 指向你安装的那个 ACP 适配器，profile 照旧，因为适配器是部署事实而不是源码常量。
-有两个 profile 不同，且只对应有据可查的偏差：`claude-agent-acp-compat-v1` 保留它既有的
-ACP 层兼容性差异；`cursor-native-acp-v1` 有两处偏差。其一是 model-only 配置保真 —— 它的 model
+区别：把 `command` 指向你安装的那个 ACP 适配器。适配器可执行文件仍是运维方拥有的部署事实；只有它
+暴露的 ACP 行为符合标准契约时才选择 `standard-native-acp-v1`，有据可查的 ACP 语义偏差则选择对应的
+源码拥有的兼容 profile。共有三个兼容 profile 偏离标准契约：
+`claude-agent-acp-compat-v1` 保留它既有的 ACP 层兼容性差异；
+`codex-agent-acp-compat-v1` 保留独立的 model 和 effort 选择器，并从每个 Run 的冻结授权推导 Codex
+自己的 ACP `mode`：包括空集在内的任意 `{read, search}` 子集要求 `read-only`，其他所有有效授权要求
+`agent`，且该策略绝不选择 `agent-full-access`。ARS 在 model 之前设置 mode 并逐字读回，随后配置
+model 与 effort，只在 post-effort 读回时复验一次 mode，之后才允许 prompt。每个 Run 都重新计算 mode，
+包括 `session/load`。
+`cursor-native-acp-v1` 有两处偏差。其一是 model-only 配置保真 —— 它的 model
 选择器**就是**全部配置，没有独立的 effort 选择器；其二（revision 3 起）是由 Run 的冻结授权驱动
 Cursor 自己的 ACP `mode`：授权能力恰好是 `{read, search}` 子集的 Run 必须运行在 `ask` 模式，其余
 一切有效授权运行在 `agent` 模式，且 mode 在 model 之前设置并逐字读回验证、在 model 设置之后再次

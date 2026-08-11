@@ -1,29 +1,48 @@
 ---
 title: Codex CLI
-description: Registering Codex CLI with ARS through an ACP adapter, on the standard profile.
+description: Registering Codex CLI with ARS through an ACP adapter and its grant-driven compatibility profile.
 ---
 
 # Codex CLI
 
 A CLI that does not speak ACP natively is reached through an ACP adapter you
-install independently. To ARS this is not a special category: point `command` at
-the adapter and use the standard profile, because the adapter is a deployment
-fact rather than a source constant.
+install independently. The adapter executable remains an operator deployment
+fact, but its evidenced ACP permission-mode behavior belongs to the source-owned
+`codex-agent-acp-compat-v1` profile.
 
 ## The registry entry
 
 ```toml title="agents.toml"
 [agents.codex-cli]
-profile   = "standard-native-acp-v1"
+profile   = "codex-agent-acp-compat-v1"
 command   = "<the-acp-adapter-executable>"
 args      = []
 mediation = "ask-privileged-tool-families-v1"
 ```
 
-`standard-native-acp-v1` is the ACP-v1 conformance contract every
-standards-conforming agent runs under. Use it unless you have **cited
-ACP-level evidence** that the agent deviates — the two compatibility profiles
-exist for specific, evidenced deviations, not as general-purpose escape hatches.
+`codex-agent-acp-compat-v1` keeps the standard ACP-v1 Session contract and
+separate model and effort selectors. Its one deviation is a grant-driven
+permission-mode selector proven exactly before any prompt.
+
+## Grant-driven mode
+
+Each Run derives the required `mode` from its own frozen `grant_capabilities`:
+
+| Frozen grant | Required mode |
+|---|---|
+| any subset of `{read, search}`, including empty | `read-only` |
+| every other valid grant | `agent` |
+
+The adapter may advertise `agent-full-access`, but this policy never selects it.
+ARS sets and exactly reads back the required mode before the model. It then
+configures model and effort and re-proves the mode once at the post-effort
+readback before Prompt. The mode is recomputed for every Run including real
+`session/load` reuse. Missing or unadvertised mode state and inexact readback
+fail pre-Prompt as `CONFIG_FIDELITY`.
+
+An operator-owned `INITIAL_AGENT_MODE=read-only` may remain a safe bootstrap
+default, but correctness does not depend on it. It is not an ARS registry or
+request field; each Run still performs its grant-derived set and readback.
 
 !!! note "Which command, and which arguments?"
 
@@ -39,7 +58,7 @@ Adapters commonly need more than the base allowlist provides. Declare it:
 
 ```toml
 [agents.codex-cli]
-profile   = "standard-native-acp-v1"
+profile   = "codex-agent-acp-compat-v1"
 command   = "<the-acp-adapter-executable>"
 args      = []
 mediation = "ask-privileged-tool-families-v1"

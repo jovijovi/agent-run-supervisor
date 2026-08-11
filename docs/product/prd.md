@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext PRD"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-09
+last_validated_at: 2026-08-11
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/prd.md"
 ---
 # agent-run-supervisor vNext PRD
@@ -263,10 +263,12 @@ no unquarantine tool.
   evidence shows an agent whose permissive mode acts without asking, the profile freezes the agent's ACP
   permission-mode selector and the required value — one frozen literal, or a value computed per Run from the
   frozen grant by one closed source-owned policy (R12). The mode is set before the model, proven by exact
-  readback, re-proven after the model set, and recomputed on every Run including Session reuse; any failure
-  is a pre-prompt `CONFIG_FIDELITY` with zero prompt. This is a **cooperative** mitigation riding the
-  agent's own mode machinery — not a sandbox, not a strong hostile-agent boundary — and it replaces neither
-  mediation nor the post-completion violation detector.
+  readback, and recomputed on every Run including Session reuse. A model-only profile re-proves it after
+  the model set; a separate-selector profile configures model and effort, then re-proves it once at the
+  post-effort readback. Any failure is a pre-prompt `CONFIG_FIDELITY` with zero prompt. This is a
+  **cooperative** mitigation riding the agent's own mode machinery — not a sandbox, not a strong
+  hostile-agent boundary — and it replaces neither mediation nor the post-completion violation
+  detector.
 - **Mediation is cooperative.** An agent that ignores the knob, or one with no registered binding, can
   execute in-process tools with no ACP permission event, and the permission bridge will never see them.
 
@@ -419,20 +421,24 @@ guarantees. ARS makes no isolation claim either way.
   which is why an ordinary ARS release leaves every Session identity field untouched.
 - A profile also declares its **configuration-fidelity mode** (R3), because how an agent is configured is an
   ACP semantic. It is the only place that fact may live.
-- The target registry is a closed set of three: `standard-native-acp-v1` for every agent, native or
-  adapter-reached; `claude-agent-acp-compat-v1` for one evidenced ACP-semantic deviation — frozen session
-  metadata sent on **both** `session/new` and `session/load`, plus a required permission-mode selector proven
-  by exact readback; and `cursor-native-acp-v1` for two evidenced deviations — configuration fidelity
-  (`model-only`, with no independent effort selector) and, at revision 3, a **grant-driven** required
-  permission mode: one closed source-owned policy requires the agent's cooperative `ask` mode when the Run's
-  frozen `grant_capabilities` are exactly a subset of `{read, search}` and its `agent` mode for every other
-  valid grant, set before the model, proven by exact readback, and re-proven after the model set. That mode
-  selection is a cooperative temporary mitigation of an agent that can complete an edit in `agent` mode
-  without asking — never a sandbox or a strong permission guarantee (R7's non-guarantees apply unchanged).
-  Every other frozen term of the Cursor profile equals the standard contract. Declaring configuration
-  fidelity moved no existing profile's `profile_hash`; the revision-3 grant-driven mode deliberately moved
-  **only** the Cursor profile's hash, so existing revision-2 Cursor Sessions are refused for reuse by the
-  ordinary profile-binding mismatch, with no migration or compatibility logic.
+- The target registry is a closed set of four:
+  - `standard-native-acp-v1` is the ACP-v1 conformance contract for every agent without an evidenced
+    deviation;
+  - `claude-agent-acp-compat-v1` freezes session metadata on **both** `session/new` and `session/load`,
+    plus a static required permission mode proven by exact readback;
+  - `codex-agent-acp-compat-v1` keeps separate model and effort selectors but adds a **grant-driven**
+    required `mode`: `read-only` exactly when frozen `grant_capabilities` are a subset of `{read, search}`
+    (including empty), and `agent` for every other valid grant. The mode is set and exactly read back before
+    the model; after model and effort are configured, it is re-proven once at the post-effort readback.
+    It is recomputed on every Run including `session/load`. `agent-full-access` may be advertised but is
+    never selected by this policy;
+  - `cursor-native-acp-v1` carries model-only configuration fidelity and, at revision 3, a grant-driven
+    permission mode: `ask` for exactly the `{read, search}` subsets and `agent` otherwise, set before and
+    re-proven after the model.
+  Both grant-driven modes are cooperative mitigations, never sandboxes or strong permission guarantees
+  (R7's non-guarantees apply unchanged). Every other frozen term of the Codex and Cursor profiles equals
+  the standard contract. Adding Codex moves no existing profile hash. Selecting it changes Session identity
+  through ordinary profile binding, with no alias, migration, or special continuation logic.
 - A profile may also declare **one launch-permission policy id** (R7), because how an agent must be
   configured to honour a permission decision before it acts is a permission-mediation semantic. It is an id
   from a closed source-owned set, keyed by the capability family it enforces and never by an agent name; the
@@ -441,10 +447,12 @@ guarantees. ARS makes no isolation claim either way.
   refuses a contract whose frozen major disagrees with it, and a future `…-v2` is a separate profile with
   its own registrations and Sessions, never a revision of this one.
 - **An adapter command is not a profile.** A non-ACP CLI reached through an independently installed ACP
-  adapter is an operator deployment fact: it is a registry `command`, registered against the standard
-  profile. Admitting a *new* compatibility profile requires all three of: a cited, reproducible
-  observation at the ACP layer; a demonstration that the deviation cannot be expressed by live discovery,
-  exact readback, a selector-id hint, or an operator environment value; and review.
+  adapter is an operator deployment fact and remains a registry `command`. It uses the standard profile
+  unless cited ACP-level evidence requires one of the closed compatibility profiles; Codex uses its
+  compatibility profile for the evidenced grant-driven `mode` contract. Admitting another compatibility
+  profile requires all three of: a cited, reproducible observation at the ACP layer; a demonstration that
+  the deviation cannot be expressed by live discovery, exact readback, a selector-id hint, or an operator
+  environment value; and review.
 - Adding or revising a profile requires discovery evidence from a real non-prompt ACP `initialize`
   exchange, a revision bump, and independent review. The ACP `agentInfo.version` and an external CLI
   `--version` are separate facts and neither may be assumed equal to the other.

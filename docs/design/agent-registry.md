@@ -2,7 +2,7 @@
 title: "ARS agent registry — the operator contract"
 status: active
 created_at: 2026-07-30
-last_validated_at: 2026-08-04
+last_validated_at: 2026-08-11
 ---
 # ARS agent registry — the operator contract
 
@@ -76,8 +76,9 @@ command   = "some-agent"          # PATH-resolved bare name, exactly as typed
 args      = ["acp"]
 mediation = "ask-privileged-tool-families-v1"   # selects a source-owned binding
 
-# An agent whose CLI is not natively ACP, reached through an independently
-# installed ACP adapter command. Same profile; the adapter is a deployment fact.
+# A standards-conforming agent reached through an independently installed ACP
+# adapter command. The executable is a deployment fact; an evidenced ACP
+# semantic deviation selects its source-owned compatibility profile.
 [agents.adapter-backed-agent]
 profile = "standard-native-acp-v1"
 command = "/home/<service-user>/.local/bin/<some-acp-adapter>"
