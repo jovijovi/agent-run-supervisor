@@ -152,7 +152,7 @@ forbidden_capabilities = ["terminal"]
 `session_epoch` —— 除此以外没有别的，任何层级上的未知键都会被拒绝。CLI 本身不讲 ACP 的 agent 也没有
 区别：把 `command` 指向你安装的那个 ACP 适配器。适配器可执行文件仍是运维方拥有的部署事实；只有它
 暴露的 ACP 行为符合标准契约时才选择 `standard-native-acp-v1`，有据可查的 ACP 语义偏差则选择对应的
-源码拥有的兼容 profile。共有三个兼容 profile 偏离标准契约：
+源码拥有的兼容 profile。共有四个兼容 profile 偏离标准契约：
 `claude-agent-acp-compat-v1` 保留它既有的 ACP 层兼容性差异；
 `codex-agent-acp-compat-v1` 保留独立的 model 和 effort 选择器，并从每个 Run 的冻结授权推导 Codex
 自己的 ACP `mode`：包括空集在内的任意 `{read, search}` 子集要求 `read-only`，其他所有有效授权要求
@@ -167,7 +167,14 @@ Cursor 自己的 ACP `mode`：授权能力恰好是 `{read, search}` 子集的 R
 agent 的**协作式缓解** —— 它不是操作系统沙箱，也不是强权限保证；ACP 权限中介与完成后违规检测器
 仍是执法线。和其他 profile 一样，它不附加任何启动权限策略，也从不改指你 agent 自己的配置根目录，
 因此 agent 自己拥有的 Session 状态仍留在 agent 放置它的地方，并通过真实的 `session/load` 复用。
-`standard-native-acp-v1` 的行为一如往常。
+`reasonix-agent-acp-compat-v1` 保留独立的 model 与 effort 选择器，并在每次新建或加载 Session 时先设置
+`tool_approval=ask`、逐字读回，再设置 model 与 effort；它绝不会自动选择 Reasonix 的 `auto`、`yolo`
+或 `work_mode`。`standard-native-acp-v1` 的行为一如往常。
+
+已安装 OMP 与 Reasonix 命令的具体运维示例见
+[`examples/agents.omp-reasonix.toml`](examples/agents.omp-reasonix.toml)。OMP 使用标准 profile，并把
+effort 选择器设为 `thinking`；Reasonix 使用上述兼容 profile。ARS 不安装任何一个命令，也不写入运维方的
+线上注册表。
 
 - **你的命令按声明原样启动。** `argv[0]` 逐字节就是你声明的那个字符串；裸名字由**子进程**投影出的
   `PATH` 按普通查找定位，因此 shim、符号链接农场以及 agent 自更新都照常可用。这里没有任何预检解析；

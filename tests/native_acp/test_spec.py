@@ -362,6 +362,42 @@ def test_workspace_fields_stay_complete_literals_and_hash_covered(tmp_path: Path
     assert len(binding.workspace_hash) == 64
 
 
+def test_symlink_workspace_and_cwd_are_canonical_before_the_runspec_is_sealed(
+    tmp_path: Path,
+) -> None:
+    real_workspace = tmp_path / "real-workspace"
+    real_cwd = real_workspace / "nested"
+    real_cwd.mkdir(parents=True)
+    linked_workspace = tmp_path / "linked-workspace"
+    linked_workspace.symlink_to(real_workspace, target_is_directory=True)
+
+    request = _request()
+    entry = _entry()
+    assembler = RunSpecAssembler(request)
+    instance = assembler.resolve_agent(entry, registry=DEFAULT_REGISTRY)
+    binding = assembler.bind_workspace(
+        root=linked_workspace,
+        cwd=str(linked_workspace / "nested"),
+    )
+    assembler.resolve_launch(
+        environment=resolve_run_environment(
+            arsd_env={"HOME": str(tmp_path), "PATH": "/usr/bin"},
+            profile=instance.profile,
+            entry=entry,
+        )
+    )
+    sealed = assembler.seal(
+        run_id="run-symlink-canonical",
+        submitted_at="2026-08-11T00:00:00+00:00",
+    )
+
+    assert binding.canonical_root == str(real_workspace.resolve())
+    assert binding.effective_cwd == str(real_cwd.resolve())
+    assert sealed.workspace.canonical_root == str(real_workspace.resolve())
+    assert sealed.workspace.cwd == str(real_cwd.resolve())
+    assert str(linked_workspace) not in json.dumps(sealed.to_dict())
+
+
 # -- observations -------------------------------------------------------------
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import os
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,9 @@ SOURCE = (
     / "agent_run_supervisor"
     / "native_acp"
     / "agent_registry.py"
+)
+PUBLIC_OMP_REASONIX_EXAMPLE = (
+    Path(__file__).resolve().parents[2] / "examples" / "agents.omp-reasonix.toml"
 )
 
 
@@ -71,6 +75,23 @@ def test_full_entry_projects_every_declared_field(tmp_path):
     assert entry.effort_selector_id == "reasoning_effort"
     assert entry.forbidden_capabilities == ("terminal",)
     assert entry.session_epoch == 1
+
+
+def test_public_omp_reasonix_example_matches_the_supported_registry_fixtures():
+    document = tomllib.loads(PUBLIC_OMP_REASONIX_EXAMPLE.read_text(encoding="utf-8"))
+    snapshot = agent_registry.parse_registry_document(document)
+
+    assert snapshot.ids() == ("oh-my-pi", "reasonix")
+    for agent_id, expected in {
+        "oh-my-pi": fx.omp_entry(),
+        "reasonix": fx.reasonix_entry(),
+    }.items():
+        entry = snapshot.get(agent_id)
+        assert entry.profile_id == expected["profile"]
+        assert entry.command == expected["command"]
+        assert entry.args == tuple(expected["args"])
+        assert entry.effort_selector_id == expected.get("effort_selector")
+        assert dict(entry.env_overlay) == expected.get("env_overlay", {})
 
 
 def test_snapshot_is_immutable_and_carries_no_reopen_seam(tmp_path):

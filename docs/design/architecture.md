@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext System Architecture"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-07
+last_validated_at: 2026-08-11
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/architecture.md"
 ---
 # agent-run-supervisor vNext System Architecture
@@ -150,7 +150,8 @@ runtime it served. `ManagedProcess` is the only supervision layer.
   7 resolve agent_id against the STARTUP SNAPSHOT — pure
     in-memory lookup, ZERO filesystem access                  ✗ AGENT_NOT_REGISTERED
   8 resolve the entry's profile from the source registry      ✗ UNKNOWN_PROFILE
-  9 bind workspace (canonical root, effective cwd, hash)      ✗ WORKSPACE_*
+  9 bind workspace (resolve symlinks to canonical root/cwd,
+    then hash and seal those canonical literals)              ✗ WORKSPACE_*
  10 validate the frozen execution_grant + referenced refs     ✗ GRANT_INVALID
  11 build argv = [command_declared, *args]; if the profile
     selects a launch-permission policy, compile it from the
@@ -659,6 +660,8 @@ writes it. There is no `attestation.json` and no Binding root.
 The workspace canonical root and effective `cwd` in `spec.json` remain complete literals and remain
 hash-covered even when the workspace lives under `$HOME`. They are independently derived authority facts,
 and truncating or tokenising them would break workspace binding, reconciliation attribution, and audit.
+The same canonical `cwd` is sent to both `session/new` and `session/load`; an operator-supplied symlink
+spelling never survives into the sealed Spec or the ACP session-open frame.
 
 `native_acp/storage.py` is the only constructor seam for Native roots. Pre-existing legacy `runs/` and
 `sessions/` storage is never read, written, imported, mirrored, or migrated by Native code.

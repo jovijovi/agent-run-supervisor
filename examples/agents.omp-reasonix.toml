@@ -1,0 +1,17 @@
+# Operator example for the two externally installed ACP Agents. Copy the
+# required entries into an operator-owned agents file and set that file to
+# mode 0600 before validation. ARS launches these commands as declared; it does
+# not install, update, copy, or configure either Agent or bubblewrap.
+schema_version = 1
+
+[agents.oh-my-pi]
+profile = "standard-native-acp-v1"
+command = "/home/ecs-user/.local/bin/omp"
+args = ["--approval-mode=always-ask", "acp"]
+effort_selector = "thinking"
+
+[agents.reasonix]
+profile = "reasonix-agent-acp-compat-v1"
+command = "/home/linuxbrew/.linuxbrew/bin/reasonix"
+args = ["acp"]
+env_overlay = { PATH = "/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin" }

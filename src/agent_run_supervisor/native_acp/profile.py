@@ -19,7 +19,7 @@ That split is what makes an AGENT or adapter upgrade behind an unchanged
 registered command cost no ARS action at all: no identity field anywhere derives
 from what the agent turned out to be.
 
-Four profiles are registered. ``standard-native-acp-v1`` is the ACP-v1
+Five profiles are registered. ``standard-native-acp-v1`` is the ACP-v1
 conformance contract every standards-conforming agent runs under.
 ``claude-agent-acp-compat-v1`` exists because one adapter carries a cited
 ACP-semantic deviation: it resolves its initial permission mode from ambient
@@ -52,6 +52,13 @@ without ever asking; it is not an OS sandbox and not a strong hostile-agent
 boundary, and the ACP permission bridge and the post-completion violation
 detector remain the enforcement line. Every other frozen term equals the
 standard contract.
+
+``reasonix-agent-acp-compat-v1`` carries one evidenced ACP-semantic deviation:
+the agent's ambient ``tool_approval`` value can be ``auto`` or ``yolo`` as well
+as ``ask``. ARS therefore sets ``ask`` before the model and effort and proves it
+twice by exact readback on every Run, including after a real ``session/load``.
+No other Reasonix selector is frozen and no agent-name branch exists in the
+runtime path.
 
 The ``-v1`` suffix is load-bearing: the id carries the ACP protocol generation,
 construction refuses a profile whose frozen protocol disagrees with it, and a
@@ -843,11 +850,29 @@ CURSOR_NATIVE_ACP_V1 = AcpCompatProfile(
     permission_mode_policy_id=PERMISSION_MODE_POLICY_READ_ONLY_ASK,
 )
 
+# Reasonix's sole compatibility deviation is configuration semantic rather
+# than launch or deployment policy: its ``tool_approval`` selector admits
+# values that do not ask the ACP Host before applicable tools run. Freeze the
+# evidenced static ``ask`` value through the existing exact-readback sequence.
+# Model and effort retain the standard selector conventions; ``work_mode`` is
+# deliberately outside this narrow profile.
+REASONIX_AGENT_ACP_COMPAT_V1 = AcpCompatProfile(
+    profile_id="reasonix-agent-acp-compat-v1",
+    revision=1,
+    acp_protocol_version="1",
+    required_capabilities=("loadSession",),
+    forbidden_capabilities=(),
+    requires_session_load=True,
+    permission_mode_selector_id="tool_approval",
+    required_permission_mode="ask",
+)
+
 DEFAULT_REGISTRY = ProfileRegistry(
     (
         STANDARD_NATIVE_ACP_V1,
         CLAUDE_AGENT_ACP_COMPAT_V1,
         CODEX_AGENT_ACP_COMPAT_V1,
         CURSOR_NATIVE_ACP_V1,
+        REASONIX_AGENT_ACP_COMPAT_V1,
     )
 )

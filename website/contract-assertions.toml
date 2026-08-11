@@ -127,7 +127,7 @@ reason = "The byte-exact workflow lock is documented without overstating it as a
 
 [[required]]
 page = "how-to/index.md"
-literal = "These four guides are an initial set, not a protocol boundary."
+literal = "These six guides are an initial set, not a protocol boundary."
 reason = "The AGENT list is not a closed universe."
 
 [[required]]
@@ -139,6 +139,21 @@ reason = "Guides describe integration, not vendoring."
 page = "how-to/index.md"
 literal = "Operator-installed ACP adapter executable; evidenced ACP mode semantics use codex-agent-acp-compat-v1."
 reason = "Codex registration keeps the executable operator-owned while selecting the source-owned compatibility profile."
+
+[[required]]
+page = "how-to/oh-my-pi.md"
+literal = "it does not support a mutation-usable claim for OMP 17.2.12 under ARS"
+reason = "The OMP guide must preserve the exact negative result of the real mutation canary."
+
+[[required]]
+page = "how-to/reasonix.md"
+literal = "Do not set `sandbox.bash=off`."
+reason = "The Reasonix guide must keep the real sandbox enabled."
+
+[[required]]
+page = "how-to/reasonix.md"
+literal = "Those canonical literals are sealed into the RunSpec and sent to both `session/new` and `session/load`"
+reason = "The documented symlink workaround must be the shared ARS admission boundary, not a Reasonix-specific bypass."
 
 [[required]]
 page = "reference/socket-api.md"

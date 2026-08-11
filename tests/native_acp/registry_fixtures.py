@@ -15,6 +15,7 @@ from agent_run_supervisor.native_acp import agent_registry
 
 STANDARD_PROFILE = "standard-native-acp-v1"
 COMPAT_PROFILE = "claude-agent-acp-compat-v1"
+REASONIX_PROFILE = "reasonix-agent-acp-compat-v1"
 MEDIATION_ID = "ask-privileged-tool-families-v1"
 
 
@@ -113,6 +114,32 @@ def full_entry(**overrides: Any) -> dict[str, Any]:
         "effort_selector": "reasoning_effort",
         "forbidden_capabilities": ["terminal"],
         "session_epoch": 1,
+    }
+    body.update(overrides)
+    return body
+
+
+def omp_entry(**overrides: Any) -> dict[str, Any]:
+    """The documented oh-my-pi operator entry, as parser-ready values."""
+    body: dict[str, Any] = {
+        "profile": STANDARD_PROFILE,
+        "command": "/home/ecs-user/.local/bin/omp",
+        "args": ["--approval-mode=always-ask", "acp"],
+        "effort_selector": "thinking",
+    }
+    body.update(overrides)
+    return body
+
+
+def reasonix_entry(**overrides: Any) -> dict[str, Any]:
+    """The documented Reasonix operator entry, as parser-ready values."""
+    body: dict[str, Any] = {
+        "profile": REASONIX_PROFILE,
+        "command": "/home/linuxbrew/.linuxbrew/bin/reasonix",
+        "args": ["acp"],
+        "env_overlay": {
+            "PATH": "/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin"
+        },
     }
     body.update(overrides)
     return body

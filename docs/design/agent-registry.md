@@ -96,6 +96,10 @@ command = "<some-adapter-command>"
 args    = []
 ```
 
+The repository also carries [`examples/agents.omp-reasonix.toml`](../../examples/agents.omp-reasonix.toml),
+an operator example with the explicitly approved installed OMP and Reasonix command paths. It is example
+configuration only: ARS never copies those binaries or writes the live registry for an operator.
+
 `agent_id` is the table key (`native-agent` above). It is what a caller names in `AgentRunRequest`, and it is
 the only registry-facing value that ever crosses the wire.
 

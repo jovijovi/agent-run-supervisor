@@ -28,7 +28,7 @@ capability claim in a current-authority document.
 **The V4 boundary-reset source is aligned on `main`.** Its module dispositions below describe merged
 source: `native_acp/runtime_binding.py` and `native_acp/attestation.py` are deleted,
 `native_acp/agent_registry.py` is the one reader of the operator agents file, and the sealed launch
-snapshot is value-blind. The source profile registry contract is a closed set of four. That contract is a
+snapshot is value-blind. The source profile registry contract is a closed set of five. That contract is a
 source fact only: it makes no publication, deployment, or runtime claim. The retired Binding-era module
 design is preserved under
 [`docs/archive/binding-era-2026-07/`](../archive/binding-era-2026-07/architecture-3.1-3.3.md) as cold
@@ -61,7 +61,7 @@ reintroduce one.
 | Module | Responsibility |
 |---|---|
 | `agent_registry.py` **(new)** | the only reader of the operator agents file: strict `tomllib` parse, bounded validation, typed `REGISTRY_*`/`ENTRY_*`/`MEDIATION_KEY_COLLISION` refusals, **one read per daemon lifetime** into an immutable snapshot, zero per-Run filesystem access, and the config-hygiene check (resolve symlinks; require a regular file that is not group- or world-writable) |
-| `profile.py` | `AcpCompatProfile` + `AgentInstance` + a **four-entry** registry (`standard-native-acp-v1`, `claude-agent-acp-compat-v1`, `codex-agent-acp-compat-v1`, `cursor-native-acp-v1`) + the source-owned mediation binding table and its global `RESERVED_MEDIATION_KEYS`. A profile freezes ACP semantics only: protocol major, required and forbidden capabilities, session semantics, the declared configuration-fidelity mode and its selector-id conventions, the base environment allowlist, mediation semantics, and — only where evidenced — frozen session metadata and a required permission-mode selector whose required value is one frozen literal or is computed per Run from the Run's frozen grant by one of the closed source-owned grant-driven policies (`required_permission_mode_for`). No executables map, wrapped artifacts, binding slots, probe-as-gate, closure predicate, launch kind, or per-agent value domain |
+| `profile.py` | `AcpCompatProfile` + `AgentInstance` + a **five-entry** registry (`standard-native-acp-v1`, `claude-agent-acp-compat-v1`, `codex-agent-acp-compat-v1`, `cursor-native-acp-v1`, `reasonix-agent-acp-compat-v1`) + the source-owned mediation binding table and its global `RESERVED_MEDIATION_KEYS`. A profile freezes ACP semantics only: protocol major, required and forbidden capabilities, session semantics, the declared configuration-fidelity mode and its selector-id conventions, the base environment allowlist, mediation semantics, and — only where evidenced — frozen session metadata and a required permission-mode selector whose required value is one frozen literal or is computed per Run from the Run's frozen grant by one of the closed source-owned grant-driven policies (`required_permission_mode_for`). No executables map, wrapped artifacts, binding slots, probe-as-gate, closure predicate, launch kind, or per-agent value domain |
 | `agent_registration.py` | the typed operator registry **entry** value and its bounded grammars — command, argv tokens, environment declarations, mediation selection, selector-id hints, capability narrowing, optional epoch. **Pure**: no filesystem access, so the single reader of the agents file stays `agent_registry.py` |
 | `spec.py` | versioned `AgentRunRequest`; immutable `AgentRunSpec`/`spec_hash`; the sealed **launch snapshot** that replaces `ResolvedLaunchSpec`; the ephemeral non-serializable `ResolvedEnvironment`; the durable value-blind `EnvProjection`; the observed-state record. `launch_spec_hash` on the Spec is **retained and load-bearing**. No sealed runtime identity, no runtime provenance, no artifact descriptor |
 | `storage.py` | the only constructor seam for `native-runs/` and `native-sessions/`; write-once discipline; bounded no-follow classifying readers returning valid/absent/corrupt while retaining the existing terminal trichotomy; the one sanctioned writer for free-form Run text, which judges the type before writing |
@@ -445,12 +445,16 @@ running agent advertises, which is why "the agent added a model today" is a non-
 **The post-`initialize` identity gate is narrowed to a contract check.** It verifies protocol major, required
 capabilities, and forbidden capabilities (source floor ∪ the entry's declared set), and on a compatibility
 profile it proves the required permission mode by exact readback. The required mode is the profile's answer
-for this Run's sealed frozen grant — `required_permission_mode_for(grant_capabilities)` — either the static
-Claude literal `default` or one of two closed source-owned grant-driven policies:
+for this Run's sealed frozen grant — `required_permission_mode_for(grant_capabilities)` — either a static
+literal (`default` for Claude or `ask` for Reasonix) or one of two closed source-owned grant-driven policies:
 
 - `codex-agent-acp-compat-v1` requires `read-only` iff the grant is a subset of `{read, search}`, otherwise
   `agent`; `agent-full-access` is advertised evidence only and is unreachable from the policy;
 - `cursor-native-acp-v1` revision 3 requires `ask` for that same subset class, otherwise `agent`.
+
+`reasonix-agent-acp-compat-v1` uses the same separate-selector sequence but sets and exactly reads back
+`tool_approval=ask` before model and effort on every `session/new` and `session/load`. It never selects
+Reasonix's advertised `auto` or `yolo` values, and it leaves `work_mode` outside the profile.
 
 The machine sets the mode **before** the model, requires exact readback immediately, and re-proves the mode
 after the model set under model-only fidelity. Under separate-selector fidelity, it configures model and
@@ -693,6 +697,6 @@ deleting the rest would silently drop the only real-agent continuity evidence.
   `http` extra stays uninstalled and HTTP/WS transport remains a non-goal.
 
 Executable slice sequences, fresh worktree/branch rules, exact commands, and separate push/PR/merge
-approvals live only in `docs/plans/active/`, which is empty right now: the reset's plan is archived at
-[`docs/plans/archive/2026-07-30-ars-v4-boundary-reset.md`](../plans/archive/2026-07-30-ars-v4-boundary-reset.md)
-as cold history, and an archived plan authorizes nothing.
+approvals live only in `docs/plans/active/`. The current board-linked plan is
+[`docs/plans/active/2026-08-11-omp-reasonix-source-support.md`](../plans/active/2026-08-11-omp-reasonix-source-support.md).
+Archived plans remain cold history and authorize nothing.

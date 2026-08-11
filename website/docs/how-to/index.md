@@ -32,11 +32,21 @@ every guide below assumes. Then pick the guide for the agent you installed.
   <p class="ars-panel__note">Model-only configuration fidelity and a grant-driven permission mode.</p>
 </a>
 
+<a class="ars-panel" href="oh-my-pi.md">
+  <p class="ars-panel__name">oh-my-pi</p>
+  <p class="ars-panel__note">Native ACP with the standard profile and its <code>thinking</code> effort selector; mutation limits are explicit.</p>
+</a>
+
+<a class="ars-panel" href="reasonix.md">
+  <p class="ars-panel__name">Reasonix</p>
+  <p class="ars-panel__note">Static <code>tool_approval=ask</code> fidelity, sandbox-on PATH requirements, and canonical workspaces.</p>
+</a>
+
 </div>
 
 ## What these guides are, and are not
 
-These four guides are an initial set, not a protocol boundary. ARS has no
+These six guides are an initial set, not a protocol boundary. ARS has no
 built-in list of supported agents and no code path that branches on an agent's
 name. What decides whether an agent can run is the operator's registry entry plus
 the ACP compatibility profile it selects — so an agent with no guide here is not
@@ -49,11 +59,12 @@ that you will keep upgrading it independently of ARS.
 
 !!! note "Commands and arguments are deployment facts"
 
-    Each guide uses a placeholder for the agent's own executable and its ACP
-    arguments, because those belong to the agent's documentation and change with
-    its releases — not to ARS. Fill them in from the agent you installed. What
-    the guides do pin exactly is the ARS side: which profile to select, which
-    mediation id, what to narrow, and what to prove before use.
+    Most guides use placeholders for the agent executable and ACP arguments.
+    The OMP and Reasonix guides additionally link to a repository example with
+    the explicitly approved local installation paths. Commands remain deployment
+    facts, not profile data. What every guide pins exactly is the ARS side:
+    which profile to select, which mediation id, what to narrow, and what to
+    prove before use.
 
 ## The order that matters
 

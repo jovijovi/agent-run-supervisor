@@ -29,7 +29,7 @@ It freezes nothing else. There is no path, version, digest, model literal, agent
 name, value domain, or deployment fact in a profile, because none of those is an
 ACP semantic.
 
-Four profiles are registered:
+Five profiles are registered:
 
 | Profile id | Exists because |
 |---|---|
@@ -37,6 +37,7 @@ Four profiles are registered:
 | `claude-agent-acp-compat-v1` | one adapter carries a cited ACP-semantic deviation: it resolves its initial permission mode from ambient settings and auto-allows tool calls while that mode is permissive, so the mode is frozen as a config selector and proven by exact readback before any prompt, and the frozen session metadata removes the ambient setting sources |
 | `codex-agent-acp-compat-v1` | keeps separate model and effort selectors, plus a grant-driven `mode`: `read-only` for exactly the `{read, search}` subsets and `agent` otherwise; advertised `agent-full-access` is never selected |
 | `cursor-native-acp-v1` | an agent whose model selector *is* the whole configuration, with no independent effort selector to discover or set, plus a grant-driven permission-mode selector |
+| `reasonix-agent-acp-compat-v1` | keeps the standard model and effort selectors but sets and exactly reads back `tool_approval=ask` before them on every new or loaded Session; it never selects `auto`, `yolo`, or `work_mode` |
 
 The `-v1` suffix is load-bearing: the id carries the ACP protocol generation, and
 a future `standard-native-acp-v2` would be a separate profile with its own
