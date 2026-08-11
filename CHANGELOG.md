@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-08-11
+
+### Added
+
+- Minimal source support and operator-registry examples for OMP and Reasonix.
+  `reasonix-agent-acp-compat-v1` sets `tool_approval=ask` and requires exact
+  readback before model and effort on every Run, including real `session/load`
+  reuse. Workspace roots and effective `cwd` paths are canonicalized before
+  sealing and reused for process launch and Session calls. This adds no live
+  activation or registry/service mutation; OMP mutation support remains
+  fail-closed beyond the permission behaviors demonstrated by the canary
+  evidence.
+
+### Changed
+
+- `codex-agent-acp-compat-v1` now derives Codex's ACP `mode` from each Run's
+  frozen grant: `read-only` when `grant_capabilities` are a subset of
+  `{read, search}` (including the empty set), and `agent` otherwise. The mode
+  is set and exactly read back before Prompt, then re-proven after model and
+  effort configuration, on both new and reused Sessions. The policy never
+  selects `agent-full-access`.
+
 ## [0.7.3] - 2026-08-10
 
 ### Fixed

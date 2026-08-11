@@ -48,7 +48,7 @@ Remaining cell says what happened to the source, because for the boundary reset 
 | F-SESSION-NOCLOSE-001 | one durable resumable Session kind: Runs terminate, Sessions do not close | Required | Done | PRD R4/R5/R9/R11; GOAL contract 3; [plan](../plans/archive/2026-08-06-session-no-close-model.md) | merged: optional `session_id`, deterministic prospective identity, one fully bound record before the dispatch marker, quarantine as independent evidence, `api_version` 3. Session durability and indefinite resumability are the product feature, not debt. This tracker records source state only — publication and runtime truth belong to live release and operator sources |
 | F-LONG-RUN-TIMEOUT-001 | 6-hour default and 7-day maximum for the per-Run hard turn timeout | Required | Done | PRD R2; technical solution §4; [archived plan](../plans/archive/2026-08-09-long-run-timeout-limits.md) | merged on `main`; no wire/schema or Session lifecycle change, and no release or deployment claim |
 | F-SESSION-REPLAY-BACKPRESSURE-001 | Session reuse under AGENT history replay: replay separated from the current Run; bounded serial evidence ledger with exact durable accounting and FIFO absolute deadlines | Required | Done | PRD R4/R9; GOAL contract 3; result/event schema §5.6; hermetic ledger/replay/backpressure + Socket v3 reuse suites | merged on `main`; this tracker records source state only, and neither publication nor deployment truth. Replay is identity-validated then aggregated into one bounded `session_replay_summary` and kept out of per-event evidence, mediation accounting, tool-call closure and `final_message`. The ledger freezes actual-sequence canonical bytes at acceptance, charges in-flight work through durable acknowledgement, grows 1024→8192 events / 8→64 MiB only after persistence progress, isolates observers from caller cancellation, ranks failures by original ordinal, and certifies every accepted ticket at close. A stalled or failed sink still reaches bounded `EVIDENCE_PIPELINE`; the locked SDK supplies no transport backpressure |
-| F-OMP-REASONIX-SOURCE-001 | minimal operator-registry source support for OMP and Reasonix, with Reasonix static approval fidelity and canonical workspace regression coverage | Required | Implemented | PRD R3/R4/R7/R12/R13; [active plan](../plans/active/2026-08-11-omp-reasonix-source-support.md); isolated real canaries | implemented on the task branch, not merged; OMP remains fail-closed for mutations under the observed 17.2.12 behavior, with no permissive fallback or unproven write-family mapping |
+| F-OMP-REASONIX-SOURCE-001 | minimal operator-registry source support for OMP and Reasonix, with Reasonix static approval fidelity and canonical workspace regression coverage | Required | Done | PRD R3/R4/R7/R12/R13; [archived plan](../plans/archive/2026-08-11-omp-reasonix-source-support.md); isolated canaries | merged on `main`; OMP remains fail-closed for mutations under the observed 17.2.12 behavior, with no permissive fallback or unproven write-family mapping. This tracker records source state only; publication, deployment, and live activation remain separate facts |
 | F-SACHIMA-ARSD-001 | Sachima socket backend | Later integration | Parked | GOAL/PRD stage boundary | ARS production acceptance closed; integration still requires its own separate approval |
 | F-NONGOAL-001 | public/root/TCP/multi-tenant/business-orchestration surfaces | Non-goal | Non-goal | GOAL; PRD §6; non-approvals | separate product decision only |
 
@@ -62,7 +62,7 @@ Remaining cell says what happened to the source, because for the boundary reset 
 | Session reuse under history replay | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | vNext Stage 0/1 | 7 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | Configuration fidelity, SDK pin, launch permission | 4 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| OMP and Reasonix source support | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| OMP and Reasonix source support | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | vNext Stage 2 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | Registered per-agent profiles | 0 | 0 | 0 | 0 | 1 | 2 | 0 | 0 | 0 |
 | Runtime Binding era | 0 | 0 | 0 | 0 | 0 | 3 | 0 | 0 | 0 |
@@ -70,9 +70,8 @@ Remaining cell says what happened to the source, because for the boundary reset 
 | Later integration | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 |
 | Explicit exclusions | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
 
-One row is `Implemented`: F-OMP-REASONIX-SOURCE-001 exists on this task branch and is not merged.
-F-SESSION-REPLAY-BACKPRESSURE-001, F-LONG-RUN-TIMEOUT-001, and F-CURSOR-GRANT-MODE-001 are each merged
-on `main`.
+No row is `Implemented`: F-OMP-REASONIX-SOURCE-001, F-SESSION-REPLAY-BACKPRESSURE-001,
+F-LONG-RUN-TIMEOUT-001, and F-CURSOR-GRANT-MODE-001 are each merged on `main`.
 The acpx removal is merged on `main`. F-LEGACY-COMPAT-001 records it as
 `Removed` in source terms only.
 
