@@ -697,6 +697,6 @@ deleting the rest would silently drop the only real-agent continuity evidence.
   `http` extra stays uninstalled and HTTP/WS transport remains a non-goal.
 
 Executable slice sequences, fresh worktree/branch rules, exact commands, and separate push/PR/merge
-approvals live only in `docs/plans/active/`. The current board-linked plan is
-[`docs/plans/active/2026-08-11-omp-reasonix-source-support.md`](../plans/active/2026-08-11-omp-reasonix-source-support.md).
-Archived plans remain cold history and authorize nothing.
+approvals live only in `docs/plans/active/`. No implementation plan is currently active. The completed
+[OMP and Reasonix source-support plan](../plans/archive/2026-08-11-omp-reasonix-source-support.md) is
+retained as cold history and authorizes nothing.

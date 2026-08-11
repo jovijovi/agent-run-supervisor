@@ -1,8 +1,9 @@
 ---
 title: "OMP and Reasonix minimal source support"
-status: active
+status: archived
 created_at: 2026-08-11
 last_validated_at: 2026-08-11
+archived_at: 2026-08-11
 ---
 # OMP and Reasonix minimal source support
 

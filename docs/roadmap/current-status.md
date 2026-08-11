@@ -13,20 +13,19 @@ supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 
 ```text
 base_branch: main
-active_plan: docs/plans/active/2026-08-11-omp-reasonix-source-support.md
+active_plan: none
 ```
 
 ## Current position
 
-- OMP and Reasonix minimal source support is implemented on this task branch
-  under the board-linked active plan and is not merged.
-  Isolated pre-implementation canaries proved Reasonix's static
-  `tool_approval=ask` deviation and symlink bind-mount failure. OMP 17.2.12
-  exposed only `execute` as a structured permission kind and then applied a
-  second local denial; ordinary write/edit and attempted delete/move supplied
-  no mappable permission request. This task therefore adds the Reasonix profile,
-  operator examples, and canonicalization regression coverage without
-  weakening approval, inventing write-family mappings, or claiming live use.
+- OMP and Reasonix minimal source support is closed on `main`
+  (F-OMP-REASONIX-SOURCE-001). The merged source adds the Reasonix
+  `tool_approval=ask` compatibility profile, operator examples, and canonical
+  workspace regression coverage. OMP 17.2.12 remains fail-closed for mutation
+  families that supplied no mappable permission request in the isolated
+  canaries. This is source and operator-example support only; publication,
+  deployment, registry or service mutation, and live activation remain
+  separate operator decisions.
 - The long-Run timeout-limit source task is closed on `main`: omitting the per-Run turn timeout now seals
   21,600 seconds, with an inclusive 604,800-second ceiling, while preserving hard Run timeout and Session
   lifecycle semantics. The merged source carries no release, publication, deployment, service, migration,
