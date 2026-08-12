@@ -26,6 +26,7 @@ from agent_run_supervisor.arsd import client as arsd_client
 from agent_run_supervisor.arsd import operand as arsd_operand
 from agent_run_supervisor.arsd import __main__ as arsd_main
 from agent_run_supervisor.native_acp import storage
+from agent_run_supervisor.native_acp.spec import STRUCTURAL_MAX_RUN_EVENT_BUDGET_BYTES
 
 from tests.arsd.test_admission import (
     SpyFactory,
@@ -156,11 +157,14 @@ class ThreadedDaemon:
         max_connections: int = 32,
         cancel_wait_seconds: float = 2.0,
         shutdown_timeout: float = 5.0,
+        max_run_event_budget_bytes: int | None = None,
     ) -> None:
         self.path = path
         self.root = root
         self.policy = same_uid_policy() if policy is None else policy
         self.factory = CompletingFactory() if factory is None else factory
+        # None means "pass nothing", so the daemon default stays under test.
+        self.max_run_event_budget_bytes = max_run_event_budget_bytes
         self.max_concurrent_runs = max_concurrent_runs
         self.max_connections = max_connections
         self.cancel_wait_seconds = cancel_wait_seconds
@@ -191,6 +195,11 @@ class ThreadedDaemon:
         self._loop = asyncio.get_running_loop()
         self._stop = asyncio.Event()
         self._ready.set()
+        extra = (
+            {}
+            if self.max_run_event_budget_bytes is None
+            else {"max_run_event_budget_bytes": self.max_run_event_budget_bytes}
+        )
         await arsd_main.serve_daemon(
             socket_path=self.path,
             supervisor_root=self.root,
@@ -203,6 +212,7 @@ class ThreadedDaemon:
             shutdown_timeout=self.shutdown_timeout,
             stop_event=self._stop,
             install_signals=False,
+            **extra,
         )
 
     def stop(self) -> None:
@@ -226,6 +236,7 @@ def running_daemon(
     max_connections: int = 32,
     cancel_wait_seconds: float = 2.0,
     shutdown_timeout: float = 5.0,
+    max_run_event_budget_bytes: int | None = None,
 ):
     daemon = ThreadedDaemon(
         path,
@@ -236,6 +247,7 @@ def running_daemon(
         max_connections=max_connections,
         cancel_wait_seconds=cancel_wait_seconds,
         shutdown_timeout=shutdown_timeout,
+        max_run_event_budget_bytes=max_run_event_budget_bytes,
     )
     daemon.start()
     try:
@@ -4073,3 +4085,159 @@ def test_a_well_formed_unknown_session_id_keeps_its_unknown_session_answer(
             assert frame["error"]["code"] == protocol.UNKNOWN_SESSION
         finally:
             sock.close()
+
+
+# --- operator-configured per-Run event-ledger budget ------------------------
+
+FOUR_GIB = 4 * 1024 * 1024 * 1024
+
+
+def test_the_structural_maximum_is_a_startable_ceiling() -> None:
+    "The exact bound parses; the daemon refusal above it is tested below."
+    parser = arsd_main.build_arg_parser()
+    ns = parser.parse_args(
+        [
+            "--supervisor-root",
+            "/tmp/sv",
+            "--caller-mapping",
+            mapping_flag(1000),
+            "--max-run-event-budget-bytes",
+            str(STRUCTURAL_MAX_RUN_EVENT_BUDGET_BYTES),
+        ]
+    )
+    assert ns.max_run_event_budget_bytes == STRUCTURAL_MAX_RUN_EVENT_BUDGET_BYTES
+
+
+def test_argparse_defaults_the_run_event_budget_to_four_gibibytes() -> None:
+    parser = arsd_main.build_arg_parser()
+    ns = parser.parse_args(
+        ["--supervisor-root", "/tmp/sv", "--caller-mapping", mapping_flag(1000)]
+    )
+    assert ns.max_run_event_budget_bytes == FOUR_GIB
+
+
+def test_argparse_accepts_a_custom_run_event_budget() -> None:
+    parser = arsd_main.build_arg_parser()
+    ns = parser.parse_args(
+        [
+            "--supervisor-root",
+            "/tmp/sv",
+            "--caller-mapping",
+            mapping_flag(1000),
+            "--max-run-event-budget-bytes",
+            str(2 * FOUR_GIB),
+        ]
+    )
+    assert ns.max_run_event_budget_bytes == 2 * FOUR_GIB
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        pytest.param(0, id="zero"),
+        pytest.param(-1, id="negative"),
+        pytest.param(
+            STRUCTURAL_MAX_RUN_EVENT_BUDGET_BYTES + 1, id="past-structural-maximum"
+        ),
+        pytest.param(10**4000, id="arbitrarily-large"),
+    ],
+)
+def test_serve_daemon_refuses_an_unusable_budget_before_lease_or_reconcile(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch, bad: int
+) -> None:
+    async def case():
+        path = sock_path(sock_root)
+        root = supervisor_root(sock_root)
+        order: list[str] = []
+
+        def boom_lease(_root):
+            order.append("lease")
+            raise AssertionError("lease must not run under a refused budget")
+
+        def boom_reconcile(_root):
+            order.append("reconcile")
+            raise AssertionError("reconcile must not run under a refused budget")
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", boom_lease)
+        monkeypatch.setattr(arsd_main.reconcile, "reconcile", boom_reconcile)
+        with pytest.raises(arsd_main.DaemonStartupError) as err:
+            await arsd_main.serve_daemon(
+                socket_path=path,
+                supervisor_root=root,
+                policy=same_uid_policy(),
+                agents_file=str(make_agents_file(sock_root)),
+                max_run_event_budget_bytes=bad,
+                install_signals=False,
+            )
+        assert "budget" in str(err.value).lower()
+        assert order == []
+        assert not path.exists()
+        assert not root.exists()
+
+    run_async(case())
+
+
+def test_serve_daemon_refuses_a_boolean_budget(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Direct Python construction can supply ``True``; argparse cannot."""
+
+    async def case():
+        def boom_lease(_root):
+            raise AssertionError("lease must not run under a refused budget")
+
+        monkeypatch.setattr(arsd_main, "acquire_daemon_instance_lease", boom_lease)
+        with pytest.raises(arsd_main.DaemonStartupError):
+            await arsd_main.serve_daemon(
+                socket_path=sock_path(sock_root),
+                supervisor_root=supervisor_root(sock_root),
+                policy=same_uid_policy(),
+                agents_file=str(make_agents_file(sock_root)),
+                max_run_event_budget_bytes=True,
+                install_signals=False,
+            )
+
+    run_async(case())
+
+
+def test_a_started_daemon_reports_and_enforces_its_configured_budget(
+    sock_root: Path,
+) -> None:
+    """End to end: one startup value, one server_info fact, one admission rule."""
+    path = sock_path(sock_root)
+    root = supervisor_root(sock_root)
+    exact = 4096 * 100
+
+    def payload_for(max_events: int) -> dict:
+        return submit_payload(
+            request=valid_wire_request(
+                session_id="sess-budget-1",
+                limits={"max_event_bytes": 4096, "max_events": max_events},
+            )
+        )
+
+    with running_daemon(path, root, max_run_event_budget_bytes=exact):
+        seed_session(storage.native_session_store(root), session_id="sess-budget-1")
+
+        with arsd_client.ArsdClient(path) as cli:
+            assert cli.server_info()["limits"]["max_run_event_budget_bytes"] == exact
+
+        # One byte over the configured ceiling. A refused frame closes the
+        # connection, so each phase uses its own client.
+        with arsd_client.ArsdClient(path) as cli:
+            with pytest.raises(arsd_client.ArsdClientError) as err:
+                cli.submit(request_id="budget-over-1", payload=payload_for(101))
+            assert err.value.code == protocol.INVALID_REQUEST
+
+        with arsd_client.ArsdClient(path) as cli:
+            ack = cli.submit(request_id="budget-ok-1", payload=payload_for(100))
+            assert ack["run_id"]
+
+
+def test_a_default_daemon_reports_four_gibibytes(sock_root: Path) -> None:
+    path = sock_path(sock_root)
+    root = supervisor_root(sock_root)
+    with running_daemon(path, root):
+        with arsd_client.ArsdClient(path) as cli:
+            info = cli.server_info()
+            assert info["limits"]["max_run_event_budget_bytes"] == FOUR_GIB

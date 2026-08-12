@@ -332,6 +332,19 @@ guarantees. ARS makes no isolation claim either way.
   composes; the agent-authored text in the rest of that list is bounded and statically redacted, not matched
   against this Run's projected values (R15).
 - One writer owns each Run event stream with monotonic sequence and bounded queue/bytes.
+- **The per-Run event-ledger admission budget is operator-configurable, defaulting to 4 GiB.** One daemon
+  startup value is the admission ceiling on `max_event_bytes * max_events` for every Run that daemon
+  accepts; each Run still seals its own limit fields, and their individual structural maxima are a separate
+  rule that no configuration moves. Exceeding the ceiling refuses the submission before a Run or Session
+  exists, and the effective value is readable through `server_info`. The budget is a theoretical ceiling on
+  one Run's persistent event ledger — not preallocated memory, not a Run-directory disk quota, and not a
+  daemon-wide aggregate across concurrent Runs. Total storage sizing and retention stay separate concerns.
+  The effective ceiling is recorded in each accepted Run's durable write-once admission evidence, so which
+  policy admitted a historical Run stays auditable after the daemon is reconfigured or restarted; that
+  record is never rewritten by a later daemon. Admission policy governs new work only: an already-accepted
+  request resolves from its strictly validated durable record — the same validation reconciliation uses —
+  and returns the original Run facts whatever ceiling the daemon now runs under, while evidence that fails
+  that validation is contained rather than accepted.
 - The ledger supports supervision, recovery, duplicate prevention, progress, config/result proof, and
   audit. It is not a second AGENT conversation database.
 - **Session identity records are small and durable by default.** Silence, age, Run completion, daemon

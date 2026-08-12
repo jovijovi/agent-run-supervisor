@@ -13,7 +13,7 @@ supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 
 ```text
 base_branch: main
-active_plan: none
+active_plan: docs/plans/active/2026-08-11-configurable-run-event-budget.md
 ```
 
 ## Current position
@@ -70,6 +70,17 @@ active_plan: none
   contract: a persisted terminal carrying an undefined key is untrusted evidence, and nothing migrates or
   rewrites a stored record. The removal is merged on `main`; no removal-landing task remains open on this
   board.
+- The per-Run event-ledger admission budget is operator-configurable in a feature-branch candidate pending
+  integration to `main` (F-RUN-EVENT-BUDGET-CONFIG-001); it is not on `main`, released, or deployed.
+  `arsd --max-run-event-budget-bytes` sets one ceiling on `max_event_bytes * max_events` for every Run that
+  daemon accepts, defaulting to 4 GiB and reported by `server_info`. The effective ceiling is also written
+  into each accepted Run's durable admission record and strictly validated there, so which policy admitted a
+  historical Run stays auditable after a reconfigure or restart; that record's material change moves
+  `SUBMISSION_SCHEMA_VERSION` to 4 alone. Admission policy governs new work only: an already-accepted key
+  resolves from strictly validated durable facts whatever the current ceiling is, and never dispatches
+  twice. It is a theoretical per-Run event-ledger ceiling, not preallocated memory, a Run-directory disk
+  quota, or a daemon-global aggregate. The individual hard limits and every wire, request-digest, Spec, and
+  launch schema version are unchanged. Source, tests, and docs only.
 
 ## Open decisions and gates
 

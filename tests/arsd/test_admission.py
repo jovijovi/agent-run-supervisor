@@ -27,6 +27,7 @@ from agent_run_supervisor.event_store import (
     EventStoreError,
 )
 from agent_run_supervisor.native_acp import storage
+from agent_run_supervisor.native_acp.spec import DEFAULT_EVENT_BUDGET_POLICY
 from agent_run_supervisor.session import QUARANTINE_DISPATCH_OBSERVATION_LOST
 
 SECRET_SENTINEL = "sk-live-" + "LEAKCANARY"  # concatenated; no scannable literal
@@ -825,6 +826,7 @@ def test_resolve_durable_rejects_symlinked_run_dir(tmp_path: Path) -> None:
                 "request_digest": digest.value,
                 "prompt_sha256": digest.prompt_sha256,
                 "prompt_bytes": digest.prompt_bytes,
+                "max_run_event_budget_bytes": 4 * 1024 * 1024 * 1024,
             },
         )
         storage.write_once_json(
@@ -922,6 +924,7 @@ def test_foreign_principal_binding_never_duplicate_matched(tmp_path: Path) -> No
             "request_digest": digest.value,
             "prompt_sha256": digest.prompt_sha256,
             "prompt_bytes": digest.prompt_bytes,
+            "max_run_event_budget_bytes": 4 * 1024 * 1024 * 1024,
         }
         storage.write_once_json(handle.run_dir / "submission.json", foreign)
         try:
@@ -1107,6 +1110,7 @@ EXPECTED_SUBMISSION_FIELDS = {
     "request_digest",
     "prompt_sha256",
     "prompt_bytes",
+    "max_run_event_budget_bytes",
 }
 
 
@@ -1419,15 +1423,18 @@ def test_every_null_valued_field_still_contributes(field: str) -> None:
     ).value != admission.compute_request_digest(protocol.parse_submit(baseline)).value
 
 
-def test_every_versioned_surface_moved_together() -> None:
-    """The wire, the digest, the submission, and the Spec moved as one change.
+def test_only_the_surface_whose_material_changed_has_moved() -> None:
+    """Each version tracks exactly its own material, and nothing else.
 
     The Session no-close model changed the request's Session block, so every
-    surface that seals it moved together. The launch snapshot did not change and
-    deliberately stays where it was.
+    surface that seals it moved together to 3, while the unchanged launch
+    snapshot stayed at 2. The configurable event budget then moved the
+    submission record alone to 4: the durable admission evidence gained the
+    ceiling that admitted the Run, and no other material changed — admission
+    policy is not caller material, digest input, or sealed per-Run state.
     """
     assert admission.DIGEST_SCHEMA_VERSION == 3
-    assert admission.SUBMISSION_SCHEMA_VERSION == 3
+    assert admission.SUBMISSION_SCHEMA_VERSION == 4
     assert protocol.ARSD_API_VERSION == 3
     assert protocol.SUPPORTED_API_VERSIONS == (3,)
     from agent_run_supervisor.native_acp.spec import (
@@ -1468,6 +1475,7 @@ def _written_submission(run_id: str = "run-strict-1") -> dict:
         digest=admission.compute_request_digest(command),
         accepted_at="2026-07-22T00:00:00+00:00",
         peer={"pid": 1, "uid": 1000, "gid": 1000},
+        event_budget_policy=DEFAULT_EVENT_BUDGET_POLICY,
     )
 
 
@@ -1510,6 +1518,7 @@ def test_the_validator_accepts_the_writers_whole_value_domain() -> None:
             digest=admission.compute_request_digest(command),
             accepted_at="2026-07-22T00:00:00+00:00",
             peer={"pid": 1, "uid": 1000, "gid": 1000},
+            event_budget_policy=DEFAULT_EVENT_BUDGET_POLICY,
         )
         assert payload["session_id"] == declared
 
@@ -1678,7 +1687,7 @@ def test_digest_material_carries_no_forbidden_selection_field() -> None:
 
 def test_digest_schema_version_moved_with_the_material() -> None:
     assert admission.DIGEST_SCHEMA_VERSION == 3
-    assert admission.SUBMISSION_SCHEMA_VERSION == 3
+    assert admission.SUBMISSION_SCHEMA_VERSION == 4
 
 
 def test_submission_records_the_agent_not_a_profile() -> None:
@@ -1734,6 +1743,7 @@ def test_a_create_submission_records_a_null_session_id_and_derives_the_id() -> N
         digest=admission.compute_request_digest(command),
         accepted_at="2026-07-22T00:00:00+00:00",
         peer={"pid": 1, "uid": 1000, "gid": 1000},
+        event_budget_policy=DEFAULT_EVENT_BUDGET_POLICY,
     )
     assert payload["session_id"] is None
     assert "session_reuse" not in payload
@@ -1760,6 +1770,7 @@ def test_a_reuse_submission_records_and_attributes_the_caller_session_id() -> No
         digest=admission.compute_request_digest(command),
         accepted_at="2026-07-22T00:00:00+00:00",
         peer={"pid": 1, "uid": 1000, "gid": 1000},
+        event_budget_policy=DEFAULT_EVENT_BUDGET_POLICY,
     )
     assert payload["session_id"] == "sess-existing"
     attribution = admission.validate_submission_artifact(payload, run_id=run_id)
@@ -1851,5 +1862,551 @@ def test_an_in_flight_duplicate_is_serialized_onto_the_same_submission(
         finally:
             release_first.set()
             await harness.aclose()
+
+    run_async(case())
+
+
+# --- the admitting daemon's event-budget ceiling is durable Run evidence -----
+#
+# ``server_info`` answers "what is this daemon's ceiling *now*". Auditing which
+# ceiling admitted a historical Run is a different question, and only the
+# write-once submission record can answer it after a config change or restart.
+
+FOUR_GIB = 4 * 1024 * 1024 * 1024
+
+
+def _policy(ceiling: int):
+    from agent_run_supervisor.native_acp import spec as spec_module
+
+    return spec_module.EventBudgetPolicy(max_run_event_budget_bytes=ceiling)
+
+
+def test_the_submission_records_the_default_event_budget_ceiling(tmp_path: Path) -> None:
+    async def case():
+        harness = Harness(tmp_path)
+        caller = caller_for(principal_a())
+        try:
+            reply = await harness.submit(caller, "budget-evidence-default")
+            assert harness.submission(reply["run_id"])[
+                "max_run_event_budget_bytes"
+            ] == FOUR_GIB
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_the_submission_records_the_effective_event_budget_ceiling(
+    tmp_path: Path,
+) -> None:
+    """The audit answer: which ceiling admitted *this* Run."""
+    ceiling = 4096 * 100
+
+    async def case():
+        harness = Harness(tmp_path, event_budget_policy=_policy(ceiling))
+        caller = caller_for(principal_a())
+        payload = submit_payload(
+            request=valid_wire_request(
+                limits={"max_event_bytes": 4096, "max_events": 100}
+            )
+        )
+        try:
+            reply = await harness.submit(caller, "budget-evidence-custom", payload)
+            submission = harness.submission(reply["run_id"])
+            assert submission["max_run_event_budget_bytes"] == ceiling
+            # Server policy, not caller material: no wire field carries it.
+            assert "max_run_event_budget_bytes" not in valid_wire_request()
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_the_request_digest_ignores_the_daemon_event_budget() -> None:
+    """A ceiling change must not turn a legitimate duplicate into a conflict."""
+    payload = submit_payload()
+    lower = protocol.parse_submit(payload, budget_policy=_policy(FOUR_GIB))
+    higher = protocol.parse_submit(payload, budget_policy=_policy(2 * FOUR_GIB))
+    assert (
+        admission.compute_request_digest(lower).value
+        == admission.compute_request_digest(higher).value
+    )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda doc: doc.pop("max_run_event_budget_bytes"), id="missing"),
+        pytest.param(
+            lambda doc: doc.update(max_run_event_budget_bytes="4294967296"), id="string"
+        ),
+        pytest.param(
+            lambda doc: doc.update(max_run_event_budget_bytes=4294967296.0), id="float"
+        ),
+        pytest.param(
+            lambda doc: doc.update(max_run_event_budget_bytes=True), id="bool"
+        ),
+        pytest.param(lambda doc: doc.update(max_run_event_budget_bytes=0), id="zero"),
+        pytest.param(
+            lambda doc: doc.update(max_run_event_budget_bytes=-1), id="negative"
+        ),
+        pytest.param(
+            lambda doc: doc.update(max_run_event_budget_bytes=None), id="null"
+        ),
+        pytest.param(
+            lambda doc: doc.update(max_run_event_budget_bytes={"bytes": 1}), id="object"
+        ),
+    ],
+)
+def test_strict_validation_refuses_a_missing_or_tampered_budget(mutate) -> None:
+    doc = _written_submission()
+    assert admission.validate_submission_artifact(doc, run_id="run-strict-1")
+    mutate(doc)
+    assert admission.validate_submission_artifact(doc, run_id="run-strict-1") is None
+
+
+def test_a_tampered_budget_makes_the_submission_corrupt(tmp_path: Path) -> None:
+    """Reconciliation sees CORRUPT, not a weaker 'valid enough' reading."""
+    run_dir = tmp_path / "run-strict-1"
+    run_dir.mkdir()
+    doc = _written_submission()
+    doc["max_run_event_budget_bytes"] = -1
+    admission.write_submission(run_dir, doc)
+    state = admission.classify_submission(run_dir, run_id="run-strict-1")
+    assert state.kind is storage.JsonDocumentKind.CORRUPT
+    assert state.attribution is None
+    assert admission.read_submission(run_dir) is not None  # readable, not valid
+
+
+def test_a_duplicate_reads_the_original_record_not_the_new_daemons_ceiling(
+    tmp_path: Path,
+) -> None:
+    """A restart with a different ceiling never rewrites accepted Run evidence."""
+    original = 4096 * 100
+
+    async def case():
+        first_daemon = Harness(
+            tmp_path, mode="complete", event_budget_policy=_policy(original)
+        )
+        caller = caller_for(principal_a())
+        payload = submit_payload(
+            request=valid_wire_request(
+                session_id=None, limits={"max_event_bytes": 4096, "max_events": 100}
+            )
+        )
+        try:
+            first = await first_daemon.submit(caller, "budget-dup-1", payload)
+            run_id = first["run_id"]
+            await asyncio.wait({first_daemon.handlers.registry.task_for(run_id)})
+        finally:
+            await first_daemon.aclose()
+
+        # A second daemon over the same durable stores, started with a raised
+        # ceiling. The duplicate resolves from the original record.
+        second_daemon = Harness(
+            tmp_path, mode="complete", event_budget_policy=_policy(8 * FOUR_GIB)
+        )
+        try:
+            second = await second_daemon.submit(caller, "budget-dup-1", payload)
+            assert second == first
+            assert second_daemon.factory.calls == []  # nothing dispatched twice
+            assert (
+                second_daemon.submission(run_id)["max_run_event_budget_bytes"]
+                == original
+            )
+        finally:
+            await second_daemon.aclose()
+
+    run_async(case())
+
+
+def _lowered_ceiling_payload() -> dict:
+    return submit_payload(
+        request=valid_wire_request(
+            session_id=None, limits={"max_event_bytes": 4096, "max_events": 100}
+        )
+    )
+
+
+async def _accept_and_finish(harness: "Harness", caller, request_id: str, payload: dict):
+    reply = await harness.submit(caller, request_id, payload)
+    await asyncio.wait({harness.handlers.registry.task_for(reply["run_id"])})
+    return reply
+
+
+def test_a_lowered_ceiling_still_returns_the_original_duplicate_facts(
+    tmp_path: Path,
+) -> None:
+    """An accepted key resolves from durable facts, whatever the ceiling is now.
+
+    Admission policy decides what this daemon will *accept*. It cannot retract an
+    acceptance that already happened: a caller retransmitting the identical
+    request after a restart at a lower ceiling is asking what became of a Run
+    that exists, and the answer is the one the durable record already holds. The
+    alternative — refusing the retry — strands a caller whose original response
+    was lost, with a Run it can no longer name.
+    """
+    original = 4096 * 100
+
+    async def case():
+        caller = caller_for(principal_a())
+        payload = _lowered_ceiling_payload()
+        first_daemon = Harness(
+            tmp_path, mode="complete", event_budget_policy=_policy(original)
+        )
+        try:
+            first = await _accept_and_finish(
+                first_daemon, caller, "budget-dup-2", payload
+            )
+            run_id = first["run_id"]
+            before = first_daemon.submission(run_id)
+        finally:
+            await first_daemon.aclose()
+
+        # Restarted under a ceiling that would refuse this request as new work.
+        strict_daemon = Harness(
+            tmp_path, mode="complete", event_budget_policy=_policy(original - 1)
+        )
+        try:
+            second = await strict_daemon.submit(caller, "budget-dup-2", payload)
+            assert second == first
+            assert second["run_id"] == run_id
+            assert second["session_id"] == admission.derive_session_id_for_run(run_id)
+            assert second["accepted_at"] == before["accepted_at"]
+            # Nothing re-created, re-dispatched, or re-stamped.
+            assert strict_daemon.factory.calls == []
+            assert strict_daemon.event_store.create_calls == []
+            assert strict_daemon.submission(run_id) == before
+            assert before["max_run_event_budget_bytes"] == original
+        finally:
+            await strict_daemon.aclose()
+
+    run_async(case())
+
+
+def test_a_lowered_ceiling_still_refuses_new_work(tmp_path: Path) -> None:
+    """Resolving an old acceptance is not admitting a new Run."""
+    original = 4096 * 100
+
+    async def case():
+        caller = caller_for(principal_a())
+        payload = _lowered_ceiling_payload()
+        first_daemon = Harness(
+            tmp_path, mode="complete", event_budget_policy=_policy(original)
+        )
+        try:
+            await _accept_and_finish(first_daemon, caller, "budget-new-1", payload)
+        finally:
+            await first_daemon.aclose()
+
+        strict_daemon = Harness(
+            tmp_path, mode="complete", event_budget_policy=_policy(original - 1)
+        )
+        try:
+            # A different request_id is new work, and new work is judged by the
+            # ceiling this daemon runs under — before any Run or Session exists.
+            await submit_expecting(
+                strict_daemon, caller, "budget-new-2", protocol.INVALID_REQUEST, payload
+            )
+            assert strict_daemon.event_store.create_calls == []
+            assert strict_daemon.factory.calls == []
+            new_run_id = derived("principal-a", "budget-new-2")
+            assert not strict_daemon.run_dir(new_run_id).exists()
+        finally:
+            await strict_daemon.aclose()
+
+    run_async(case())
+
+
+def test_a_lowered_ceiling_keeps_conflicting_material_a_conflict(
+    tmp_path: Path,
+) -> None:
+    """Durable-first resolution never downgrades a conflict to a validation error."""
+    original = 4096 * 100
+
+    async def case():
+        caller = caller_for(principal_a())
+        payload = _lowered_ceiling_payload()
+        first_daemon = Harness(
+            tmp_path, mode="complete", event_budget_policy=_policy(original)
+        )
+        try:
+            await _accept_and_finish(first_daemon, caller, "budget-conf-1", payload)
+        finally:
+            await first_daemon.aclose()
+
+        strict_daemon = Harness(
+            tmp_path, mode="complete", event_budget_policy=_policy(original - 1)
+        )
+        try:
+            different = submit_payload(
+                request=valid_wire_request(
+                    session_id=None,
+                    limits={"max_event_bytes": 4096, "max_events": 100},
+                ),
+                prompt_text="a different prompt entirely",
+            )
+            await submit_expecting(
+                strict_daemon,
+                caller,
+                "budget-conf-1",
+                protocol.IDEMPOTENCY_CONFLICT,
+                different,
+            )
+            assert strict_daemon.factory.calls == []
+        finally:
+            await strict_daemon.aclose()
+
+    run_async(case())
+
+
+def _rewrite_submission(run_dir: Path, payload: dict) -> None:
+    path = run_dir / "submission.json"
+    path.unlink()
+    storage.write_once_json(path, payload)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda doc: doc.pop("max_run_event_budget_bytes"), id="missing"),
+        pytest.param(
+            lambda doc: doc.update(max_run_event_budget_bytes=0), id="non-positive"
+        ),
+        pytest.param(
+            lambda doc: doc.update(max_run_event_budget_bytes="4294967296"),
+            id="wrong-type",
+        ),
+        pytest.param(
+            lambda doc: doc.update(unknown_admission_key=1), id="unknown-field"
+        ),
+    ],
+)
+def test_duplicate_resolution_refuses_weak_admission_evidence(
+    tmp_path: Path, mutate
+) -> None:
+    """The duplicate path judges the record exactly as reconciliation does.
+
+    A completed Run is not, by itself, proof that ARS admitted it: the durable
+    submission is that proof, and a record that fails strict validation is not
+    evidence at all. Accepting it as a duplicate would return acceptance facts
+    ARS cannot stand behind.
+    """
+
+    async def case():
+        caller = caller_for(principal_a())
+        payload = _lowered_ceiling_payload()
+        harness = Harness(tmp_path, mode="complete")
+        try:
+            first = await _accept_and_finish(harness, caller, "weak-ev-1", payload)
+            run_id = first["run_id"]
+            record = harness.submission(run_id)
+            mutate(record)
+            _rewrite_submission(harness.run_dir(run_id), record)
+            assert (
+                admission.classify_submission(
+                    harness.run_dir(run_id), run_id=run_id
+                ).kind
+                is storage.JsonDocumentKind.CORRUPT
+            )
+        finally:
+            await harness.aclose()
+
+        second_daemon = Harness(tmp_path, mode="complete")
+        try:
+            await submit_expecting(
+                second_daemon,
+                caller,
+                "weak-ev-1",
+                protocol.SUBMISSION_INDETERMINATE,
+                payload,
+            )
+            assert second_daemon.factory.calls == []
+            assert second_daemon.event_store.create_calls == []
+        finally:
+            await second_daemon.aclose()
+
+    run_async(case())
+
+
+# --- impossible budget evidence never authorizes a duplicate ----------------
+#
+# A stored ceiling is only evidence if the approved producer could have written
+# it *for this request*. Two records can be well-formed and still be impossible:
+# one names a ceiling no ``EventBudgetPolicy`` can hold, and one names a ceiling
+# that would have refused the very request its digest attests. Neither can have
+# come from an admission that happened, so neither may authorize a duplicate.
+
+
+def _structural_max() -> int:
+    from agent_run_supervisor.native_acp import spec as spec_module
+
+    return spec_module.STRUCTURAL_MAX_RUN_EVENT_BUDGET_BYTES
+
+
+async def _completed_run(harness: "Harness", caller, request_id: str, payload: dict):
+    reply = await harness.submit(caller, request_id, payload)
+    await asyncio.wait({harness.handlers.registry.task_for(reply["run_id"])})
+    return reply
+
+
+def _restamp_budget(harness: "Harness", run_id: str, ceiling: int) -> dict:
+    record = harness.submission(run_id)
+    record["max_run_event_budget_bytes"] = ceiling
+    _rewrite_submission(harness.run_dir(run_id), record)
+    return record
+
+
+def test_a_duplicate_is_refused_when_the_stored_ceiling_is_out_of_domain(
+    tmp_path: Path,
+) -> None:
+    """No policy can hold it, so no daemon can have admitted under it."""
+    impossible = _structural_max() + 1
+
+    async def case():
+        caller = caller_for(principal_a())
+        payload = _lowered_ceiling_payload()
+        harness = Harness(tmp_path, mode="complete")
+        try:
+            first = await _completed_run(harness, caller, "impossible-1", payload)
+            run_id = first["run_id"]
+            _restamp_budget(harness, run_id, impossible)
+            # The strict classification alone already refuses this one.
+            assert (
+                admission.classify_submission(
+                    harness.run_dir(run_id), run_id=run_id
+                ).kind
+                is storage.JsonDocumentKind.CORRUPT
+            )
+        finally:
+            await harness.aclose()
+
+        second = Harness(tmp_path, mode="complete")
+        try:
+            await submit_expecting(
+                second, caller, "impossible-1", protocol.SUBMISSION_INDETERMINATE, payload
+            )
+            assert second.factory.calls == []
+            assert second.event_store.create_calls == []
+        finally:
+            await second.aclose()
+
+    run_async(case())
+
+
+def test_a_duplicate_is_refused_when_the_stored_ceiling_could_not_admit_it(
+    tmp_path: Path,
+) -> None:
+    """In-domain, positive, and still impossible: it would have refused this Run.
+
+    The digest proves which request this record is about, and that request's
+    sealed limits need more ledger bytes than the stored policy allows. A
+    daemon under that policy would have refused the submission, so the record
+    cannot be the acceptance it claims to be.
+    """
+    product = 4096 * 100
+
+    async def case():
+        caller = caller_for(principal_a())
+        payload = _lowered_ceiling_payload()
+        harness = Harness(tmp_path, mode="complete")
+        try:
+            first = await _completed_run(harness, caller, "impossible-2", payload)
+            run_id = first["run_id"]
+            _restamp_budget(harness, run_id, product - 1)
+            # Well-formed by every field rule — the defect is the pairing.
+            assert (
+                admission.classify_submission(
+                    harness.run_dir(run_id), run_id=run_id
+                ).kind
+                is storage.JsonDocumentKind.VALID
+            )
+        finally:
+            await harness.aclose()
+
+        second = Harness(tmp_path, mode="complete")
+        try:
+            await submit_expecting(
+                second, caller, "impossible-2", protocol.SUBMISSION_INDETERMINATE, payload
+            )
+            assert second.factory.calls == []
+            assert second.event_store.create_calls == []
+        finally:
+            await second.aclose()
+
+    run_async(case())
+
+
+@pytest.mark.parametrize(
+    "stored,current",
+    [
+        pytest.param(4096 * 100, 4096 * 100 - 1, id="historical-above-current"),
+        pytest.param(4096 * 100, 8 * FOUR_GIB, id="historical-below-current"),
+        pytest.param(4096 * 100, 4096 * 100, id="historical-equals-current"),
+    ],
+)
+def test_a_duplicate_is_accepted_when_the_stored_ceiling_did_admit_it(
+    tmp_path: Path, stored: int, current: int
+) -> None:
+    """Positive control: a legitimate historical ceiling still resolves.
+
+    The stored value is exactly what admitted the Run, and it keeps doing so
+    whatever the daemon runs under now — that is the durable-first contract.
+    """
+
+    async def case():
+        caller = caller_for(principal_a())
+        payload = _lowered_ceiling_payload()
+        first_daemon = Harness(
+            tmp_path, mode="complete", event_budget_policy=_policy(stored)
+        )
+        try:
+            first = await _completed_run(first_daemon, caller, "possible-1", payload)
+            run_id = first["run_id"]
+            assert first_daemon.submission(run_id)["max_run_event_budget_bytes"] == stored
+        finally:
+            await first_daemon.aclose()
+
+        second = Harness(tmp_path, mode="complete", event_budget_policy=_policy(current))
+        try:
+            assert await second.submit(caller, "possible-1", payload) == first
+            assert second.factory.calls == []
+        finally:
+            await second.aclose()
+
+    run_async(case())
+
+
+def test_a_duplicate_is_accepted_at_the_exact_structural_maximum(
+    tmp_path: Path,
+) -> None:
+    """Positive control at the widest ceiling the producer can hold."""
+
+    async def case():
+        caller = caller_for(principal_a())
+        payload = _lowered_ceiling_payload()
+        harness = Harness(
+            tmp_path, mode="complete", event_budget_policy=_policy(_structural_max())
+        )
+        try:
+            first = await _completed_run(harness, caller, "possible-2", payload)
+            run_id = first["run_id"]
+            record = harness.submission(run_id)
+            assert record["max_run_event_budget_bytes"] == _structural_max()
+            assert (
+                admission.classify_submission(
+                    harness.run_dir(run_id), run_id=run_id
+                ).kind
+                is storage.JsonDocumentKind.VALID
+            )
+        finally:
+            await harness.aclose()
+
+        second = Harness(tmp_path, mode="complete")
+        try:
+            assert await second.submit(caller, "possible-2", payload) == first
+            assert second.factory.calls == []
+        finally:
+            await second.aclose()
 
     run_async(case())

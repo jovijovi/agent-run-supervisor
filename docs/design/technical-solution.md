@@ -361,6 +361,71 @@ uses the existing process-group terminate → `cancel_grace_seconds` → kill/re
 Session timeout. A later `session/load` Run seals a new independent `RunLimits`, and changing these numeric
 policy values moves no wire, request, Spec, or launch schema version.
 
+Two different kinds of validation are separated rather than merged. `RunLimits` owns **field shape and each
+individual structural hard limit** — `max_event_bytes` within `[256, 1_048_576]`, `max_events` within
+`[1, 1_000_000]`, and the timeout/stderr bounds — and no configuration moves them. One frozen
+`EventBudgetPolicy` owns the **cross-product admission ceiling**: whether `max_event_bytes * max_events`
+fits `max_run_event_budget_bytes` for the daemon admitting this Run. The configured value is itself bounded,
+fail-closed at construction, by `STRUCTURAL_MAX_RUN_EVENT_BUDGET_BYTES` —
+`LIMIT_MAX_EVENT_BYTES_MAX * LIMIT_MAX_EVENTS_MAX`, derived once from the limits it bounds. A ceiling past
+that admits nothing extra, because no Run can request more, while still being serialized into every Run's
+durable evidence and every `server_info` frame; refusing it costs nothing and closes that hazard before a
+registry is parsed, a lease is taken, or any state is written. The policy is injected, not looked up:
+`arsd` builds one at startup from `--max-run-event-budget-bytes` (default `DEFAULT_MAX_RUN_EVENT_BUDGET_BYTES`,
+4 GiB) and injects it into the handlers, which hold it as the daemon's effective ceiling — reported by
+`server_info.limits.max_run_event_budget_bytes` — and apply it through `admit_event_budget` to genuinely new
+work only. The daemon's own `parse_submit` call deliberately does **not** carry that policy; it parses under
+`STRUCTURAL_EVENT_BUDGET_POLICY` for identity, and strict durable duplicate classification and resolution
+run before the effective ceiling is consulted at all (see the ordering below). A direct or dev
+`parse_submit` caller stays on the same shared seam, taking `DEFAULT_EVENT_BUDGET_POLICY` when it passes
+nothing, so there is no mutable module global and no second copy of the rule. For new work the refusal is
+`INVALID_REQUEST`, before a Run or Session exists.
+
+The ceiling is carried as a `dataclasses.InitVar`, so it is not a `RunLimits` field: it never reaches the
+wire key set, `asdict`, the sealed Spec projection, or a hash input. It bounds the theoretical worst case of
+one Run's persistent event ledger and is not preallocated memory, a Run-directory disk quota, or a
+daemon-wide aggregate across concurrent Runs.
+
+The **effective ceiling is durable Run evidence**, not only a live `server_info` fact. Every accepted Run's
+write-once `submission.json` records `max_run_event_budget_bytes` as the policy that actually admitted it,
+so an operator can still audit a historical Run after the daemon is reconfigured or restarted. The strict
+validator shared by admission and reconciliation rebuilds that field through `EventBudgetPolicy` itself, so
+the question it asks is "could the approved producer have written this?" — a missing, mistyped, boolean,
+non-positive, or past-the-structural-maximum value makes the record corrupt rather than partially
+trustworthy, and the producer's bounds are never respelled as a second copy here. Because the durable admission record's material changed, `SUBMISSION_SCHEMA_VERSION`
+moves to 4 — alone, and honestly: the wire, the request digest material, the Spec, and the launch snapshot
+are unchanged, and there is no tolerant reader for the older shape.
+
+Admission policy governs **new work only**, and the submit path is ordered to say so. `_submit` parses for
+identity under `STRUCTURAL_EVENT_BUDGET_POLICY` — the policy that adds nothing to the per-field structural
+limits — so whether a frame is the request ARS already accepted never depends on a ceiling that changed
+since. `_submit_locked` then resolves the durable record first, and calls `protocol.admit_event_budget` with
+the daemon's real ceiling only when there is no acceptance to resolve: at the single place a Run is born,
+before a Session is tracked, a slot is reserved, or a Run directory exists. An identical retransmission of an
+accepted key therefore returns its original `run_id`, `session_id`, and `accepted_at` under any later
+ceiling, dispatches nothing a second time, and re-stamps nothing; the same key with different caller
+material is still `IDEMPOTENCY_CONFLICT`. Admission policy is likewise not digest input:
+`compute_request_digest` covers caller material only, so a reconfigured daemon cannot manufacture a conflict.
+
+`--print-service-unit` renders a configured ceiling into `ExecStart` through the one existing
+`render_service_unit` seam, validated by the same policy the daemon applies, so a rendered unit never starts
+a different daemon than the command that rendered it and never contains an `ExecStart` the daemon would
+refuse. At the default it renders nothing, exactly like the other tunables the renderer leaves unspelled.
+
+Duplicate resolution consumes the **same strict classification reconciliation uses**:
+`admission.classify_submission`, whose verdict now carries the exact validated payload so nothing re-opens
+the file under a weaker rule. A completed Run is not by itself proof that ARS admitted one — the durable
+submission is — so an absent, unreadable, unknown-field, or defective-budget record lands in the existing
+`SUBMISSION_INDETERMINATE` containment rather than being duplicate-accepted.
+
+Field-by-field validity is still not enough, because a record can be well-formed and impossible. Once the
+digest match proves *which* request a record is the acceptance of, `submission_admits_limits` re-derives the
+stored policy and asks whether it admits that request's sealed `max_event_bytes * max_events`. A stored
+ceiling smaller than the request it attests describes an admission that could not have happened, so it
+reaches the same integrity containment instead of authorizing a duplicate. The check pairs the stored policy
+with the digest-matched request and consults the *current* policy nowhere, so a later reduction still cannot
+retract a real past acceptance.
+
 The reset drops the descriptor-based interpreter exec so the declared `command` and `argv[0]` survive
 exactly as declared, accepts `ResolvedEnvironment` only at the spawn seam, never formats the environment
 mapping, and bounds stderr before any retained diagnostic output. Child-exec errno is preserved
@@ -697,6 +762,8 @@ deleting the rest would silently drop the only real-agent continuity evidence.
   `http` extra stays uninstalled and HTTP/WS transport remains a non-goal.
 
 Executable slice sequences, fresh worktree/branch rules, exact commands, and separate push/PR/merge
-approvals live only in `docs/plans/active/`. No implementation plan is currently active. The completed
+approvals live only in `docs/plans/active/`. The active plan is
+[the configurable per-Run event budget](../plans/active/2026-08-11-configurable-run-event-budget.md), which
+is planning and execution detail only and authorizes no integration, release, or deployment. The completed
 [OMP and Reasonix source-support plan](../plans/archive/2026-08-11-omp-reasonix-source-support.md) is
 retained as cold history and authorizes nothing.

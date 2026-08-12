@@ -18,7 +18,14 @@ import json
 import re
 from typing import Any, Mapping
 
-from ..native_acp.spec import AgentRunRequest, InputRef, NativeSpecError, RunLimits
+from ..native_acp.spec import (
+    DEFAULT_EVENT_BUDGET_POLICY,
+    AgentRunRequest,
+    EventBudgetPolicy,
+    InputRef,
+    NativeSpecError,
+    RunLimits,
+)
 from ..session import is_valid_session_id
 
 ARSD_API_VERSION = 3
@@ -315,16 +322,19 @@ def build_error(request_id: str | None, code: str, message: str) -> dict[str, An
     }
 
 
-def _parse_limits(value: Any) -> RunLimits:
+def _parse_limits(value: Any, budget_policy: EventBudgetPolicy) -> RunLimits:
     if not isinstance(value, dict):
         raise _invalid("limits must be a JSON object")
+    # ``_LIMIT_FIELDS`` comes from ``dataclasses.fields``, which excludes the
+    # injected policy: the daemon's ceiling is server configuration and is not
+    # a limit a caller can name, spell, or widen from the wire.
     _require_closed_keys(value, _LIMIT_FIELDS, "limits")
     for name, number in value.items():
         if isinstance(number, bool) or not isinstance(number, (int, float)):
             raise _invalid(f"limit {name} must be a number")
         if name in _INT_LIMIT_FIELDS and not isinstance(number, int):
             raise _invalid(f"limit {name} must be an integer")
-    return RunLimits(**value)
+    return RunLimits(**value, event_budget_policy=budget_policy)
 
 
 def _parse_input_refs(value: Any) -> tuple[InputRef, ...]:
@@ -350,7 +360,9 @@ def _parse_string_tuple(value: Any, name: str) -> tuple[str, ...]:
     return tuple(value)
 
 
-def _parse_request_object(value: Any) -> AgentRunRequest:
+def _parse_request_object(
+    value: Any, budget_policy: EventBudgetPolicy
+) -> AgentRunRequest:
     if not isinstance(value, dict):
         raise _invalid("request must be a JSON object")
     _require_closed_keys(value, _REQUEST_FIELD_NAMES, "request")
@@ -361,7 +373,7 @@ def _parse_request_object(value: Any) -> AgentRunRequest:
     try:
         for name, item in value.items():
             if name == "limits":
-                kwargs[name] = _parse_limits(item)
+                kwargs[name] = _parse_limits(item, budget_policy)
             elif name == "input_refs":
                 kwargs[name] = _parse_input_refs(item)
             elif name in _STRING_TUPLE_REQUEST_FIELDS:
@@ -399,6 +411,28 @@ def _parse_request_object(value: Any) -> AgentRunRequest:
         ) from None
 
 
+def admit_event_budget(
+    limits: RunLimits, budget_policy: EventBudgetPolicy
+) -> None:
+    """Judge sealed limits against the admitting daemon's event-ledger ceiling.
+
+    Separate from :func:`parse_submit` because the two answer different
+    questions at different moments: parsing decides what the caller said, and
+    this decides whether *this* daemon will accept new work saying it. A caller
+    retransmitting an already-accepted request is not new work, so the daemon
+    path calls this only once it knows there is no durable acceptance to
+    resolve. The refusal is spelled exactly as the parse-time one, because it is
+    the same refusal about the same field.
+    """
+    try:
+        budget_policy.check_run_limits(limits)
+    except NativeSpecError as err:
+        raise ProtocolError(
+            INVALID_REQUEST,
+            f"submit request failed spec validation ({type(err).__name__})",
+        ) from None
+
+
 def _optional_text(payload: Mapping[str, Any], key: str) -> str | None:
     value = payload.get(key)
     if value is None:
@@ -408,7 +442,19 @@ def _optional_text(payload: Mapping[str, Any], key: str) -> str | None:
     return value
 
 
-def parse_submit(payload: Mapping[str, Any]) -> SubmitCommand:
+def parse_submit(
+    payload: Mapping[str, Any],
+    *,
+    budget_policy: EventBudgetPolicy = DEFAULT_EVENT_BUDGET_POLICY,
+) -> SubmitCommand:
+    """Map one submit payload onto the spec dataclasses.
+
+    ``budget_policy`` is the admitting daemon's event-ledger ceiling, threaded
+    to the one place the cross-product is judged. It defaults to the shared
+    default policy so a direct/dev caller is judged by the same rule rather than
+    escaping it, and a Run over the ceiling is refused here — at the protocol
+    boundary, before any Run or Session exists.
+    """
     if not isinstance(payload, Mapping):
         raise _invalid("submit payload must be a JSON object")
     _require_closed_keys(payload, _SUBMIT_KEYS, "submit")
@@ -426,7 +472,7 @@ def parse_submit(payload: Mapping[str, Any]) -> SubmitCommand:
         raise _invalid("workspace_root must be a non-empty string")
     cwd = _optional_text(payload, "cwd")
     retry_of_run_id = _optional_text(payload, "retry_of_run_id")
-    request = _parse_request_object(payload["request"])
+    request = _parse_request_object(payload["request"], budget_policy)
     return SubmitCommand(
         request=request,
         prompt_text=prompt_text,

@@ -3821,3 +3821,130 @@ def test_r5_b4_os_kill_never_used_by_pidfd_helper(monkeypatch) -> None:
             main_ident=(1, 1),
             agent_ident=(2, 2),
         )
+
+
+# --- the rendered unit preserves the effective event-budget ceiling ---------
+
+
+def _exec_start(unit: str) -> str:
+    lines = [line for line in unit.splitlines() if line.startswith("ExecStart=")]
+    assert len(lines) == 1
+    return lines[0]
+
+
+def test_print_service_unit_preserves_a_configured_event_budget(
+    monkeypatch, capsys
+) -> None:
+    """A rendered unit must start the daemon the operator asked for.
+
+    Dropping the flag renders a unit that silently runs under the source
+    default, which is a different daemon from the one the operator configured
+    on the command line they just ran.
+    """
+    from agent_run_supervisor.arsd import __main__ as arsd_main
+
+    monkeypatch.setattr(
+        arsd_main,
+        "geteuid",
+        lambda: (_ for _ in ()).throw(AssertionError("no euid")),
+    )
+    rc = arsd_main.main(
+        [
+            "--print-service-unit",
+            "--agents-file",
+            AGENTS_FILE,
+            "--max-run-event-budget-bytes",
+            "123456789",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    _required_lines(out)
+    _forbid_root_system(out)
+    assert "--max-run-event-budget-bytes 123456789" in _exec_start(out)
+
+
+def test_print_service_unit_omits_the_flag_at_the_default(monkeypatch, capsys) -> None:
+    """Default rendering is unchanged: the flag says nothing the default doesn't."""
+    from agent_run_supervisor.arsd import __main__ as arsd_main
+
+    monkeypatch.setattr(
+        arsd_main,
+        "geteuid",
+        lambda: (_ for _ in ()).throw(AssertionError("no euid")),
+    )
+    for argv in (
+        ["--print-service-unit", "--agents-file", AGENTS_FILE],
+        [
+            "--print-service-unit",
+            "--agents-file",
+            AGENTS_FILE,
+            "--max-run-event-budget-bytes",
+            str(4 * 1024 * 1024 * 1024),
+        ],
+    ):
+        assert arsd_main.main(argv) == 0
+        assert "--max-run-event-budget-bytes" not in _exec_start(
+            capsys.readouterr().out
+        )
+
+
+def test_print_service_unit_refuses_an_unusable_event_budget(
+    monkeypatch, capsys
+) -> None:
+    """Never render a unit whose ExecStart the daemon would refuse to start."""
+    from agent_run_supervisor.arsd import __main__ as arsd_main
+    from agent_run_supervisor.native_acp.spec import (
+        STRUCTURAL_MAX_RUN_EVENT_BUDGET_BYTES,
+    )
+
+    monkeypatch.setattr(
+        arsd_main,
+        "geteuid",
+        lambda: (_ for _ in ()).throw(AssertionError("no euid")),
+    )
+    for bad in ("0", "-1", str(STRUCTURAL_MAX_RUN_EVENT_BUDGET_BYTES + 1)):
+        rc = arsd_main.main(
+            [
+                "--print-service-unit",
+                "--agents-file",
+                AGENTS_FILE,
+                "--max-run-event-budget-bytes",
+                bad,
+            ]
+        )
+        captured = capsys.readouterr()
+        assert rc == 2
+        assert captured.out == ""
+        assert "budget" in captured.err.lower()
+
+
+def test_the_renderer_emits_the_budget_flag_as_argv_data() -> None:
+    from agent_run_supervisor.arsd.service_unit import (
+        ServiceUnitError,
+        render_service_unit,
+    )
+    from agent_run_supervisor.native_acp.spec import (
+        STRUCTURAL_MAX_RUN_EVENT_BUDGET_BYTES,
+    )
+
+    unit = render_service_unit(
+        agents_file=AGENTS_FILE, max_run_event_budget_bytes=123456789
+    )
+    assert "--max-run-event-budget-bytes 123456789" in _exec_start(unit)
+    # Omission keeps today's exact ExecStart.
+    assert "--max-run-event-budget-bytes" not in _exec_start(
+        render_service_unit(agents_file=AGENTS_FILE)
+    )
+    # The exact structural bound renders; anything past it is refused.
+    assert str(STRUCTURAL_MAX_RUN_EVENT_BUDGET_BYTES) in _exec_start(
+        render_service_unit(
+            agents_file=AGENTS_FILE,
+            max_run_event_budget_bytes=STRUCTURAL_MAX_RUN_EVENT_BUDGET_BYTES,
+        )
+    )
+    for bad in (0, -1, True, "123456789", 1.0, STRUCTURAL_MAX_RUN_EVENT_BUDGET_BYTES + 1):
+        with pytest.raises(ServiceUnitError):
+            render_service_unit(
+                agents_file=AGENTS_FILE, max_run_event_budget_bytes=bad
+            )

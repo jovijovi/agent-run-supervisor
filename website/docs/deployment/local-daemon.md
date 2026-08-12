@@ -24,6 +24,7 @@ python3 -m agent_run_supervisor.arsd \
 | `--supervisor-root` | daemon mode | The single state directory ARS owns |
 | `--caller-mapping` | daemon mode, at least one | `UID:principal_id:owner:namespace`. **Zero mappings refuse to listen** |
 | `--socket` | no | Defaults to `$XDG_RUNTIME_DIR/agent-run-supervisor/arsd.sock`, falling back to `<supervisor-root>/arsd/arsd.sock` |
+| `--max-run-event-budget-bytes` | no | Admission ceiling on one Run's event ledger, in bytes. Defaults to `4294967296` (4 GiB). Must be a positive integer no larger than `1048576000000` (1 MiB × 1 000 000, the most any Run could request); anything else refuses to start |
 | `--print-service-unit` | no | Renders a user-scope unit to stdout and exits. Pure text; installs nothing |
 
 `arsd` **refuses to run as root**.
@@ -34,6 +35,42 @@ python3 -m agent_run_supervisor.arsd \
     installation. Keep them in a mode-`0600` unit file or an environment file
     that is ignored by version control — never in a repository, an issue, or a
     documentation page.
+
+## The per-Run event budget
+
+`--max-run-event-budget-bytes` is this daemon's admission policy: a `submit`
+whose `max_event_bytes * max_events` exceeds it is refused with
+`INVALID_REQUEST` before any Run or Session exists. It applies to every Run this
+daemon accepts, while each Run still seals its own `max_event_bytes` and
+`max_events`. `server_info` reports the effective value as
+`limits.max_run_event_budget_bytes`.
+
+It is a **theoretical per-Run ceiling on persistent event-ledger bytes** — the
+worst case of one `events.jsonl`. It is **not** preallocated memory, **not** the
+total disk quota of a Run directory, and **not** a daemon-wide aggregate across
+concurrent Runs. Sizing storage is still yours: budget for the Runs you keep,
+not for one Run's worst case.
+
+The effective ceiling is also written into each accepted Run's write-once
+`submission.json`, so you can audit which policy admitted a historical Run after
+you change this flag and restart. A later daemon never rewrites that record.
+
+Lowering the ceiling changes what the daemon **accepts**, never what it already
+accepted. Retransmitting an accepted `request_id` returns the original `run_id`,
+`session_id`, and `accepted_at` whatever the ceiling is now, and dispatches
+nothing a second time; the same `request_id` with different content is still
+`IDEMPOTENCY_CONFLICT`. Only a genuinely new submission over the current ceiling
+is refused with `INVALID_REQUEST`.
+
+The per-field bounds — `max_event_bytes` at most 1 MiB and at least 256,
+`max_events` at most 1 000 000 — are independent structural limits that this
+flag does not move. Their product is also this flag's own maximum: a larger
+ceiling could admit nothing extra. See [Socket API](../reference/socket-api.md).
+
+`--print-service-unit` carries a configured ceiling into the rendered
+`ExecStart`, so the unit you install starts the daemon you just configured. At
+the default it renders nothing, and a value the daemon would refuse is refused
+at render time instead of at the next start.
 
 ## The socket
 
@@ -78,6 +115,7 @@ atomic final writes:
 <supervisor-root>/
   arsd/                       # socket, when no XDG_RUNTIME_DIR is available
   <run storage>/
+    submission.json           # the write-once admission record for this Run
     spec.json                 # the sealed per-Run spec
     launch.json               # value-blind launch snapshot
     events.jsonl              # the persisted normalized, seq-ordered event stream

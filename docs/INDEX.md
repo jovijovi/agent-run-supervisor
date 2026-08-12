@@ -2,10 +2,11 @@
 
 # Documentation Index
 
-Total: 86 documents tracked across 2 statuses.
+Total: 87 documents tracked across 2 statuses.
 
-## Active (18)
+## Active (19)
 
+- [Operator-configurable per-Run event-ledger budget](plans/active/2026-08-11-configurable-run-event-budget.md) — created 2026-08-11
 - [ARS Public Documentation Site Design](design/documentation-site.md) — created 2026-08-07
 - [Session reuse acceptance test plan](roadmap/session-reuse-acceptance.md) — created 2026-08-07
 - [ARS agent registry — the operator contract](design/agent-registry.md) — created 2026-07-30

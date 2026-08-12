@@ -118,9 +118,25 @@ sealed defaults; an omitted field takes its own default independently.
 | `max_events` | integer | `10_000` | `1 <= value <= 1_000_000` | events reserved for the Run |
 
 The combined event budget must also satisfy
-`max_event_bytes * max_events <= 1_073_741_824`. Unknown limit keys, invalid
-numeric types, non-finite or non-positive values, and values above an inclusive
-maximum are refused with `INVALID_REQUEST`.
+`max_event_bytes * max_events <= max_run_event_budget_bytes` — the admission
+ceiling the daemon was started with. It defaults to **4 GiB**
+(`4294967296` bytes); an operator overrides it with
+[`--max-run-event-budget-bytes`](../deployment/local-daemon.md), and
+`server_info` reports the effective value as
+`limits.max_run_event_budget_bytes`. Unknown limit keys, invalid numeric types,
+non-finite or non-positive values, and values above an inclusive maximum are
+refused with `INVALID_REQUEST`.
+
+!!! note "What the event budget is, and what it is not"
+
+    It bounds the **theoretical worst case of one Run's persistent event
+    ledger**: `max_event_bytes` × `max_events` for that Run's `events.jsonl`.
+
+    It is **not** preallocated memory, **not** the total disk quota of a Run
+    directory — which also holds the sealed spec, launch snapshot, result, and
+    bounded stderr — and **not** a daemon-wide aggregate across concurrent Runs.
+    The per-field bounds in the table above are separate structural limits, and
+    no daemon setting moves them.
 
 `turn_timeout_seconds` is a hard **Run** timeout, not a Session lifetime. It
 starts at Prompt dispatch and covers the complete AGENT tool/multi-turn loop
