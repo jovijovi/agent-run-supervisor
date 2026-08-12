@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-08-12
+
+### Added
+
+- Operators can configure the per-Run event budget and inspect the effective
+  limit through `server_info`.
+
+### Changed
+
+- The default per-Run event budget is increased from 1 GiB to 4 GiB.
+- Duplicate retries now honor their durable admission records across daemon
+  restarts and configuration changes.
+
 ## [0.7.4] - 2026-08-11
 
 ### Added
