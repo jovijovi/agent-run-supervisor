@@ -20,6 +20,11 @@ from agent_run_supervisor.event_store import EventStore, RunHandle, _RUN_ID_RE
 from agent_run_supervisor.exit_classifier import AgentRunStatus
 from agent_run_supervisor.native_acp import agent_registry, storage
 from agent_run_supervisor.native_acp.agent_registration import AgentEntry
+from agent_run_supervisor.native_acp.spec import (
+    EventBudgetPolicy,
+    NativeSpecError,
+    RunLimits,
+)
 from agent_run_supervisor.result import build_result_payload
 from agent_run_supervisor.session import derive_session_id_for_run, is_valid_session_id
 
@@ -30,7 +35,14 @@ from . import protocol
 # value-blind. A pre-reset frame therefore hashes differently by construction
 # rather than being silently reinterpreted.
 DIGEST_SCHEMA_VERSION = 3
-SUBMISSION_SCHEMA_VERSION = 3
+# Moved to 4 on its own, and only it: the durable admission record gained the
+# effective ``max_run_event_budget_bytes`` — the ceiling that admitted this Run —
+# so a record written before the field exists no longer describes what a reader
+# of this version is entitled to rely on. Nothing else moved with it, because
+# nothing else changed: the wire, the request digest material, the Spec, and the
+# launch snapshot are byte-identical, and a version that tracks nothing tells a
+# reader nothing. There is deliberately no tolerant reader for the older shape.
+SUBMISSION_SCHEMA_VERSION = 4
 
 # Request fields that would let a caller choose a runtime, name a value, or
 # anticipate a transport. None of them exists on ``AgentRunRequest`` and none is
@@ -240,8 +252,15 @@ def build_submission_artifact(
     digest: RequestDigest,
     accepted_at: str,
     peer: Mapping[str, int],
+    event_budget_policy: EventBudgetPolicy,
 ) -> dict[str, Any]:
-    """Exact §6 v1 submission field set — no prompt text, no secrets."""
+    """Exact §6 v1 submission field set — no prompt text, no secrets.
+
+    ``event_budget_policy`` is taken as the object rather than a number so the
+    persisted ceiling is always one that passed the policy's own fail-closed
+    validation, and is required rather than defaulted so no caller can silently
+    record a ceiling that did not admit this Run.
+    """
     return {
         "schema_version": SUBMISSION_SCHEMA_VERSION,
         "principal_id": key.principal_id,
@@ -265,6 +284,13 @@ def build_submission_artifact(
         "request_digest": digest.value,
         "prompt_sha256": digest.prompt_sha256,
         "prompt_bytes": digest.prompt_bytes,
+        # The admission policy that actually admitted this Run. ``server_info``
+        # answers what the ceiling is *now*; only this write-once record can say
+        # which ceiling a historical Run was accepted under, after the daemon is
+        # reconfigured or restarted. It is server configuration, never caller
+        # material: no wire field carries it and it is not digest input, so a
+        # ceiling change can never turn a legitimate duplicate into a conflict.
+        "max_run_event_budget_bytes": event_budget_policy.max_run_event_budget_bytes,
     }
 
 
@@ -293,6 +319,7 @@ SUBMISSION_FIELDS = (
     "request_digest",
     "prompt_sha256",
     "prompt_bytes",
+    "max_run_event_budget_bytes",
 )
 SUBMISSION_PEER_FIELDS = ("pid", "uid", "gid")
 
@@ -314,10 +341,17 @@ class SubmissionAttribution:
 
 @dataclasses.dataclass(frozen=True)
 class SubmissionState:
-    """Classification of the durable submission plus its attribution when valid."""
+    """Classification of the durable submission plus its attribution when valid.
+
+    ``payload`` is the exact document the strict validator accepted, carried so
+    a caller that needs a field of it — the duplicate-resolution path needs the
+    binding and ``accepted_at`` — reads what was validated instead of opening
+    the file a second time under a weaker rule.
+    """
 
     kind: storage.JsonDocumentKind
     attribution: SubmissionAttribution | None = None
+    payload: dict[str, Any] | None = None
 
 
 def _nonempty_str(value: Any) -> bool:
@@ -391,6 +425,16 @@ def validate_submission_artifact(
     retry_of = payload.get("retry_of_run_id")
     if retry_of is not None and not _nonempty_str(retry_of):
         return None
+    # The admitting ceiling is evidence, so it is validated as strictly as the
+    # rest — and by the producer's own type rather than by a second copy of its
+    # rules. A value ``EventBudgetPolicy`` cannot hold is a value the approved
+    # producer cannot have written: missing, mistyped, boolean, non-positive, or
+    # past the structural maximum all mean this is not a record ARS wrote, which
+    # makes the document corrupt rather than partially trustworthy. It is
+    # deliberately not compared against the *current* policy — the record attests
+    # what admitted this Run, not what would admit it today.
+    if stored_event_budget_policy(payload) is None:
+        return None
     return SubmissionAttribution(
         run_id=run_id,
         owner=owner,
@@ -411,7 +455,9 @@ def classify_submission(run_dir: Path, *, run_id: str) -> SubmissionState:
     attribution = validate_submission_artifact(state.payload, run_id=run_id)
     if attribution is None:
         return SubmissionState(storage.JsonDocumentKind.CORRUPT)
-    return SubmissionState(storage.JsonDocumentKind.VALID, attribution)
+    return SubmissionState(
+        storage.JsonDocumentKind.VALID, attribution, payload=state.payload
+    )
 
 
 def read_submission(run_dir: Path) -> dict[str, Any] | None:
@@ -427,6 +473,49 @@ def read_submission(run_dir: Path) -> dict[str, Any] | None:
     if payload.get("schema_version") != SUBMISSION_SCHEMA_VERSION:
         return None
     return payload
+
+
+def stored_event_budget_policy(
+    submission: Mapping[str, Any] | None,
+) -> EventBudgetPolicy | None:
+    """The admission policy a submission attests, or ``None`` if it attests none.
+
+    Rebuilt through the producer's own type, so "could the approved producer
+    have written this?" is answered by the one object that decides what the
+    producer may hold — never by a second copy of its bounds here.
+    """
+    if not isinstance(submission, Mapping):
+        return None
+    try:
+        return EventBudgetPolicy(
+            max_run_event_budget_bytes=submission.get("max_run_event_budget_bytes")
+        )
+    except NativeSpecError:
+        return None
+
+
+def submission_admits_limits(
+    submission: Mapping[str, Any] | None, limits: RunLimits
+) -> bool:
+    """True when the ceiling this record attests could have admitted ``limits``.
+
+    The caller supplies the limits of the **digest-matched** request, so this
+    asks a question about one pairing: would a daemon running the stored policy
+    have accepted the very request this record is the acceptance of? A record
+    whose ceiling is smaller than that request's ``max_event_bytes *
+    max_events`` is self-contradictory — the admission it claims could not have
+    happened — however well-formed each of its fields is on its own. The current
+    daemon's policy is deliberately not consulted: a later reduction must not
+    retract a past acceptance.
+    """
+    policy = stored_event_budget_policy(submission)
+    if policy is None:
+        return False
+    try:
+        policy.check_run_limits(limits)
+    except NativeSpecError:
+        return False
+    return True
 
 
 def submission_binds_key(submission: Mapping[str, Any], key: AdmissionKey) -> bool:

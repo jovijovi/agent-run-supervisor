@@ -972,3 +972,71 @@ def test_a_present_null_session_id_is_refused_before_any_side_effect() -> None:
 def test_the_session_field_is_not_in_the_generic_nullable_set() -> None:
     """Structural: it needs its own rule, or absent and null collapse again."""
     assert "session_id" not in protocol._NULLABLE_REQUEST_FIELDS
+
+
+# --- the daemon-configured per-Run event-ledger budget ----------------------
+
+
+def _budget_policy(ceiling: int):
+    from agent_run_supervisor.native_acp import spec as spec_module
+
+    return spec_module.EventBudgetPolicy(max_run_event_budget_bytes=ceiling)
+
+
+def test_parse_submit_admits_the_default_four_gibibyte_event_budget() -> None:
+    payload = valid_submit_payload()
+    payload["request"]["limits"] = {"max_event_bytes": 1024 * 1024, "max_events": 4096}
+    limits = protocol.parse_submit(payload).request.limits
+    assert limits.max_event_bytes * limits.max_events == 4 * 1024 * 1024 * 1024
+
+    payload["request"]["limits"] = {"max_event_bytes": 1024 * 1024, "max_events": 4097}
+    _reject("INVALID_REQUEST", protocol.parse_submit, payload)
+
+
+def test_parse_submit_judges_the_budget_against_the_injected_ceiling() -> None:
+    exact = 4096 * 100
+    payload = valid_submit_payload()
+    payload["request"]["limits"] = {"max_event_bytes": 4096, "max_events": 100}
+
+    at_ceiling = protocol.parse_submit(payload, budget_policy=_budget_policy(exact))
+    assert at_ceiling.request.limits.max_events == 100
+
+    with pytest.raises(protocol.ProtocolError) as err:
+        protocol.parse_submit(payload, budget_policy=_budget_policy(exact - 1))
+    assert err.value.code == protocol.INVALID_REQUEST
+
+
+def test_parse_submit_admits_beyond_the_default_under_a_raised_ceiling() -> None:
+    eight_gib = 8 * 1024 * 1024 * 1024
+    payload = valid_submit_payload()
+    payload["request"]["limits"] = {"max_event_bytes": 1024 * 1024, "max_events": 8192}
+
+    _reject("INVALID_REQUEST", protocol.parse_submit, payload)
+    raised = protocol.parse_submit(payload, budget_policy=_budget_policy(eight_gib))
+    assert raised.request.limits.max_events == 8192
+
+
+def test_the_ceiling_is_never_a_caller_supplied_limit_key() -> None:
+    assert "event_budget_policy" not in protocol._LIMIT_FIELDS
+    assert "max_run_event_budget_bytes" not in protocol._LIMIT_FIELDS
+    payload = valid_submit_payload()
+    payload["request"]["limits"] = {"event_budget_policy": {"max_run_event_budget_bytes": 1}}
+    _reject("INVALID_REQUEST", protocol.parse_submit, payload)
+    payload["request"]["limits"] = {"max_run_event_budget_bytes": 8 * 1024**3}
+    _reject("INVALID_REQUEST", protocol.parse_submit, payload)
+
+
+def test_individual_limit_bounds_are_refused_under_any_ceiling() -> None:
+    from agent_run_supervisor.native_acp import spec as spec_module
+
+    huge = _budget_policy(spec_module.STRUCTURAL_MAX_RUN_EVENT_BUDGET_BYTES)
+    for limits in (
+        {"max_event_bytes": 1024 * 1024 + 1},
+        {"max_event_bytes": 255},
+        {"max_events": 1_000_001},
+    ):
+        payload = valid_submit_payload()
+        payload["request"]["limits"] = limits
+        with pytest.raises(protocol.ProtocolError) as err:
+            protocol.parse_submit(payload, budget_policy=huge)
+        assert err.value.code == protocol.INVALID_REQUEST

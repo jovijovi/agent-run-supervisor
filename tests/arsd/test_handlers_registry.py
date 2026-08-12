@@ -853,6 +853,7 @@ def test_authorize_run_rejects_symlinked_run_dir(tmp_path: Path) -> None:
                 "request_digest": digest.value,
                 "prompt_sha256": digest.prompt_sha256,
                 "prompt_bytes": digest.prompt_bytes,
+                "max_run_event_budget_bytes": 4 * 1024 * 1024 * 1024,
             },
         )
         Path(harness.event_store.base_dir).mkdir(parents=True, exist_ok=True)
@@ -3319,3 +3320,86 @@ def test_run_cancel_refuses_a_terminal_carrying_the_retired_field(
             await harness.aclose()
 
     run_async(case())
+
+
+# --- the daemon-configured per-Run event-ledger budget ----------------------
+
+
+def _budget_policy(ceiling: int):
+    from agent_run_supervisor.native_acp import spec as spec_module
+
+    return spec_module.EventBudgetPolicy(max_run_event_budget_bytes=ceiling)
+
+
+def _budget_submit(max_event_bytes: int, max_events: int) -> dict:
+    return submit_payload(
+        request=valid_wire_request(
+            session_id=None,
+            limits={"max_event_bytes": max_event_bytes, "max_events": max_events},
+        )
+    )
+
+
+def test_server_info_reports_the_default_run_event_budget(tmp_path: Path) -> None:
+    async def case():
+        harness = Harness(tmp_path)
+        caller = caller_for(principal_a())
+        try:
+            info = await call(harness, caller, "server_info", "budget-info-1", {})
+            assert info["limits"]["max_run_event_budget_bytes"] == 4 * 1024**3
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_a_custom_daemon_ceiling_reaches_server_info_and_submit(tmp_path: Path) -> None:
+    """One startup value, reported and enforced by the same daemon."""
+    exact = 4096 * 100
+
+    async def case():
+        harness = Harness(tmp_path, event_budget_policy=_budget_policy(exact))
+        caller = caller_for(principal_a())
+        try:
+            info = await call(harness, caller, "server_info", "budget-info-2", {})
+            assert info["limits"]["max_run_event_budget_bytes"] == exact
+
+            # One byte over the configured ceiling: refused before anything is
+            # reserved, created, or handed to a factory.
+            await expect_code(
+                harness,
+                caller,
+                "submit",
+                "budget-over-1",
+                protocol.INVALID_REQUEST,
+                _budget_submit(4096, 101),
+            )
+            assert harness.event_store.create_calls == []
+            assert harness.factory.calls == []
+
+            reply = await harness.submit(caller, "budget-ok-1", _budget_submit(4096, 100))
+            assert reply["run_id"]
+            assert harness.event_store.create_calls == [reply["run_id"]]
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_a_raised_daemon_ceiling_admits_beyond_the_default(tmp_path: Path) -> None:
+    async def case():
+        harness = Harness(tmp_path, event_budget_policy=_budget_policy(8 * 1024**3))
+        caller = caller_for(principal_a())
+        try:
+            over_default = _budget_submit(1024 * 1024, 8192)
+            reply = await harness.submit(caller, "budget-raised-1", over_default)
+            assert reply["run_id"]
+        finally:
+            await harness.aclose()
+
+    run_async(case())
+
+
+def test_handlers_refuse_a_ceiling_that_is_not_a_policy(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        Harness(tmp_path, event_budget_policy=4 * 1024**3)

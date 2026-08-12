@@ -25,7 +25,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import InitVar, asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -84,7 +84,26 @@ LIMIT_MAX_STDERR_BYTES_MAX = 64 * 1024 * 1024
 LIMIT_MAX_EVENT_BYTES_MAX = 1024 * 1024
 LIMIT_MAX_EVENTS_MAX = 1_000_000
 LIMIT_MAX_EVENT_BYTES_MIN = 256
-LIMIT_EVENT_BUDGET_BYTES = 1024 * 1024 * 1024
+
+# The *default* admission ceiling on one Run's normalized event ledger, in bytes
+# (4 GiB). Deliberately not named ``LIMIT_*``: the three constants above are
+# structural per-field maxima that no configuration moves, while this one is a
+# deployment sizing choice an operator overrides at daemon startup. It bounds
+# the theoretical worst case of a single Run's persistent ``events.jsonl`` —
+# not preallocated memory, not the Run directory's total disk quota, and not a
+# daemon-wide aggregate across concurrent Runs.
+DEFAULT_MAX_RUN_EVENT_BUDGET_BYTES = 4 * 1024 * 1024 * 1024
+
+# The largest cross-product the individual structural limits above can produce,
+# and therefore the largest ceiling that can ever admit anything: no Run may
+# request more than ``LIMIT_MAX_EVENT_BYTES_MAX`` × ``LIMIT_MAX_EVENTS_MAX``, so
+# a ceiling past this point admits exactly nothing extra. It is also the bound
+# on the configured value, for a reason that is not tidiness: the ceiling is
+# serialized into every accepted Run's durable evidence and into every
+# ``server_info`` frame, so an unbounded integer is a live serialization hazard
+# — bought for zero admission value. Derived here, once, from the limits it
+# bounds; never respelled as a literal or as a digit-count rule.
+STRUCTURAL_MAX_RUN_EVENT_BUDGET_BYTES = LIMIT_MAX_EVENT_BYTES_MAX * LIMIT_MAX_EVENTS_MAX
 
 # The environment layers, in application order. The two source-owned layers are
 # applied last, always, as defense in depth: a defect in a parse-time collision
@@ -179,6 +198,70 @@ class InputRef:
 
 
 @dataclass(frozen=True)
+class EventBudgetPolicy:
+    """The admission ceiling one daemon applies to every Run it accepts.
+
+    Two different questions are deliberately answered by two different objects.
+    :class:`RunLimits` judges *field shape* and each *individual* structural
+    hard limit — those are properties of the data model and no configuration
+    moves them. This object judges exactly one *policy* question:
+    ``max_event_bytes * max_events``, the theoretical worst case of one Run's
+    persistent event ledger, against the ceiling this daemon was started with.
+
+    It is a frozen value, injected where admission happens, so a differently
+    configured daemon constructs its own instead of writing to shared state:
+    there is no mutable module global to reconfigure, and no second copy of the
+    rule for a direct/dev construction path to drift from.
+    """
+
+    max_run_event_budget_bytes: int = DEFAULT_MAX_RUN_EVENT_BUDGET_BYTES
+
+    def __post_init__(self) -> None:
+        # Fail closed on configuration, exactly like a limit value: ``bool`` is
+        # refused before ``int`` can accept it, since ``True`` is a positive
+        # integer and a direct Python caller can supply one.
+        _require(
+            not isinstance(self.max_run_event_budget_bytes, bool)
+            and isinstance(self.max_run_event_budget_bytes, int),
+            "max_run_event_budget_bytes must be an integer",
+        )
+        _require(
+            self.max_run_event_budget_bytes > 0,
+            "max_run_event_budget_bytes must be positive",
+        )
+        _require(
+            self.max_run_event_budget_bytes <= STRUCTURAL_MAX_RUN_EVENT_BUDGET_BYTES,
+            "max_run_event_budget_bytes exceeds the structural maximum",
+        )
+
+    def check_run_limits(self, limits: "RunLimits") -> None:
+        """Refuse limits whose event-ledger worst case exceeds this ceiling."""
+        budget = limits.max_event_bytes * limits.max_events
+        _require(
+            budget <= self.max_run_event_budget_bytes,
+            "limit event budget exceeds the configured maximum "
+            "(max_event_bytes * max_events)",
+        )
+
+
+# One immutable default instance, shared by every construction path that is not
+# handed a daemon's own policy. Nothing rebinds or mutates it.
+DEFAULT_EVENT_BUDGET_POLICY = EventBudgetPolicy()
+
+# The policy at that structural bound: it adds nothing to the per-field limits.
+# It is **not** a deployment setting and no daemon runs under it. It exists for
+# the one step that has to understand a request *as a request* — its identity
+# and canonical digest — before the admitting daemon's own policy is consulted,
+# so that whether a retransmission is the same request cannot depend on a
+# ceiling that changed since it was accepted. Parsing under it widens nothing:
+# every per-field bound in ``RunLimits`` still applies, and new work is still
+# judged by the daemon's real ceiling before anything is created.
+STRUCTURAL_EVENT_BUDGET_POLICY = EventBudgetPolicy(
+    max_run_event_budget_bytes=STRUCTURAL_MAX_RUN_EVENT_BUDGET_BYTES
+)
+
+
+@dataclass(frozen=True)
 class RunLimits:
     startup_timeout_seconds: float = 60.0
     turn_timeout_seconds: float = 21600.0
@@ -186,8 +269,15 @@ class RunLimits:
     max_stderr_bytes: int = 262_144
     max_event_bytes: int = 65_536
     max_events: int = 10_000
+    # The admitting daemon's ceiling, injected rather than looked up. An
+    # ``InitVar`` is not a dataclass field, so it stays out of the wire key set,
+    # ``dataclasses.fields``, ``asdict``, equality, and the sealed Spec
+    # projection: policy decides admission and never becomes per-Run material,
+    # which is why admission policy moves no schema version. ``None`` means the
+    # default policy, so a direct/dev construction is judged rather than exempt.
+    event_budget_policy: InitVar[EventBudgetPolicy | None] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, event_budget_policy: EventBudgetPolicy | None) -> None:
         _validate_limit_float(
             "startup_timeout_seconds",
             self.startup_timeout_seconds,
@@ -213,11 +303,17 @@ class RunLimits:
             minimum=LIMIT_MAX_EVENT_BYTES_MIN,
         )
         _validate_limit_int("max_events", self.max_events, LIMIT_MAX_EVENTS_MAX)
-        budget = self.max_event_bytes * self.max_events
-        _require(
-            budget <= LIMIT_EVENT_BUDGET_BYTES,
-            "limit event budget exceeds maximum (max_event_bytes * max_events)",
+        # Field shape is settled; the cross-product is the policy's question.
+        policy = (
+            DEFAULT_EVENT_BUDGET_POLICY
+            if event_budget_policy is None
+            else event_budget_policy
         )
+        _require(
+            isinstance(policy, EventBudgetPolicy),
+            "event_budget_policy must be an EventBudgetPolicy",
+        )
+        policy.check_run_limits(self)
 
 
 @dataclass(frozen=True)

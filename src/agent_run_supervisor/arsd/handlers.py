@@ -24,7 +24,13 @@ from agent_run_supervisor.native_acp.profile import (
     UnknownProfileError,
 )
 from agent_run_supervisor.native_acp.run_task import RunTask
-from agent_run_supervisor.native_acp.spec import LIMIT_MAX_EVENT_BYTES_MAX
+from agent_run_supervisor.native_acp.spec import (
+    DEFAULT_EVENT_BUDGET_POLICY,
+    LIMIT_MAX_EVENT_BYTES_MAX,
+    STRUCTURAL_EVENT_BUDGET_POLICY,
+    EventBudgetPolicy,
+    RunLimits,
+)
 from agent_run_supervisor.session import (
     QUARANTINE_UNTRUSTED_TERMINAL_EVIDENCE,
     SessionNotFoundError,
@@ -861,9 +867,16 @@ class ArsdHandlers:
         supervisor_root: Path | None = None,
         profile_registry: ProfileRegistry = DEFAULT_REGISTRY,
         agents: agent_registry.AgentRegistrySnapshot | None = None,
+        event_budget_policy: EventBudgetPolicy = DEFAULT_EVENT_BUDGET_POLICY,
     ) -> None:
+        # One policy object per daemon, judged once here rather than duck-typed
+        # later: a non-policy would otherwise surface as an INTERNAL failure on
+        # a caller's submit instead of refusing at construction.
+        if not isinstance(event_budget_policy, EventBudgetPolicy):
+            raise ValueError("event_budget_policy must be an EventBudgetPolicy")
         self._session_store = session_store
         self._event_store = event_store
+        self._event_budget_policy = event_budget_policy
         self._cancel_wait = cancel_wait_seconds
         self._follow_queue = event_follow_queue_size
         self._page_limit = min(events_page_limit, MAX_EVENTS_PAGE_LIMIT)
@@ -935,6 +948,10 @@ class ArsdHandlers:
                 "max_prompt_bytes": protocol.MAX_PROMPT_BYTES,
                 "events_page_limit": self._page_limit,
                 "event_follow_queue_size": self._follow_queue,
+                # This daemon's admission ceiling on one Run's event ledger.
+                "max_run_event_budget_bytes": (
+                    self._event_budget_policy.max_run_event_budget_bytes
+                ),
             },
         }
 
@@ -950,7 +967,16 @@ class ArsdHandlers:
     async def _submit(
         self, caller: server.AuthenticatedCaller, request: protocol.ParsedRequest
     ) -> dict[str, Any]:
-        command = protocol.parse_submit(request.payload)
+        # Parsed for *identity* first, under the structural limits only.
+        # Whether a frame is the request ARS already accepted cannot depend on
+        # the ceiling this daemon happens to run under now: a restart at a lower
+        # ceiling would otherwise refuse a caller's retransmission of an
+        # accepted key, stranding them with a Run they can no longer name. The
+        # daemon's own ceiling is applied in ``_submit_locked``, on the single
+        # path that creates new work, before anything exists.
+        command = protocol.parse_submit(
+            request.payload, budget_policy=STRUCTURAL_EVENT_BUDGET_POLICY
+        )
         self._require_owner(
             caller, command.request.owner, command.request.namespace
         )
@@ -984,9 +1010,17 @@ class ArsdHandlers:
         run_id: str,
     ) -> dict[str, Any]:
         run_dir = Path(self._event_store.base_dir) / run_id
-        resolved = await self._resolve_durable(key, digest, run_id, run_dir)
+        resolved = await self._resolve_durable(
+            key, digest, run_id, run_dir, command.request.limits
+        )
         if resolved is not None:
             return resolved
+
+        # There is no acceptance to resolve, so this is new work — and new work
+        # is judged by the ceiling *this* daemon runs under. It happens here, at
+        # the one place a Run is born, and therefore before a Session is
+        # tracked, a concurrency slot is reserved, or a Run directory exists.
+        protocol.admit_event_budget(command.request.limits, self._event_budget_policy)
 
         session_id = self._tracked_session_id(command, run_id=run_id)
         reservation = await self.registry.reserve(session_id=session_id)
@@ -1013,6 +1047,7 @@ class ArsdHandlers:
                 digest=digest,
                 accepted_at=accepted_at,
                 peer={"pid": peer.pid, "uid": peer.uid, "gid": peer.gid},
+                event_budget_policy=self._event_budget_policy,
             )
             try:
                 admission.write_submission(handle.run_dir, artifact)
@@ -1101,6 +1136,7 @@ class ArsdHandlers:
         digest: admission.RequestDigest,
         run_id: str,
         run_dir: Path,
+        limits: RunLimits,
     ) -> dict[str, Any] | None:
         if not run_dir.exists():
             return None
@@ -1110,8 +1146,21 @@ class ArsdHandlers:
                 protocol.SUBMISSION_INDETERMINATE,
                 "run reservation lacks a valid submission binding",
             )
-        submission = admission.read_submission(run_dir)
-        if submission is None:
+        # Exactly the classification reconciliation uses. A completed Run is not
+        # by itself proof that ARS admitted one: the durable submission is that
+        # proof, and a record that is absent, unreadable, or fails strict
+        # validation — an unknown or missing field, a defective admission-policy
+        # value, drifted ``peer`` shape — is not evidence at all. Returning
+        # acceptance facts read out of it would be returning facts ARS cannot
+        # stand behind, so every non-valid classification lands in the same
+        # containment as a missing record.
+        state = admission.classify_submission(run_dir, run_id=run_id)
+        submission = state.payload
+        if (
+            state.kind is not storage.JsonDocumentKind.VALID
+            or state.attribution is None
+            or submission is None
+        ):
             raise protocol.ProtocolError(
                 protocol.SUBMISSION_INDETERMINATE,
                 "run reservation lacks a valid submission binding",
@@ -1131,6 +1180,17 @@ class ArsdHandlers:
                 protocol.IDEMPOTENCY_CONFLICT,
                 "request_id already bound to a different request digest",
             )
+        # The digest now proves which request this record is the acceptance of,
+        # so the stored ceiling can be checked against that request's own sealed
+        # limits: a record whose policy would have refused this very submission
+        # is not the acceptance it claims to be, whatever its fields look like.
+        # This asks nothing about the *current* policy, so a later reduction
+        # still cannot retract a real past acceptance.
+        if not admission.submission_admits_limits(submission, limits):
+            raise protocol.ProtocolError(
+                protocol.SUBMISSION_INDETERMINATE,
+                "submission binding integrity failure",
+            )
         registered = self.registry.is_registered(run_id)
         terminal = admission.inspect_terminal_result(run_dir, run_id=run_id)
         if terminal.kind is storage.NativeTerminalKind.INVALID:
@@ -1144,9 +1204,10 @@ class ArsdHandlers:
             # dispatches anything a second time.
             return {
                 "run_id": run_id,
-                "session_id": admission.bound_session_id_for_run(
-                    run_id=run_id, submission=submission
-                ),
+                # The strict validator's own Session answer — the same single
+                # rule reconciliation attributes by — rather than a second
+                # derivation that could drift from it.
+                "session_id": state.attribution.session_id,
                 "accepted_at": submission["accepted_at"],
             }
         raise protocol.ProtocolError(

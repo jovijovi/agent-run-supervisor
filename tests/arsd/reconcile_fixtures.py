@@ -284,6 +284,7 @@ def submission_payload(
         "request_digest": "sha256:" + "d" * 64,
         "prompt_sha256": "e" * 64,
         "prompt_bytes": 17,
+        "max_run_event_budget_bytes": 4 * 1024 * 1024 * 1024,
     }
 
 

@@ -24,6 +24,7 @@ from agent_run_supervisor.arsd import admission, handlers, protocol, server
 from agent_run_supervisor.event_store import atomic_write_json
 from agent_run_supervisor.exit_classifier import _RETRYABLE_DEFAULT, AgentRunStatus
 from agent_run_supervisor.native_acp import storage
+from agent_run_supervisor.native_acp.spec import DEFAULT_EVENT_BUDGET_POLICY
 from agent_run_supervisor.native_acp.run_task import (
     CONFIG_PROVEN_MARKER,
     CONFIG_ROLLBACK_PROVEN_MARKER,
@@ -209,6 +210,7 @@ def _seed_submission(
         "request_digest": digest.value,
         "prompt_sha256": digest.prompt_sha256,
         "prompt_bytes": digest.prompt_bytes,
+        "max_run_event_budget_bytes": 4 * 1024 * 1024 * 1024,
     }
     path = storage.write_once_json(run_dir / "submission.json", artifact)
     return path.read_bytes()
@@ -2281,6 +2283,7 @@ def _production_submission(run_id: str, command) -> dict[str, Any]:
         digest=admission.compute_request_digest(command),
         accepted_at="2026-07-30T00:00:00+00:00",
         peer={"pid": 1, "uid": 1000, "gid": 1000},
+        event_budget_policy=DEFAULT_EVENT_BUDGET_POLICY,
     )
 
 
@@ -3059,6 +3062,7 @@ def _submission_payload(**overrides) -> dict[str, Any]:
         "request_digest": "sha256:" + "a" * 64,
         "prompt_sha256": "b" * 64,
         "prompt_bytes": 17,
+        "max_run_event_budget_bytes": 4 * 1024 * 1024 * 1024,
     }
     payload.update(overrides)
     return payload

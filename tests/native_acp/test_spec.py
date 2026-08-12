@@ -463,3 +463,145 @@ def test_request_validates_session_id_grammar() -> None:
             _request(session_id=bad)
     accepted = _request(session_id="sess-ok_1")
     assert accepted.session_id == "sess-ok_1"
+
+
+# --- configurable per-Run event-ledger admission budget ----------------------
+#
+# Two different rules, deliberately separated: ``RunLimits`` judges field shape
+# and each individual hard limit, while one injected policy object judges the
+# cross-product ``max_event_bytes * max_events`` against the ceiling the
+# admitting daemon was started with.
+
+FOUR_GIB = 4 * 1024 * 1024 * 1024
+# Exactly the default ceiling: 1 MiB per event × 4096 events.
+_AT_DEFAULT_CEILING = {"max_event_bytes": 1024 * 1024, "max_events": 4096}
+
+
+def test_the_default_run_event_budget_ceiling_is_four_gibibytes() -> None:
+    assert spec_module.DEFAULT_MAX_RUN_EVENT_BUDGET_BYTES == FOUR_GIB
+    assert spec_module.EventBudgetPolicy().max_run_event_budget_bytes == FOUR_GIB
+    assert (
+        spec_module.DEFAULT_EVENT_BUDGET_POLICY.max_run_event_budget_bytes == FOUR_GIB
+    )
+
+
+def test_direct_run_limits_are_under_the_same_default_budget_policy() -> None:
+    """The dev/direct construction path is judged, not exempted."""
+    limits = RunLimits(**_AT_DEFAULT_CEILING)
+    assert limits.max_event_bytes * limits.max_events == FOUR_GIB
+    with pytest.raises(SpecValidationError):
+        RunLimits(max_event_bytes=1024 * 1024, max_events=4097)
+
+
+def test_an_injected_ceiling_decides_the_cross_product_to_the_byte() -> None:
+    exact = 4096 * 100
+    at_ceiling = spec_module.EventBudgetPolicy(max_run_event_budget_bytes=exact)
+    one_byte_lower = spec_module.EventBudgetPolicy(max_run_event_budget_bytes=exact - 1)
+    admitted = RunLimits(
+        max_event_bytes=4096, max_events=100, event_budget_policy=at_ceiling
+    )
+    assert admitted.max_event_bytes * admitted.max_events == exact
+    with pytest.raises(SpecValidationError):
+        RunLimits(
+            max_event_bytes=4096, max_events=100, event_budget_policy=one_byte_lower
+        )
+
+
+def test_a_raised_ceiling_admits_more_and_a_lowered_ceiling_less() -> None:
+    generous = spec_module.EventBudgetPolicy(max_run_event_budget_bytes=2 * FOUR_GIB)
+    beyond_default = RunLimits(
+        max_event_bytes=1024 * 1024, max_events=8192, event_budget_policy=generous
+    )
+    assert beyond_default.max_event_bytes * beyond_default.max_events == 2 * FOUR_GIB
+    with pytest.raises(SpecValidationError):
+        # The same 8 GiB Run under the unchanged default ceiling.
+        RunLimits(max_event_bytes=1024 * 1024, max_events=8192)
+    strict = spec_module.EventBudgetPolicy(max_run_event_budget_bytes=1024 * 1024)
+    with pytest.raises(SpecValidationError):
+        RunLimits(max_event_bytes=1024 * 1024, max_events=2, event_budget_policy=strict)
+
+
+def test_the_structural_maximum_is_derived_from_the_hard_limits() -> None:
+    "One named bound, computed from the very limits it is a bound over."
+    assert spec_module.STRUCTURAL_MAX_RUN_EVENT_BUDGET_BYTES == (
+        spec_module.LIMIT_MAX_EVENT_BYTES_MAX * spec_module.LIMIT_MAX_EVENTS_MAX
+    )
+    assert spec_module.DEFAULT_MAX_RUN_EVENT_BUDGET_BYTES == FOUR_GIB
+    assert FOUR_GIB < spec_module.STRUCTURAL_MAX_RUN_EVENT_BUDGET_BYTES
+
+
+def test_the_exact_structural_maximum_is_a_valid_ceiling() -> None:
+    "Positive control: the bound itself configures, and admits the largest Run."
+    bound = spec_module.STRUCTURAL_MAX_RUN_EVENT_BUDGET_BYTES
+    policy = spec_module.EventBudgetPolicy(max_run_event_budget_bytes=bound)
+    assert policy.max_run_event_budget_bytes == bound
+    assert spec_module.STRUCTURAL_EVENT_BUDGET_POLICY.max_run_event_budget_bytes == bound
+    largest = RunLimits(
+        max_event_bytes=spec_module.LIMIT_MAX_EVENT_BYTES_MAX,
+        max_events=spec_module.LIMIT_MAX_EVENTS_MAX,
+        event_budget_policy=policy,
+    )
+    assert largest.max_event_bytes * largest.max_events == bound
+
+
+def test_a_ceiling_past_the_structural_maximum_is_refused() -> None:
+    """A ceiling no Run could ever reach admits nothing and serializes badly.
+
+    It would still be written into durable Run evidence and into every
+    ``server_info`` frame, so an unbounded integer is a live serialization
+    hazard bought for exactly zero admission value.
+    """
+    bound = spec_module.STRUCTURAL_MAX_RUN_EVENT_BUDGET_BYTES
+    with pytest.raises(SpecValidationError):
+        spec_module.EventBudgetPolicy(max_run_event_budget_bytes=bound + 1)
+    with pytest.raises(SpecValidationError):
+        spec_module.EventBudgetPolicy(max_run_event_budget_bytes=10**4000)
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, False, 4096.0, "4096", None])
+def test_a_configured_ceiling_fails_closed(bad) -> None:
+    with pytest.raises(SpecValidationError):
+        spec_module.EventBudgetPolicy(max_run_event_budget_bytes=bad)
+
+
+def test_run_limits_refuse_an_object_that_is_not_an_event_budget_policy() -> None:
+    class LooksLikeOne:
+        max_run_event_budget_bytes = FOUR_GIB
+
+        def check_run_limits(self, limits):
+            return None
+
+    with pytest.raises(SpecValidationError):
+        RunLimits(event_budget_policy=LooksLikeOne())
+
+
+def test_individual_hard_limits_survive_a_generous_ceiling() -> None:
+    """Structural bounds are a separate rule and are not relaxed by a ceiling."""
+    huge = spec_module.EventBudgetPolicy(
+        max_run_event_budget_bytes=spec_module.STRUCTURAL_MAX_RUN_EVENT_BUDGET_BYTES
+    )
+    for bad in (
+        {"max_event_bytes": 1024 * 1024 + 1, "max_events": 1},
+        {"max_event_bytes": 255, "max_events": 1},
+        {"max_event_bytes": 256, "max_events": 1_000_001},
+    ):
+        with pytest.raises(SpecValidationError):
+            RunLimits(**bad, event_budget_policy=huge)
+    RunLimits(max_event_bytes=1024 * 1024, max_events=1, event_budget_policy=huge)
+    RunLimits(max_event_bytes=256, max_events=1_000_000, event_budget_policy=huge)
+
+
+def test_the_injected_budget_policy_is_not_sealed_run_limits_material() -> None:
+    """The daemon's ceiling is never a per-Run field, wire key, or hash input."""
+    assert [f.name for f in dataclasses.fields(RunLimits)] == [
+        "startup_timeout_seconds",
+        "turn_timeout_seconds",
+        "cancel_grace_seconds",
+        "max_stderr_bytes",
+        "max_event_bytes",
+        "max_events",
+    ]
+    strict = spec_module.EventBudgetPolicy(max_run_event_budget_bytes=FOUR_GIB // 2)
+    under_policy = RunLimits(event_budget_policy=strict)
+    assert dataclasses.asdict(under_policy) == dataclasses.asdict(RunLimits())
+    assert under_policy == RunLimits()

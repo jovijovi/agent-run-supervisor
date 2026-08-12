@@ -33,6 +33,11 @@ from agent_run_supervisor.event_store import (
     durable_secure_mkdir,
 )
 from agent_run_supervisor.native_acp import agent_registry, storage
+from agent_run_supervisor.native_acp.spec import (
+    DEFAULT_MAX_RUN_EVENT_BUDGET_BYTES,
+    EventBudgetPolicy,
+    NativeSpecError,
+)
 
 _LOGGER = logging.getLogger("agent_run_supervisor.arsd")
 
@@ -454,6 +459,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MAX_CONNECTIONS,
     )
     parser.add_argument(
+        "--max-run-event-budget-bytes",
+        type=int,
+        default=DEFAULT_MAX_RUN_EVENT_BUDGET_BYTES,
+        metavar="BYTES",
+        help=(
+            "Admission ceiling on one Run's normalized event ledger, in bytes: "
+            "a Run whose max_event_bytes * max_events exceeds it is refused at "
+            "submit. Applies to every Run this daemon accepts; each Run still "
+            "seals its own limits. Default 4294967296 (4 GiB). This is a "
+            "theoretical per-Run persistent event-ledger ceiling — not "
+            "preallocated memory, not a Run-directory disk quota, and not a "
+            "daemon-wide aggregate across concurrent Runs."
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"),
@@ -611,6 +631,7 @@ async def serve_daemon(
     policy: CallerPolicy,
     max_concurrent_runs: int = handlers.DEFAULT_MAX_CONCURRENT_RUNS,
     max_connections: int = DEFAULT_MAX_CONNECTIONS,
+    max_run_event_budget_bytes: int = DEFAULT_MAX_RUN_EVENT_BUDGET_BYTES,
     agents_file: Path | str | None = None,
     run_task_factory: Any | None = None,
     cancel_wait_seconds: float = DEFAULT_CANCEL_WAIT_SECONDS,
@@ -712,6 +733,20 @@ async def serve_daemon(
                 f"agent registry file overlaps the {label}; refusing to listen"
             )
 
+    # The admission ceiling this daemon will apply to every Run it accepts.
+    # Built here, before anything is written: a misconfigured ceiling refuses to
+    # listen rather than silently falling back to the default. argparse already
+    # rejects a non-integer spelling, so this also covers the programmatic entry
+    # a direct caller uses — where ``True`` is a positive integer.
+    try:
+        budget_policy = EventBudgetPolicy(
+            max_run_event_budget_bytes=max_run_event_budget_bytes
+        )
+    except NativeSpecError as err:
+        raise DaemonStartupError(
+            f"invalid run event budget: {err}; refusing to listen"
+        ) from err
+
     # Step 1, and it is first for a reason: the registry parse is the only step
     # that can fail without ARS having written anything at all. Any defect
     # refuses to listen *before any state write* — before the lease, before the
@@ -742,6 +777,7 @@ async def serve_daemon(
             "event_store": event_store,
             "max_concurrent_runs": max_concurrent_runs,
             "cancel_wait_seconds": cancel_wait_seconds,
+            "event_budget_policy": budget_policy,
         }
         if run_task_factory is not None:
             handler_kwargs["run_task_factory"] = run_task_factory
@@ -844,6 +880,15 @@ def main(argv: list[str] | None = None) -> int:
                 agents_file=args.agents_file,
                 caller_mappings=tuple(args.caller_mapping or ()),
                 python_executable=sys.executable,
+                # Rendered only when the operator asked for a specific ceiling.
+                # At the default the flag would say exactly what its absence
+                # already says, and every existing unit would grow a line.
+                max_run_event_budget_bytes=(
+                    None
+                    if args.max_run_event_budget_bytes
+                    == DEFAULT_MAX_RUN_EVENT_BUDGET_BYTES
+                    else args.max_run_event_budget_bytes
+                ),
             )
         except ServiceUnitError as err:
             print(f"arsd: invalid service unit: {err}", file=sys.stderr)
@@ -908,6 +953,7 @@ def main(argv: list[str] | None = None) -> int:
                 policy=policy,
                 max_concurrent_runs=args.max_concurrent_runs,
                 max_connections=args.max_connections,
+                max_run_event_budget_bytes=args.max_run_event_budget_bytes,
                 agents_file=args.agents_file,
                 install_signals=True,
             )

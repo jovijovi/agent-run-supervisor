@@ -19,6 +19,7 @@ from agent_run_supervisor.arsd.operand import (
     admit_exact_text,
     capture_agents_file,
 )
+from agent_run_supervisor.native_acp.spec import EventBudgetPolicy, NativeSpecError
 
 __all__ = [
     "DEFAULT_RESTART_SEC",
@@ -103,6 +104,7 @@ def render_service_unit(
     agents_file: str | None = None,
     caller_mappings: Sequence[str] = (),
     python_executable: str | None = None,
+    max_run_event_budget_bytes: int | None = None,
     timeout_stop_sec: int = DEFAULT_TIMEOUT_STOP_SEC,
     restart_sec: int = DEFAULT_RESTART_SEC,
 ) -> str:
@@ -121,6 +123,14 @@ def render_service_unit(
     ``TypeError`` that would escape the CLI's fail-closed handler.
     It is rendered as argv data only — this module never opens, creates, or
     validates the file.
+
+    ``max_run_event_budget_bytes`` is the per-Run event-ledger admission ceiling.
+    ``None`` renders nothing and leaves the source default in force — the unit
+    stays exactly as short as it was, like the other tunables this renderer
+    deliberately does not spell. A value renders the flag, because a unit that
+    silently dropped it would start a *different* daemon from the one the
+    operator just configured. It is validated by the same policy the daemon
+    applies, so this never renders an ``ExecStart`` the daemon would refuse.
     """
     if not isinstance(timeout_stop_sec, int) or not (30 <= timeout_stop_sec <= 300):
         raise ServiceUnitError("TimeoutStopSec must be an int in [30, 300]")
@@ -167,6 +177,15 @@ def render_service_unit(
         raise ServiceUnitError(str(exc)) from exc
     argv_parts.append(("--agents-file", True))
     argv_parts.append((agents, True))
+    if max_run_event_budget_bytes is not None:
+        try:
+            policy = EventBudgetPolicy(
+                max_run_event_budget_bytes=max_run_event_budget_bytes
+            )
+        except NativeSpecError as exc:
+            raise ServiceUnitError(f"invalid run event budget: {exc}") from exc
+        argv_parts.append(("--max-run-event-budget-bytes", True))
+        argv_parts.append((str(policy.max_run_event_budget_bytes), True))
     for raw in caller_mappings:
         mapping = _reject_controls(raw, label="caller_mapping")
         parts = mapping.split(":", 3)
