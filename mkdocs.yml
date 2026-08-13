@@ -39,7 +39,7 @@ theme:
   name: material
   custom_dir: website/overrides
   language: en
-  logo: assets/logo/ars-mark.svg
+  logo: assets/logo/logo-mark-64.png
   favicon: assets/logo/favicon.svg
   # `false` removes the theme's Google Fonts <link>. Every face is served from
   # website/docs/assets/fonts by assets/stylesheets/ars.css.
