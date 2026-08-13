@@ -1,110 +1,45 @@
-# Test matrix contract
+# Fixed quick-health cases
 
-The runner accepts one strict UTF-8 JSON object. Duplicate keys, non-JSON numeric constants, unknown keys, wrong JSON types, invalid Socket API request fields, implicit Run limits, repeated case IDs, and any `session_id` are refused before submission.
+The prompts may include AGENT-specific syntax, but the task, capabilities, checker, and PASS rules below do not change between runs.
 
-## Closed shape
+## 1. Response-only: bubble sort
 
-Top level:
+**Method:** the AGENT returns Python source in its response. The trusted controller extracts it and runs the fixed checker in a fresh temporary workspace. The AGENT does not write files.
 
-- `schema_version`: the skill matrix schema.
-- `server_constraints`: `api_version` and a non-empty `allowed_daemon_versions` array. Supply values from the operator's approved runtime target; the skill freezes none.
-- `controller`: every controller limit is required: `max_concurrency`, `max_rounds`, `max_cases`, `poll_interval_seconds`, `terminal_timeout_seconds`, `events_page_limit`, and `checker_output_limit_bytes`.
-- `rounds`: a non-empty array. Each round contains exactly `round_id` and `cases`.
+| ID | Content and checker inputs | Expected result |
+|---|---|---|
+| R1 basic | `bubble_sort(values)`; negatives, duplicates, empty/singleton inputs; verify input is unchanged | Correct ascending output; no input mutation |
+| R2 reverse | `bubble_sort(values, reverse=False)`; ascending/descending and nearly sorted inputs | Correct output for both `reverse` values |
+| R3 key/stable | `bubble_sort(values, key=None, reverse=False)`; records with duplicate keys, sorted and reversed inputs | Key ordering is correct, equal-key order is stable, input is unchanged, sorted input exits after one pass |
 
-Each case contains exactly:
+Parameters: three Runs per AGENT, no write capability required. PASS requires `completed`, exact model/effort readback, extractable source, and all deterministic assertions passing.
 
-- `case_id`: a unique safe identifier used only in raw local evidence.
-- `request`: the current Socket API `AgentRunRequest` JSON shape, with `session_id` omitted and all six `limits` values present.
-- `prompt`: raw prompt text. It remains raw local evidence and never enters the receipt.
-- `task_checker`: `argv` as a non-empty string array plus a positive `timeout_seconds`. The runner calls `subprocess.run(argv, cwd=<case-workspace>, shell=False, ...)` once. It does not interpret the command through a shell.
-- `event_constraints`: four arrays: `required_event_types`, `forbidden_event_types`, `required_permission_decisions`, and `forbidden_permission_decisions`.
+## 2. Permissions
 
-The runner creates a fresh, initially empty workspace at `workspaces/<case-ref>` below the output directory. Use an absolute or otherwise executable checker argv supplied by the operator; relative checker data paths resolve from the case workspace.
+Use one fresh empty workspace per case and fixed markers generated before submission.
 
-## Preflight meaning
+| ID | Capabilities | Action | Expected result |
+|---|---|---|---|
+| P1 read/search allow | `read`, `search` | Read a seeded file and find its unique marker | Both operations are allowed; exact marker returned; no mutation |
+| P2 execute allow | `execute` | Run the approved harmless command that prints a fixed marker | Execute is allowed; exit `0`; exact marker returned |
+| P3 write/edit deny | `write` | Attempt to create or edit `denied.txt` | The write/edit request is denied and `denied.txt` does not exist |
 
-Before creating the evidence directory or submitting any case, the controller:
+PASS is based on the expected permission/tool event plus the checker-observed side effect. Write-family mediation is currently deny-only even when the grant contains `write`; `edit` is an ACP tool kind, not a grant-capability token. This deny must not make response-only or unrelated permission cases fail.
 
-1. checks actual round/case totals against the configured matrix maxima;
-2. parses the explicitly supplied agents file through ARS's strict read-only registry loader and confirms every requested `agent_id` exists;
-3. reads `server_info` with the configured API version;
-4. checks the API and daemon-version allowlist;
-5. requires the Socket operations used by the controller;
-6. refuses a controller cap above live `max_concurrent_runs`;
-7. refuses a page size above the live event page limit; and
-8. refuses any case whose `max_event_bytes * max_events` exceeds the live per-Run event budget.
+## 3. Session reuse
 
-The agents file proves what the supplied file contains. Because the current Socket API does not expose the daemon's immutable startup registry snapshot, only the daemon can conclusively reject a snapshot mismatch at submission. The runner neither edits the file nor restarts the daemon.
+Run sequentially for each AGENT:
 
-## Bubble-sort example only
+| ID | Request | Expected result |
+|---|---|---|
+| S1 create | Submit without `session_id`; ask the AGENT to remember a fresh continuity token and acknowledge it | New Session and first Run complete; exact model/effort read back |
+| S2 reuse | Submit a second Run with S1's `session_id`; ask for the token without restating it | `session/load` succeeds; second Run is distinct, same Session is used, exact token is returned |
 
-Bubble sort is an illustrative safe task, not a built-in judge or a required algorithm. Replace every placeholder and the deliberately invalid `api_version` sentinel with operator-approved values before use. The checker is an operator-supplied local program; it is not bundled into the generic runner.
+PASS requires both Runs to complete, the Session to remain non-quarantined, configuration to stay exact, and the token to match. A new/recreated Session, missing token, or load failure is FAIL.
 
-```json
-{
-  "schema_version": 1,
-  "server_constraints": {
-    "api_version": 0,
-    "allowed_daemon_versions": ["<approved-daemon-version>"]
-  },
-  "controller": {
-    "max_concurrency": 1,
-    "max_rounds": 1,
-    "max_cases": 1,
-    "poll_interval_seconds": 1,
-    "terminal_timeout_seconds": 600,
-    "events_page_limit": 100,
-    "checker_output_limit_bytes": 16384
-  },
-  "rounds": [
-    {
-      "round_id": "example-round",
-      "cases": [
-        {
-          "case_id": "bubble-sort-example",
-          "request": {
-            "owner": "<caller-owner>",
-            "namespace": "<caller-namespace>",
-            "agent_id": "<registered-agent-id>",
-            "expected_binding_hash": null,
-            "input_refs": [
-              {"ref": "prompt:inline", "content_hash": "<content-hash>"}
-            ],
-            "requested_model": "<model-id>",
-            "requested_effort": "<effort>",
-            "grant_ref": "<grant-reference>",
-            "grant_hash": "<grant-hash>",
-            "grant_role_hash": "<grant-role-hash>",
-            "grant_capabilities": ["read", "write"],
-            "mcp_snapshot_hashes": [],
-            "credential_refs": [],
-            "limits": {
-              "startup_timeout_seconds": 60,
-              "turn_timeout_seconds": 600,
-              "cancel_grace_seconds": 10,
-              "max_stderr_bytes": 262144,
-              "max_event_bytes": 65536,
-              "max_events": 1000
-            },
-            "evidence_policy_hash": "<evidence-policy-hash>",
-            "recovery_policy_hash": "<recovery-policy-hash>"
-          },
-          "prompt": "Implement bubble sort and write the requested deliverable into the case workspace.",
-          "task_checker": {
-            "argv": ["python3", "<repo-root>/checks/check-bubble-sort.py"],
-            "timeout_seconds": 30
-          },
-          "event_constraints": {
-            "required_event_types": [],
-            "forbidden_event_types": ["permission_violation"],
-            "required_permission_decisions": [],
-            "forbidden_permission_decisions": []
-          }
-        }
-      ]
-    }
-  ]
-}
-```
+## Common execution rules
 
-Do not add an algorithm-specific branch to either script. Express every task verdict through the trusted checker and explicit event constraints.
+- Read live API/version/capacity/limits from `server_info`; do not hard-code deployment values.
+- Use fresh request IDs and evidence paths. Never overwrite prior evidence.
+- Run each case once; uncertainty is `INDETERMINATE`, not permission to replay.
+- Keep prompts, identifiers, paths, event bodies, and checker output out of the shared summary.
