@@ -1,17 +1,16 @@
-"""Focused contract tests for the repository-owned batch acceptance skill.
+"""Hermetic contract tests for the two direct ARS quick-health controllers.
 
-No test starts arsd, an external AGENT, or a provider call.  The controller is
-driven through a typed-client stand-in and the adjudicator reads synthetic local
-evidence only.
+The tests use a public-client-shaped fake and synthetic durable Run evidence.
+They never start arsd, an external AGENT, or a provider call.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import threading
-import time
 from pathlib import Path
 from types import ModuleType
 
@@ -20,12 +19,17 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "ars-batch-agent-acceptance"
-RUNNER_PATH = SKILL / "scripts" / "run_batch_acceptance.py"
-ADJUDICATOR_PATH = SKILL / "scripts" / "adjudicate.py"
+SCRIPTS = SKILL / "scripts"
+COMMON_PATH = SCRIPTS / "_common.py"
+RESPONSE_PATH = SCRIPTS / "run_response_only.py"
+SESSION_PATH = SCRIPTS / "run_session_reuse.py"
 
 
 def _load(path: Path, name: str) -> ModuleType:
     assert path.is_file(), f"required script is absent: {path.relative_to(ROOT)}"
+    script_dir = str(path.parent)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -34,127 +38,51 @@ def _load(path: Path, name: str) -> ModuleType:
     return module
 
 
-def _runner() -> ModuleType:
-    return _load(RUNNER_PATH, "ars_batch_acceptance_runner_test_view")
-
-
-def _adjudicator() -> ModuleType:
-    return _load(ADJUDICATOR_PATH, "ars_batch_acceptance_adjudicator_test_view")
-
-
-def _request(*, agent_id: str, model: str, effort: str) -> dict:
-    return {
-        "owner": "<caller-owner>",
-        "namespace": "<caller-namespace>",
-        "agent_id": agent_id,
-        "expected_binding_hash": None,
-        "input_refs": [
-            {"ref": "prompt:inline", "content_hash": "sha256:" + "a" * 64}
-        ],
-        "requested_model": model,
-        "requested_effort": effort,
-        "grant_ref": "grant:<reference>",
-        "grant_hash": "sha256:" + "b" * 64,
-        "grant_role_hash": "sha256:" + "c" * 64,
-        "grant_capabilities": ["read"],
-        "mcp_snapshot_hashes": [],
-        "credential_refs": [],
-        "limits": {
-            "startup_timeout_seconds": 5,
-            "turn_timeout_seconds": 10,
-            "cancel_grace_seconds": 1,
-            "max_stderr_bytes": 4096,
-            "max_event_bytes": 256,
-            "max_events": 10,
-        },
-        "evidence_policy_hash": "sha256:" + "d" * 64,
-        "recovery_policy_hash": "sha256:" + "e" * 64,
-    }
-
-
-def _case(
-    case_id: str,
-    *,
-    agent_id: str = "example-agent",
-    model: str = "provider/example-model",
-    effort: str = "example-effort",
-    checker: list[str] | None = None,
-) -> dict:
-    return {
-        "case_id": case_id,
-        "request": _request(agent_id=agent_id, model=model, effort=effort),
-        "prompt": "write the requested result into the case workspace",
-        "task_checker": {
-            "argv": checker
-            or [sys.executable, "-c", "raise SystemExit(0)"],
-            "timeout_seconds": 2,
-        },
-        "event_constraints": {
-            "required_event_types": [],
-            "forbidden_event_types": ["permission_violation"],
-            "required_permission_decisions": [],
-            "forbidden_permission_decisions": [],
-        },
-    }
-
-
-def _matrix(*rounds: list[dict], concurrency: int = 2) -> dict:
-    selected = list(rounds) or [
-        {"round_id": "round-a", "cases": [_case("case-a")]}
-    ]
-    return {
-        "schema_version": 1,
-        "server_constraints": {
-            "api_version": 3,
-            "allowed_daemon_versions": ["test-build"],
-        },
-        "controller": {
-            "max_concurrency": concurrency,
-            "max_rounds": len(selected),
-            "max_cases": sum(len(item["cases"]) for item in selected),
-            "poll_interval_seconds": 0.001,
-            "terminal_timeout_seconds": 1,
-            "events_page_limit": 100,
-            "checker_output_limit_bytes": 4096,
-        },
-        "rounds": selected,
-    }
-
-
-def _write_matrix(path: Path, payload: dict) -> Path:
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    return path
-
-
-class _Snapshot:
-    def __init__(self, *agent_ids: str) -> None:
-        self._ids = tuple(agent_ids)
-
-    def ids(self) -> tuple[str, ...]:
-        return self._ids
+def _modules() -> tuple[ModuleType, ModuleType, ModuleType]:
+    common = _load(COMMON_PATH, "_common")
+    response = _load(RESPONSE_PATH, "ars_response_only_test_view")
+    session = _load(SESSION_PATH, "ars_session_reuse_test_view")
+    return common, response, session
 
 
 class _FakeClient:
-    """Typed-client stand-in with shared observation state."""
+    """Public-ArsdClient-shaped fake with synthetic durable evidence."""
 
     lock = threading.Lock()
-    submissions: list[dict] = []
-    active_status_calls = 0
-    max_active_status_calls = 0
-    fail_submit_for: str | None = None
-    final_message = "controller-private-final-message"
-    checker_delay = 0.02
+    supervisor_root: Path
+    submissions: list[dict]
+    results: dict[str, dict]
+    events: dict[str, list[dict]]
+    tokens: dict[str, str]
+    response_message: object
+    s1_message: object
+    s2_message: object | None
+    mutate_workspace: bool
+    effective_model: str | None
+    omit_prompt_event: bool
+    change_session_on_load: bool
+    reuse_run_on_load: bool
+    info_overrides: dict
 
     @classmethod
-    def reset(cls) -> None:
+    def configure(cls, supervisor_root: Path) -> None:
+        cls.supervisor_root = supervisor_root
         cls.submissions = []
-        cls.active_status_calls = 0
-        cls.max_active_status_calls = 0
-        cls.fail_submit_for = None
+        cls.results = {}
+        cls.events = {}
+        cls.tokens = {}
+        cls.response_message = "plain deliverable; intentionally not JSON or Python"
+        cls.s1_message = "acknowledged in arbitrary words"
+        cls.s2_message = None
+        cls.mutate_workspace = False
+        cls.effective_model = None
+        cls.omit_prompt_event = False
+        cls.change_session_on_load = False
+        cls.reuse_run_on_load = False
+        cls.info_overrides = {}
 
-    def __init__(self, socket_path: Path | str, *, api_version: int | None = None):
-        self.socket_path = socket_path
-        self.api_version = api_version
+    def __init__(self, socket_path: Path | str):
+        self.socket_path = Path(socket_path)
 
     def __enter__(self):
         return self
@@ -162,33 +90,37 @@ class _FakeClient:
     def __exit__(self, exc_type, exc, tb):
         return None
 
-    def server_info(self) -> dict:
-        return {
-            "version": "test-build",
-            "api_version": 3,
-            "supported_api_versions": [3],
-            "operations": [
-                "server_info",
-                "submit",
-                "run_status",
-                "run_events",
-                "session_status",
-            ],
+    def server_info(self, *, request_id: str | None = None) -> dict:
+        del request_id
+        info = {
+            "version": "test-package-version",
+            "api_version": 19,
+            "supported_api_versions": [19],
+            "operations": ["server_info", "submit", "run_status", "run_events"],
             "limits": {
                 "max_concurrent_runs": 2,
-                "max_run_event_budget_bytes": 10_000,
-                "events_page_limit": 100,
+                "max_prompt_bytes": 200_000,
+                "events_page_limit": 50,
+                "max_run_event_budget_bytes": 50_000_000,
             },
         }
+        for key, value in self.info_overrides.items():
+            if key == "limits":
+                info["limits"].update(value)
+            else:
+                info[key] = value
+        return info
 
     def submit(self, *, request_id: str, payload: dict) -> dict:
         request = payload["request"]
-        if request["requested_model"] == self.fail_submit_for:
-            raise RuntimeError("synthetic submit refusal")
+        reference = request["input_refs"][0]["ref"]
+        is_load = "session-reuse:S2" in reference
         with self.lock:
             ordinal = len(self.submissions) + 1
-            run_id = f"synthetic-run-{ordinal}"
-            session_id = f"synthetic-session-{ordinal}"
+            run_id = "run-1" if is_load and self.reuse_run_on_load else f"run-{ordinal}"
+            session_id = request.get("session_id", f"session-{ordinal}")
+            if is_load and self.change_session_on_load:
+                session_id = "unexpected-session"
             self.submissions.append(
                 {
                     "request_id": request_id,
@@ -197,524 +129,406 @@ class _FakeClient:
                     "session_id": session_id,
                 }
             )
+
+        workspace = Path(payload["workspace_root"])
+        if self.mutate_workspace:
+            (workspace / "agent-write.txt").write_text("changed", encoding="utf-8")
+
+        if ":response-only:" in reference:
+            final_message = self.response_message
+            event_types = ["session_new_requested", "session_prompt_sent"]
+        elif "session-reuse:S1" in reference:
+            match = re.search(r"CONTINUITY-[A-F0-9]+", payload["prompt_text"])
+            assert match is not None
+            self.tokens[session_id] = match.group(0)
+            final_message = self.s1_message
+            event_types = ["session_new_requested", "session_prompt_sent"]
+        else:
+            final_message = self.s2_message
+            if final_message is None:
+                final_message = self.tokens[request["session_id"]]
+            event_types = ["session_load_requested", "session_prompt_sent"]
+        if self.omit_prompt_event:
+            event_types.remove("session_prompt_sent")
+
+        self.results[run_id] = {
+            "status": "completed",
+            "stop_reason": "end_turn",
+            "detail_code": None,
+            "retryable": False,
+            "final_message": final_message,
+        }
+        self.events[run_id] = [
+            {"seq": index, "type": event_type}
+            for index, event_type in enumerate(event_types, start=1)
+        ]
+        run_dir = self.supervisor_root / "native-runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        effective_model = self.effective_model or request["requested_model"]
+        (run_dir / "effective.json").write_text(
+            json.dumps(
+                {
+                    "process_identity": {
+                        "pid": 12345,
+                        "process_start": "123",
+                        "boot_id": "test-boot",
+                        "host": "test-host",
+                    },
+                    "effective_model": effective_model,
+                    "effective_effort": request["requested_effort"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (run_dir / "spec.json").write_text(
+            json.dumps(
+                {
+                    "runtime": {
+                        "model_id": request["requested_model"],
+                        "effort": request["requested_effort"],
+                        "config_fidelity": "exact",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
         return {
             "run_id": run_id,
             "session_id": session_id,
-            "accepted_at": "synthetic-time",
+            "accepted_at": "test-time",
         }
 
     def run_status(self, run_id: str) -> dict:
-        client_type = type(self)
-        with self.lock:
-            client_type.active_status_calls += 1
-            client_type.max_active_status_calls = max(
-                client_type.max_active_status_calls, client_type.active_status_calls
-            )
-        time.sleep(self.checker_delay)
-        with self.lock:
-            client_type.active_status_calls -= 1
-        return {
-            "run_id": run_id,
-            "result": {
-                "status": "completed",
-                "detail_code": None,
-                "retryable": False,
-                "final_message": self.final_message,
-            },
-        }
+        return {"run_id": run_id, "result": self.results[run_id]}
 
-    def run_events(self, run_id: str, **kwargs) -> dict:
+    def run_events(self, run_id: str, *, from_seq: int, limit: int, **kwargs) -> dict:
         del kwargs
+        selected = [event for event in self.events[run_id] if event["seq"] > from_seq]
+        page = selected[:limit]
         return {
             "run_id": run_id,
-            "events": [
-                {
-                    "seq": 1,
-                    "type": "permission_mediation",
-                    "decision": "allow",
-                    "requested_op": "permission:read",
-                }
-            ],
-            "next_from_seq": 1,
-            "exhausted": True,
-        }
-
-    def session_status(self, session_id: str) -> dict:
-        with self.lock:
-            row = next(item for item in self.submissions if item["session_id"] == session_id)
-        request = row["payload"]["request"]
-        return {
-            "session_id": session_id,
-            "owner": request["owner"],
-            "namespace": request["namespace"],
-            "agent_id": request["agent_id"],
-            "last_effective_model": request["requested_model"],
-            "last_effective_effort": request["requested_effort"],
-            "quarantine": None,
+            "events": page,
+            "next_from_seq": page[-1]["seq"] if page else from_seq,
+            "exhausted": len(page) == len(selected),
         }
 
 
-class _OversizedEventClient(_FakeClient):
-    def run_events(self, run_id: str, **kwargs) -> dict:
-        del kwargs
-        return {
-            "run_id": run_id,
-            "events": [
-                {"seq": 1, "type": "tool_started"},
-                {"seq": 2, "type": "tool_finished"},
-            ],
-            "next_from_seq": 2,
-            "exhausted": True,
-        }
-
-
-def _run(tmp_path: Path, payload: dict, **kwargs):
-    runner = _runner()
-    matrix_path = _write_matrix(tmp_path / "matrix.json", payload)
-    output = tmp_path / "evidence"
-    result = runner.run_batch(
-        matrix_path=matrix_path,
+def _config(tmp_path: Path, common: ModuleType, output_name: str):
+    route = common.AgentRoute("agent-a", "provider/exact-model", "exact-effort")
+    return common.ControllerConfig(
         socket_path=tmp_path / "arsd.sock",
-        agents_file=tmp_path / "agents.toml",
-        output_dir=output,
-        client_factory=_FakeClient,
-        registry_loader=lambda path: _Snapshot("example-agent", "other-agent"),
-        **kwargs,
+        supervisor_root=_FakeClient.supervisor_root,
+        output_dir=tmp_path / output_name,
+        owner="private-owner",
+        namespace="private/namespace",
+        routes=(route,),
+        request_limits=common.RequestLimits(
+            startup_timeout_seconds=5,
+            turn_timeout_seconds=10,
+            cancel_grace_seconds=1,
+            max_stderr_bytes=4096,
+            max_event_bytes=1024,
+            max_events=100,
+        ),
+        controller_policy=common.ControllerPolicy(
+            poll_seconds=0.001,
+            terminal_deadline_seconds=1,
+        ),
     )
-    return runner, output, result
 
 
-def test_required_skill_files_exist() -> None:
-    required = {
-        "SKILL.md",
-        "scripts/run_batch_acceptance.py",
-        "scripts/adjudicate.py",
-        "references/test-matrix.md",
-        "references/evidence-contract.md",
-    }
-    assert required <= {
+@pytest.fixture
+def controller_setup(tmp_path: Path):
+    common, response, session = _modules()
+    supervisor_root = tmp_path / "supervisor-state"
+    supervisor_root.mkdir()
+    _FakeClient.configure(supervisor_root)
+    return common, response, session
+
+
+def _reaped(identity: dict) -> str:
+    assert identity["pid"] == 12345
+    return "crashed"
+
+
+def test_skill_keeps_only_official_parameterized_controllers() -> None:
+    present = {
         str(path.relative_to(SKILL)) for path in SKILL.rglob("*") if path.is_file()
     }
+    assert {
+        "SKILL.md",
+        "scripts/_common.py",
+        "scripts/run_response_only.py",
+        "scripts/run_session_reuse.py",
+        "references/test-matrix.md",
+        "references/evidence-contract.md",
+        "references/response-only-controller.md",
+    } <= present
+    assert "scripts/run_batch_acceptance.py" not in present
+    assert "scripts/adjudicate.py" not in present
+    assert list((ROOT / "tests").glob("test_ars_batch_agent_acceptance*")) == [
+        ROOT / "tests/test_ars_batch_agent_acceptance_skill.py"
+    ]
+    assert RESPONSE_PATH.stat().st_mode & 0o111
+    assert SESSION_PATH.stat().st_mode & 0o111
 
 
-def test_matrix_parser_rejects_duplicate_and_unknown_keys_before_submission(
-    tmp_path: Path,
+def test_response_controller_is_a_compact_delivery_harness() -> None:
+    source = RESPONSE_PATH.read_text(encoding="utf-8")
+    assert len(source.splitlines()) < 400
+
+
+def test_docs_define_delivery_health_and_content_as_out_of_scope() -> None:
+    documents = [
+        SKILL / "SKILL.md",
+        SKILL / "references/evidence-contract.md",
+        SKILL / "references/response-only-controller.md",
+        SKILL / "references/test-matrix.md",
+    ]
+    text = "\n".join(path.read_text(encoding="utf-8") for path in documents).lower()
+    assert "content correctness" in text
+    assert "quality" in text
+    assert "out of scope" in text
+
+
+def test_route_parser_and_both_clis_preserve_exact_parameters(
+    controller_setup, tmp_path: Path
 ) -> None:
-    runner = _runner()
-    duplicate = tmp_path / "duplicate.json"
-    duplicate.write_text('{"schema_version":1,"schema_version":1}', encoding="utf-8")
-    with pytest.raises(runner.MatrixValidationError):
-        runner.load_matrix(duplicate)
-
-    unknown = _matrix()
-    unknown["unexpected"] = True
-    path = _write_matrix(tmp_path / "unknown.json", unknown)
-    with pytest.raises(runner.MatrixValidationError):
-        runner.load_matrix(path)
-
-
-def test_matrix_parser_rejects_non_json_numbers_and_session_reuse(tmp_path: Path) -> None:
-    runner = _runner()
-    non_json = tmp_path / "constant.json"
-    non_json.write_text(
-        '{"schema_version":1,"server_constraints":NaN}', encoding="utf-8"
+    common, response, session = controller_setup
+    route = common.parse_agent_route("agent-b=opaque[effort=high,fast=true],N/A")
+    assert (route.agent_id, route.model, route.effort) == (
+        "agent-b",
+        "opaque[effort=high,fast=true]",
+        "N/A",
     )
-    with pytest.raises(runner.MatrixValidationError):
-        runner.load_matrix(non_json)
+    argv = [
+        "--socket",
+        str(tmp_path / "arsd.sock"),
+        "--supervisor-root",
+        str(tmp_path / "state"),
+        "--output-dir",
+        str(tmp_path / "evidence"),
+        "--owner",
+        "caller-owner",
+        "--namespace",
+        "caller/namespace",
+        "--agent",
+        "agent-a=provider/model,high",
+    ]
+    for module in (response, session):
+        config = module.parse_args(argv).config
+        assert config.socket_path == tmp_path / "arsd.sock"
+        assert config.routes[0].model == "provider/model"
+        assert config.routes[0].effort == "high"
 
-    payload = _matrix()
-    payload["rounds"][0]["cases"][0]["request"]["session_id"] = "existing-session"
-    with pytest.raises(runner.MatrixValidationError):
-        runner.load_matrix(_write_matrix(tmp_path / "reuse.json", payload))
 
-
-def test_matrix_requires_explicit_model_and_effort(tmp_path: Path) -> None:
-    runner = _runner()
-    for field in ("requested_model", "requested_effort"):
-        payload = _matrix()
-        del payload["rounds"][0]["cases"][0]["request"][field]
-        with pytest.raises(runner.MatrixValidationError):
-            runner.load_matrix(_write_matrix(tmp_path / f"missing-{field}.json", payload))
-
-
-def test_preflight_fails_before_output_or_submit_on_live_constraint_mismatch(
-    tmp_path: Path,
+def test_response_only_accepts_any_nonempty_string_as_the_deliverable(
+    controller_setup, tmp_path: Path
 ) -> None:
-    _FakeClient.reset()
-    runner = _runner()
-    payload = _matrix()
-    payload["controller"]["max_concurrency"] = 3
-    path = _write_matrix(tmp_path / "matrix.json", payload)
-    output = tmp_path / "evidence"
-    with pytest.raises(runner.PreflightError):
-        runner.run_batch(
-            matrix_path=path,
-            socket_path=tmp_path / "arsd.sock",
-            agents_file=tmp_path / "agents.toml",
-            output_dir=output,
-            client_factory=_FakeClient,
-            registry_loader=lambda value: _Snapshot("example-agent"),
-        )
-    assert not output.exists()
-    assert _FakeClient.submissions == []
+    common, response, _ = controller_setup
+    config = _config(tmp_path, common, "response-evidence")
 
+    summary = response.run_response_only(
+        config, client_factory=_FakeClient, sleeper=lambda _: None, liveness_checker=_reaped
+    )
 
-@pytest.mark.parametrize("mismatch", ["api", "version", "agent", "budget", "matrix"])
-def test_each_preflight_dimension_refuses_before_submission(
-    tmp_path: Path, mismatch: str
-) -> None:
-    _FakeClient.reset()
-    runner = _runner()
-    payload = _matrix()
-    snapshot = _Snapshot("example-agent")
-    if mismatch == "api":
-        payload["server_constraints"]["api_version"] = 2
-    elif mismatch == "version":
-        payload["server_constraints"]["allowed_daemon_versions"] = ["other-build"]
-    elif mismatch == "agent":
-        snapshot = _Snapshot("other-agent")
-    elif mismatch == "budget":
-        payload["rounds"][0]["cases"][0]["request"]["limits"]["max_events"] = 100
-    else:
-        payload["controller"]["max_cases"] = 0
-    with pytest.raises((runner.MatrixValidationError, runner.PreflightError)):
-        runner.run_batch(
-            matrix_path=_write_matrix(tmp_path / "matrix.json", payload),
-            socket_path=tmp_path / "arsd.sock",
-            agents_file=tmp_path / "agents.toml",
-            output_dir=tmp_path / "evidence",
-            client_factory=_FakeClient,
-            registry_loader=lambda value: snapshot,
-        )
-    assert _FakeClient.submissions == []
-
-
-def test_output_directory_must_not_exist(tmp_path: Path) -> None:
-    _FakeClient.reset()
-    output = tmp_path / "evidence"
-    output.mkdir()
-    runner = _runner()
-    with pytest.raises(runner.EvidenceError):
-        runner.run_batch(
-            matrix_path=_write_matrix(tmp_path / "matrix.json", _matrix()),
-            socket_path=tmp_path / "arsd.sock",
-            agents_file=tmp_path / "agents.toml",
-            output_dir=output,
-            client_factory=_FakeClient,
-            registry_loader=lambda value: _Snapshot("example-agent"),
-        )
-    assert _FakeClient.submissions == []
-
-
-def test_rounds_are_sequential_cases_are_capped_and_each_submit_is_fresh(
-    tmp_path: Path,
-) -> None:
-    _FakeClient.reset()
-    first_a = _case("case-a")
-    first_a["prompt"] = "first-a"
-    first_b = _case("case-b")
-    first_b["prompt"] = "first-b"
-    second_case = _case("case-c")
-    second_case["prompt"] = "second"
-    first = {
-        "round_id": "round-a",
-        "cases": [first_a, first_b],
+    assert summary["overall"] == "PASS"
+    assert len(_FakeClient.submissions) == 3
+    assert all("session_id" not in row["payload"]["request"] for row in _FakeClient.submissions)
+    assert all(
+        not any(path.iterdir())
+        for path in (config.output_dir / "workspaces").glob("*/*")
+    )
+    expected_checks = {
+        "completed",
+        "end_turn",
+        "effective_model",
+        "effective_effort",
+        "spec_model",
+        "spec_effort",
+        "config_fidelity",
+        "prompt_once",
+        "session_new_once",
+        "session_load_absent",
+        "process_reaped",
+        "workspace_unchanged",
+        "deliverable_present",
     }
-    second = {"round_id": "round-b", "cases": [second_case]}
-    _, output, result = _run(tmp_path, _matrix(first, second, concurrency=2))
-
-    assert result["case_count"] == 3
-    assert _FakeClient.max_active_status_calls == 2
-    request_ids = [item["request_id"] for item in _FakeClient.submissions]
-    assert len(request_ids) == len(set(request_ids)) == 3
-    assert all("session_id" not in item["payload"]["request"] for item in _FakeClient.submissions)
-    submitted_prompts = [
-        item["payload"]["prompt_text"] for item in _FakeClient.submissions
-    ]
-    assert set(submitted_prompts[:2]) == {"first-a", "first-b"}
-    assert submitted_prompts[2] == "second"
-    assert (output / "controller-manifest.json").is_file()
-    assert (output / "completion.json").is_file()
-    assert len(list((output / "cases").glob("*.json"))) == 3
+    for receipt_path in (config.output_dir / "raw").glob("R*.json"):
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        assert set(receipt["checks"]) == expected_checks
+        assert all(receipt["checks"].values())
+        assert "final_message" not in receipt
 
 
-def test_submission_failure_is_recorded_once_and_never_retried(tmp_path: Path) -> None:
-    _FakeClient.reset()
-    _FakeClient.fail_submit_for = "provider/refused-model"
-    payload = _matrix(
-        {
-            "round_id": "round-a",
-            "cases": [_case("case-a", model="provider/refused-model")],
-        }
-    )
-    _, output, result = _run(tmp_path, payload)
-    assert result["case_count"] == 1
-    assert _FakeClient.submissions == []
-    evidence = json.loads(next((output / "cases").glob("*.json")).read_text())
-    assert evidence["controller"]["submission_attempts"] == 1
-    assert evidence["controller"]["submit_error"]["kind"] == "RuntimeError"
-
-
-def test_checker_runs_as_argv_in_case_workspace_with_timeout_and_bounded_output(
-    tmp_path: Path,
+@pytest.mark.parametrize("message", ["", None])
+def test_response_only_refuses_a_missing_deliverable(
+    controller_setup, tmp_path: Path, message: object
 ) -> None:
-    _FakeClient.reset()
-    checker = [
-        sys.executable,
-        "-c",
-        "import pathlib,sys; pathlib.Path('checked').write_text('ok'); "
-        "sys.stdout.write('x' * 5000)",
-    ]
-    payload = _matrix(
-        {"round_id": "round-a", "cases": [_case("case-a", checker=checker)]}
-    )
-    _, output, _ = _run(tmp_path, payload)
-    case_file = next((output / "cases").glob("*.json"))
-    evidence = json.loads(case_file.read_text(encoding="utf-8"))
-    checker_result = evidence["controller"]["task_checker"]
-    workspace = output / evidence["workspace_relpath"]
-    assert (workspace / "checked").read_text(encoding="utf-8") == "ok"
-    assert checker_result["returncode"] == 0
-    assert checker_result["timed_out"] is False
-    assert checker_result["stdout_truncated"] is True
-    assert len(checker_result["stdout"].encode("utf-8")) <= 4096
+    common, response, _ = controller_setup
+    _FakeClient.response_message = message
+    config = _config(tmp_path, common, "missing-deliverable")
 
-
-def test_event_capture_is_bounded_by_the_case_event_limit(tmp_path: Path) -> None:
-    _OversizedEventClient.reset()
-    runner = _runner()
-    payload = _matrix()
-    payload["rounds"][0]["cases"][0]["request"]["limits"]["max_events"] = 1
-    matrix_path = _write_matrix(tmp_path / "matrix.json", payload)
-    output = tmp_path / "evidence"
-    runner.run_batch(
-        matrix_path=matrix_path,
-        socket_path=tmp_path / "arsd.sock",
-        agents_file=tmp_path / "agents.toml",
-        output_dir=output,
-        client_factory=_OversizedEventClient,
-        registry_loader=lambda path: _Snapshot("example-agent"),
-    )
-    evidence = json.loads(next((output / "cases").glob("*.json")).read_text())
-    assert evidence["controller"]["events_exhausted"] is False
-    assert any(
-        item["phase"] == "run_events"
-        for item in evidence["controller"]["observation_errors"]
+    summary = response.run_response_only(
+        config, client_factory=_FakeClient, sleeper=lambda _: None, liveness_checker=_reaped
     )
 
+    assert summary["overall"] == "FAIL"
+    assert summary["results"][0]["first_failure"] == "DELIVERABLE_MISSING"
 
-def test_adjudication_recomputes_separate_axes_and_sanitizes_receipt(
+
+@pytest.mark.parametrize(
+    ("mutation", "liveness", "expected_verdict", "expected_failure"),
+    [
+        ("workspace", _reaped, "FAIL", "WORKSPACE_MUTATED"),
+        ("model", _reaped, "FAIL", "CONFIG_FIDELITY"),
+        ("prompt", _reaped, "FAIL", "PROMPT_EVENTS"),
+        (None, lambda _: "unknown", "INDETERMINATE", "PROCESS_REAP_UNPROVEN"),
+    ],
+)
+def test_response_only_fails_closed_on_missing_chain_evidence(
+    controller_setup,
     tmp_path: Path,
+    mutation: str | None,
+    liveness,
+    expected_verdict: str,
+    expected_failure: str,
 ) -> None:
-    _FakeClient.reset()
-    marker = "private-account-marker"
-    case = _case("case-sensitive")
-    case["request"]["owner"] = marker
-    case["request"]["namespace"] = marker + "-namespace"
-    case["request"]["agent_id"] = "example-agent"
-    case["request"]["requested_model"] = marker + "-model"
-    case["prompt"] = marker + "-raw-prompt"
-    case["event_constraints"]["required_event_types"] = ["permission_mediation"]
-    case["event_constraints"]["required_permission_decisions"] = ["allow"]
-    _, output, _ = _run(tmp_path, _matrix({"round_id": "round-a", "cases": [case]}))
+    common, response, _ = controller_setup
+    _FakeClient.mutate_workspace = mutation == "workspace"
+    _FakeClient.effective_model = "wrong-model" if mutation == "model" else None
+    _FakeClient.omit_prompt_event = mutation == "prompt"
+    config = _config(tmp_path, common, "failed-response-proof")
 
-    adjudicator = _adjudicator()
-    receipt = adjudicator.build_receipt(output)
-    assert receipt["cases"][0]["transport_ars_terminal"]["verdict"] == "PASS"
-    assert receipt["cases"][0]["configuration_fidelity"]["verdict"] == "PASS"
-    assert receipt["cases"][0]["task_checker"]["verdict"] == "PASS"
-    assert receipt["cases"][0]["execution_constraints"]["verdict"] == "PASS"
-    assert receipt["cases"][0]["settled_state"]["verdict"] == "PASS"
-    assert receipt["cases"][0]["business_verdict"] == "PASS"
+    summary = response.run_response_only(
+        config, client_factory=_FakeClient, sleeper=lambda _: None, liveness_checker=liveness
+    )
 
-    raw_case = json.loads(next((output / "cases").glob("*.json")).read_text())
-    encoded = json.dumps(receipt, sort_keys=True)
-    for forbidden in (
-        marker,
-        "example-agent",
-        "synthetic-run-",
-        "synthetic-session-",
-        raw_case["controller"]["request_id"],
+    assert summary["overall"] == expected_verdict
+    assert summary["results"][0]["first_failure"] == expected_failure
+
+
+def test_session_reuse_proves_create_load_and_exact_token_continuity(
+    controller_setup, tmp_path: Path
+) -> None:
+    common, _, session = controller_setup
+    config = _config(tmp_path, common, "session-evidence")
+    token = "CONTINUITY-" + "A" * 32
+
+    summary = session.run_session_reuse(
+        config,
+        client_factory=_FakeClient,
+        sleeper=lambda _: None,
+        liveness_checker=_reaped,
+        token_factory=lambda: token,
+    )
+
+    assert summary["overall"] == "PASS"
+    assert len(_FakeClient.submissions) == 2
+    first, second = _FakeClient.submissions
+    assert first["run_id"] != second["run_id"]
+    assert second["payload"]["request"]["session_id"] == first["session_id"]
+    receipt = json.loads(
+        (config.output_dir / "raw/session-reuse-agent-a.json").read_text(encoding="utf-8")
+    )
+    assert receipt["S1"]["checks"]["deliverable_present"] is True
+    assert all(receipt["S1"]["checks"].values())
+    assert all(receipt["S2"]["checks"].values())
+    assert receipt["S1"]["event_family_counts"] == {
+        "session_new_requested": 1,
+        "session_prompt_sent": 1,
+    }
+    assert receipt["S2"]["event_family_counts"] == {
+        "session_load_requested": 1,
+        "session_prompt_sent": 1,
+    }
+    assert receipt["continuity"] == {
+        "distinct_runs": True,
+        "same_session": True,
+        "token_exact_match": True,
+    }
+    encoded = json.dumps(receipt)
+    assert token not in encoded
+    assert _FakeClient.s1_message not in encoded
+
+
+def test_session_reuse_requires_nonempty_s1_output_before_s2(
+    controller_setup, tmp_path: Path
+) -> None:
+    common, _, session = controller_setup
+    _FakeClient.s1_message = ""
+    config = _config(tmp_path, common, "empty-s1")
+
+    summary = session.run_session_reuse(
+        config,
+        client_factory=_FakeClient,
+        sleeper=lambda _: None,
+        liveness_checker=_reaped,
+        token_factory=lambda: "CONTINUITY-" + "B" * 32,
+    )
+
+    assert summary["overall"] == "FAIL"
+    assert summary["results"][0]["first_failure"] == "S1_DELIVERABLE_MISSING"
+    assert len(_FakeClient.submissions) == 1
+
+
+@pytest.mark.parametrize(
+    ("mutation", "failure"),
+    [
+        ("token", "TOKEN_MISMATCH"),
+        ("session", "SESSION_CHANGED"),
+        ("run", "RUNS_NOT_DISTINCT"),
+    ],
+)
+def test_session_reuse_rejects_broken_continuity(
+    controller_setup, tmp_path: Path, mutation: str, failure: str
+) -> None:
+    common, _, session = controller_setup
+    _FakeClient.s2_message = "wrong-token" if mutation == "token" else None
+    _FakeClient.change_session_on_load = mutation == "session"
+    _FakeClient.reuse_run_on_load = mutation == "run"
+    config = _config(tmp_path, common, "broken-continuity")
+
+    summary = session.run_session_reuse(
+        config,
+        client_factory=_FakeClient,
+        sleeper=lambda _: None,
+        liveness_checker=_reaped,
+        token_factory=lambda: "CONTINUITY-" + "C" * 32,
+    )
+
+    assert summary["overall"] == "FAIL"
+    assert summary["results"][0]["first_failure"] == failure
+
+
+def test_shareable_summaries_exclude_local_and_private_values(
+    controller_setup, tmp_path: Path
+) -> None:
+    common, response, _ = controller_setup
+    config = _config(tmp_path, common, "sanitized-summary")
+
+    summary = response.run_response_only(
+        config, client_factory=_FakeClient, sleeper=lambda _: None, liveness_checker=_reaped
+    )
+
+    persisted = json.loads((config.output_dir / "summary.json").read_text(encoding="utf-8"))
+    assert persisted == summary
+    encoded = json.dumps(summary)
+    for private in (
         str(tmp_path),
-        _FakeClient.final_message,
-        "raw-prompt",
-        "stderr",
+        config.owner,
+        config.namespace,
+        "run-1",
+        "session-1",
+        str(_FakeClient.response_message),
     ):
-        assert forbidden not in encoded
-    assert "[REDACTED]" in encoded
+        assert private not in encoded
 
 
-def test_completed_terminal_does_not_pass_when_checker_or_constraints_fail(
-    tmp_path: Path,
-) -> None:
-    _FakeClient.reset()
-    case = _case(
-        "case-a",
-        checker=[sys.executable, "-c", "raise SystemExit(7)"],
-    )
-    case["event_constraints"]["forbidden_event_types"] = ["permission_mediation"]
-    _, output, _ = _run(tmp_path, _matrix({"round_id": "round-a", "cases": [case]}))
-    receipt = _adjudicator().build_receipt(output)
-    row = receipt["cases"][0]
-    assert row["transport_ars_terminal"]["verdict"] == "PASS"
-    assert row["task_checker"]["verdict"] == "FAIL"
-    assert row["execution_constraints"]["verdict"] == "FAIL"
-    assert row["business_verdict"] == "FAIL"
-
-
-def test_configuration_fidelity_checks_observable_session_configuration(
-    tmp_path: Path,
-) -> None:
-    _FakeClient.reset()
-    _, output, _ = _run(tmp_path, _matrix())
-    case_path = next((output / "cases").glob("*.json"))
-    evidence = json.loads(case_path.read_text(encoding="utf-8"))
-    evidence["controller"]["session_observation"]["agent_id"] = "other-agent"
-    case_path.write_text(json.dumps(evidence), encoding="utf-8")
-
-    receipt = _adjudicator().build_receipt(output)
-    axis = receipt["cases"][0]["configuration_fidelity"]
-    assert axis == {"verdict": "FAIL", "exact_readback": False}
-    assert receipt["cases"][0]["business_verdict"] == "FAIL"
-
-
-def test_adjudication_rejects_non_closed_completion_and_failed_preflight(
-    tmp_path: Path,
-) -> None:
-    _FakeClient.reset()
-    adjudicator = _adjudicator()
-    _, output, _ = _run(tmp_path, _matrix())
-    completion_path = output / "completion.json"
-    completion = json.loads(completion_path.read_text(encoding="utf-8"))
-    completion["unexpected"] = True
-    completion_path.write_text(json.dumps(completion), encoding="utf-8")
-    with pytest.raises(adjudicator.AdjudicationError):
-        adjudicator.build_receipt(output)
-
-    completion.pop("unexpected")
-    completion_path.write_text(json.dumps(completion), encoding="utf-8")
-    manifest_path = output / "controller-manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["preflight"]["checks"]["capacity"] = "FAIL"
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(adjudicator.AdjudicationError):
-        adjudicator.build_receipt(output)
-
-
-def test_receipt_refuses_unsafe_case_refs_and_never_projects_unknown_terminals(
-    tmp_path: Path,
-) -> None:
-    _FakeClient.reset()
-    adjudicator = _adjudicator()
-    _, output, _ = _run(tmp_path, _matrix())
-    manifest_path = output / "controller-manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["planned_cases"][0]["case_ref"] = "private-account-marker"
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(adjudicator.AdjudicationError):
-        adjudicator.build_receipt(output)
-
-    manifest["planned_cases"][0]["case_ref"] = "r001-c001"
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    case_path = next((output / "cases").glob("*.json"))
-    evidence = json.loads(case_path.read_text(encoding="utf-8"))
-    marker = "private-terminal-marker"
-    evidence["controller"]["terminal_observation"]["result"]["status"] = marker
-    case_path.write_text(json.dumps(evidence), encoding="utf-8")
-    receipt = adjudicator.build_receipt(output)
-    encoded = json.dumps(receipt, sort_keys=True)
-    assert marker not in encoded
-    assert receipt["cases"][0]["transport_ars_terminal"] == {
-        "verdict": "INDETERMINATE",
-        "terminal_class": None,
-    }
-
-
-def test_adjudication_refuses_malformed_nested_controller_evidence(
-    tmp_path: Path,
-) -> None:
-    _FakeClient.reset()
-    _, output, _ = _run(tmp_path, _matrix())
-    case_path = next((output / "cases").glob("*.json"))
-    evidence = json.loads(case_path.read_text(encoding="utf-8"))
-    evidence["controller"] = []
-    case_path.write_text(json.dumps(evidence), encoding="utf-8")
-    adjudicator = _adjudicator()
-    with pytest.raises(adjudicator.AdjudicationError):
-        adjudicator.build_receipt(output)
-
-
-def test_adjudication_rejects_duplicate_evidence_keys(tmp_path: Path) -> None:
-    _FakeClient.reset()
-    _, output, _ = _run(tmp_path, _matrix())
-    completion_path = output / "completion.json"
-    completion_path.write_text(
-        '{"schema_version":1,"case_count":1,"case_count":1,'
-        '"completed_case_refs":["r001-c001"]}',
-        encoding="utf-8",
-    )
-    adjudicator = _adjudicator()
-    with pytest.raises(adjudicator.AdjudicationError):
-        adjudicator.build_receipt(output)
-
-
-def test_receipt_write_is_exclusive(tmp_path: Path) -> None:
-    adjudicator = _adjudicator()
-    target = tmp_path / "receipt.json"
-    target.write_text("existing", encoding="utf-8")
-    with pytest.raises(adjudicator.AdjudicationError):
-        adjudicator.write_receipt(target, {"schema_version": 1})
-    assert target.read_text(encoding="utf-8") == "existing"
-
-
-def test_script_and_skill_hygiene() -> None:
-    run_source = RUNNER_PATH.read_text(encoding="utf-8")
-    adjudicate_source = ADJUDICATOR_PATH.read_text(encoding="utf-8")
-    skill_source = (SKILL / "SKILL.md").read_text(encoding="utf-8")
-    matrix_reference = (SKILL / "references" / "test-matrix.md").read_text(
-        encoding="utf-8"
-    )
-    evidence_reference = (SKILL / "references" / "evidence-contract.md").read_text(
-        encoding="utf-8"
-    )
-
-    assert "ArsdClient" in run_source
-    assert "load_agents_file" in run_source
-    assert "subprocess.run" in run_source
-    assert "shell=True" not in run_source
-    assert "socket.socket" not in run_source
-    assert "bubble" not in run_source.lower()
-    for banned in ("/proc", "systemctl", "journalctl"):
-        assert banned not in run_source
-        assert banned not in adjudicate_source
-
-    assert skill_source.startswith(
-        "---\nname: ars-batch-agent-acceptance\ndescription:"
-    )
-    assert "references/test-matrix.md" in skill_source
-    assert "references/evidence-contract.md" in skill_source
-    assert "completed" in skill_source and "trusted checker" in skill_source
-    assert "response-only" in skill_source
-    assert "permissions" in skill_source
-    assert "session reuse" in skill_source.lower()
-    assert "bubble sort" in matrix_reference.lower()
-    assert "read/search allow" in matrix_reference.lower()
-    assert "execute allow" in matrix_reference.lower()
-    assert "write/edit deny" in matrix_reference.lower()
-    assert "write/edit allow" not in matrix_reference.lower()
-    assert "session reuse" in matrix_reference.lower()
-    assert "raw evidence" in evidence_reference.lower()
-    assert "[REDACTED]" in evidence_reference
-
-    authored = "\n".join(
+def test_committed_skill_material_has_no_checkout_specific_path() -> None:
+    material = "\n".join(
         path.read_text(encoding="utf-8")
         for path in SKILL.rglob("*")
-        if path.is_file() and path.suffix in {".md", ".py"}
+        if path.is_file() and "__pycache__" not in path.parts
     )
-    for host_specific in (
-        "/" + "home" + "/",
-        "/" + "Users" + "/",
-        "workspace" + "/" + "hermes",
-        "github" + ".com/",
-    ):
-        assert host_specific not in authored
+    assert str(ROOT) not in material

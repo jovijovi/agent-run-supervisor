@@ -1,44 +1,49 @@
 ---
 name: ars-batch-agent-acceptance
-description: Use when quickly checking whether a deployed ARS can run registered external AGENTs, mediate permissions, and reuse ACP Sessions through the local arsd Socket API.
+description: Use when directly checking a deployed ARS with fixed response-only delivery and real Session create-to-load quick-health controllers.
 ---
 
-# ARS quick health acceptance
+# ARS quick-health acceptance
 
-Use this skill for a fast, repeatable health check of an already deployed ARS. It does not install, configure, restart, repair, or benchmark ARS.
+Use this skill for a bounded health check of an already deployed ARS. It does not install or manage external AGENTs, edit a registry, configure or restart a service, deploy, retry a Run, or turn technical completion into business success.
 
-## Fixed test groups
+## Official direct entry points
 
-Run only these groups; their cases are fixed in [references/test-matrix.md](references/test-matrix.md).
+| Script | Direct contract |
+|---|---|
+| `scripts/run_response_only.py` | Three fresh Runs per route using fixed bubble-sort prompts; each Run must complete the task-delivery chain and return a non-empty string |
+| `scripts/run_session_reuse.py` | Two sequential Runs per route; S1 creates a Session and returns a non-empty string, then S2 loads that exact Session and recalls a fresh token |
 
-| Group | Goal | Fixed cases | PASS |
-|---|---|---|---|
-| Response-only | Verify submit → Native ACP → response → checker | Three bubble-sort cases: basic, `reverse`, `key`/stability/early exit | Run completes, exact config reads back, trusted checker passes |
-| Permissions | Verify configured allow/deny mediation | read/search allow; execute allow; write/edit deny | Expected permission event occurs and expected side effect is present or absent |
-| Session reuse | Verify durable ACP context | create Session and store token; reuse the same Session and recall token | Both Runs complete, second Run loads the same Session and returns the token |
+Both scripts use the public `ArsdClient` over the configured Unix socket. They read the served API version, required operations, concurrency, event-page limit, prompt limit, and event-budget ceiling from live `server_info`. They never hard-code a package/API version, daemon PID, caller identity, registry path, route, provider, or deployment label.
 
-Do not treat one group's result as proof of another. In particular, response-only does not prove workspace-write permission.
+Content correctness and quality are out of scope. The response-only prompt is a fixed payload used to prove that ARS can invoke the selected AGENT and return a concrete deliverable. Prompt wording and requested output format are not acceptance authority, and the controller does not parse, execute, or otherwise judge the returned text.
 
-## Parameters
+## Required parameters
 
-- Use the selected registered AGENTs and their approved exact model/effort.
-- Use the deployed Socket API version and limits returned by `server_info`.
-- Use fresh request IDs, Runs, Sessions, evidence directory, and temporary workspace.
-- Run each fixed case once. Do not retry or replace failures to improve the pass rate.
-- Run permission cases only with the capability set named by that case.
+Supply the socket, supervisor state root, a path that does not yet exist for output, caller owner/namespace, and one or more exact routes. Repeat `--agent` for multiple routes:
 
-## Steps
+```bash
+uv run python skills/ars-batch-agent-acceptance/scripts/run_response_only.py \
+  --socket /path/to/arsd.sock \
+  --supervisor-root /path/to/supervisor-state \
+  --output-dir /path/to/fresh-response-evidence \
+  --owner '<caller-owner>' \
+  --namespace '<caller-namespace>' \
+  --agent 'agent-a=<exact-model>,<exact-effort>'
+```
 
-1. Read `server_info`; verify daemon/API version, required operations, capacity, and event limits.
-2. Verify each selected AGENT is registered and exact model/effort readback is available.
-3. Run the fixed groups. Cases may run concurrently within live capacity; Session steps stay sequential.
-4. Apply the trusted checker and event assertions for each case.
-5. Produce a compact per-AGENT table: `response-only`, `permissions`, `session-reuse`, overall result, and first concrete failure.
+Use the same parameters with `scripts/run_session_reuse.py` for the continuity check. Timeout and evidence-size options are controller-selected request limits; live daemon limits remain authoritative, and incompatible settings are refused before output creation or submission.
 
-Overall `PASS` requires every selected group to pass. `completed` alone is not a test pass.
+## Verdicts
+
+Rounds are sequential. Selected routes may run concurrently only within live capacity; Session legs are always sequential per route. Every case has one submission attempt and no replay or retry path.
+
+Response-only PASS requires only: `completed/end_turn`; exact requested, sealed, and effective model/effort with exact config fidelity; the expected create and Prompt events; process reap proof; an unchanged AGENT workspace; and a non-empty string in `final_message`.
+
+Session-reuse PASS requires: S1 create plus non-empty output; S2 load of exactly S1's Session; distinct Runs; exact token recall; exact configuration and create/load/Prompt event evidence; and process reap proof for both Runs. The token comparison is continuity evidence, not a content-quality verdict.
+
+Permissions remain a separate acceptance concern. These controllers do not run permission canaries and cannot report permission PASS.
 
 ## Evidence
 
-Follow [references/evidence-contract.md](references/evidence-contract.md). Keep raw evidence local; share only the sanitized summary. For the fixed bubble-sort group, use [references/response-only-controller.md](references/response-only-controller.md) for the controller/checker contract.
-
-The existing generic matrix runner may be used for fresh-Session response and permission cases. Its matrix deliberately rejects `session_id`; run the Session-reuse group through the Socket API/Native ACP acceptance harness instead of pretending it was tested by the generic runner.
+Follow [references/evidence-contract.md](references/evidence-contract.md). Each output root is exclusive and all controller-created paths stay beneath it. Keep the raw root local; only `summary.json` and the identical stdout projection are shareable. Neither projection includes its absolute evidence path.
