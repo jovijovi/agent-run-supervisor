@@ -10,6 +10,11 @@ no database, and no ingress to expose.
 
 <div class="ars-panels">
 
+<a class="ars-panel" href="operations-runbook.md">
+  <p class="ars-panel__name">Operations runbook</p>
+  <p class="ars-panel__note">The complete PyPI install, user-service deployment, acceptance, upgrade, rollback, and uninstall lifecycle.</p>
+</a>
+
 <a class="ars-panel" href="local-daemon.md">
   <p class="ars-panel__name">Local daemon</p>
   <p class="ars-panel__note">Flags, the supervisor root, the socket, caller mappings, and startup order.</p>
@@ -21,6 +26,10 @@ no database, and no ingress to expose.
 </a>
 
 </div>
+
+First-time operators should follow the [Operations
+runbook](operations-runbook.md) from start to finish. The pages below it are
+focused references for daemon and service-manager behavior.
 
 ## What the host must provide
 
