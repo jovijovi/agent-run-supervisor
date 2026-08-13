@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+from html.parser import HTMLParser
 import json
 import re
 import sys
@@ -36,6 +37,7 @@ import tomllib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
+from urllib.parse import unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -166,7 +168,7 @@ PUBLICATION_WORKFLOW = "pages-publish.yml"
 #: is intentionally tiny and rarely changed; any trigger, permission, action,
 #: input, job placement, or comment edit must update this reviewed digest.
 PUBLICATION_WORKFLOW_SHA256 = (
-    "196189a5934ac72fbb044c364ba9a540691318e366c0b5285f8a63eb4a25ac03"
+    "418ecb878724957e9080ee7aa044b958f8bd4a74f11cd0fd347f700e5e0c53bc"
 )
 
 #: Markers that *are* the reviewed workflow's mechanism — the official
@@ -552,6 +554,81 @@ def check_links(root: Path) -> list[Finding]:
                     )
                 continue
             findings.append(Finding(rel.as_posix(), line, "links:unresolved", target))
+    return findings
+
+
+class _BuiltLinkParser(HTMLParser):
+    """Collect link destinations from rendered HTML without third-party code."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.links: list[tuple[str, int]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "a":
+            return
+        for name, value in attrs:
+            if name == "href" and value is not None:
+                self.links.append((value, self.getpos()[0]))
+
+
+def check_built_site_links(
+    site_dir: Path, pages_base_path: str = "/"
+) -> list[Finding]:
+    """Reject broken internal URLs in MkDocs' final HTML output.
+
+    Paths are checked after query strings and fragments are removed. This keeps
+    fragments from corrupting path resolution without duplicating MkDocs' anchor
+    validation for Markdown-authored links.
+    """
+    findings: list[Finding] = []
+    if not site_dir.is_dir():
+        return [Finding(str(site_dir), 0, "built_links:site_dir_missing", "")]
+
+    base_root = "/" + pages_base_path.strip("/")
+    base_prefix = base_root if base_root == "/" else base_root + "/"
+    site_root = site_dir.resolve()
+
+    for page in sorted(site_dir.rglob("*.html")):
+        parser = _BuiltLinkParser()
+        parser.feed(_read(page))
+        rel = page.relative_to(site_dir).as_posix()
+        for target, line in parser.links:
+            parsed = urlsplit(target)
+            if parsed.scheme or parsed.netloc or not parsed.path:
+                continue
+            url_path = unquote(parsed.path)
+            if url_path.lower().endswith(".md"):
+                findings.append(Finding(rel, line, "built_links:markdown_url", target))
+                continue
+
+            if url_path.startswith("/"):
+                if base_root != "/" and url_path == base_root:
+                    relative_url = ""
+                elif url_path.startswith(base_prefix):
+                    relative_url = url_path[len(base_prefix):]
+                else:
+                    findings.append(
+                        Finding(rel, line, "built_links:outside_pages_base", target)
+                    )
+                    continue
+                resolved = site_root / relative_url
+            else:
+                resolved = page.parent / url_path
+            resolved = resolved.resolve()
+            try:
+                resolved.relative_to(site_root)
+            except ValueError:
+                findings.append(Finding(rel, line, "built_links:escapes_site", target))
+                continue
+
+            candidates = [resolved]
+            if url_path.endswith("/") or resolved.is_dir():
+                candidates.append(resolved / "index.html")
+            elif not resolved.suffix:
+                candidates.extend((resolved.with_suffix(".html"), resolved / "index.html"))
+            if not any(candidate.is_file() for candidate in candidates):
+                findings.append(Finding(rel, line, "built_links:target_missing", target))
     return findings
 
 
@@ -1065,8 +1142,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Content gate for the public documentation site under website/."
     )
     parser.add_argument("root", nargs="?", default=".", help="Repository root to scan")
+    parser.add_argument(
+        "--built-site",
+        type=Path,
+        help="Scan internal links in an already-built MkDocs site instead",
+    )
+    parser.add_argument(
+        "--pages-base-path",
+        default="/",
+        help="URL path prefix used by root-relative links in the built site",
+    )
     args = parser.parse_args(argv)
-    report = run_scan(Path(args.root))
+    if args.built_site is None:
+        report = run_scan(Path(args.root))
+    else:
+        findings = check_built_site_links(args.built_site, args.pages_base_path)
+        report = {
+            "ok": not findings,
+            "root": str(args.built_site),
+            "checks": ["check_built_site_links"],
+            "findings": [asdict(finding) for finding in findings],
+        }
     print(json.dumps(report, indent=2, ensure_ascii=False))
     return 0 if report["ok"] else 1
 

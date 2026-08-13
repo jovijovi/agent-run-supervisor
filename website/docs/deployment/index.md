@@ -10,17 +10,17 @@ no database, and no ingress to expose.
 
 <div class="ars-panels">
 
-<a class="ars-panel" href="operations-runbook.md">
+<a class="ars-panel" href="operations-runbook/">
   <p class="ars-panel__name">Operations runbook</p>
   <p class="ars-panel__note">The complete PyPI install, user-service deployment, acceptance, upgrade, rollback, and uninstall lifecycle.</p>
 </a>
 
-<a class="ars-panel" href="local-daemon.md">
+<a class="ars-panel" href="local-daemon/">
   <p class="ars-panel__name">Local daemon</p>
   <p class="ars-panel__note">Flags, the supervisor root, the socket, caller mappings, and startup order.</p>
 </a>
 
-<a class="ars-panel" href="systemd.md">
+<a class="ars-panel" href="systemd/">
   <p class="ars-panel__name">Service manager</p>
   <p class="ars-panel__note">Rendering a user-scope unit, and the cgroup properties crash containment depends on.</p>
 </a>

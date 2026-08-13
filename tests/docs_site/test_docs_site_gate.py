@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -35,6 +36,101 @@ def _kinds(root: Path) -> set[str]:
 def test_current_site_passes_all_content_checks() -> None:
     report = check_docs_site.run_scan(ROOT)
     assert report["ok"], report["findings"]
+
+
+def test_built_site_gate_rejects_markdown_and_missing_internal_urls(tmp_path: Path) -> None:
+    site = tmp_path / "site"
+    page = site / "guide" / "index.html"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        '<a href="topic.md#details">Markdown source</a>'
+        '<a href="../missing/#section">Missing page</a>',
+        encoding="utf-8",
+    )
+
+    kinds = {finding.kind for finding in check_docs_site.check_built_site_links(site)}
+    assert kinds == {"built_links:markdown_url", "built_links:target_missing"}
+
+
+def test_built_site_gate_resolves_pages_base_path_and_ignores_fragments(tmp_path: Path) -> None:
+    site = tmp_path / "site"
+    (site / "guide").mkdir(parents=True)
+    (site / "guide/index.html").write_text(
+        '<a href="/agent-run-supervisor/reference/#known-anchor">Reference</a>',
+        encoding="utf-8",
+    )
+    (site / "reference").mkdir()
+    (site / "reference/index.html").write_text("<h1 id=known-anchor>Reference</h1>")
+
+    assert not check_docs_site.check_built_site_links(
+        site, pages_base_path="/agent-run-supervisor/"
+    )
+
+
+@pytest.mark.parametrize("target", ["/agent-run-supervisor", "/agent-run-supervisor/"])
+def test_built_site_gate_resolves_pages_base_root_to_site_index(
+    tmp_path: Path, target: str
+) -> None:
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "index.html").write_text(f'<a href="{target}">Home</a>', encoding="utf-8")
+
+    assert not check_docs_site.check_built_site_links(
+        site, pages_base_path="/agent-run-supervisor/"
+    )
+
+
+def test_built_site_cli_scans_an_existing_rendered_site(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "index.html").write_text(
+        '<a href="/agent-run-supervisor/missing/">Missing</a>', encoding="utf-8"
+    )
+    result = check_docs_site.main(
+        ["--built-site", str(site), "--pages-base-path", "/agent-run-supervisor/"]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert result == 1
+    assert report["checks"] == ["check_built_site_links"]
+    assert {finding["kind"] for finding in report["findings"]} == {
+        "built_links:target_missing"
+    }
+
+
+def test_docs_build_chains_scan_the_rendered_site() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    docs_recipe = makefile.split("docs: docs-sync docs-check\n", 1)[1].split("\n\n", 1)[0]
+    assert docs_recipe.index("mkdocs build --strict") < docs_recipe.index(
+        "check_docs_site.py --built-site site"
+    )
+
+    for workflow_name in ("docs.yml", "pages-publish.yml"):
+        workflow = (ROOT / ".github/workflows" / workflow_name).read_text(encoding="utf-8")
+        assert workflow.index("mkdocs build --strict") < workflow.index(
+            "check_docs_site.py --built-site site --pages-base-path /agent-run-supervisor/"
+        )
+
+
+def test_primary_navigation_contract_is_explicit_and_accessible() -> None:
+    config = (ROOT / "mkdocs.yml").read_text(encoding="utf-8")
+    for page in (
+        "concepts/index.md",
+        "how-to/index.md",
+        "deployment/index.md",
+        "reference/index.md",
+        "reference/api/index.md",
+        "contributing/index.md",
+    ):
+        assert f"- Overview: {page}" in config
+
+    css = (ROOT / "website/docs/assets/stylesheets/ars.css").read_text(encoding="utf-8")
+    assert ".md-sidebar--primary .md-nav__link:focus-visible" in css
+    assert ".md-sidebar--primary .md-nav__link--active" in css
+    assert "border-left: 3px solid var(--ars-signal)" in css
+    assert "transition: all" not in css
 
 
 @pytest.mark.parametrize(

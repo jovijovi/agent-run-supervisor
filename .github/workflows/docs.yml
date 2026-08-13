@@ -61,3 +61,6 @@ jobs:
 
       - name: Build documentation strictly
         run: uv run mkdocs build --strict
+
+      - name: Validate rendered site links
+        run: uv run python tools/check_docs_site.py --built-site site --pages-base-path /agent-run-supervisor/
