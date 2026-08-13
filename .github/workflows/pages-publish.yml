@@ -55,6 +55,9 @@ jobs:
       - name: Build documentation strictly
         run: uv run mkdocs build --strict
 
+      - name: Validate rendered site links
+        run: uv run python tools/check_docs_site.py --built-site site --pages-base-path /agent-run-supervisor/
+
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
         with:

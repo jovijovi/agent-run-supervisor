@@ -33,6 +33,7 @@ docs-check:
 
 docs: docs-sync docs-check
 	uv run mkdocs build --strict
+	uv run python tools/check_docs_site.py --built-site site --pages-base-path /agent-run-supervisor/
 
 docs-serve: docs-sync
 	uv run mkdocs serve

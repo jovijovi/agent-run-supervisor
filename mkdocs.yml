@@ -153,13 +153,13 @@ nav:
   - Overview: overview.md
   - Quickstart: quickstart.md
   - Core Concepts:
-      - concepts/index.md
+      - Overview: concepts/index.md
       - concepts/agents.md
       - concepts/runs-and-sessions.md
       - concepts/profiles-and-binding.md
       - concepts/native-acp.md
   - How-to Guides:
-      - how-to/index.md
+      - Overview: how-to/index.md
       - how-to/register-an-agent.md
       - how-to/claude-code.md
       - how-to/codex-cli.md
@@ -168,23 +168,23 @@ nav:
       - how-to/oh-my-pi.md
       - how-to/reasonix.md
   - Deployment:
-      - deployment/index.md
+      - Overview: deployment/index.md
       - deployment/operations-runbook.md
       - deployment/local-daemon.md
       - deployment/systemd.md
   - Reference:
-      - reference/index.md
+      - Overview: reference/index.md
       - reference/socket-api.md
       - reference/agents-file.md
       - reference/events.md
       - reference/results.md
       - reference/error-codes.md
   - API Reference:
-      - reference/api/index.md
+      - Overview: reference/api/index.md
       - reference/api/client.md
       - reference/api/protocol.md
   - Contributing:
-      - contributing/index.md
+      - Overview: contributing/index.md
       - contributing/testing.md
       - contributing/publishing.md
   - About:

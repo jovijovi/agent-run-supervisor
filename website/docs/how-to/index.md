@@ -12,32 +12,32 @@ every guide below assumes. Then pick the guide for the agent you installed.
 
 <div class="ars-panels">
 
-<a class="ars-panel" href="claude-code.md">
+<a class="ars-panel" href="claude-code/">
   <p class="ars-panel__name">Claude Code</p>
   <p class="ars-panel__note">Reached through an ACP adapter, on the compatibility profile, with exact model pinning.</p>
 </a>
 
-<a class="ars-panel" href="codex-cli.md">
+<a class="ars-panel" href="codex-cli/">
   <p class="ars-panel__name">Codex CLI</p>
   <p class="ars-panel__note">Operator-installed ACP adapter executable; evidenced ACP mode semantics use codex-agent-acp-compat-v1.</p>
 </a>
 
-<a class="ars-panel" href="opencode.md">
+<a class="ars-panel" href="opencode/">
   <p class="ars-panel__name">OpenCode</p>
   <p class="ars-panel__note">The agent the registered mediation binding was written for.</p>
 </a>
 
-<a class="ars-panel" href="cursor-cli.md">
+<a class="ars-panel" href="cursor-cli/">
   <p class="ars-panel__name">Cursor CLI</p>
   <p class="ars-panel__note">Model-only configuration fidelity and a grant-driven permission mode.</p>
 </a>
 
-<a class="ars-panel" href="oh-my-pi.md">
+<a class="ars-panel" href="oh-my-pi/">
   <p class="ars-panel__name">oh-my-pi</p>
   <p class="ars-panel__note">Native ACP with the standard profile and its <code>thinking</code> effort selector; mutation limits are explicit.</p>
 </a>
 
-<a class="ars-panel" href="reasonix.md">
+<a class="ars-panel" href="reasonix/">
   <p class="ars-panel__name">Reasonix</p>
   <p class="ars-panel__note">Static <code>tool_approval=ask</code> fidelity, sandbox-on PATH requirements, and canonical workspaces.</p>
 </a>
