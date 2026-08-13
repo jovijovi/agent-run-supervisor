@@ -1,26 +1,26 @@
 # Response-only controller
 
-Use this harness pattern for the fixed R1–R3 bubble-sort group.
+`scripts/run_response_only.py` is the official direct R1/R2/R3 entry point.
 
 ## Execution
 
-1. Probe the deployed Unix Socket with `server_info`; record ARS package/API and live limits. Do not guess the service-unit name or treat a failed lookup of a guessed unit as daemon failure.
-2. Create a fresh evidence root, request ID, Session, Run, and empty temporary workspace for every case.
-3. Ask the AGENT for exactly one JSON object: `{"bubble_sort.py":"<source>"}`. It must not call tools or write files.
-4. After `completed/end_turn`, read exact model/effort fidelity and the complete final response from durable Run evidence.
-5. Parse the one-key JSON, then let the trusted controller—not the AGENT—write and execute the source.
+1. Read live `server_info` through `ArsdClient` and validate the served API, required operations, concurrency, prompt/event-page limits, and event-ledger ceiling.
+2. Refuse an existing output path, then create one empty workspace per route and round beneath the fresh root.
+3. Submit exactly once without `session_id`, using the fixed prompt for that round.
+4. Require `completed/end_turn`, exact model/effort, durable exact config fidelity, the expected new-Session and Prompt events, and process reap from that Run's durable process identity.
+5. Require the AGENT workspace to remain empty and `final_message` to be a non-empty string.
 
-## Fixed checks
+The fixed prompts ask for plain Python source implementing three bubble-sort signatures. That request is only the payload carried through ARS. The returned text is not parsed, executed, or inspected for format or meaning. Content correctness and quality are out of scope.
 
-- AST: exact public signature for the case, nested loops, adjacent-swap implementation, an early-exit branch, no `sorted()` or `.sort()`, and no top-level execution.
-- R1: negatives, duplicates, empty/singleton, tuple input, newly allocated output, input unchanged.
-- R2: `reverse=False/True`, nearly sorted and already sorted inputs, input unchanged.
-- R3: `key`, stable equal-key ordering in both directions, `reverse`, larger reverse-heavy input, input unchanged.
-- Early exit: use comparison-counting objects on already sorted input; merely finding `break` in the AST is not behavioral proof.
-- Execution contract: exactly one new Session and one Prompt per case, no tool/permission events, no AGENT workspace mutation.
+## PASS boundary
 
-## Verdict
+The PASS checks are exactly:
 
-A case passes only when terminal, exact configuration, AST, deterministic execution, and execution-contract checks all pass. Preserve failures; do not replay to make the score green. Report algorithm pass count separately from terminal count.
+- real submitted Run reached `completed` with `stop_reason=end_turn`;
+- requested and effective model/effort match exactly, with the sealed config marked exact;
+- exactly one new-Session event and one Prompt event, with no load event;
+- the Run's recorded process identity proves reaped;
+- the disposable AGENT workspace remains unchanged;
+- `final_message` is a non-empty string.
 
-Afterward verify zero active test Runs, child-process reap, and unchanged service restart count when available. Keep raw identifiers and paths local; publish only the sanitized per-AGENT table.
+A route passes only when all three rounds pass. The controller retains failures and never replays a Run to improve the score. A non-empty deliverable proves the response reached ARS; it does not establish content correctness, quality, write permission, or business success.
