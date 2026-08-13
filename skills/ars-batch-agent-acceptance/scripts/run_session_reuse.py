@@ -223,14 +223,14 @@ def run_session_reuse(
     liveness_checker: Callable[[Mapping[str, Any]], str] = classify_holder,
     token_factory: Callable[[], str] = _new_token,
 ) -> dict[str, Any]:
-    live, server_info = preflight(config, client_factory)
+    live, diagnostics = preflight(config, client_factory)
     sample_prompts = _prompts("CONTINUITY-" + "A" * 32)
     if any(
         len(prompt.encode("utf-8")) > live.max_prompt_bytes
         for prompt in sample_prompts
     ):
         raise ControllerError("PROMPT_LIMIT")
-    root = create_output_root(config, server_info)
+    root = create_output_root(config, diagnostics)
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=live.workers_for(config)
     ) as executor:

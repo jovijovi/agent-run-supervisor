@@ -192,13 +192,13 @@ def run_response_only(
     sleeper: Callable[[float], None] = time.sleep,
     liveness_checker: Callable[[Mapping[str, Any]], str] = classify_holder,
 ) -> dict[str, Any]:
-    live, server_info = preflight(config, client_factory)
+    live, diagnostics = preflight(config, client_factory)
     if any(
         len(prompt_for(round_id).encode("utf-8")) > live.max_prompt_bytes
         for round_id in ROUNDS
     ):
         raise ControllerError("PROMPT_LIMIT")
-    root = create_output_root(config, server_info)
+    root = create_output_root(config, diagnostics)
     by_agent: dict[str, list[dict[str, Any]]] = {
         route.agent_id: [] for route in config.routes
     }
