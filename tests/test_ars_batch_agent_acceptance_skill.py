@@ -693,9 +693,17 @@ def test_script_and_skill_hygiene() -> None:
     )
     assert "references/test-matrix.md" in skill_source
     assert "references/evidence-contract.md" in skill_source
-    assert "completed" in skill_source and "business" in skill_source
+    assert "completed" in skill_source and "trusted checker" in skill_source
+    assert "response-only" in skill_source
+    assert "permissions" in skill_source
+    assert "session reuse" in skill_source.lower()
     assert "bubble sort" in matrix_reference.lower()
-    assert "optional operator checks" in evidence_reference.lower()
+    assert "read/search allow" in matrix_reference.lower()
+    assert "execute allow" in matrix_reference.lower()
+    assert "write/edit deny" in matrix_reference.lower()
+    assert "write/edit allow" not in matrix_reference.lower()
+    assert "session reuse" in matrix_reference.lower()
+    assert "raw evidence" in evidence_reference.lower()
     assert "[REDACTED]" in evidence_reference
 
     authored = "\n".join(

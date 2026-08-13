@@ -1,48 +1,44 @@
 ---
 name: ars-batch-agent-acceptance
-description: Run configurable matrices of real external AGENT Runs through the local arsd Unix Socket API and Native ACP, capture controller evidence, and independently produce sanitized task verdicts. Use when an operator needs bounded batch acceptance across agents, models, efforts, rounds, or task checkers without changing the daemon, registry, service, deployment, or provider configuration.
+description: Use when quickly checking whether a deployed ARS can run registered external AGENTs, mediate permissions, and reuse ACP Sessions through the local arsd Socket API.
 ---
 
-# ARS batch external-AGENT acceptance
+# ARS quick health acceptance
 
-Use this skill only after the operator has separately authorized real external-AGENT calls and confirmed the mandatory denied-action canary for every registered agent in scope.
+Use this skill for a fast, repeatable health check of an already deployed ARS. It does not install, configure, restart, repair, or benchmark ARS.
 
-## Prepare
+## Fixed test groups
 
-1. Read [references/test-matrix.md](references/test-matrix.md) before authoring the strict JSON matrix.
-2. Read [references/evidence-contract.md](references/evidence-contract.md) before choosing an output location or sharing a receipt.
-3. Supply every runtime value explicitly: matrix, socket, operator agents file, fresh evidence directory, and fresh receipt path.
-4. Keep `session_id` absent in every case. The controller creates one new Session per case and never reuses, retries, or replays a prompt.
-5. Treat the checker argv as trusted local configuration. Review it before execution.
+Run only these groups; their cases are fixed in [references/test-matrix.md](references/test-matrix.md).
 
-Do not install or deploy ARS, edit the agents file, restart or enable a service, change caller policy, or contact GitHub as part of this workflow.
+| Group | Goal | Fixed cases | PASS |
+|---|---|---|---|
+| Response-only | Verify submit → Native ACP → response → checker | Three bubble-sort cases: basic, `reverse`, `key`/stability/early exit | Run completes, exact config reads back, trusted checker passes |
+| Permissions | Verify configured allow/deny mediation | read/search allow; execute allow; write/edit deny | Expected permission event occurs and expected side effect is present or absent |
+| Session reuse | Verify durable ACP context | create Session and store token; reuse the same Session and recall token | Both Runs complete, second Run loads the same Session and returns the token |
 
-## Run once
+Do not treat one group's result as proof of another. In particular, response-only does not prove workspace-write permission.
 
-From the repository root, with the package available on `PYTHONPATH`:
+## Parameters
 
-```bash
-PYTHONPATH=src python skills/ars-batch-agent-acceptance/scripts/run_batch_acceptance.py \
-  --matrix <matrix.json> \
-  --socket <arsd-socket> \
-  --agents-file <operator-agents-file> \
-  --output <new-evidence-directory>
-```
+- Use the selected registered AGENTs and their approved exact model/effort.
+- Use the deployed Socket API version and limits returned by `server_info`.
+- Use fresh request IDs, Runs, Sessions, evidence directory, and temporary workspace.
+- Run each fixed case once. Do not retry or replace failures to improve the pass rate.
+- Run permission cases only with the capability set named by that case.
 
-The controller validates the complete matrix first, then reads `server_info`, validates the supplied operator registry read-only, checks live API/version, capacity, event-budget and page limits, and only then creates the fresh output directory. It executes rounds sequentially and cases within a round concurrently up to the configured cap.
+## Steps
 
-If submission or observation becomes uncertain, stop at the recorded evidence. Do not rerun the case to improve the pass rate. A successor requires a new operator-authorized matrix entry and remains a distinct Run.
+1. Read `server_info`; verify daemon/API version, required operations, capacity, and event limits.
+2. Verify each selected AGENT is registered and exact model/effort readback is available.
+3. Run the fixed groups. Cases may run concurrently within live capacity; Session steps stay sequential.
+4. Apply the trusted checker and event assertions for each case.
+5. Produce a compact per-AGENT table: `response-only`, `permissions`, `session-reuse`, overall result, and first concrete failure.
 
-## Adjudicate separately
+Overall `PASS` requires every selected group to pass. `completed` alone is not a test pass.
 
-Run the independent command after the controller writes `completion.json`:
+## Evidence
 
-```bash
-PYTHONPATH=src python skills/ars-batch-agent-acceptance/scripts/adjudicate.py \
-  --evidence <evidence-directory> \
-  --receipt <new-sanitized-receipt.json>
-```
+Follow [references/evidence-contract.md](references/evidence-contract.md). Keep raw evidence local; share only the sanitized summary. For the fixed bubble-sort group, use [references/response-only-controller.md](references/response-only-controller.md) for the controller/checker contract.
 
-Review the separate verdicts for transport/ARS terminal, exact configuration fidelity, task checker, execution constraints, and settled state. Only their conjunction can produce task `PASS`. An ARS `completed` terminal alone is never business success.
-
-Share the sanitized receipt, not the raw evidence directory. The receipt is a controller-side judgment, not an ARS business verdict and not proof of hostile-process isolation.
+The existing generic matrix runner may be used for fresh-Session response and permission cases. Its matrix deliberately rejects `session_id`; run the Session-reuse group through the Socket API/Native ACP acceptance harness instead of pretending it was tested by the generic runner.
