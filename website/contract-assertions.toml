@@ -96,6 +96,21 @@ literal = "The service cgroup closes that gap only for descendants that remain i
 reason = "Crash containment must not extend across a supervisor, namespace, or cgroup boundary."
 
 [[required]]
+page = "deployment/operations-runbook.md"
+literal = "Keep these decisions explicit and separately authorized"
+reason = "The lifecycle runbook must keep install, configuration, enablement, restart, cutover, release, and deployment as separate decisions."
+
+[[required]]
+page = "deployment/operations-runbook.md"
+literal = "Never upgrade or otherwise mutate the virtual environment used by a live unit."
+reason = "Published releases use an immutable per-version runtime rather than an in-place package upgrade."
+
+[[required]]
+page = "deployment/operations-runbook.md"
+literal = "Uninstall has independent service, package, configuration, and state boundaries. Choose each deletion explicitly."
+reason = "Removing the unit or package must never imply deletion of configuration, durable ARS evidence, or external-agent state."
+
+[[required]]
 page = "reference/error-codes.md"
 literal = "Every wire code in the first four sections has a generated exception type in ERROR_CODE_TO_EXCEPTION"
 reason = "Only arsd wire codes map to Python client exceptions."

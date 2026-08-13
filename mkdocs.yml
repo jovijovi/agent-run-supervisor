@@ -169,6 +169,7 @@ nav:
       - how-to/reasonix.md
   - Deployment:
       - deployment/index.md
+      - deployment/operations-runbook.md
       - deployment/local-daemon.md
       - deployment/systemd.md
   - Reference:
