@@ -85,8 +85,7 @@ These are ours, not vendored, and carry the repository's MIT license:
 
 | File | Notes |
 |---|---|
-| `docs/assets/logo/ars-mark.svg` | header mark: recorder housing, tick scale, trace |
-| `docs/assets/logo/favicon.svg` | the same mark on a deep-ink tile |
+| `docs/assets/logo/logo-mark-64.png` | 64×64 web derivative of the canonical project logo; used by the header and favicon |
 | `docs/assets/stylesheets/ars.css` | brand tokens, self-hosted type, homepage shell |
 | `docs/assets/javascript/ars.js` | two reading affordances; no network access |
 | `overrides/main.html` | loads the vendored Mermaid before the theme bundle |
