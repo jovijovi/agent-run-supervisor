@@ -10,12 +10,18 @@ Claude Code is reached through the ACP adapter
 which you install and upgrade yourself. ARS launches the adapter command exactly
 as you declare it.
 
+```bash
+export CLAUDE_ACP_VERSION='<exact-version>'
+npm install -g "@agentclientprotocol/claude-agent-acp@$CLAUDE_ACP_VERSION"
+claude-agent-acp --version
+```
+
 ## The registry entry
 
 ```toml title="agents.toml"
 [agents.claude-code]
 profile = "claude-agent-acp-compat-v1"
-command = "<the-claude-agent-acp-executable>"
+command = "claude-agent-acp"
 args    = []
 ```
 
@@ -95,7 +101,7 @@ reaches your Node installation and the adapter's own bin directory:
 ```toml
 [agents.claude-code]
 profile = "claude-agent-acp-compat-v1"
-command = "<the-claude-agent-acp-executable>"
+command = "claude-agent-acp"
 args    = []
 env_overlay = { PATH = "/usr/local/bin:/usr/bin:/bin" }
 ```
