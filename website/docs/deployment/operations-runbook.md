@@ -84,11 +84,33 @@ ARS has no TCP listener, HTTP health endpoint, web console, or root/system
 service.
 
 Also install, configure, and authenticate each ACP-capable external agent using
-its own instructions and package manager. ARS never installs, upgrades, removes,
-or manages an external agent, its adapter, credentials, home, plugins, caches,
-configuration, or conversation store.
+its own instructions and package manager. Codex CLI and Claude Code do not expose
+the ACP stdio server ARS needs by themselves; install their adapters separately:
+
+```bash
+export CODEX_ACP_VERSION='<exact-version>'
+export CLAUDE_ACP_VERSION='<exact-version>'
+npm install -g "@agentclientprotocol/codex-acp@$CODEX_ACP_VERSION"
+npm install -g "@agentclientprotocol/claude-agent-acp@$CLAUDE_ACP_VERSION"
+codex-acp --version
+claude-agent-acp --version
+```
+
+Use the current [`@agentclientprotocol/codex-acp`](https://github.com/agentclientprotocol/codex-acp)
+package, not the archived `@zed-industries/codex-acp` package. The adapters are
+operator-managed software: ARS never installs, upgrades, removes, or manages an
+external agent, adapter, credential, home, plugin, cache, configuration, or
+conversation store. Pin versions appropriate for the deployment and re-run agent
+acceptance after either the adapter or underlying CLI changes.
 
 ## 2. Install one immutable ARS runtime
+
+Choose exactly one installation source. **PyPI is the recommended production
+path.** A local source checkout is useful for development, acceptance of an
+unreleased commit, or an operator-controlled build. Do not combine the two paths
+in one runtime.
+
+### 2.1 Install the published PyPI package
 
 Create a new virtual environment for this exact release. Never upgrade or
 otherwise mutate the virtual environment used by a live unit.
@@ -103,6 +125,7 @@ python3 -m venv "$ARS_RUNTIME"
   --only-binary=:all: \
   "agent-run-supervisor[native]==$ARS_VERSION"
 "$ARS_RUNTIME/bin/python" -m pip check
+export ARS_EXPECTED_VERSION="$ARS_VERSION"
 "$ARS_RUNTIME/bin/python" - <<'PY'
 from importlib.metadata import version
 print(version("agent-run-supervisor"))
@@ -121,6 +144,52 @@ supported published artifact; do not mutate an older live runtime.
 
 The directory named by `$ARS_RUNTIME` is now an immutable release artifact.
 Keep it until the rollback window closes.
+
+### 2.2 Install from a pinned local source checkout
+
+Use a dedicated clean checkout at an exact commit. Do not install from a moving
+branch or a checkout with local changes. Give the runtime and configuration a
+commit-derived release id so it cannot collide with a PyPI runtime carrying the
+same package version:
+
+```bash
+export ARS_SOURCE='<absolute-path-to-agent-run-supervisor-checkout>'
+export ARS_SOURCE_COMMIT='<full-40-character-commit-id>'
+test "$(git -C "$ARS_SOURCE" rev-parse HEAD)" = "$ARS_SOURCE_COMMIT"
+test -z "$(git -C "$ARS_SOURCE" status --porcelain=v1 -uall)"
+
+export ARS_SOURCE_RELEASE="source-${ARS_SOURCE_COMMIT:0:12}"
+export ARS_RUNTIME="$ARS_RELEASE_ROOT/$ARS_SOURCE_RELEASE/venv"
+export ARS_CONFIG="$ARS_CONFIG_ROOT/releases/$ARS_SOURCE_RELEASE"
+
+umask 077
+install -d -m 0700 "$ARS_RELEASE_ROOT"
+test ! -e "$ARS_RUNTIME"
+python3 -m venv "$ARS_RUNTIME"
+"$ARS_RUNTIME/bin/python" -m pip install --upgrade pip
+"$ARS_RUNTIME/bin/python" -m pip install "$ARS_SOURCE[native]"
+"$ARS_RUNTIME/bin/python" -m pip check
+export ARS_EXPECTED_VERSION="$(
+  "$ARS_RUNTIME/bin/python" -c \
+    'from importlib.metadata import version; print(version("agent-run-supervisor"))'
+)"
+"$ARS_RUNTIME/bin/python" - <<'PY'
+from importlib.metadata import version
+print(version("agent-run-supervisor"))
+print(version("agent-client-protocol"))
+PY
+"$ARS_RUNTIME/bin/agent-run-supervisor" --help
+"$ARS_RUNTIME/bin/python" -m agent_run_supervisor.arsd --help
+printf '%s\n' "$ARS_SOURCE_COMMIT" >"$ARS_RUNTIME/.ars-source-commit"
+chmod 0600 "$ARS_RUNTIME/.ars-source-commit"
+test "$(cat "$ARS_RUNTIME/.ars-source-commit")" = "$ARS_SOURCE_COMMIT"
+```
+
+Checkpoint: the checkout remains clean at the exact commit, `pip check` and both
+help commands succeed, and `.ars-source-commit` records the installed source
+identity. The installation copies/builds the package into the release venv; the
+service does not run with `PYTHONPATH=src` and does not depend on the checkout
+remaining at that path. Keep the source commit reachable for rebuild and audit.
 
 ## 3. Create the local configuration
 
@@ -307,14 +376,17 @@ from agent_run_supervisor.arsd.client import ArsdClient
 with ArsdClient(os.environ["ARS_SOCKET"]) as client:
     info = client.server_info(request_id="ops-server-info")
 print(info)
-assert version("agent-run-supervisor") == os.environ["ARS_VERSION"]
+expected = os.environ["ARS_EXPECTED_VERSION"]
+assert version("agent-run-supervisor") == expected
+assert info["version"] == expected
+assert info["api_version"] == 3
 PY
 ```
 
-Export `ARS_VERSION` to this command's environment if your shell does not export
-it. Check that `server_info` reports API version 3 and the expected ARS package
-version and limits. Socket success proves that the caller UID is mapped; an
-unmapped UID is refused.
+Export `ARS_EXPECTED_VERSION` to this command's environment if your shell does
+not retain exports from the selected installation path. Check that `server_info`
+reports API version 3 and that expected ARS package version and limits. Socket
+success proves that the caller UID is mapped; an unmapped UID is refused.
 
 At this point the service is installed and reachable, but do **not** cut callers
 over until acceptance passes.
@@ -636,6 +708,7 @@ keeping the same state root and socket.
 export ARS_VERSION='<OLD_VERSION>'
 export ARS_RUNTIME="$ARS_RELEASE_ROOT/$ARS_VERSION/venv"
 export ARS_CONFIG="$ARS_CONFIG_ROOT/releases/$ARS_VERSION"
+export ARS_EXPECTED_VERSION="$ARS_VERSION"
 
 test -x "$ARS_RUNTIME/bin/python"
 test -r "$ARS_CONFIG/agents.toml"

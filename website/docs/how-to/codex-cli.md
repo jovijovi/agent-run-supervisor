@@ -5,9 +5,19 @@ description: Registering Codex CLI with ARS through an ACP adapter and its grant
 
 # Codex CLI
 
-A CLI that does not speak ACP natively is reached through an ACP adapter you
-install independently. The adapter executable remains an operator deployment
-fact, but its evidenced ACP permission-mode behavior belongs to the source-owned
+Codex CLI is reached through the
+[`@agentclientprotocol/codex-acp`](https://github.com/agentclientprotocol/codex-acp)
+adapter, which you install independently. Do not use the archived
+`@zed-industries/codex-acp` package for a new installation.
+
+```bash
+export CODEX_ACP_VERSION='<exact-version>'
+npm install -g "@agentclientprotocol/codex-acp@$CODEX_ACP_VERSION"
+codex-acp --version
+```
+
+The adapter executable remains an operator deployment fact, but its evidenced
+ACP permission-mode behavior belongs to the source-owned
 `codex-agent-acp-compat-v1` profile.
 
 ## The registry entry
@@ -15,7 +25,7 @@ fact, but its evidenced ACP permission-mode behavior belongs to the source-owned
 ```toml title="agents.toml"
 [agents.codex-cli]
 profile   = "codex-agent-acp-compat-v1"
-command   = "<the-acp-adapter-executable>"
+command   = "codex-acp"
 args      = []
 mediation = "ask-privileged-tool-families-v1"
 ```
@@ -46,11 +56,10 @@ request field; each Run still performs its grant-derived set and readback.
 
 !!! note "Which command, and which arguments?"
 
-    Both come from the adapter you installed, and change with its releases.
-    Whatever the adapter's documentation says to run for a stdio ACP server is
-    what goes in `command` and `args`. ARS passes them to `exec` unchanged: a
-    bare name stays a bare name, an absolute path stays absolute, and every token
-    — including an empty one — reaches the process as declared.
+    The global npm package currently installs the `codex-acp` executable and
+    takes no required stdio-server argument. If a later adapter release changes
+    that contract, follow its documentation and re-run acceptance. ARS passes
+    `command` and `args` to `exec` unchanged.
 
 ## Environment
 
@@ -59,7 +68,7 @@ Adapters commonly need more than the base allowlist provides. Declare it:
 ```toml
 [agents.codex-cli]
 profile   = "codex-agent-acp-compat-v1"
-command   = "<the-acp-adapter-executable>"
+command   = "codex-acp"
 args      = []
 mediation = "ask-privileged-tool-families-v1"
 

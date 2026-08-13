@@ -18,19 +18,39 @@ not write ARS runtime state or submit a Run. Step 4 starts the daemon.
 
 ## 1. Install
 
+For a published release (recommended for production), install an exact PyPI
+version into a virtual environment:
+
 ```bash
-pip install 'agent-run-supervisor[native]'
+python3 -m venv .venv
+.venv/bin/python -m pip install 'agent-run-supervisor[native]==<X.Y.Z>'
+. .venv/bin/activate
+agent-run-supervisor --help
 ```
 
 The `native` extra pins the official ACP client, which is what actually drives a
-real agent. The runtime itself is standard library only, so a source checkout
-runs with nothing installed at all:
+real agent. For development or an unreleased commit, install a clean, pinned
+local checkout into a separate virtual environment:
 
 ```bash
 git clone https://github.com/jovijovi/agent-run-supervisor.git
 cd agent-run-supervisor
-PYTHONPATH=src python3 -m agent_run_supervisor --help
+git checkout <full-40-character-commit-id>
+test -z "$(git status --porcelain=v1 -uall)"
+python3 -m venv .venv
+.venv/bin/python -m pip install '.[native]'
+. .venv/bin/activate
+agent-run-supervisor --help
 ```
+
+Do not treat `PYTHONPATH=src` as an installation or deploy from a moving/dirty
+checkout. The complete immutable PyPI and pinned-source procedures are in the
+[operations runbook](deployment/operations-runbook.md).
+
+Keep that virtual environment active for the remaining steps. In a new shell,
+return to the installation directory and run `. .venv/bin/activate` first; the
+bare `agent-run-supervisor` and `python3` commands below then resolve to the
+selected installation rather than an unrelated system package.
 
 ## 2. Write an agents file
 
