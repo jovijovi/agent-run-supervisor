@@ -40,7 +40,7 @@ theme:
   custom_dir: website/overrides
   language: en
   logo: assets/logo/logo-mark-64.png
-  favicon: assets/logo/favicon.svg
+  favicon: assets/logo/logo-mark-64.png
   # `false` removes the theme's Google Fonts <link>. Every face is served from
   # website/docs/assets/fonts by assets/stylesheets/ars.css.
   font: false
