@@ -2,7 +2,9 @@
 
 ## Fresh local root
 
-`--output-dir` must name a path that does not exist. The controller creates it exclusively and writes only beneath it:
+`--output-dir` must name a path that does not exist. Its **parent directory must already exist and be writable**; controllers create the leaf output root exclusively and intentionally do not create missing ancestors. Preflight both facts before launch. A missing parent yields the stable pre-submission category `OUTPUT_CREATE`.
+
+If `OUTPUT_CREATE` occurs, do not call it an AGENT failure or Case retry. First prove there was no successful submit acknowledgement, no controller-created output root, and no corresponding new durable Run evidence. Only after that proof may the operator create the missing parent and begin the intended first Case attempt. The controller then creates the leaf directory and writes only beneath it:
 
 ```text
 <output-dir>/
@@ -74,6 +76,12 @@ They exclude absolute paths, output/evidence location, owner/namespace, registry
 `TERMINAL_UNTRUSTWORTHY`, and `CONTROLLER_DEADLINE`; its projection also carries the mode and the case ids it ran. Live package and API versions stay diagnostic: no verdict reads one, an absent or unusable package version
 is projected as the sentinel `unreported` and never stops a batch, and no projection ranks AGENTs or
 reports a pass rate.
+
+## Independent post-run verification
+
+Treat controller outputs as immutable evidence. Derive the expected receipt set from the source-owned fixed case table and route list: response-only expects one receipt for every `R1/R2/R3 × route`, while Session reuse expects one paired S1/S2 receipt per route. Verify counts, single-submission fields, unique Runs/Sessions, exact configuration checks, continuity checks, process reap, summaries, daemon state, and repository delta.
+
+A read-only helper or aggregation failure is an evidence-inspection problem, not an AGENT Case failure and not permission to replay. Keep the original outputs, switch to direct fixed-path receipt inspection, and report the helper issue separately if it matters. Never repair, normalize, or rewrite receipts to make aggregation succeed.
 
 ## Interpretation
 
