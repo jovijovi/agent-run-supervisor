@@ -1,11 +1,11 @@
 ---
 name: ars-batch-agent-acceptance
-description: Use when directly checking a deployed ARS with fixed response-only delivery and real Session create-to-load quick-health controllers.
+description: Use when directly checking a deployed ARS with fixed response-only delivery, real Session create-to-load, and permission-mediation quick-health controllers.
 ---
 
 # ARS quick-health acceptance
 
-Use this skill for a bounded health check of an already deployed ARS. It does not install or manage external AGENTs, edit a registry, configure or restart a service, deploy, retry a Run, or turn technical completion into business success.
+Use this skill for a bounded health check of an already deployed ARS selected by the operator. A disposable daemon is optional, never required. It does not install or manage external AGENTs, edit a registry, configure or restart a service, deploy, retry a Run, or turn technical completion into business success.
 
 ## Official direct entry points
 
@@ -13,8 +13,9 @@ Use this skill for a bounded health check of an already deployed ARS. It does no
 |---|---|
 | `scripts/run_response_only.py` | Three fresh Runs per route using fixed bubble-sort prompts; each Run must complete the task-delivery chain and return a non-empty string |
 | `scripts/run_session_reuse.py` | Two sequential Runs per route; S1 creates a Session and returns a non-empty string, then S2 loads that exact Session and recalls a fresh token |
+| `scripts/run_permissions.py` | One fresh Run per fixed permission case in an exclusive disposable workspace; `--mode quick` (default) or `--mode regression` |
 
-Both scripts use the public `ArsdClient` over the configured Unix socket. They read the served API version, required operations, concurrency, event-page limit, prompt limit, and event-budget ceiling from live `server_info`. They never hard-code a package/API version, daemon PID, caller identity, registry path, route, provider, or deployment label.
+All three scripts use the public `ArsdClient` over the configured Unix socket. They read the served API version, required operations, concurrency, event-page limit, prompt limit, and event-budget ceiling from live `server_info`. They never hard-code a package/API version, daemon PID, caller identity, registry path, route, provider, or deployment label.
 
 Content correctness and quality are out of scope. The response-only prompt is a fixed payload used to prove that ARS can invoke the selected AGENT and return a concrete deliverable. Prompt wording and requested output format are not acceptance authority, and the controller does not parse, execute, or otherwise judge the returned text.
 
@@ -32,17 +33,19 @@ uv run python skills/ars-batch-agent-acceptance/scripts/run_response_only.py \
   --agent 'agent-a=<exact-model>,<exact-effort>'
 ```
 
-Use the same parameters with `scripts/run_session_reuse.py` for the continuity check. Timeout and evidence-size options are controller-selected request limits; live daemon limits remain authoritative, and incompatible settings are refused before output creation or submission.
+Use the same parameters with `scripts/run_session_reuse.py` for the continuity check, and with `scripts/run_permissions.py` for the permission check, which additionally accepts `--mode quick|regression`. Timeout and evidence-size options are controller-selected request limits; live daemon limits remain authoritative, and incompatible settings are refused before output creation or submission.
 
 ## Verdicts
 
-Rounds are sequential. Selected routes may run concurrently only within live capacity; Session legs are always sequential per route. Every case has one submission attempt and no replay or retry path.
+Rounds are sequential. Selected routes may run concurrently only within live capacity; Session legs and permission cases are always sequential per route. Every case has one submission attempt and no replay or retry path: a controller timeout reconciles the same durable Run instead of killing or resubmitting it.
 
 Response-only PASS requires only: `completed/end_turn`; exact requested, sealed, and effective model/effort with exact config fidelity; the expected create and Prompt events; process reap proof; an unchanged AGENT workspace; and a non-empty string in `final_message`.
 
 Session-reuse PASS requires: S1 create plus non-empty output; S2 load of exactly S1's Session; distinct Runs; exact token recall; exact configuration and create/load/Prompt event evidence; and process reap proof for both Runs. The token comparison is continuity evidence, not a content-quality verdict.
 
-Permissions remain a separate acceptance concern. These controllers do not run permission canaries and cannot report permission PASS.
+Permission PASS requires the current Run to show the expected operation family and decision, an observed tool attempt of the expected kind, the expected effect or non-effect, a trustworthy terminal, exact model/effort, and process reap. An AGENT's own account of what it was allowed to do is never permission evidence. A read that succeeds — or a write that is stopped — with nothing mediating it is `UNSUPPORTED`, not PASS. Any permission violation is FAIL, and a denied Run may legitimately end in more than one trustworthy terminal. Worst verdict wins, and only an overall PASS exits 0. See [references/permissions-controller.md](references/permissions-controller.md).
+
+None of the three controllers gates on an AGENT CLI or ACP adapter version, revision, or binary hash — an upgrade is exactly why the same fixed cases run again, and version observations stay diagnostic, including an unreadable one. The permission cases measure cooperative AGENT/adapter mediation, not an OS sandbox or hostile-process containment. The two delivery controllers above run no permission case and report no permission verdict.
 
 ## Evidence
 

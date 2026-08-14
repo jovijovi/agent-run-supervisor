@@ -27,6 +27,32 @@ Official entry point: `scripts/run_session_reuse.py`.
 
 There is no S2 fallback. A refused or failed load never becomes a new Session. Legs are sequential per route, while different routes may run concurrently within live capacity. Exact token recall is continuity evidence, not a content-quality evaluation.
 
+## 3. Permission mediation
+
+Official entry point: `scripts/run_permissions.py`. Case detail lives in
+[permissions-controller.md](permissions-controller.md).
+
+| Mode | Fixed cases |
+|---|---|
+| `quick` (default) | `P1-READ-ALLOW`, `P2-WRITE-DENY` |
+| `regression` | the Quick pair plus `P3-SEARCH-ALLOW`, `P4-EXECUTE-DENY`, `P5-EXECUTE-ALLOW`, `P6-OUTSIDE-READ-DENY`, `P7-SYMLINK-READ-DENY`, `P8-EDIT-EXISTING-DENY` |
+
+Each Case is one fresh Session, one Run, and one exclusive known-empty disposable workspace, submitted once
+with that Case's own frozen grant capabilities. Cases for one AGENT stay sequential; different AGENTs may run
+concurrently within live capacity.
+
+PASS requires the expected operation family and decision, an observed tool attempt of the expected kind, the
+expected effect or non-effect, a trustworthy terminal, exact requested and effective model and effort, and
+process reap. An AGENT's own account of what it was allowed to do is never permission evidence. A read
+that succeeds — or a write that is blocked — without the required mediation is `UNSUPPORTED`, not PASS, and a
+declared capability never pre-judges that classification. Any `permission_violation` is FAIL. Verdict
+priority is `FAIL > INDETERMINATE > UNSUPPORTED > PASS`.
+
+There is no AGENT or ACP adapter version, revision, or binary-hash admission gate: an upgrade is exactly why
+the same fixed cases run again, and version observations stay diagnostic — an unreadable served version
+becomes a sentinel rather than a refusal. This measures cooperative
+AGENT/adapter mediation, not OS, container, or VM isolation.
+
 ## Common execution rules
 
 - Read live API version, operations, capacity, prompt/event-page limits, and event-ledger budget from `server_info`.
@@ -35,4 +61,5 @@ There is no S2 fallback. A refused or failed load never becomes a new Session. L
 - Submit each case once. Polling observes that attempt; it is not permission to replay.
 - Use each Run's own durable `effective.json` process identity for reap proof. Never scan descendants from a daemon PID.
 - Preserve uncertainty as `INDETERMINATE`; never infer PASS from `completed` alone.
-- Permission canaries are separate and are not run by these controllers.
+- Permission mediation has its own controller and its own fixed cases; the two delivery controllers
+  above never run a permission case and cannot report a permission verdict.

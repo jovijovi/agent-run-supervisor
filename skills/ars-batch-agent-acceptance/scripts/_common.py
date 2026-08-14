@@ -291,6 +291,41 @@ def config_from_namespace(args: argparse.Namespace) -> ControllerConfig:
     )
 
 
+VERSION_UNREPORTED = "unreported"
+_SAFE_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}")
+
+
+def diagnostic_version(value: Any) -> str:
+    """The served package version, or a sentinel.
+
+    A version is diagnostic metadata and never an admission gate, so an absent,
+    empty, non-string, or unsafely shaped value must not stop the batch: it
+    becomes one sentinel and the same fixed cases run anyway.
+    """
+
+    if isinstance(value, str) and _SAFE_VERSION.fullmatch(value):
+        return value
+    return VERSION_UNREPORTED
+
+
+def live_projection(live: LivePolicy) -> dict[str, Any]:
+    """The only live-daemon facts a controller persists.
+
+    ``server_info`` is a daemon-authored document that may carry operator,
+    host, or deployment detail this skill has no business retaining, so the
+    validated policy numbers are projected out and the document is dropped.
+    """
+
+    return {
+        "api_version": live.api_version,
+        "ars_package_version": live.package_version,
+        "max_concurrent_runs": live.capacity,
+        "events_page_limit": live.event_page_limit,
+        "max_run_event_budget_bytes": live.max_run_event_budget_bytes,
+        "max_prompt_bytes": live.max_prompt_bytes,
+    }
+
+
 def preflight(config: ControllerConfig, client_factory: Callable[..., Any]) -> tuple[LivePolicy, dict[str, Any]]:
     try:
         with client_factory(config.socket_path) as client:
@@ -333,29 +368,25 @@ def preflight(config: ControllerConfig, client_factory: Callable[..., Any]) -> t
     )
     if event_budget > values["max_run_event_budget_bytes"]:
         raise PreflightError("EVENT_BUDGET")
-    package_version = info.get("version")
-    if not isinstance(package_version, str) or not package_version:
-        raise PreflightError("PACKAGE_VERSION")
-    return (
-        LivePolicy(
-            package_version=package_version,
-            api_version=api_version,
-            capacity=values["max_concurrent_runs"],
-            event_page_limit=values["events_page_limit"],
-            max_run_event_budget_bytes=values["max_run_event_budget_bytes"],
-            max_prompt_bytes=values["max_prompt_bytes"],
-        ),
-        info,
+    live = LivePolicy(
+        package_version=diagnostic_version(info.get("version")),
+        api_version=api_version,
+        capacity=values["max_concurrent_runs"],
+        event_page_limit=values["events_page_limit"],
+        max_run_event_budget_bytes=values["max_run_event_budget_bytes"],
+        max_prompt_bytes=values["max_prompt_bytes"],
     )
+    # The daemon document itself stops here: only the projection travels on.
+    return live, live_projection(live)
 
 
-def create_output_root(config: ControllerConfig, server_info: Mapping[str, Any]) -> Path:
+def create_output_root(config: ControllerConfig, diagnostics: Mapping[str, Any]) -> Path:
     root = config.output_dir.resolve(strict=False)
     try:
         root.mkdir(mode=0o700, exist_ok=False)
         (root / "raw").mkdir(mode=0o700)
         (root / "workspaces").mkdir(mode=0o700)
-        write_json_exclusive(root / "raw" / "server-info.json", server_info)
+        write_json_exclusive(root / "raw" / "live-policy.json", diagnostics)
     except FileExistsError:
         raise EvidenceError("OUTPUT_EXISTS") from None
     except OSError:
@@ -393,7 +424,14 @@ def build_payload(
     prompt: str,
     workspace: Path,
     session_id: str | None = None,
+    capabilities: Sequence[str] = ("read",),
+    grant_label: str = "read-only",
 ) -> dict[str, Any]:
+    """One immutable per-Run request. The grant is the case's own capability
+    set: a controller that always sent the same grant could never distinguish a
+    denied family from an ungranted one."""
+
+    grant_name = f"ars-quick-health-{grant_label}"
     request: dict[str, Any] = {
         "owner": config.owner,
         "namespace": config.namespace,
@@ -402,10 +440,10 @@ def build_payload(
         "input_refs": [{"ref": case_ref, "content_hash": sha256_ref(prompt)}],
         "requested_model": route.model,
         "requested_effort": route.effort,
-        "grant_ref": "grant:ars-quick-health-read-only",
-        "grant_hash": sha256_ref("ars-quick-health-read-only"),
+        "grant_ref": f"grant:{grant_name}",
+        "grant_hash": sha256_ref(grant_name),
         "grant_role_hash": sha256_ref("ars-quick-health-controller"),
-        "grant_capabilities": ["read"],
+        "grant_capabilities": list(capabilities),
         "mcp_snapshot_hashes": [],
         "credential_refs": [],
         "limits": config.request_limits.to_wire(),
@@ -473,7 +511,10 @@ def read_all_events(
     raise CaseFailure("EVENT_EVIDENCE")
 
 
-def _safe_component(value: Any) -> str:
+def safe_component(value: Any) -> str:
+    """An ack identifier safe to use as one path component, or a stop."""
+
+
     if (
         not isinstance(value, str)
         or not value
@@ -498,6 +539,52 @@ def _read_json(path: Path) -> dict[str, Any]:
     return payload
 
 
+def read_run_evidence(
+    config: ControllerConfig, run_id: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """That Run's own durable ``effective.json`` and sealed ``spec.json``."""
+
+    run_dir = config.supervisor_root.resolve(strict=False) / "native-runs" / run_id
+    effective = _read_json(run_dir / "effective.json")
+    spec = _read_json(run_dir / "spec.json")
+    if type(spec.get("runtime")) is not dict:
+        raise CaseFailure("DURABLE_EVIDENCE")
+    return effective, spec
+
+
+def config_fidelity_checks(
+    route: AgentRoute,
+    effective: Mapping[str, Any],
+    spec: Mapping[str, Any],
+) -> dict[str, bool]:
+    """Exact requested/sealed/effective model and effort, or nothing."""
+
+    runtime = spec.get("runtime")
+    runtime = runtime if isinstance(runtime, Mapping) else {}
+    return {
+        "effective_model": effective.get("effective_model") == route.model,
+        "effective_effort": effective.get("effective_effort") == route.effort,
+        "spec_model": runtime.get("model_id") == route.model,
+        "spec_effort": runtime.get("effort") == route.effort,
+        "config_fidelity": runtime.get("config_fidelity") == "exact",
+    }
+
+
+def classify_reap(
+    effective: Mapping[str, Any],
+    liveness_checker: Callable[[Mapping[str, Any]], str] = classify_holder,
+) -> str:
+    """Liveness of this Run's own recorded process identity; never a scan."""
+
+    identity = effective.get("process_identity")
+    if not isinstance(identity, Mapping):
+        return "unknown"
+    try:
+        return liveness_checker(identity)
+    except Exception:
+        return "unknown"
+
+
 def prove_run(
     config: ControllerConfig,
     route: AgentRoute,
@@ -509,24 +596,15 @@ def prove_run(
     session_operation: str,
     liveness_checker: Callable[[Mapping[str, Any]], str] = classify_holder,
 ) -> RunProof:
-    run_id = _safe_component(ack.get("run_id"))
-    session_id = _safe_component(ack.get("session_id"))
-    run_dir = config.supervisor_root.resolve(strict=False) / "native-runs" / run_id
-    effective = _read_json(run_dir / "effective.json")
-    spec = _read_json(run_dir / "spec.json")
-    runtime = spec.get("runtime")
-    if type(runtime) is not dict:
-        raise CaseFailure("DURABLE_EVIDENCE")
+    run_id = safe_component(ack.get("run_id"))
+    session_id = safe_component(ack.get("session_id"))
+    effective, spec = read_run_evidence(config, run_id)
 
     families = [str(event.get("type", "")) for event in events]
     checks: dict[str, bool | None] = {
         "completed": result.get("status") == "completed",
         "end_turn": result.get("stop_reason") == "end_turn",
-        "effective_model": effective.get("effective_model") == route.model,
-        "effective_effort": effective.get("effective_effort") == route.effort,
-        "spec_model": runtime.get("model_id") == route.model,
-        "spec_effort": runtime.get("effort") == route.effort,
-        "config_fidelity": runtime.get("config_fidelity") == "exact",
+        **config_fidelity_checks(route, effective, spec),
         "prompt_once": families.count("session_prompt_sent") == 1,
     }
     if session_operation == "create":
@@ -538,13 +616,7 @@ def prove_run(
     else:
         raise ConfigurationError("SESSION_OPERATION")
 
-    identity = effective.get("process_identity")
-    liveness = "unknown"
-    if isinstance(identity, Mapping):
-        try:
-            liveness = liveness_checker(identity)
-        except Exception:
-            liveness = "unknown"
+    liveness = classify_reap(effective, liveness_checker)
     checks["process_reaped"] = liveness == CRASHED
 
     failure: str | None = None
