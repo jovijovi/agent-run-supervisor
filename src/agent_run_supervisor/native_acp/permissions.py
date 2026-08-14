@@ -48,12 +48,13 @@ _REGISTERED_KINDS = frozenset(
 _ALLOW_OPTION_PREFERENCE = ("allow_once",)
 _REJECT_OPTION_PREFERENCE = ("reject_once", "reject_always")
 
-# Write-family ACP tool kinds and the grant capability each one requires. A
-# write-family tool call that reaches ``completed`` without that capability in
-# the frozen grant is a grant violation: the agent performed a side effect the
-# grant never allowed and no mediation could have legitimately approved. This
-# is the honest fail-closed backstop behind the client-mediated ask/deny
-# launch binding — detection, never prevention (the tool already ran).
+# Write-family ACP tool kinds and the grant capability each one requires for
+# both permission mediation and the completion backstop. A write-family tool
+# call that reaches ``completed`` without that capability in the frozen grant
+# is a grant violation: the agent performed a side effect the grant never
+# allowed and no mediation could have legitimately approved. This is the
+# honest fail-closed backstop behind the client-mediated ask/deny launch
+# binding — detection, never prevention (the tool already ran).
 _WRITE_FAMILY_REQUIRED_CAPABILITY: dict[str, str] = {
     "edit": "write",
     "delete": "delete",
@@ -227,17 +228,14 @@ class PermissionBridge:
                 options=options,
             )
 
-        # B4: `execute` is mediated against the frozen grant instead of being
-        # denied unconditionally. Without this the completion backstop below
-        # was unreachable in the honest direction — it already treats an
-        # execute completion under an execute grant as legitimate, while
-        # mediation refused the request that could produce it. The remaining
-        # write-family kinds keep their unconditional deny in this slice: their
-        # mediated-allow path has no live canary.
-        if kind == "execute" and "execute" in self._capabilities:
+        required_capability = _WRITE_FAMILY_REQUIRED_CAPABILITY.get(kind)
+        if (
+            required_capability is not None
+            and required_capability in self._capabilities
+        ):
             return self._allow_once_or_deny(
                 kind=kind,
-                reason="execute permitted once by the frozen grant",
+                reason=f"{kind} permitted once by the frozen grant",
                 tool_call_id=tool_call_id,
                 options=options,
             )
