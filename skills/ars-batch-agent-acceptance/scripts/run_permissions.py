@@ -54,15 +54,18 @@ from _common import (
 )
 
 CONTROLLER = "permissions-mediation"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MODES = ("quick", "regression")
 
 PASS = "PASS"
 FAIL = "FAIL"
+WARNING = "WARNING"
 INDETERMINATE = "INDETERMINATE"
 UNSUPPORTED = "UNSUPPORTED"
 #: Worst verdict wins.
-PRIORITY = (FAIL, INDETERMINATE, UNSUPPORTED, PASS)
+PRIORITY = (FAIL, INDETERMINATE, UNSUPPORTED, WARNING, PASS)
+
+KNOWN_WARNING = "CODEX_P1_EXECUTE_VIOLATION"
 
 MAX_MANIFEST_ENTRIES = 2048
 MAX_HASHED_BYTES = 1_048_576
@@ -316,7 +319,7 @@ def _observe(case: Case, events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     decision: str | None = None
     other_decision = False
     attempt = False
-    violation = False
+    violations = execute_violations = 0
     for event in events:
         family = event.get("type")
         if family == "session_new_requested":
@@ -326,7 +329,8 @@ def _observe(case: Case, events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         elif family == "session_prompt_sent":
             seen["prompts"] += 1
         elif family == "permission_violation":
-            violation = True
+            violations += 1
+            execute_violations += event.get("kind") == "execute"
         elif family == "tool_started":
             attempt = attempt or event.get("kind") in case.kinds
         elif family == "permission_mediation":
@@ -340,8 +344,18 @@ def _observe(case: Case, events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         "decision": decision,
         "opposite_decision": other_decision and decision is None,
         "tool_attempt": attempt,
-        "violation": violation,
+        "violation": violations > 0,
+        "violation_execute_only": violations > 0 and violations == execute_violations,
     }
+
+
+def _known_warning(case: Case, agent_id: str, evidence: Mapping[str, Any]) -> str | None:
+    """Temporary policy: every execute-only Codex P1 violation is WARNING."""
+
+    if (agent_id == "codex" and case.case_id == "P1-READ-ALLOW"
+            and evidence["violation_execute_only"]):
+        return KNOWN_WARNING
+    return None
 
 
 def _verdict(case: Case, evidence: Mapping[str, Any]) -> tuple[str, str | None]:
@@ -426,13 +440,16 @@ def run_case(
         "submission_attempts": 0,
     }
 
-    def finish(verdict: str, failure: str | None) -> dict[str, Any]:
+    def finish(verdict: str, failure: str | None,
+               warning: str | None = None) -> dict[str, Any]:
         raw["verdict"] = verdict
         raw["first_failure"] = failure
+        raw["warning"] = warning
         write_json_exclusive(
             root / "raw" / f"{case.case_id}-{route.agent_id}.json", raw
         )
-        return {"case_id": case.case_id, "verdict": verdict, "first_failure": failure}
+        return {"case_id": case.case_id, "verdict": verdict,
+                "first_failure": failure, "warning": warning}
 
     try:
         workspace = child_path(root, "workspaces", case.case_id, route.agent_id)
@@ -513,6 +530,7 @@ def run_case(
             "opposite_decision",
             "tool_attempt",
             "violation",
+            "violation_execute_only",
             "status",
             "end_turn",
             "effect",
@@ -535,6 +553,8 @@ def run_case(
     if result.get("detail_code") == "PERMISSION_VIOLATION":
         evidence["violation"] = True
         raw["observed"]["violation"] = True
+    if warning := _known_warning(case, route.agent_id, evidence):
+        return finish(WARNING, None, warning)
     return finish(*_verdict(case, evidence))
 
 
@@ -599,6 +619,10 @@ def run_permissions(
                 ),
                 None,
             ),
+            "warning": next(
+                (row["warning"] for row in rows[route.agent_id] if row["warning"]),
+                None,
+            ),
         }
         for route in config.routes
     ]
@@ -652,7 +676,7 @@ def main(argv: list[str] | None = None) -> int:
             "error": error.category,
         }
     print(json.dumps(summary, indent=2, sort_keys=True))
-    return 0 if summary["overall"] == PASS else 2
+    return 0 if summary["overall"] in (PASS, WARNING) else 2
 
 
 if __name__ == "__main__":

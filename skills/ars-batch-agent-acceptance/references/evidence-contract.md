@@ -65,9 +65,10 @@ both manifests are preserved exactly as found — the evidence is the point.
 
 - controller/schema identity and the live package/API version;
 - stable operator-supplied agent IDs and exact model/effort routes;
-- per-round, per-route, or per-Case `PASS`, `FAIL`, `INDETERMINATE`, or — for a permission Case —
-  `UNSUPPORTED`;
-- one stable categorical `first_failure`.
+- per-round, per-route, or per-Case `PASS`, `FAIL`, or `INDETERMINATE`, plus `UNSUPPORTED` or `WARNING`
+  for a permission Case;
+- one stable categorical `first_failure`;
+- for permission results, source-owned `warning` (`CODEX_P1_EXECUTE_VIOLATION`) or `null`;
 
 They exclude absolute paths, output/evidence location, owner/namespace, registry path, request/Run/Session IDs, prompts, final messages, the continuity token, workspace manifests and file names, process IDs, event bodies, raw exceptions, and provider-authored free-form text. Use stable categories such as `SUBMIT`, `CONFIG_FIDELITY`, `SESSION_CHANGED`, `TOKEN_MISMATCH`, or `PROCESS_REAP_UNPROVEN`; never copy exception text into shared output. The permission controller adds `PERMISSION_VIOLATION`, `REFUSAL_INEFFECTIVE`, `UNEXPECTED_ALLOW`, `UNEXPECTED_DENY`, `MEDIATION_ABSENT`, `CONDITIONAL_ALLOW_UNAVAILABLE`, `TOOL_ATTEMPT_UNPROVEN`, `EFFECT_UNPROVEN`, `SESSION_BINDING`,
 `TERMINAL_UNTRUSTWORTHY`, and `CONTROLLER_DEADLINE`; its projection also carries the mode and the case ids it ran. Live package and API versions stay diagnostic: no verdict reads one, an absent or unusable package version
