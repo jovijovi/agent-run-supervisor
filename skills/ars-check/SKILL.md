@@ -1,5 +1,5 @@
 ---
-name: ars-batch-agent-acceptance
+name: ars-check
 description: Use when directly checking a deployed ARS with fixed response-only delivery, real Session create-to-load, and permission-mediation quick-health controllers.
 ---
 
@@ -32,7 +32,7 @@ Content correctness and quality are out of scope. The response-only prompt is a 
 Supply the socket, supervisor state root, a path that does not yet exist for output, caller owner/namespace, and one or more exact routes. Repeat `--agent` for multiple routes. **The output path's parent directory must already exist and be writable**: the controller exclusively creates the leaf output directory but does not create missing ancestors. Preflight both conditions explicitly—parent exists/writable, leaf absent—before launch:
 
 ```bash
-uv run python skills/ars-batch-agent-acceptance/scripts/run_response_only.py \
+uv run python skills/ars-check/scripts/run_response_only.py \
   --socket /path/to/arsd.sock \
   --supervisor-root /path/to/supervisor-state \
   --output-dir /path/to/fresh-response-evidence \

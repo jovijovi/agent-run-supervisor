@@ -19,7 +19,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "skills" / "ars-batch-agent-acceptance"
+SKILL = ROOT / "skills" / "ars-check"
 SCRIPTS = SKILL / "scripts"
 COMMON_PATH = SCRIPTS / "_common.py"
 RESPONSE_PATH = SCRIPTS / "run_response_only.py"
@@ -269,12 +269,26 @@ def test_skill_keeps_only_official_parameterized_controllers() -> None:
     } <= present
     assert "scripts/run_batch_acceptance.py" not in present
     assert "scripts/adjudicate.py" not in present
-    assert list((ROOT / "tests").glob("test_ars_batch_agent_acceptance*")) == [
-        ROOT / "tests/test_ars_batch_agent_acceptance_skill.py"
+    assert list((ROOT / "tests").glob("test_ars_check*")) == [
+        ROOT / "tests/test_ars_check_skill.py"
     ]
     assert RESPONSE_PATH.stat().st_mode & 0o111
     assert SESSION_PATH.stat().st_mode & 0o111
     assert PERMISSIONS_PATH.stat().st_mode & 0o111
+
+
+def test_skill_is_published_under_its_short_public_name() -> None:
+    """The directory, the frontmatter name, and the documented command agree."""
+
+    text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+    assert "\nname: ars-check\n" in text
+    assert "skills/ars-check/scripts/run_response_only.py" in text
+    material = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in SKILL.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    )
+    assert "ars-batch-agent-acceptance" not in material
 
 
 def test_response_controller_is_a_compact_delivery_harness() -> None:
