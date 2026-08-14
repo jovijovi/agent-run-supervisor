@@ -597,13 +597,60 @@ def test_execute_without_a_once_option_denies_even_when_granted(
     ("kind", "capability"),
     [("edit", "write"), ("delete", "delete"), ("move", "move")],
 )
-def test_other_write_family_kinds_stay_denied_even_when_granted(
+def test_write_family_kinds_allow_once_with_the_matching_grant(
     tmp_path: Path, kind: str, capability: str
 ) -> None:
-    # Scope pin: only `execute` mediation is opened in this slice; the other
-    # write-family kinds have no live-canaried mediated-allow path.
-    bridge, _, _ = _bridge(tmp_path, capabilities=("read", capability))
+    bridge, _, events = _bridge(tmp_path, capabilities=("read", capability))
     decision = bridge.decide_permission_request(
         _request(kind, options=CLAUDE_SHAPED_OPTIONS)
     )
+
+    assert decision["decision"] == "allow"
+    assert decision["option_id"] == "allow"
+    assert events[-1].requested_op == f"permission:{kind}"
+    assert events[-1].decision == "allow"
+    assert events[-1].reason == decision["reason"]
+    assert events[-1].tool_call_id == "tool-1"
+
+
+@pytest.mark.parametrize(
+    ("kind", "mismatched_capability"),
+    [("edit", "delete"), ("delete", "move"), ("move", "write")],
+)
+def test_write_family_kinds_deny_without_the_matching_grant(
+    tmp_path: Path, kind: str, mismatched_capability: str
+) -> None:
+    bridge, _, events = _bridge(
+        tmp_path, capabilities=("read", mismatched_capability)
+    )
+    decision = bridge.decide_permission_request(
+        _request(kind, options=CLAUDE_SHAPED_OPTIONS)
+    )
+
     assert decision["decision"] == "deny"
+    assert decision["option_id"] == "reject"
+    assert events[-1].requested_op == f"permission:{kind}"
+    assert events[-1].decision == "deny"
+    assert events[-1].reason == decision["reason"]
+    assert events[-1].tool_call_id == "tool-1"
+
+
+@pytest.mark.parametrize(
+    ("kind", "capability"),
+    [("edit", "write"), ("delete", "delete"), ("move", "move")],
+)
+def test_write_family_kinds_deny_without_a_once_option_even_when_granted(
+    tmp_path: Path, kind: str, capability: str
+) -> None:
+    bridge, _, events = _bridge(tmp_path, capabilities=("read", capability))
+    decision = bridge.decide_permission_request(
+        _request(kind, options=[ALLOW_ALWAYS_OPTION, REJECT_OPTION])
+    )
+
+    assert decision["decision"] == "deny"
+    assert decision["option_id"] == "opt-reject"
+    assert events[-1].requested_op == f"permission:{kind}"
+    assert events[-1].decision == "deny"
+    assert events[-1].reason == decision["reason"]
+    assert events[-1].reason == "no once-scoped allow option offered; denying"
+    assert events[-1].tool_call_id == "tool-1"
