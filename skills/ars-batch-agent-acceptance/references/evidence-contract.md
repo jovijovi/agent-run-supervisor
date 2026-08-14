@@ -2,7 +2,9 @@
 
 ## Fresh local root
 
-`--output-dir` must name a path that does not exist. The controller creates it exclusively and writes only beneath it:
+`--output-dir` must name a path that does not exist. Its **parent directory must already exist and be writable**; controllers create the leaf output root exclusively and intentionally do not create missing ancestors. Preflight both facts before launch. A missing parent yields the stable pre-submission category `OUTPUT_CREATE`.
+
+If `OUTPUT_CREATE` occurs, do not call it an AGENT failure or Case retry. First prove there was no successful submit acknowledgement, no controller-created output root, and no corresponding new durable Run evidence. Only after that proof may the operator create the missing parent and begin the intended first Case attempt. The controller then creates the leaf directory and writes only beneath it:
 
 ```text
 <output-dir>/
@@ -65,14 +67,21 @@ both manifests are preserved exactly as found — the evidence is the point.
 
 - controller/schema identity and the live package/API version;
 - stable operator-supplied agent IDs and exact model/effort routes;
-- per-round, per-route, or per-Case `PASS`, `FAIL`, `INDETERMINATE`, or — for a permission Case —
-  `UNSUPPORTED`;
-- one stable categorical `first_failure`.
+- per-round, per-route, or per-Case `PASS`, `FAIL`, or `INDETERMINATE`, plus `UNSUPPORTED` or `WARNING`
+  for a permission Case;
+- one stable categorical `first_failure`;
+- for permission results, source-owned `warning` (`CODEX_P1_EXECUTE_VIOLATION`) or `null`;
 
 They exclude absolute paths, output/evidence location, owner/namespace, registry path, request/Run/Session IDs, prompts, final messages, the continuity token, workspace manifests and file names, process IDs, event bodies, raw exceptions, and provider-authored free-form text. Use stable categories such as `SUBMIT`, `CONFIG_FIDELITY`, `SESSION_CHANGED`, `TOKEN_MISMATCH`, or `PROCESS_REAP_UNPROVEN`; never copy exception text into shared output. The permission controller adds `PERMISSION_VIOLATION`, `REFUSAL_INEFFECTIVE`, `UNEXPECTED_ALLOW`, `UNEXPECTED_DENY`, `MEDIATION_ABSENT`, `CONDITIONAL_ALLOW_UNAVAILABLE`, `TOOL_ATTEMPT_UNPROVEN`, `EFFECT_UNPROVEN`, `SESSION_BINDING`,
 `TERMINAL_UNTRUSTWORTHY`, and `CONTROLLER_DEADLINE`; its projection also carries the mode and the case ids it ran. Live package and API versions stay diagnostic: no verdict reads one, an absent or unusable package version
 is projected as the sentinel `unreported` and never stops a batch, and no projection ranks AGENTs or
 reports a pass rate.
+
+## Independent post-run verification
+
+Treat controller outputs as immutable evidence. Derive the expected receipt set from the source-owned fixed case table and route list: response-only expects one receipt for every `R1/R2/R3 × route`, while Session reuse expects one paired S1/S2 receipt per route. Verify counts, single-submission fields, unique Runs/Sessions, exact configuration checks, continuity checks, process reap, summaries, daemon state, and repository delta.
+
+A read-only helper or aggregation failure is an evidence-inspection problem, not an AGENT Case failure and not permission to replay. Keep the original outputs, switch to direct fixed-path receipt inspection, and report the helper issue separately if it matters. Never repair, normalize, or rewrite receipts to make aggregation succeed.
 
 ## Interpretation
 

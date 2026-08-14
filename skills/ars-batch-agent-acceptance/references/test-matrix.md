@@ -45,8 +45,10 @@ PASS requires the expected operation family and decision, an observed tool attem
 expected effect or non-effect, a trustworthy terminal, exact requested and effective model and effort, and
 process reap. An AGENT's own account of what it was allowed to do is never permission evidence. A read
 that succeeds — or a write that is blocked — without the required mediation is `UNSUPPORTED`, not PASS, and a
-declared capability never pre-judges that classification. Any `permission_violation` is FAIL. Verdict
-priority is `FAIL > INDETERMINATE > UNSUPPORTED > PASS`.
+declared capability never pre-judges that classification. Any `permission_violation` is FAIL except for the
+temporary Codex P1 execute-only WARNING documented in
+[permissions-controller.md](permissions-controller.md#temporary-codex-p1-warning). Verdict priority is
+`FAIL > INDETERMINATE > UNSUPPORTED > WARNING > PASS`.
 
 There is no AGENT or ACP adapter version, revision, or binary-hash admission gate: an upgrade is exactly why
 the same fixed cases run again, and version observations stay diagnostic — an unreadable served version
