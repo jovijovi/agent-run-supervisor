@@ -69,7 +69,7 @@ reintroduce one.
 | `config_fidelity.py` | exact-or-zero configuration and between-Run switch/rollback state machine; the two **configuration-fidelity modes** and the shared `EFFORT_NOT_APPLICABLE` sentinel; option domains come from **live discovery**, with no source-domain preflight |
 | `launch_permissions.py` **(new)** | the closed set of source-owned launch-permission policies a profile may select, each keyed by the capability family it enforces. Compiles one deterministic document from the Run's frozen grant, digests it, materializes it privately per Run under the supervisor root, and removes it. No dynamic approval, no path-level write policy, no positive write/execute grant, and no agent-named literal |
 | `client.py` | official SDK callback implementation. Synchronous fail-closed identity rejection at callback entry for every ID-bearing update, permission, filesystem, terminal, and session-scoped elicitation surface, using exact pinned SDK signatures rather than varargs; categorical violations carry no IDs |
-| `permissions.py` | frozen-grant → default-deny mediation; deterministic mediation evidence; every decision reason is ARS-authored and stable |
+| `permissions.py` | frozen-grant → default-deny mediation; read-like requests additionally require protocol-declared, workspace-contained `locations[].path` evidence; denied tool-call ids are remembered so a later `completed` for one is a violation; deterministic mediation evidence; every decision reason is ARS-authored and stable |
 | `events.py` | ACP update normalization into the caller-stable event families without copying thought/raw bulk bodies |
 | `event_writer.py` | one event-loop-owned **Bounded Serial Ledger** per Run: atomic actual-sequence allocation; one retained canonical newline-terminated NDJSON `str`; exact UTF-8 count/byte charging through the durable `append_text` acknowledgement; separate admission/persistence ticket outcomes; FIFO absolute producer deadlines checked before room or growth; progress-earned policy rungs; value-only cancellation-isolated observers; one serial consumer; absorbing ordinal-ranked failure; and a private healthy-close stop distinct from failure drain |
 | `run_task.py` | admission assembly, the closed start plan, lease, process/driver coordination, dispatch markers, timeout/cancel, finalization, quarantine, top-level exception boundary; once-only environment resolution; Spec-then-launch write order preserved; `agentInfo` name/version recorded as evidence and gating nothing |
@@ -483,6 +483,24 @@ an operator needs; a refused pre-existing target creates nothing, so it never re
 last-resort retry clears the leftover without erasing the fact that the first attempt failed, and cleanup
 hygiene never becomes the Run's terminal verdict. `PermissionBridge` and the post-completion violation
 detector are unchanged: this is an earlier line, not a replacement for either.
+
+**A read-like allow is decided on declared paths, and a contradicted denial is a violation.** A `read` grant
+answers *whether* the agent may read, never *what*, so `PermissionBridge` allows a `read`/`search`
+`session/request_permission` only when the frozen grant includes `read` **and** the prompt's
+`toolCall.locations` is a non-empty list whose every entry is a mapping carrying a non-empty absolute string
+`path` that the bridge's own `_resolve_workspace_path()` / `_inside_workspace()` pair — the same canonical,
+symlink-resolving containment `fs/read_text_file` already uses — places inside the bound workspace. Anything
+else (absent, empty, non-mapping, non-string, unparseable by the platform, relative, one outside entry among
+inside ones, traversal or symlink escape) denies fail-closed with a stable ARS-authored categorical reason
+that never carries the offending path. `locations` is the only path authority: `rawInput`, `_meta`, title, content, prompt text, and
+adapter-private keys are never read. Because mediation is cooperative, the bridge also remembers the
+`toolCallId` of every denial it issued; when a current-Turn update reports that same call `completed`, the
+existing grant-violation flag is set and one `permission_violation` carrying
+`violation_class: completed_after_deny` is emitted, so `RunTask` reuses the existing
+`failed` / `PERMISSION_VIOLATION` / non-retryable finalization with the Session still reusable. A denied call
+that reports `failed` is the healthy refusal shape and flags nothing. The pre-existing write-family backstop
+is unchanged and now labels itself `violation_class: missing_grant_capability`; neither class adds a terminal
+state, a Session lifecycle rule, or a claim that the operation was prevented.
 
 **Two configuration-fidelity modes, declared by the profile.** `config_fidelity.py` owns both, and a profile
 declares exactly one.

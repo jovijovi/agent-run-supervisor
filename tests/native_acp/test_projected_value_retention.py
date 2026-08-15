@@ -255,6 +255,9 @@ def test_a_permission_option_id_equal_to_a_projected_value_is_still_selectable(
         "path": str(written),
         "content": "ALLOWED_CANARY",
         "choice_path": str(choice),
+        # Workspace-internal path evidence, so the subject of this test stays
+        # the option id's bytes rather than read-like location containment.
+        "locations": [{"path": str(written.resolve())}],
         "allow_option_ids": [sentinel],
         "options": [
             {"optionId": sentinel, "name": "Allow once", "kind": "allow_once"},

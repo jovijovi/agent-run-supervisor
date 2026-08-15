@@ -243,6 +243,19 @@ no unquarantine tool.
 - A compatibility profile owns ACP launch/config semantics, not business authorization.
 - Registered ACP permission/filesystem/terminal requests map to deterministic allow/deny decisions and
   redacted mediation evidence. Unknown operations deny by default.
+- **A read-like permission request needs path evidence, not only a grant.** For `session/request_permission`
+  operations classified `read` or `search`, ARS may select `allow_once` only when the frozen grant includes
+  `read` **and** the request carries one or more protocol-declared absolute `locations[].path` values whose
+  canonical, symlink-resolved targets all remain inside the bound workspace. Missing, empty, malformed,
+  relative, mixed, traversal-outside, and symlink-outside locations deny fail-closed. `rawInput`, `_meta`,
+  tool title, prompt text, model output, and adapter-private fields are never path authority.
+- **A denial is cooperative, and a contradicted denial is a violation.** If a tool call ARS denied later
+  reports `completed` for that same `toolCallId`, ARS records a permission violation and finalizes the Run
+  `failed` / `PERMISSION_VIOLATION` / non-retryable; it does not claim the side effect was prevented. A
+  denied call that reports `failed` is the healthy refusal shape and does not fail the Run. This rule does
+  not turn ACP mediation into filesystem isolation, does not prevent unmediated in-process tools, and does
+  not inspect arbitrary raw input or AGENT-owned configuration; an external process that bypasses ACP
+  remains outside ARS's cooperative enforcement guarantee (non-guarantees 1, 3, and 4 below).
 - Mediation environment values are source-owned in **key and value**, keyed by the capability family they
   mediate. A registry entry may select one binding id or none; it can never author a pair, a key, or a
   value, and there is no "mediation off". Reserved mediation keys are global across every registered

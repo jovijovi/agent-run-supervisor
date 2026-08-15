@@ -9,6 +9,7 @@ import contextlib
 import json
 import os
 import shutil
+import signal
 import sys
 import tempfile
 from pathlib import Path
@@ -2777,9 +2778,14 @@ def test_read_ask_is_client_mediated_allowed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The allow half of the mediated path: a read-like ask under the read
-    # grant selects a real allow option id on the wire.
+    # grant, declaring a workspace-internal location, selects a real allow
+    # option id on the wire.
+    inside = (tmp_path / "workspace" / "doc.md").resolve()
     script = dict(HAPPY_SCRIPT)
-    script["ask_permission"] = {"kind": "read"}
+    script["ask_permission"] = {
+        "kind": "read",
+        "locations": [{"path": str(inside)}],
+    }
     harness = Harness(tmp_path, monkeypatch, script)
     result = _run(harness.task())
 
@@ -2795,6 +2801,141 @@ def test_read_ask_is_client_mediated_allowed(
         and e.get("requested_op") == "permission:read"
     ]
     assert allows, "expected an allow mediation event for the read-like ask"
+
+
+def test_permission_read_outside_location_is_denied_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The read grant is present, but the only path the protocol declares is
+    # outside the bound workspace. Through the real ACP callback chain that is
+    # a refusal, and a refusal the agent honors is a healthy completed Run.
+    outside = (tmp_path / "outside.txt").resolve()
+    script = dict(HAPPY_SCRIPT)
+    script["ask_permission"] = {
+        "kind": "read",
+        "locations": [{"path": str(outside)}],
+    }
+    harness = Harness(tmp_path, monkeypatch, script)
+
+    result = _run(harness.task())
+
+    assert result.status is AgentRunStatus.COMPLETED
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    assert payload["final_message"] == "ASK_DENIED"
+    events = _run_events(harness.run_dir())
+    denies = [
+        e
+        for e in events
+        if e.get("type") == "permission_mediation"
+        and e.get("requested_op") == "permission:read"
+        and e.get("decision") == "deny"
+    ]
+    assert denies, "expected a read deny mediation event"
+    assert denies[0]["tool_call_id"] == "perm-call-1"
+    # The categorical reason travels; the refused path never does.
+    assert str(outside) not in json.dumps(events)
+    assert not [e for e in events if e.get("type") == "permission_violation"]
+
+
+def test_permission_read_without_locations_is_denied_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An adapter that declares no location supplies no containment evidence at
+    # all. Default-deny is the whole contract; it is not a lane ARS widens.
+    script = dict(HAPPY_SCRIPT)
+    script["ask_permission"] = {"kind": "search"}
+    harness = Harness(tmp_path, monkeypatch, script)
+
+    result = _run(harness.task())
+
+    assert result.status is AgentRunStatus.COMPLETED
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    assert payload["final_message"] == "ASK_DENIED"
+    events = _run_events(harness.run_dir())
+    assert [
+        e
+        for e in events
+        if e.get("type") == "permission_mediation"
+        and e.get("requested_op") == "permission:search"
+        and e.get("decision") == "deny"
+        and e.get("reason") == "read-like permission request has no usable locations"
+    ]
+
+
+def test_tool_completion_after_permission_deny_fails_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ARS denied the ask and the agent reported that same call completed. ARS
+    # cannot undo the side effect; it must not let the Run read as if the
+    # denial held.
+    script = dict(HAPPY_SCRIPT)
+    script["ask_permission"] = {
+        "kind": "edit",
+        "status_after_response": "completed",
+    }
+    harness = Harness(tmp_path, monkeypatch, script)
+
+    result = _run(harness.task())
+
+    assert result.status is AgentRunStatus.FAILED
+    run_dir = harness.run_dir()
+    payload = json.loads((run_dir / "result.json").read_text())
+    assert payload["status"] == "failed"
+    assert payload["detail_code"] == "PERMISSION_VIOLATION"
+    assert payload["retryable"] is False
+    assert payload["stop_reason"] == "end_turn"
+    assert payload["origin"] == "acp"
+    # A recorded exit signal only exists because ARS awaited the child's exit
+    # status: the fixture blocks on stdin until ARS stops it, so the violation
+    # terminal was published after a proven reap, not over a live child.
+    assert payload["signal"] == signal.SIGTERM
+    events = _run_events(run_dir)
+    violations = [e for e in events if e.get("type") == "permission_violation"]
+    assert violations, "expected durable permission_violation evidence"
+    assert violations[0]["violation_class"] == "completed_after_deny"
+    assert violations[0]["tool_call_id"] == "perm-call-1"
+    assert violations[0]["kind"] == "edit"
+    assert "required_capability" not in violations[0]
+    # The lifecycle stream stays honest: no run_completed for a failed Run.
+    assert "run_completed" not in [e.get("type") for e in events]
+    assert len([e for e in events if e.get("type") == "run_failed"]) == 1
+    assert json.loads((run_dir / "progress.json").read_text())["state"] == "failed"
+    state = storage.read_native_terminal_result(
+        run_dir / "result.json", run_id="run-0001"
+    )
+    assert state.kind is storage.NativeTerminalKind.TRUSTED
+    # A permission violation is a trustworthy failed Run, not a continuity
+    # doubt: the Session stays reusable.
+    record = harness.session_store().open_session("sess-native-1")
+    assert record.quarantine is None
+    assert result.session_quarantined is not True
+
+
+def test_failed_tool_after_permission_deny_remains_healthy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The honored-refusal control for the same wire shape: the denied call
+    # reports failed, which is exactly what a cooperating agent does.
+    script = dict(HAPPY_SCRIPT)
+    script["ask_permission"] = {
+        "kind": "edit",
+        "status_after_response": "failed",
+    }
+    harness = Harness(tmp_path, monkeypatch, script)
+
+    result = _run(harness.task())
+
+    assert result.status is AgentRunStatus.COMPLETED
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    assert payload["status"] == "completed"
+    assert payload["final_message"] == "ASK_DENIED"
+    assert payload.get("detail_code") is None
+    events = _run_events(harness.run_dir())
+    assert not [e for e in events if e.get("type") == "permission_violation"]
+    assert [e for e in events if e.get("type") == "run_completed"]
+    assert not [e for e in events if e.get("type") == "run_failed"]
+    record = harness.session_store().open_session("sess-native-1")
+    assert record.quarantine is None
 
 
 def test_registered_permission_env_reaches_spawned_agent(

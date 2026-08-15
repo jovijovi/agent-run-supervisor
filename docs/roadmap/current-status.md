@@ -13,7 +13,7 @@ supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 
 ```text
 base_branch: main
-active_plan: docs/plans/active/2026-08-11-configurable-run-event-budget.md
+active_plan: docs/plans/active/2026-08-15-permission-boundary-fixes.md
 ```
 
 ## Current position
@@ -80,7 +80,22 @@ active_plan: docs/plans/active/2026-08-11-configurable-run-event-budget.md
   resolves from strictly validated durable facts whatever the current ceiling is, and never dispatches
   twice. It is a theoretical per-Run event-ledger ceiling, not preallocated memory, a Run-directory disk
   quota, or a daemon-global aggregate. The individual hard limits and every wire, request-digest, Spec, and
-  launch schema version are unchanged. Source, tests, and docs only.
+  launch schema version are unchanged. Source, tests, and docs only. Its plan stays active in
+  [`docs/plans/active/`](../plans/active/2026-08-11-configurable-run-event-budget.md); the board's
+  `active_plan` link now names the current task and does not retire that candidate.
+- **Current task:** ARS-owned permission boundary fixes, a task-branch candidate that is not on `main`,
+  released, or deployed
+  ([plan](../plans/active/2026-08-15-permission-boundary-fixes.md)). A `read`/`search`
+  `session/request_permission` is allow-eligible only when the frozen grant includes `read` and every
+  protocol-declared `locations[].path` is absolute and canonically inside the bound workspace — missing,
+  malformed, relative, mixed, traversal, and symlink-escape locations deny fail-closed, and no other field is
+  path authority. A tool call that reports `completed` after ARS denied that same call now emits
+  `permission_violation` with `violation_class=completed_after_deny` and reuses the existing
+  `failed` / `PERMISSION_VIOLATION` / non-retryable finalization with the Session still reusable; a denied
+  call that reports `failed` stays healthy. Mediation remains cooperative — this is neither filesystem
+  isolation nor a claim that the side effect was prevented — and it repairs no external AGENT or adapter.
+  No wire, API, schema-version, Session lifecycle, or terminal-vocabulary change. Source, tests, and docs
+  only.
 
 ## Open decisions and gates
 
