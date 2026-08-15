@@ -162,6 +162,33 @@ fields the writer is given.
 structural hints only — never values. Watchdog/kill/lifecycle metadata is not a
 stream event; it is attached to the Run `result.json`.
 
+### 3.1 Permission evidence families
+
+`permission_mediation` carries one decision the bridge made: `requested_op`,
+`decision`, a bounded ARS-authored categorical `reason`, and `tool_call_id`
+when the prompt named a call. The reason never carries the path, option, or
+payload it refused.
+
+`permission_violation` carries:
+
+- `type = permission_violation`
+- `violation_class = missing_grant_capability | completed_after_deny`
+- `tool_call_id = string | null`
+- `kind = registered tool kind | null`
+- `reason = bounded ARS-authored categorical text`
+- `required_capability` only for `missing_grant_capability`
+
+`missing_grant_capability` means a write-family tool reached `completed` under
+a grant that lacks the capability which could ever have allowed it.
+`completed_after_deny` means ARS observed an ACP completion contradicting its
+own earlier denial for that same tool call. Both are detection of a broken
+cooperative protocol — the tool already ran — and neither claims ARS prevented
+or reversed the operation. Either one projects through the existing path:
+`status=failed`, `detail_code=PERMISSION_VIOLATION`, `retryable=false`, with the
+Session still reusable. `violation_class` is an additive field on an existing
+event family; it moves no schema version, adds no `result.json` key, and adds no
+terminal status.
+
 ## 4. Caller-stability contract
 
 - **`business_verdict` is always `null`.** The supervisor never sets a business

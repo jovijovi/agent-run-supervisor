@@ -53,9 +53,14 @@ Script keys (all optional):
   Claude adapter's always-first ordering), ``allow_option_ids`` (option ids
   that count as an allow; default ``["once", "always"]``), ``tool_call_id``
   (the exact ``toolCallId`` the ask carries, so a fixture can put arbitrary
-  child text into mediation evidence), and ``choice_path`` (file receiving the
+  child text into mediation evidence), ``choice_path`` (file receiving the
   exact selected option id, so a test can prove *which* option the client
-  chose — never only that it allowed).
+  chose — never only that it allowed), ``locations`` (a wire-shaped
+  ``ToolCallLocation`` list copied into ``toolCall.locations``, the only path
+  evidence a read-like ask carries), and ``status_after_response`` (a terminal
+  ``tool_call_update`` status emitted after the permission response under the
+  same ``toolCallId`` — ``"completed"`` models an agent that ignored the
+  refusal, ``"failed"`` the healthy honored one).
 - ``echo_env``: final message becomes ``ENV:<value>`` of that environment
   variable (``ENV_MISSING`` when unset) — the deliberate leak shape the
   environment-value sink boundary has to erase.
@@ -414,6 +419,14 @@ class FakeAgent:
         if self.script.get("ask_permission"):
             ask = self.script["ask_permission"]
             self.pending_permission_prompt_id = request_id
+            tool_call = {
+                "toolCallId": ask.get("tool_call_id", "perm-call-1"),
+                "title": "Scripted permission ask",
+                "kind": ask.get("kind", "edit"),
+                "status": "pending",
+            }
+            if "locations" in ask:
+                tool_call["locations"] = ask["locations"]
             _emit(
                 {
                     "jsonrpc": "2.0",
@@ -421,12 +434,7 @@ class FakeAgent:
                     "method": "session/request_permission",
                     "params": {
                         "sessionId": self.update_session_id or self.session_id,
-                        "toolCall": {
-                            "toolCallId": ask.get("tool_call_id", "perm-call-1"),
-                            "title": "Scripted permission ask",
-                            "kind": ask.get("kind", "edit"),
-                            "status": "pending",
-                        },
+                        "toolCall": tool_call,
                         "options": ask.get(
                             "options",
                             [
@@ -547,6 +555,19 @@ class FakeAgent:
             text = "ASK_ALLOWED"
         else:
             text = "ASK_DENIED"
+        status_after_response = ask.get("status_after_response")
+        if status_after_response is not None:
+            # The ACP contradiction itself, and nothing else: this fixture
+            # reports a terminal status for the call that was just decided. It
+            # performs no extra unmediated filesystem work — proving hostile
+            # containment is not what an L2 fake can do.
+            self._notify_update(
+                {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": ask.get("tool_call_id", "perm-call-1"),
+                    "status": status_after_response,
+                }
+            )
         self._notify_update(
             {
                 "sessionUpdate": "agent_message_chunk",

@@ -561,9 +561,18 @@ process, reconstructs a prompt, acquires or removes a lease, creates a Session, 
 Callers decide and freeze business authorization. ARS authenticates the UDS peer, binds ownership, and
 enforces `execution_grant` default-deny without widening or live-policy refresh.
 
-- Registered read operations may be allowed within the bound workspace.
+- Registered read operations may be allowed within the bound workspace, and "within" is decided on
+  protocol-declared path evidence: a `read`/`search` permission request allows only when the frozen grant
+  includes `read` and every `locations[].path` it declares is a non-empty absolute path whose canonical,
+  symlink-resolved target is inside the bound workspace. Missing, empty, malformed, relative, mixed, or
+  outside locations deny fail-closed, and no other field — `rawInput`, `_meta`, title, prompt text, model
+  output, adapter-private payload — is ever path authority.
 - write/create/delete/terminal/execute/fetch and unknown operations deny unless the frozen grant and
   registered mediation contract explicitly permit them.
+- A denial ARS issues is cooperative: when the same `toolCallId` later reports `completed`, ARS records a
+  permission violation and the Run finalizes `failed` / `PERMISSION_VIOLATION`, with the Session still
+  reusable. That is detection of a broken cooperative protocol, never a claim that the side effect was
+  prevented or reversed; a denied call that reports `failed` is the healthy refusal shape.
 - Every mediation decision produces redacted evidence.
 - A real denied-action canary is mandatory per registered agent; zero mediation events prove nothing.
 - `allowed_roots`, UDS auth, and ACP mediation are not OS sandboxing or hostile-process containment.
