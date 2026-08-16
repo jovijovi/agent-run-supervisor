@@ -79,6 +79,21 @@ record outside it is untrusted rather than repaired:
 - `cancelled` requires `stop_reason = cancelled`;
 - `unknown` requires `origin = supervisor` with no ACP stop.
 
+### A permission violation is a `failed` Run
+
+A Run whose stream showed a [`permission_violation`](events.md#the-permission-families)
+ends `failed` / `PERMISSION_VIOLATION` / `retryable = false`, with `origin = acp`
+and the turn's own `stop_reason` preserved. Two facts about that terminal matter
+to a caller:
+
+- **The Session stays reusable.** A refused operation is not continuity doubt,
+  so nothing is quarantined and the next Run may continue the conversation.
+- **It is detection, not prevention.** The violation was observed after a tool
+  reported `completed`, so a failed Run here does **not** mean the side effect
+  was blocked. It means ARS refused to persist a `completed` terminal for a Run
+  that contradicted a decision ARS made. An agent that reports `failed` for the
+  call it was refused is behaving correctly and completes normally.
+
 ### `failure_reason`
 
 When present and non-null, one of a fixed categorical allowlist — never raw

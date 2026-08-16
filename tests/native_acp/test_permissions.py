@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from agent_run_supervisor.native_acp.permissions import (
+    _OPEN_TOOL_CALL_LIMIT,
     MediationEvent,
     PermissionBridge,
     _canonicalize_past_absence,
@@ -1160,6 +1161,621 @@ def test_a_denial_without_a_tool_call_id_correlates_nothing(tmp_path: Path) -> N
     assert bridge.grant_violation is False
 
 
+# -- a host read ARS denied, against the structured call that was pending -----
+
+
+def test_completed_read_call_after_a_denied_host_read_flags_violation(
+    tmp_path: Path,
+) -> None:
+    # The second mediated read path. ``fs/read_text_file`` is a client-bound
+    # request carrying no ``toolCallId``, so a refusal there names no call by
+    # itself — and a read-like kind sits outside the write-family backstop
+    # entirely. With exactly one unresolved read call in the turn, the refusal
+    # binds to it, and reporting that same call completed is the contradiction.
+    bridge, _workspace, events = _bridge(tmp_path, capabilities=("read",))
+    outside = tmp_path / "outside.txt"
+    outside.write_text("OUTSIDE_SECRET", encoding="utf-8")
+    assert (
+        bridge.observe_tool_update(
+            _update("tool_call", toolCallId="call-read-1", kind="read", status="pending")
+        )
+        is None
+    )
+
+    assert bridge.decide_fs_read(str(outside))["decision"] == "deny"
+    denials = [
+        event
+        for event in events
+        if event.requested_op == "fs_read" and event.decision == "deny"
+    ]
+    assert [event.tool_call_id for event in denials] == ["call-read-1"]
+    # The categorical refusal reason never carries the path it refused.
+    assert str(outside) not in denials[0].reason
+
+    violation = bridge.observe_tool_update(
+        _update("tool_call_update", toolCallId="call-read-1", status="completed")
+    )
+
+    assert violation is not None
+    assert violation["type"] == "permission_violation"
+    assert violation["violation_class"] == "completed_after_deny"
+    assert violation["tool_call_id"] == "call-read-1"
+    assert violation["kind"] == "read"
+    # The evidence names the surface that actually refused.
+    assert violation["reason"] == "tool completed after ARS denied its filesystem read"
+    assert str(outside) not in violation["reason"]
+    assert set(violation) == {
+        "type",
+        "violation_class",
+        "tool_call_id",
+        "kind",
+        "reason",
+    }
+    assert bridge.grant_violation is True
+
+
+def test_failed_read_call_after_a_denied_host_read_is_healthy(
+    tmp_path: Path,
+) -> None:
+    # The honored-refusal shape for the same wire flow: a read tool that was
+    # refused its host read and reports failed did exactly what it was told.
+    bridge, _workspace, _events = _bridge(tmp_path, capabilities=("read",))
+    bridge.observe_tool_update(
+        _update("tool_call", toolCallId="call-read-2", kind="read", status="pending")
+    )
+    assert bridge.decide_fs_read(str(tmp_path / "outside.txt"))["decision"] == "deny"
+
+    violation = bridge.observe_tool_update(
+        _update("tool_call_update", toolCallId="call-read-2", status="failed")
+    )
+
+    assert violation is None
+    assert bridge.grant_violation is False
+
+
+def test_an_active_execute_call_is_never_correlated_to_a_denied_host_read(
+    tmp_path: Path,
+) -> None:
+    # Correlation is by *kind*, never by "whatever call happens to be open".
+    # An execute tool is not the thing a refused host read was asked for, and
+    # the grant carries execute, so no family may flag this completion.
+    bridge, _workspace, events = _bridge(
+        tmp_path, capabilities=("read", "execute")
+    )
+    bridge.observe_tool_update(
+        _update("tool_call", toolCallId="call-exec-1", kind="execute", status="pending")
+    )
+    assert bridge.decide_fs_read(str(tmp_path / "outside.txt"))["decision"] == "deny"
+    assert events[-1].tool_call_id is None
+
+    assert (
+        bridge.observe_tool_update(
+            _update("tool_call_update", toolCallId="call-exec-1", status="completed")
+        )
+        is None
+    )
+    assert bridge.grant_violation is False
+
+
+def test_two_unresolved_reads_never_invent_a_denied_call(tmp_path: Path) -> None:
+    # Which of the two asked for the host read is unknowable from the protocol,
+    # and ARS does not guess by arrival order, nearness, or anything else. An
+    # uncorrelated refusal is a missed detection; a wrong one is a false
+    # accusation that fails an innocent Run.
+    bridge, _workspace, events = _bridge(tmp_path, capabilities=("read",))
+    bridge.observe_tool_update(
+        _update("tool_call", toolCallId="call-read-a", kind="read", status="pending")
+    )
+    bridge.observe_tool_update(
+        _update("tool_call", toolCallId="call-read-b", kind="search", status="pending")
+    )
+
+    assert bridge.decide_fs_read(str(tmp_path / "outside.txt"))["decision"] == "deny"
+    assert events[-1].tool_call_id is None
+
+    for call_id in ("call-read-a", "call-read-b"):
+        assert (
+            bridge.observe_tool_update(
+                _update("tool_call_update", toolCallId=call_id, status="completed")
+            )
+            is None
+        )
+    assert bridge.grant_violation is False
+
+
+def test_a_resolved_read_call_is_no_longer_a_correlation_candidate(
+    tmp_path: Path,
+) -> None:
+    # A call that already reported terminal cannot be the one waiting on a host
+    # read, so it is not a candidate and a later refusal correlates nothing.
+    bridge, _workspace, events = _bridge(tmp_path, capabilities=("read",))
+    bridge.observe_tool_update(
+        _update("tool_call", toolCallId="call-read-3", kind="read", status="pending")
+    )
+    assert (
+        bridge.observe_tool_update(
+            _update("tool_call_update", toolCallId="call-read-3", status="completed")
+        )
+        is None
+    )
+
+    assert bridge.decide_fs_read(str(tmp_path / "outside.txt"))["decision"] == "deny"
+
+    assert events[-1].tool_call_id is None
+    assert bridge.grant_violation is False
+
+
+def test_a_flood_of_unresolved_calls_stops_correlating_instead_of_guessing(
+    tmp_path: Path,
+) -> None:
+    # The lifecycle state is bounded, and past the bound it stops answering.
+    # A truncated picture of what is unresolved cannot support "exactly one",
+    # so the refusal correlates nothing rather than naming a call on the
+    # strength of a set that is missing entries.
+    bridge, _workspace, events = _bridge(tmp_path, capabilities=("read",))
+    for ordinal in range(1200):
+        bridge.observe_tool_update(
+            _update(
+                "tool_call",
+                toolCallId=f"call-flood-{ordinal}",
+                kind="other",
+                status="pending",
+            )
+        )
+    bridge.observe_tool_update(
+        _update("tool_call", toolCallId="call-read-5", kind="read", status="pending")
+    )
+
+    assert bridge.decide_fs_read(str(tmp_path / "outside.txt"))["decision"] == "deny"
+
+    assert events[-1].tool_call_id is None
+    assert (
+        bridge.observe_tool_update(
+            _update("tool_call_update", toolCallId="call-read-5", status="completed")
+        )
+        is None
+    )
+    assert bridge.grant_violation is False
+
+
+def test_an_open_edit_sibling_blocks_correlating_a_denied_host_read(
+    tmp_path: Path,
+) -> None:
+    # The population that has to be sole is *every* unresolved call, not the
+    # read-like ones among them. An edit tool reads before it writes, so a
+    # refused host read is as plausibly the edit call's as the read call's —
+    # and picking the read because it is the only read is picking by kind
+    # filter, not by evidence. With two calls that could have issued it, the
+    # refusal names none, and the innocent read completing is not a violation.
+    bridge, _workspace, events = _bridge(tmp_path, capabilities=("read", "write"))
+    bridge.observe_tool_update(
+        _update("tool_call", toolCallId="call-edit-1", kind="edit", status="pending")
+    )
+    bridge.observe_tool_update(
+        _update("tool_call", toolCallId="call-read-6", kind="read", status="pending")
+    )
+
+    assert bridge.decide_fs_read(str(tmp_path / "outside.txt"))["decision"] == "deny"
+    assert events[-1].tool_call_id is None
+
+    for call_id in ("call-read-6", "call-edit-1"):
+        assert (
+            bridge.observe_tool_update(
+                _update("tool_call_update", toolCallId=call_id, status="completed")
+            )
+            is None
+        )
+    assert bridge.grant_violation is False
+
+
+def test_an_unresolved_untyped_sibling_blocks_correlating_a_denied_host_read(
+    tmp_path: Path,
+) -> None:
+    # A call that has not declared a kind is not a call that cannot have issued
+    # the host read — it is a call whose kind nobody knows yet. Treating it as
+    # invisible makes the read look sole when it is not, which is the same
+    # false attribution as the edit sibling above with less to see it by.
+    bridge, _workspace, events = _bridge(tmp_path, capabilities=("read",))
+    bridge.observe_tool_update(
+        _update("tool_call", toolCallId="call-untyped-1", status="pending")
+    )
+    bridge.observe_tool_update(
+        _update("tool_call", toolCallId="call-read-7", kind="read", status="pending")
+    )
+
+    assert bridge.decide_fs_read(str(tmp_path / "outside.txt"))["decision"] == "deny"
+    assert events[-1].tool_call_id is None
+
+    for call_id in ("call-read-7", "call-untyped-1"):
+        assert (
+            bridge.observe_tool_update(
+                _update("tool_call_update", toolCallId=call_id, status="completed")
+            )
+            is None
+        )
+    assert bridge.grant_violation is False
+
+
+def test_a_call_that_later_declares_read_migrates_without_double_counting(
+    tmp_path: Path,
+) -> None:
+    # The other half of tracking untyped calls: an id that arrives kindless and
+    # later declares ``read`` is *one* call the whole time. It has to stop being
+    # counted as untyped exactly when it starts being counted as read, or the
+    # turn's only call reads as two and correlation is lost for a Run whose
+    # lifecycle was never ambiguous.
+    bridge, _workspace, events = _bridge(tmp_path, capabilities=("read",))
+    bridge.observe_tool_update(
+        _update("tool_call", toolCallId="call-late-kind", status="pending")
+    )
+    bridge.observe_tool_update(
+        _update(
+            "tool_call_update",
+            toolCallId="call-late-kind",
+            kind="read",
+            status="in_progress",
+        )
+    )
+
+    assert bridge.decide_fs_read(str(tmp_path / "outside.txt"))["decision"] == "deny"
+    assert events[-1].tool_call_id == "call-late-kind"
+
+    violation = bridge.observe_tool_update(
+        _update("tool_call_update", toolCallId="call-late-kind", status="completed")
+    )
+
+    assert violation is not None
+    assert violation["violation_class"] == "completed_after_deny"
+    assert violation["tool_call_id"] == "call-late-kind"
+    assert violation["kind"] == "read"
+    assert bridge.grant_violation is True
+
+
+def test_a_truncated_population_never_correlates_a_call_that_reads_as_sole(
+    tmp_path: Path,
+) -> None:
+    # Truncation is permanent for the turn, and this is why. The read opens
+    # first, a flood past the ceiling poisons the picture, and then the flood
+    # ends — leaving tracked state that says "exactly one unresolved read" while
+    # the untracked calls the ceiling refused are still out there unresolved.
+    # The arithmetic looks sound and is not, so the guard, not the count, is
+    # what has to answer here.
+    bridge, _workspace, events = _bridge(tmp_path, capabilities=("read",))
+    bridge.observe_tool_update(
+        _update("tool_call", toolCallId="call-read-solo", kind="read", status="pending")
+    )
+    for ordinal in range(1200):
+        bridge.observe_tool_update(
+            _update(
+                "tool_call",
+                toolCallId=f"call-sibling-{ordinal}",
+                kind="other",
+                status="pending",
+            )
+        )
+    for ordinal in range(1200):
+        assert (
+            bridge.observe_tool_update(
+                _update(
+                    "tool_call_update",
+                    toolCallId=f"call-sibling-{ordinal}",
+                    status="completed",
+                )
+            )
+            is None
+        )
+
+    assert bridge.decide_fs_read(str(tmp_path / "outside.txt"))["decision"] == "deny"
+
+    assert events[-1].tool_call_id is None
+    assert (
+        bridge.observe_tool_update(
+            _update("tool_call_update", toolCallId="call-read-solo", status="completed")
+        )
+        is None
+    )
+    assert bridge.grant_violation is False
+
+
+def test_typed_and_untyped_calls_share_one_combined_ceiling(tmp_path: Path) -> None:
+    # One population, one ceiling. Untyped calls occupy the same bounded state
+    # as typed ones, so a turn that reaches the ceiling on a mixture of the two
+    # is exactly as truncated as one that reached it on typed calls alone —
+    # anything else lets an unbounded half of the population in under a bound
+    # that is still advertised as holding.
+    bridge, _workspace, events = _bridge(tmp_path, capabilities=("read",))
+    for ordinal in range(_OPEN_TOOL_CALL_LIMIT):
+        fields = {"toolCallId": f"call-mixed-{ordinal}", "status": "pending"}
+        if ordinal % 2 == 0:
+            fields["kind"] = "other"
+        bridge.observe_tool_update(_update("tool_call", **fields))
+    bridge.observe_tool_update(
+        _update("tool_call", toolCallId="call-read-8", kind="read", status="pending")
+    )
+
+    assert bridge.decide_fs_read(str(tmp_path / "outside.txt"))["decision"] == "deny"
+
+    assert events[-1].tool_call_id is None
+    assert (
+        bridge.observe_tool_update(
+            _update("tool_call_update", toolCallId="call-read-8", status="completed")
+        )
+        is None
+    )
+    assert bridge.grant_violation is False
+
+
+def test_an_allowed_host_read_marks_nothing_denied(tmp_path: Path) -> None:
+    # Only a refusal is remembered. A workspace-internal read that ARS allowed
+    # is the ordinary lane, and the call completing afterwards is the expected
+    # end of it — never a violation.
+    bridge, workspace, events = _bridge(tmp_path, capabilities=("read",))
+    (workspace / "doc.md").write_text("INSIDE", encoding="utf-8")
+    bridge.observe_tool_update(
+        _update("tool_call", toolCallId="call-read-4", kind="read", status="pending")
+    )
+
+    assert bridge.decide_fs_read(str(workspace / "doc.md"))["decision"] == "allow"
+
+    assert (
+        bridge.observe_tool_update(
+            _update("tool_call_update", toolCallId="call-read-4", status="completed")
+        )
+        is None
+    )
+    assert bridge.grant_violation is False
+
+
+# -- a terminal call is closed for the rest of the turn -----------------------
+
+# One more ended call than the private ceiling an earlier repair imposed. The
+# number lives here and nowhere else: production has no such ceiling to name,
+# and a regression against a removed threshold has to cross that exact count to
+# prove it is gone.
+_PAST_THE_REMOVED_TERMINAL_CEILING = 16_385
+
+
+def test_a_repeated_completed_after_a_denied_host_read_flags_once(
+    tmp_path: Path,
+) -> None:
+    # One contradiction is one violation. The duplicate terminal update carries
+    # no new fact — same call, same completion — so a second event would count
+    # a single broken protocol twice in the Run's durable evidence.
+    bridge, _workspace, _events = _bridge(tmp_path, capabilities=("read",))
+    bridge.observe_tool_update(
+        _update("tool_call", toolCallId="r1", kind="read", status="pending")
+    )
+    assert bridge.decide_fs_read(str(tmp_path / "outside.txt"))["decision"] == "deny"
+
+    first = bridge.observe_tool_update(
+        _update("tool_call_update", toolCallId="r1", status="completed")
+    )
+    assert first is not None
+    assert first["violation_class"] == "completed_after_deny"
+
+    assert (
+        bridge.observe_tool_update(
+            _update("tool_call_update", toolCallId="r1", status="completed")
+        )
+        is None
+    )
+    assert bridge.grant_violation is True
+
+
+def test_a_repeated_completed_after_a_permission_deny_flags_once(
+    tmp_path: Path,
+) -> None:
+    # The same contract on the other mediated surface: a refused permission
+    # prompt whose call reports completed twice is still one contradiction.
+    bridge, _workspace, _events = _bridge(tmp_path, capabilities=("read",))
+    assert bridge.decide_permission_request(_request("edit"))["decision"] == "deny"
+
+    first = bridge.observe_tool_update(
+        _update("tool_call_update", toolCallId="tool-1", status="completed")
+    )
+    assert first is not None
+    assert first["violation_class"] == "completed_after_deny"
+
+    assert (
+        bridge.observe_tool_update(
+            _update("tool_call_update", toolCallId="tool-1", status="completed")
+        )
+        is None
+    )
+    assert bridge.grant_violation is True
+
+
+def test_a_repeated_write_family_completion_flags_once(tmp_path: Path) -> None:
+    # And on the backstop family: the write already happened once, and the
+    # agent repeating the announcement does not make it two side effects.
+    bridge, _workspace, _events = _bridge(tmp_path, capabilities=("read",))
+    first = bridge.observe_tool_update(
+        _update("tool_call", toolCallId="w1", kind="edit", status="completed")
+    )
+    assert first is not None
+    assert first["violation_class"] == "missing_grant_capability"
+
+    assert (
+        bridge.observe_tool_update(
+            _update("tool_call_update", toolCallId="w1", kind="edit", status="completed")
+        )
+        is None
+    )
+    assert bridge.grant_violation is True
+
+
+def test_a_completed_call_is_never_reopened_by_a_later_update(
+    tmp_path: Path,
+) -> None:
+    # A call that reported completed is finished for this turn. A later
+    # nonterminal update for that id cannot un-finish it, and treating it as
+    # unresolved again would make it the sole candidate for a refusal it was
+    # never waiting on — a false accusation against a Run that did nothing
+    # wrong, built out of an id the agent simply repeated.
+    bridge, _workspace, events = _bridge(tmp_path, capabilities=("read",))
+    bridge.observe_tool_update(
+        _update("tool_call", toolCallId="r2", kind="read", status="pending")
+    )
+    assert (
+        bridge.observe_tool_update(
+            _update("tool_call_update", toolCallId="r2", status="completed")
+        )
+        is None
+    )
+
+    assert (
+        bridge.observe_tool_update(
+            _update("tool_call_update", toolCallId="r2", status="in_progress")
+        )
+        is None
+    )
+
+    assert bridge.decide_fs_read(str(tmp_path / "outside.txt"))["decision"] == "deny"
+    assert events[-1].tool_call_id is None
+
+    assert (
+        bridge.observe_tool_update(
+            _update("tool_call_update", toolCallId="r2", status="completed")
+        )
+        is None
+    )
+    assert bridge.grant_violation is False
+
+
+def test_a_failed_call_is_never_reopened_by_a_later_update(tmp_path: Path) -> None:
+    # ``failed`` ends a call exactly as ``completed`` does, so the same id
+    # coming back nonterminal — and then terminal again — stays closed.
+    bridge, _workspace, events = _bridge(tmp_path, capabilities=("read",))
+    bridge.observe_tool_update(
+        _update("tool_call", toolCallId="r3", kind="read", status="pending")
+    )
+    assert (
+        bridge.observe_tool_update(
+            _update("tool_call_update", toolCallId="r3", status="failed")
+        )
+        is None
+    )
+
+    assert (
+        bridge.observe_tool_update(
+            _update("tool_call_update", toolCallId="r3", status="in_progress")
+        )
+        is None
+    )
+
+    assert bridge.decide_fs_read(str(tmp_path / "outside.txt"))["decision"] == "deny"
+    assert events[-1].tool_call_id is None
+
+    assert (
+        bridge.observe_tool_update(
+            _update("tool_call_update", toolCallId="r3", status="completed")
+        )
+        is None
+    )
+    assert bridge.grant_violation is False
+
+
+def test_closing_one_call_leaves_a_later_call_correlatable(tmp_path: Path) -> None:
+    # Closure is per id, never a global latch: the next genuinely unresolved
+    # read still binds a refusal, and still contradicts its own completion.
+    bridge, _workspace, events = _bridge(tmp_path, capabilities=("read",))
+    bridge.observe_tool_update(
+        _update("tool_call", toolCallId="r4", kind="read", status="pending")
+    )
+    bridge.observe_tool_update(
+        _update("tool_call_update", toolCallId="r4", status="completed")
+    )
+    bridge.observe_tool_update(
+        _update("tool_call", toolCallId="r5", kind="read", status="pending")
+    )
+
+    assert bridge.decide_fs_read(str(tmp_path / "outside.txt"))["decision"] == "deny"
+    assert events[-1].tool_call_id == "r5"
+
+    violation = bridge.observe_tool_update(
+        _update("tool_call_update", toolCallId="r5", status="completed")
+    )
+    assert violation is not None
+    assert violation["violation_class"] == "completed_after_deny"
+    assert violation["tool_call_id"] == "r5"
+
+
+def test_the_exact_once_contract_survives_a_flood_of_ended_calls(
+    tmp_path: Path,
+) -> None:
+    # Ending many calls is ordinary for a long turn, and it changes nothing
+    # about what a *later* call owes: one contradiction, one violation. A
+    # bridge that stops remembering ended ids past some count reopens every id
+    # after it, and the reopened call flags again on its own duplicate — the
+    # exact blocker this family exists to close, reintroduced at a threshold
+    # the protocol never agreed to.
+    bridge, _workspace, _events = _bridge(tmp_path, capabilities=("read",))
+    for ordinal in range(_PAST_THE_REMOVED_TERMINAL_CEILING):
+        bridge.observe_tool_update(
+            _update(
+                "tool_call",
+                toolCallId=f"call-ended-{ordinal}",
+                kind="read",
+                status="completed",
+            )
+        )
+
+    first = bridge.observe_tool_update(
+        _update(
+            "tool_call",
+            toolCallId="overflow-edit",
+            kind="edit",
+            status="completed",
+        )
+    )
+    assert first is not None
+    assert first["violation_class"] == "missing_grant_capability"
+
+    assert (
+        bridge.observe_tool_update(
+            _update(
+                "tool_call_update",
+                toolCallId="overflow-edit",
+                kind="edit",
+                status="completed",
+            )
+        )
+        is None
+    )
+
+
+def test_a_flood_of_ended_calls_still_correlates_a_later_refusal(
+    tmp_path: Path,
+) -> None:
+    # The other face of the same fact. Ended calls leave the unresolved set as
+    # they close, so however many of them a turn accumulates, the one call
+    # still open is still the one a client-bound refusal belongs to. Nothing
+    # about a long turn makes the uniqueness answer less certain.
+    bridge, _workspace, events = _bridge(tmp_path, capabilities=("read",))
+    for ordinal in range(_PAST_THE_REMOVED_TERMINAL_CEILING):
+        bridge.observe_tool_update(
+            _update(
+                "tool_call",
+                toolCallId=f"call-ended-{ordinal}",
+                kind="other",
+                status="completed",
+            )
+        )
+    bridge.observe_tool_update(
+        _update("tool_call", toolCallId="call-read-6", kind="read", status="pending")
+    )
+
+    assert bridge.decide_fs_read(str(tmp_path / "outside.txt"))["decision"] == "deny"
+    assert events[-1].tool_call_id == "call-read-6"
+
+    violation = bridge.observe_tool_update(
+        _update("tool_call_update", toolCallId="call-read-6", status="completed")
+    )
+    assert violation is not None
+    assert violation["violation_class"] == "completed_after_deny"
+    assert violation["tool_call_id"] == "call-read-6"
+
+
 # -- B4: option-scope discipline and grant-driven execute mediation ----------
 
 ALLOW_ALWAYS_OPTION = {
@@ -1349,3 +1965,158 @@ def test_write_family_kinds_deny_without_a_once_option_even_when_granted(
     assert events[-1].reason == decision["reason"]
     assert events[-1].reason == "no once-scoped allow option offered; denying"
     assert events[-1].tool_call_id == "tool-1"
+
+
+# -- the opt-in C3 gate's admission predicate, exercised by default -----------
+#
+# The symlink-escape gate needs a live agent and never runs here. Its
+# *admission predicate* is ordinary code, and a gate that would pass on the
+# very evidence it was written to reject is not a gate — so the predicate runs
+# by default, against hand-built asks and one real symlink.
+
+
+@pytest.fixture()
+def smoke_gate():
+    pytest.importorskip("acp")
+    return pytest.importorskip("tests.native_acp.test_real_opencode_smoke")
+
+
+def _ask(kind, decision, locations=_LOCATIONS_OMITTED):
+    """One recorded mediation ask in the shape the smoke's observer keeps."""
+    return {
+        "request": _request(kind, locations=locations),
+        "decision": decision,
+        "reason": "recorded reason",
+    }
+
+
+def _location(path) -> dict:
+    return {"path": str(path)}
+
+
+def test_c3_rejects_a_denied_read_ask_that_declared_no_locations(
+    smoke_gate, tmp_path: Path
+) -> None:
+    # The exact shape the real adapter produced: a read-kind ask carrying zero
+    # ``ToolCallLocation``, denied for exactly that reason. It is evidence the
+    # adapter declared nothing — never evidence ARS refused an *escape*.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    error = smoke_gate._escape_evidence_error([_ask("read", "deny", locations=[])], workspace)
+    assert error is not None
+
+
+def test_c3_rejects_an_ask_that_omitted_locations_entirely(
+    smoke_gate, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    assert smoke_gate._escape_evidence_error([_ask("read", "deny")], workspace) is not None
+
+
+def test_c3_rejects_a_workspace_internal_location(
+    smoke_gate, tmp_path: Path
+) -> None:
+    # Absolute, structured, denied — and about a file that never left the
+    # workspace. Nothing here is the escape the case claims to have refused.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "inside.txt").write_text("INSIDE", encoding="utf-8")
+    error = smoke_gate._escape_evidence_error(
+        [_ask("read", "deny", locations=[_location(workspace / "inside.txt")])],
+        workspace,
+    )
+    assert error is not None
+
+
+def test_c3_rejects_a_relative_location(smoke_gate, tmp_path: Path) -> None:
+    # ACP declares ``ToolCallLocation.path`` absolute. A relative one names no
+    # root, so it proves neither containment nor escape.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    error = smoke_gate._escape_evidence_error(
+        [_ask("read", "deny", locations=[{"path": "linked-secret.txt"}])], workspace
+    )
+    assert error is not None
+
+
+def test_c3_rejects_an_outside_location_that_was_allowed(
+    smoke_gate, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "controller-owned-secret.txt"
+    outside.write_text("TOKEN", encoding="utf-8")
+    error = smoke_gate._escape_evidence_error(
+        [_ask("read", "allow", locations=[_location(outside)])], workspace
+    )
+    assert error is not None
+
+
+def test_c3_rejects_a_run_with_no_read_like_ask_at_all(
+    smoke_gate, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "controller-owned-secret.txt"
+    outside.write_text("TOKEN", encoding="utf-8")
+    error = smoke_gate._escape_evidence_error(
+        [_ask("edit", "deny", locations=[_location(outside)])], workspace
+    )
+    assert error is not None
+
+
+def test_c3_admits_a_denied_absolute_outside_location(
+    smoke_gate, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "controller-owned-secret.txt"
+    outside.write_text("TOKEN", encoding="utf-8")
+    assert (
+        smoke_gate._escape_evidence_error(
+            [_ask("read", "deny", locations=[_location(outside)])], workspace
+        )
+        is None
+    )
+
+
+def test_c3_admits_a_denied_workspace_symlink_whose_target_is_outside(
+    smoke_gate, tmp_path: Path
+) -> None:
+    # The case's own shape: the declared path sits *inside* the workspace and
+    # only canonical resolution shows where it actually points. Judging the
+    # location lexically would call this contained and admit nothing.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "controller-owned-secret.txt"
+    outside.write_text("TOKEN", encoding="utf-8")
+    link = workspace / "linked-secret.txt"
+    link.symlink_to(outside)
+    assert (
+        smoke_gate._escape_evidence_error(
+            [_ask("read", "deny", locations=[_location(link)])], workspace
+        )
+        is None
+    )
+
+
+def test_c3_admits_a_denied_search_ask_alongside_an_unusable_one(
+    smoke_gate, tmp_path: Path
+) -> None:
+    # A search kind is read-like too, and one ask that declared nothing does
+    # not spoil a sibling ask that declared the escape and was refused.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "controller-owned-secret.txt"
+    outside.write_text("TOKEN", encoding="utf-8")
+    assert (
+        smoke_gate._escape_evidence_error(
+            [
+                _ask("read", "deny", locations=[]),
+                _ask("search", "deny", locations=[_location(outside)]),
+            ],
+            workspace,
+        )
+        is None
+    )

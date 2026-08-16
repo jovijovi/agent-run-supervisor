@@ -42,6 +42,17 @@ Script keys (all optional):
 - ``fs_read_path``: during the prompt, send a client-bound
   ``fs/read_text_file`` request for that path and echo the outcome in the
   final message (``FS_CONTENT:<text>`` on success, ``FS_DENIED`` on error).
+- ``fs_read_tool``: ``{"path":..., "tool_call_id":..., "kind":...,
+  "status_after_response":...}`` — the same client-bound read, wrapped in the
+  structured tool-call lifecycle a real adapter reports around it: a
+  ``tool_call`` of that kind (default ``read``) in ``pending``, then the
+  ``fs/read_text_file`` request, then — once the Host has answered — an
+  optional terminal ``tool_call_update`` under the same ``toolCallId``, and the
+  ordinary final message. ``"completed"`` models an agent that reports success
+  for a read the Host refused; ``"failed"`` is the honored-refusal control. The
+  fixture models the protocol contradiction only: it performs no unmediated
+  read of the path itself, because proving containment is not something an L2
+  fake can do.
 - ``prompt_tool_updates``: raw session-update dicts notified during the
   prompt before the final message (models agent-owned tool activity that
   never asked for permission — the A4-S2 rogue-write shape).
@@ -459,19 +470,24 @@ class FakeAgent:
                 }
             )
             return
-        if self.script.get("fs_read_path"):
-            self.pending_fs_prompt_id = request_id
-            _emit(
+        read_tool = self.script.get("fs_read_tool")
+        if read_tool:
+            # The structured lifecycle a real adapter reports around its host
+            # read: the call is open and typed before the request goes out, so
+            # the client sees what the read belongs to.
+            self._notify_update(
                 {
-                    "jsonrpc": "2.0",
-                    "id": "fs-req-1",
-                    "method": "fs/read_text_file",
-                    "params": {
-                        "sessionId": self.update_session_id or self.session_id,
-                        "path": self.script["fs_read_path"],
-                    },
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": read_tool.get("tool_call_id", "read-call-1"),
+                    "title": "Scripted structured read",
+                    "kind": read_tool.get("kind", "read"),
+                    "status": "pending",
                 }
             )
+            self._send_fs_read(request_id, read_tool["path"])
+            return
+        if self.script.get("fs_read_path"):
+            self._send_fs_read(request_id, self.script["fs_read_path"])
             return
         if self.script.get("hang_prompt_until_cancel"):
             self.pending_prompt_id = request_id
@@ -513,6 +529,20 @@ class FakeAgent:
             },
         )
 
+    def _send_fs_read(self, request_id: Any, path: str) -> None:
+        self.pending_fs_prompt_id = request_id
+        _emit(
+            {
+                "jsonrpc": "2.0",
+                "id": "fs-req-1",
+                "method": "fs/read_text_file",
+                "params": {
+                    "sessionId": self.update_session_id or self.session_id,
+                    "path": path,
+                },
+            }
+        )
+
     def _on_fs_response(self, message: dict[str, Any]) -> None:
         prompt_id = self.pending_fs_prompt_id
         self.pending_fs_prompt_id = None
@@ -521,6 +551,18 @@ class FakeAgent:
             text = f"FS_CONTENT:{result['content']}"
         else:
             text = "FS_DENIED"
+        read_tool = self.script.get("fs_read_tool") or {}
+        status_after_response = read_tool.get("status_after_response")
+        if status_after_response is not None:
+            # Reported only after the Host answered, so the terminal status is
+            # this call's response to a decision it already received.
+            self._notify_update(
+                {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": read_tool.get("tool_call_id", "read-call-1"),
+                    "status": status_after_response,
+                }
+            )
         self._notify_update(
             {
                 "sessionUpdate": "agent_message_chunk",
