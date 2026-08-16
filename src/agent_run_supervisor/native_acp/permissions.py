@@ -17,7 +17,14 @@ every declared location is provably inside the bound workspace.
 
 Because mediation is cooperative, the bridge also remembers which calls it
 denied: a tool call that reports ``completed`` after ARS refused it broke the
-protocol, and the Run must not persist as if the refusal held.
+protocol, and the Run must not persist as if the refusal held. A refused
+``fs/read_text_file`` carries no ``toolCallId`` of its own, so it is bound to a
+call only when the turn's *entire* unresolved population is that one call and
+its declared kind is read-like — not merely when one unresolved call happens to
+be the only read-like one among several. A call that reported ``completed`` or
+``failed`` is finished for that turn: later updates naming its id neither
+reopen it nor add a second contradiction, so one broken protocol is recorded
+exactly once.
 """
 
 from __future__ import annotations
@@ -72,6 +79,19 @@ _WRITE_FAMILY_REQUIRED_CAPABILITY: dict[str, str] = {
     "move": "move",
     "execute": "execute",
 }
+
+# ACP tool-call statuses that end a call's lifecycle. Everything else — an
+# explicit ``pending``/``in_progress``, or a ``tool_call`` that declares no
+# status at all — leaves the call unresolved and therefore still able to be
+# waiting on a client-bound request.
+_TERMINAL_TOOL_STATUSES = frozenset({"completed", "failed"})
+
+# How many unresolved structured calls one turn may track, counting typed and
+# untyped alike. The map exists to answer "is the turn's whole unresolved
+# population one read-like call", and an answer drawn from a truncated picture
+# would be a guess: past this ceiling the bridge stops answering rather than
+# answering wrongly.
+_OPEN_TOOL_CALL_LIMIT = 1024
 
 
 def _eloop_as_os_error(resolve: Callable[[], Path]) -> Path:
@@ -233,6 +253,29 @@ class PermissionBridge:
         self.grant_violation = False
         self.grant_violation_reason: str | None = None
         self._tool_kinds: dict[str, str] = {}
+        # The structured calls of this turn that reported no terminal status
+        # yet, by id → the kind it declared, or ``None`` while it has declared
+        # none. A client-bound request can only belong to one of these, so an
+        # id is held here whether or not its kind is known: a call of unknown
+        # kind is one nobody can rule out, and leaving it untracked would make
+        # the calls beside it look sole when they are not. One id, one entry —
+        # a later update that supplies the kind rewrites this value rather than
+        # adding a second membership for the same call.
+        self._open_tool_calls: dict[str, str | None] = {}
+        # Set once the turn declares more unresolved calls than the ceiling
+        # above holds. From then on the map is known-incomplete, so no
+        # uniqueness answer drawn from it can be trusted again.
+        self._open_tool_calls_truncated = False
+        # The structured calls of this turn that already reported a terminal
+        # status. A call ends once: whatever the agent sends for that id
+        # afterwards, the call is not running, not waiting on a decision, and
+        # not owed a second contradiction event. This is current-turn
+        # structured lifecycle state: it grows by at most one entry per
+        # distinct structured ``toolCallId`` observed, the same per-call
+        # growth class as ``_tool_kinds`` above. Every terminal id has to stay
+        # remembered for the whole turn — evicting or refusing one lets that
+        # ended call reopen and earn a duplicate violation.
+        self._terminal_tool_calls: set[str] = set()
         # Every denial this bridge issued, by the call it refused → the
         # ARS-recorded operation it was asked for. A completion for one of
         # these contradicts a decision ARS actually made.
@@ -363,22 +406,102 @@ class PermissionBridge:
                 return "read-like permission location is outside the bound workspace"
         return None
 
+    # -- structured tool-call lifecycle -------------------------------------
+
+    def _open_call(self, tool_call_id: str, kind: str | None) -> None:
+        """Track one unresolved call, or refuse to track anything further.
+
+        Typed and untyped alike: an untyped call is not a call that can be
+        ruled out, it is one whose kind has not been declared yet, and the
+        question this map answers is how many calls are unresolved at all.
+        Writing the id is also how a kind arrives — the same entry gains its
+        kind in place, so one call never becomes two.
+
+        Reaching the ceiling poisons the map permanently for the turn rather
+        than evicting an entry — an evicted call is one that stays unresolved
+        forever as far as this bridge can tell, and "exactly one" computed
+        without it is the false-accusation case.
+        """
+        if self._open_tool_calls_truncated:
+            return
+        if (
+            tool_call_id not in self._open_tool_calls
+            and len(self._open_tool_calls) >= _OPEN_TOOL_CALL_LIMIT
+        ):
+            self._open_tool_calls_truncated = True
+            return
+        self._open_tool_calls[tool_call_id] = kind
+
+    def _close_call(self, tool_call_id: str) -> None:
+        """Record that one call ended: unresolved no more, ended for good.
+
+        Both halves are one fact. Dropping the id from the unresolved map is
+        what stops an ended call from being counted as a candidate, and
+        remembering that it ended is what keeps a repeated id from re-entering
+        that map or being counted twice. The second memory is not optional the
+        way a correlation answer is: an id it stopped recording is an id that
+        reopens, and a reopened call flags its own duplicate as a second
+        violation. There is no private ceiling here for that reason — see the
+        set's own note for what does bound it.
+        """
+        self._open_tool_calls.pop(tool_call_id, None)
+        self._terminal_tool_calls.add(tool_call_id)
+
+    def _sole_open_call_if_kind(self, kinds: frozenset[str]) -> str | None:
+        """The turn's one unresolved call when it is of these kinds, else
+        ``None``.
+
+        A client-bound request such as ``fs/read_text_file`` names no call: ACP
+        gives it no ``toolCallId``, and nothing else in it is path- or
+        identity-authority. The only honest correlation is arithmetic — when
+        exactly one call was unresolved at all, that call is the one the
+        decision answered.
+
+        Which is why the count is over the *whole* unresolved population and
+        the kind is checked afterwards, on that sole call. Counting only
+        read-like calls would answer "the only read among them" instead: an
+        ``edit`` reads before it writes and an as-yet-untyped call may be
+        anything, so either one beside a read makes the read look sole while
+        the refusal may well have been the sibling's. Two calls, none, an
+        untyped sole call, or a map already known to be incomplete all return
+        ``None``: a missed detection is a bounded loss, while a wrong
+        correlation fails a Run that did nothing wrong. Arrival order, nearness
+        in time, and child free text are never consulted.
+        """
+        if self._open_tool_calls_truncated:
+            return None
+        if len(self._open_tool_calls) != 1:
+            return None
+        ((call_id, kind),) = self._open_tool_calls.items()
+        if kind not in kinds:
+            return None
+        return call_id
+
     # -- filesystem mediation ----------------------------------------------
+
+    def _deny_fs_read(self, reason: str) -> dict[str, Any]:
+        """Refuse one host read, bound to the call it belongs to when the turn
+        proves which one that is."""
+        tool_call_id = self._sole_open_call_if_kind(_READ_KINDS)
+        decision = self._emit(
+            requested_op="fs_read",
+            decision="deny",
+            reason=reason,
+            tool_call_id=tool_call_id,
+        )
+        if tool_call_id is not None:
+            # Same record the permission-prompt refusals keep, so one
+            # completion check covers both mediated paths. ``setdefault``:
+            # the first refusal for a call is the one remembered.
+            self._denied_tool_calls.setdefault(tool_call_id, "fs_read")
+        return decision
 
     def decide_fs_read(self, path: str) -> dict[str, Any]:
         if "read" not in self._capabilities:
-            return self._emit(
-                requested_op="fs_read",
-                decision="deny",
-                reason="grant does not include read",
-            )
+            return self._deny_fs_read("grant does not include read")
         resolved = self._resolve_workspace_path(path)
         if not self._inside_workspace(resolved):
-            return self._emit(
-                requested_op="fs_read",
-                decision="deny",
-                reason="path is outside the bound workspace",
-            )
+            return self._deny_fs_read("path is outside the bound workspace")
         decision = self._emit(
             requested_op="fs_read",
             decision="allow",
@@ -470,8 +593,10 @@ class PermissionBridge:
         """Watch raw session updates for completions the frozen grant or ARS's
         own decisions contradict. Two families, one event type:
 
-        - ``completed_after_deny``: this exact call was denied by this bridge
-          and reported ``completed`` anyway;
+        - ``completed_after_deny``: this exact call was denied by this bridge —
+          at its permission prompt, or at the host filesystem read it was the
+          turn's one unresolved call for, read-like — and reported
+          ``completed`` anyway;
         - ``missing_grant_capability``: a write-family tool completed without
           the capability that could ever have allowed it (A4-S2 backstop).
 
@@ -483,15 +608,52 @@ class PermissionBridge:
         already ran — and a completion that matches neither does not flag: an
         unseen kind cannot be proven write-family, and the mediated ask/deny
         launch binding is the prevention layer.
+
+        Detection is per *call*, not per update: an id that already reported
+        terminal is closed for the turn, so a repeated or late update for it
+        returns ``None`` without re-entering the lifecycle.
         """
         update_type = update.get("sessionUpdate")
         if update_type not in ("tool_call", "tool_call_update"):
             return None
         tool_call_id = update.get("toolCallId")
         kind = update.get("kind")
+        if isinstance(tool_call_id, str) and tool_call_id in self._terminal_tool_calls:
+            # This call already ended, and a call ends once. Everything the
+            # agent sends for that id afterwards is a repeat or a contradiction
+            # of its own lifecycle, and neither is new evidence: a second
+            # terminal update would double-count one broken protocol, and a
+            # late nonterminal one would make a finished call look like it is
+            # still waiting on a decision it could then be blamed for.
+            return None
         if isinstance(tool_call_id, str) and isinstance(kind, str):
             self._tool_kinds[tool_call_id] = kind
-        if update.get("status") != "completed":
+        status = update.get("status")
+        terminal = status in _TERMINAL_TOOL_STATUSES
+        if isinstance(tool_call_id, str) and not terminal:
+            # A kind this update omits falls back to the one this id already
+            # declared, so a later kindless update never un-types a typed call.
+            self._open_call(
+                tool_call_id,
+                kind if isinstance(kind, str) else self._tool_kinds.get(tool_call_id),
+            )
+        try:
+            return self._violation_for_completion(tool_call_id, kind, status)
+        finally:
+            # Closed only after this update's contradiction checks have run:
+            # while they run, the call is still the one that was waiting on the
+            # decision they are checking.
+            if terminal and isinstance(tool_call_id, str):
+                self._close_call(tool_call_id)
+
+    def _violation_for_completion(
+        self,
+        tool_call_id: Any,
+        kind: Any,
+        status: Any,
+    ) -> dict[str, Any] | None:
+        """The contradiction check for one update, or ``None``."""
+        if status != "completed":
             return None
         if not isinstance(kind, str) and isinstance(tool_call_id, str):
             kind = self._tool_kinds.get(tool_call_id)
@@ -509,7 +671,14 @@ class PermissionBridge:
                 # ARS's own record of what it was asked for — never child text.
                 kind = denied_op.removeprefix("permission:")
             self.grant_violation = True
-            reason = "tool completed after ARS denied its permission request"
+            # Which surface refused is ARS's own record, so the evidence names
+            # the decision that was actually contradicted rather than assuming
+            # every refusal came from a permission prompt.
+            reason = (
+                "tool completed after ARS denied its filesystem read"
+                if denied_op == "fs_read"
+                else "tool completed after ARS denied its permission request"
+            )
             self.grant_violation_reason = reason
             return {
                 "type": "permission_violation",

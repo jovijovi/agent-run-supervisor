@@ -100,6 +100,21 @@ record and the source version that emitted it remain authoritative.
 
 No process exists in the `COMMAND_NOT_*` and `SPAWN_FAILED` cases.
 
+## Selected post-dispatch detail codes
+
+These fail a Run whose prompt was already dispatched. The same caveat applies:
+this is not the complete Run-detail vocabulary.
+
+| Code | Meaning |
+|---|---|
+| `PERMISSION_VIOLATION` | a tool call reported `completed` after ARS denied that same call, or a write-family tool completed without the grant capability that could have allowed it. `status = failed`, `retryable = false`, Session still reusable |
+
+!!! warning "`PERMISSION_VIOLATION` is detection, not prevention"
+
+    It is observed after the completion is reported, so it never means the side
+    effect was blocked — only that the Run must not persist as `completed`. See
+    [Events](events.md#the-permission-families).
+
 ## Terminal error codes
 
 The five terminal statuses map to their own codes. See
