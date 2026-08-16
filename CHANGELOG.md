@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-08-16
+
+### Added
+
+- `ars-check`: operator quick-health controllers that check a deployed ARS over
+  its Unix socket — response delivery, real Session create-to-load reuse, and
+  permission mediation. They install nothing, edit no registry, and start or
+  restart no service. This is a repository tool, not part of the published
+  package.
+- Documentation: an end-to-end operations runbook covering install, user-service
+  deployment, acceptance, upgrade, rollback, and uninstall, plus a quickstart
+  that installs a pinned version into a virtual environment.
+
+### Changed
+
+- A `read` or `search` permission request is allowed only when the grant
+  includes `read` **and** every path the request declares resolves — through
+  symlinks — inside the bound workspace. Anything else denies fail-closed, so an
+  ACP adapter that declares no paths at all now has its read and search requests
+  denied.
+
+### Fixed
+
+- `edit`, `delete`, and `move` permission requests are now honored once
+  (`allow_once`) when the frozen grant carries the matching capability, instead
+  of being denied unconditionally.
+- A tool call ARS denied — at its permission request, or at a host file read —
+  that the agent then reports as `completed` now fails the Run with
+  `PERMISSION_VIOLATION` and `retryable = false`, leaving the Session reusable.
+  A denied call that reports `failed` is the healthy shape and changes nothing.
+
+### Notes
+
+- ACP permission mediation is cooperative agent-policy enforcement, not OS
+  isolation: a violation is observed after the fact and never means the side
+  effect was prevented. Preparing this version implies no tag, publication,
+  deployment, or service restart — each stays a separate decision.
+
 ## [0.7.5] - 2026-08-12
 
 ### Added

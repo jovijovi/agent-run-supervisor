@@ -16,7 +16,7 @@ wheels = [
 
 [[package]]
 name = "agent-run-supervisor"
-version = "0.7.5"
+version = "0.7.6"
 source = { editable = "." }
 
 [package.optional-dependencies]
