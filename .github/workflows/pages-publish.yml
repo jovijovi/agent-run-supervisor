@@ -45,6 +45,8 @@ jobs:
         with:
           enable-cache: true
           python-version: '3.11'
+          cache-suffix: docs
+          save-cache: false
 
       - name: Install documentation toolchain
         run: uv sync --locked --extra docs

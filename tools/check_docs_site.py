@@ -168,7 +168,7 @@ PUBLICATION_WORKFLOW = "pages-publish.yml"
 #: is intentionally tiny and rarely changed; any trigger, permission, action,
 #: input, job placement, or comment edit must update this reviewed digest.
 PUBLICATION_WORKFLOW_SHA256 = (
-    "418ecb878724957e9080ee7aa044b958f8bd4a74f11cd0fd347f700e5e0c53bc"
+    "7e45790969007ed53fc0fb910a3c16105189b0223dc51750fe35583870e5bec2"
 )
 
 #: Markers that *are* the reviewed workflow's mechanism — the official

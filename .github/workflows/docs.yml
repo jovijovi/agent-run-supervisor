@@ -49,6 +49,10 @@ jobs:
         with:
           enable-cache: true
           python-version: '3.11'
+          # Own key namespace for the documentation toolchain, so it never
+          # collides with the general Python 3.11 cache; this job writes it.
+          cache-suffix: docs
+          save-cache: true
 
       - name: Install documentation toolchain
         run: uv sync --locked --extra docs --extra dev

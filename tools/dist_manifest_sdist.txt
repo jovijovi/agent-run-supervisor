@@ -53,6 +53,7 @@ src/agent_run_supervisor/result.py
 src/agent_run_supervisor/session.py
 tests/test_agents_cli.py
 tests/test_ars_check_skill.py
+tests/test_ci_cache_writer_policy.py
 tests/test_cli_smoke.py
 tests/test_dist_manifest.py
 tests/test_event_store.py

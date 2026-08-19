@@ -62,6 +62,9 @@ jobs:
         with:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
+          # The verify job is the single writer of this Python version's cache
+          # key; this job restores it and never reserves it concurrently.
+          save-cache: false
 
       - name: Install package
         run: uv sync --locked --extra dev --extra release --extra native
