@@ -3,20 +3,24 @@
 ``RunTask._update_sink`` assigns each session/update its delivery ordinal by
 invocation count and compares it against the driver's prompt wire boundary.
 That is sound only under two exact properties of the locked stack
-(agent-client-protocol 0.12.0 on CPython asyncio):
+(agent-client-protocol 0.12.1 on CPython asyncio):
 
 1. ``NativeAcpClient.session_update`` runs the synchronous sink before its
    first await, so the ordinal is assigned in the notification task's first
    step.
-2. The SDK dispatcher creates one notification task per frame in receive
-   order, and asyncio starts task first-steps in creation order (documented
-   FIFO ``call_soon`` scheduling) — even when an earlier runner is slow.
+2. The SDK creates one notification task per frame in receive order, and
+   asyncio starts task first-steps in creation order (documented FIFO
+   ``call_soon`` scheduling) — even when an earlier handler is slow. 0.12.1
+   dropped the pluggable queue/dispatcher layer and now creates that task
+   synchronously inside the receive loop, which additionally makes a frame
+   batched ahead of a response reach its callback before that response
+   resolves.
 3. The driver's observed-update count (prompt wire boundary + pre-response
    delivery barrier) and the sink's delivery ordinals live in one causal
    domain: only session/update frames the SDK will actually dispatch to
    ``Client.session_update`` may be counted. The SDK drops a notification
    whose params fail ``SessionNotification`` validation (``_run_notification``
-   swallows handler exceptions — 0.11.0 silently, 0.11.1/0.12.0 with a
+   swallows handler exceptions — 0.11.0 silently, 0.11.1 onward with a
    root-logger record; no callback runs either way) and routes a frame
    carrying an ``id`` to the request table (method-not-found, no callback) —
    counting such a frame creates a phantom ordinal that shifts the frozen
@@ -77,60 +81,47 @@ def test_session_update_sink_completes_before_first_await() -> None:
     assert client.updates_completed == 1
 
 
-def test_dispatcher_invokes_notification_runners_in_receive_order() -> None:
-    from acp.task import (
-        DefaultMessageDispatcher,
-        InMemoryMessageQueue,
-        InMemoryMessageStateStore,
-        RpcTask,
-        RpcTaskKind,
-        TaskSupervisor,
-    )
+def test_connection_invokes_notification_handlers_in_receive_order() -> None:
+    # 0.12.1 removed the pluggable queue/dispatcher layer this pin used to run
+    # against: ``Connection._process_message`` is now synchronous and creates
+    # one handler task per frame straight from the receive loop. The property
+    # ARS depends on is unchanged and is asserted here against the real
+    # connection — handler *first steps* follow receive order (documented FIFO
+    # ``call_soon`` scheduling), even when an earlier handler is slow.
+    from acp._transport import memory_transport_pair
+    from acp.connection import Connection
 
     async def case() -> tuple[list[int], list[int]]:
-        queue = InMemoryMessageQueue()
-        supervisor = TaskSupervisor(source="test.update-delivery-contract")
         started: list[int] = []
         finished: list[int] = []
         done = asyncio.Event()
 
-        async def request_runner(message: dict[str, Any]) -> Any:
-            raise AssertionError("no request frames in this contract pin")
-
-        async def notification_runner(message: dict[str, Any]) -> None:
-            ordinal = message["params"]["ordinal"]
+        async def handler(method: str, params: Any, is_notification: bool) -> Any:
+            assert is_notification, "no request frames in this contract pin"
+            ordinal = params["ordinal"]
             started.append(ordinal)
             if ordinal == 1:
-                # Deliberately delayed first runner: later runners would
+                # Deliberately delayed first handler: later handlers would
                 # overtake it if invocation order were completion-driven.
                 await asyncio.sleep(0.05)
             finished.append(ordinal)
             if len(finished) == 3:
                 done.set()
 
-        dispatcher = DefaultMessageDispatcher(
-            queue=queue,
-            supervisor=supervisor,
-            store=InMemoryMessageStateStore(),
-            request_runner=request_runner,
-            notification_runner=notification_runner,
-        )
-        dispatcher.start()
+        left, right = memory_transport_pair()
+        connection = Connection(handler, left)
         try:
             for ordinal in (1, 2, 3):
-                await queue.publish(
-                    RpcTask(
-                        RpcTaskKind.NOTIFICATION,
-                        {
-                            "method": "session/update",
-                            "params": {"ordinal": ordinal},
-                        },
-                    )
+                await right.send(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {"ordinal": ordinal},
+                    }
                 )
             await asyncio.wait_for(done.wait(), 10)
         finally:
-            await dispatcher.stop()
-            await supervisor.shutdown()
+            await connection.close()
         return started, finished
 
     started, finished = asyncio.run(case())
@@ -140,6 +131,46 @@ def test_dispatcher_invokes_notification_runners_in_receive_order() -> None:
     # Completion order deliberately differs, proving the pin is not
     # accidentally satisfied by completion-driven sequencing.
     assert finished == [2, 3, 1]
+
+
+def test_deliverable_update_batched_before_its_response_reaches_the_callback_first() -> None:
+    # The 0.12.1 ordering property that ARS's fail-closed identity guard now
+    # meets deterministically: a notification frame the AGENT wrote *before* a
+    # response reaches ``Client.session_update`` before that response resolves
+    # its request future. Removing the dispatcher hop is what made this exact
+    # rather than a scheduling accident, which is why a deliverable pre-prompt
+    # update must not be batched ahead of the ``session/new`` response that
+    # binds the expected external Session id.
+    from acp._transport import memory_transport_pair
+    from acp.connection import Connection
+
+    async def case() -> list[str]:
+        order: list[str] = []
+
+        async def handler(method: str, params: Any, is_notification: bool) -> Any:
+            order.append("notification")
+            return None
+
+        left, right = memory_transport_pair()
+        connection = Connection(handler, left)
+        try:
+            request = asyncio.ensure_future(connection.send_request("session/new"))
+            # Drain the outgoing request, then answer it in one batch that is
+            # preceded by a notification, exactly as an agent process would.
+            outgoing = await asyncio.wait_for(right.receive(), 10)
+            await right.send(
+                {"jsonrpc": "2.0", "method": "session/update", "params": {}}
+            )
+            await right.send(
+                {"jsonrpc": "2.0", "id": outgoing["id"], "result": {"sessionId": "s1"}}
+            )
+            await asyncio.wait_for(request, 10)
+            order.append("response")
+            return order
+        finally:
+            await connection.close()
+
+    assert asyncio.run(case()) == ["notification", "response"]
 
 
 # -- ordinal-gap coherence regression (B1, 2026-07-24 R3) --------------------
@@ -241,6 +272,8 @@ async def _wire_agent(
     writer: asyncio.StreamWriter,
     phantom_frame: dict[str, Any],
     prompt_responded: asyncio.Event,
+    *,
+    frame_before_new_session_response: bool = True,
 ) -> None:
     """Scripted agent peer speaking real newline-delimited JSON-RPC."""
     options = {option["id"]: dict(option) for option in _INITIAL_OPTIONS}
@@ -270,10 +303,21 @@ async def _wire_agent(
                 },
             )
         elif method == "session/new":
-            # Wire order pins causality: the phantom frame precedes the
-            # session/new response, so the receive loop has observed it long
-            # before the prompt bytes can be written.
-            writer.write(_frame(phantom_frame))
+            # Wire order pins causality: the injected frame is observed by the
+            # receive loop long before the prompt bytes can be written.
+            #
+            # A frame the SDK never dispatches may sit *before* the session/new
+            # response — no callback runs, so there is nothing to service. A
+            # *deliverable* one may not: the locked SDK creates the
+            # notification's handler task straight from the receive loop, so a
+            # frame batched with the response reaches ``session_update`` before
+            # the response resolves and binds the expected external id. ARS
+            # refuses that fail-closed by contract (an unbound expectation is
+            # itself an identity violation), so a deliverable pre-prompt frame
+            # is emitted immediately *after* the response instead — still
+            # strictly pre-prompt, and now identity-serviceable.
+            if frame_before_new_session_response:
+                writer.write(_frame(phantom_frame))
             respond(
                 request_id,
                 {
@@ -281,6 +325,8 @@ async def _wire_agent(
                     "configOptions": [dict(option) for option in options.values()],
                 },
             )
+            if not frame_before_new_session_response:
+                writer.write(_frame(phantom_frame))
         elif method == "session/set_config_option":
             config_id = params.get("configId")
             if config_id == "model":
@@ -327,6 +373,7 @@ async def _ordinal_gap_case(
     phantom_frame: dict[str, Any],
     *,
     deliverable_updates: int = 2,
+    frame_before_new_session_response: bool = True,
 ) -> tuple[str, int | None, str, int]:
     driver_sock, agent_sock = socket.socketpair()
     driver_reader, driver_writer = await asyncio.open_connection(sock=driver_sock)
@@ -360,7 +407,13 @@ async def _ordinal_gap_case(
 
     prompt_responded = asyncio.Event()
     agent_task = asyncio.ensure_future(
-        _wire_agent(agent_reader, agent_writer, phantom_frame, prompt_responded)
+        _wire_agent(
+            agent_reader,
+            agent_writer,
+            phantom_frame,
+            prompt_responded,
+            frame_before_new_session_response=frame_before_new_session_response,
+        )
     )
     prompt_task: asyncio.Task[Any] | None = None
     try:
@@ -466,7 +519,13 @@ def test_lenient_salvaged_pre_prompt_update_counts_on_both_sides() -> None:
     # delivered but uncounted, the boundary would sit one ordinal low, and the
     # first genuine current-turn chunk would be excluded from final_message.
     stop_reason, boundary, final_text, delivered = asyncio.run(
-        _ordinal_gap_case(_SALVAGED_LENIENT_UPDATE, deliverable_updates=3)
+        _ordinal_gap_case(
+            _SALVAGED_LENIENT_UPDATE,
+            deliverable_updates=3,
+            # Deliverable, so it follows the session/new response — see the
+            # wire-order note in ``_wire_agent``. Still strictly pre-prompt.
+            frame_before_new_session_response=False,
+        )
     )
     assert stop_reason == "end_turn"
     assert final_text == "REAL_CHUNK", (

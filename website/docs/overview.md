@@ -130,7 +130,7 @@ Uncertainty is never resolved optimistically:
 | Need | Requirement |
 |---|---|
 | Runtime | Python ≥ 3.11, with zero third-party runtime dependencies |
-| Driving a real agent | the `native` extra, which pins the official ACP client `agent-client-protocol==0.12.0` |
+| Driving a real agent | the `native` extra, which pins the official ACP client `agent-client-protocol==0.12.1` |
 | Running `arsd` | Linux with a POSIX user session for the `AF_UNIX` socket, a supervisor root, an agents file, and at least one caller mapping you supply |
 | Running an agent | the agent installed by you, plus one registry entry naming its command |
 

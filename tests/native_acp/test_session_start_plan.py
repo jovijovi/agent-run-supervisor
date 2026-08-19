@@ -248,9 +248,16 @@ def _new_session_spy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 
 def _wire_capture(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
-    """Capture every outgoing frame as it is serialized onto the transport."""
+    """Capture every outgoing frame as it is serialized onto the transport.
+
+    Wrapping the writer the SDK's ``MessageSender`` is constructed with keeps
+    the capture on the real byte path (one frame per ``write``) without
+    depending on how the driver injects its own pre-write hook.
+    """
+    from acp.task import sender as sender_module
+
     frames: list[dict] = []
-    original = NativeAcpDriver._sender_factory
+    original_init = sender_module.MessageSender.__init__
 
     class _Tap:
         def __init__(self, writer) -> None:
@@ -266,10 +273,10 @@ def _wire_capture(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
         def __getattr__(self, name):
             return getattr(self._writer, name)
 
-    def factory(self, writer, supervisor):
-        return original(self, _Tap(writer), supervisor)
+    def recording_init(self, writer, supervisor) -> None:
+        original_init(self, _Tap(writer), supervisor)
 
-    monkeypatch.setattr(NativeAcpDriver, "_sender_factory", factory)
+    monkeypatch.setattr(sender_module.MessageSender, "__init__", recording_init)
     return frames
 
 

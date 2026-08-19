@@ -1,13 +1,14 @@
-"""Containment of the ACP SDK's handler-exception logging (SDK 0.12.0).
+"""Containment of the ACP SDK's handler-exception logging (SDK 0.12.1).
 
 ``agent-client-protocol`` 0.11.1 changed exactly one file, ``acp/connection.py``,
-in exactly two places: ``_run_request`` and ``_run_notification`` now call
+in exactly two places: the request and notification runners now call
 ``logging.exception(..., exc_info=exc)`` when a handler raises. 0.11.0 answered
 the request from the exception and, for a *notification*, dropped it through
 ``contextlib.suppress(Exception)`` — emitting nothing at all. 0.12.0's
-transport refactor moved the byte framing out of that file but left both
-``logging.exception`` calls exactly where they were, so the containment below
-is asserted against 0.12.0 unchanged.
+transport refactor moved the byte framing out of that file, and 0.12.1's
+connection refactor split response building out of ``_run_request`` into
+``_execute_request``; both ``logging.exception`` calls survived every move, so
+the containment below is asserted against 0.12.1 unchanged.
 
 Both calls are module-level ``logging.exception``, so their records are emitted
 directly on the **root** logger, which ``arsd`` configures with

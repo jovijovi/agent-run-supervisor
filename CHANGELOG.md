@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The optional `native` extra now pins the official ACP client
+  `agent-client-protocol==0.12.1`. That release removed the connection's
+  injectable `sender_factory`, so the driver assembles the SDK's own message
+  sender and newline-delimited JSON transport around its existing pre-write hook
+  and passes the result in through the SDK's message-level transport seam. ARS
+  implements no framing of its own, and the prompt causal boundary, replay
+  versus current-turn separation, update delivery barrier, process supervision,
+  and Session load-only behavior are unchanged.
+
 ## [0.7.6] - 2026-08-16
 
 ### Added

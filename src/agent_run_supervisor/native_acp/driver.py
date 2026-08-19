@@ -88,6 +88,9 @@ class NativeAcpDriver:
         self._client = client
         self._machine = machine
         self._connection: Any | None = None
+        # Supervisor for the one SDK sender-loop task this driver constructs;
+        # see :meth:`_build_stdio_transport`.
+        self._sender_tasks: Any | None = None
         self._session_id: str | None = None
         # Fired synchronously immediately before the FIRST
         # ``session/set_config_option`` frame of this driver — the boundary
@@ -104,10 +107,10 @@ class NativeAcpDriver:
         # Wire-order count of incoming session/update frames that the locked
         # SDK will actually dispatch to ``Client.session_update`` — the same
         # ordinal domain as the client's delivery/completion counters. The
-        # SDK receive loop notifies observers synchronously before enqueueing
-        # the handler and before resolving any response future, so every
-        # deliverable update frame that precedes a response is counted here
-        # before that response resolves. Frames the SDK silently drops
+        # SDK receive loop notifies observers synchronously before creating the
+        # frame's handler task and before resolving any response future, so
+        # every deliverable update frame that precedes a response is counted
+        # here before that response resolves. Frames the SDK silently drops
         # (schema-invalid notifications, request-shaped session/update) must
         # never be counted: a counted-but-undeliverable frame is a phantom
         # ordinal that shifts the frozen boundary past genuine current-turn
@@ -158,7 +161,7 @@ class NativeAcpDriver:
                 hook()
 
     def _update_frame_will_dispatch(self, message: Mapping[str, Any]) -> bool:
-        """Locked-SDK (0.12.0) dispatch predicate for one update callback.
+        """Locked-SDK (0.12.1) dispatch predicate for one update callback.
 
         ``Client.session_update`` runs for an incoming session/update frame
         iff it is notification-shaped (no ``id`` — a request-shaped frame
@@ -207,12 +210,43 @@ class NativeAcpDriver:
         if isinstance(message, dict) and message.get("method") == "session/prompt":
             self._prompt_wire_boundary = self._updates_observed
 
-    def _sender_factory(self, writer: Any, supervisor: Any) -> Any:
-        sender_module = importlib.import_module("acp.task.sender")
-        return sender_module.MessageSender(
-            _PromptBoundaryWriter(writer, self._snapshot_prompt_wire_boundary),
-            supervisor,
+    def _build_stdio_transport(self, proc: ManagedProcess) -> Any:
+        """Assemble the locked SDK's own stdio transport around the tap.
+
+        The locked SDK (0.12.1) constructs the stdio ``MessageSender``
+        internally and offers no injection seam for it — ``sender_factory``,
+        with the rest of the connection's pluggable queue/state/dispatcher
+        machinery, was removed in the 0.12.1 connection refactor. Its remaining
+        seam is one step further out: ``ClientSideConnection`` accepts a
+        **message-level** ``Transport`` in place of the (writer, reader) pair,
+        and then uses it verbatim.
+
+        So ARS builds that transport out of the SDK's own parts —
+        :class:`acp.task.MessageSender` and :class:`acp._transport.NdjsonTransport`
+        — and threads the pre-write tap through the one place the SDK still
+        leaves open, the sender's writer. No framing, buffer-limit-overrun
+        handling, or receive-timeout behavior is reimplemented here, and the
+        boundary is still snapshotted in the sender loop immediately before the
+        prompt's bytes reach the real ``StreamWriter.write()``. A tap on the
+        transport's message hand-off instead would fire one queue hop earlier
+        and pull pre-prompt frames into the current Turn.
+
+        The sender loop needs a supervisor; the connection's own is not
+        reachable before it exists, so the driver owns one and shuts it down in
+        :meth:`close`.
+        """
+        task_module = importlib.import_module("acp.task")
+        transport_module = importlib.import_module("acp._transport")
+        self._sender_tasks = task_module.TaskSupervisor(
+            source="agent_run_supervisor.native_acp.driver"
         )
+        sender = task_module.MessageSender(
+            _PromptBoundaryWriter(proc.stdin, self._snapshot_prompt_wire_boundary),
+            self._sender_tasks,
+        )
+        # No receive timeout, exactly as the SDK's own stdio path constructs it:
+        # turn-level time bounds stay with the caller (RunTask).
+        return transport_module.NdjsonTransport(proc.stdout, sender)
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -225,25 +259,35 @@ class NativeAcpDriver:
         connection_module = importlib.import_module("acp.client.connection")
         self._connection = connection_module.ClientSideConnection(
             self._client,
-            proc.stdin,
-            proc.stdout,
+            self._build_stdio_transport(proc),
             observers=[self._observe_stream],
-            sender_factory=self._sender_factory,
         )
 
     async def close(self) -> None:
         """Shut down the SDK connection tasks (never the process)."""
         connection = self._connection
+        sender_tasks = self._sender_tasks
         self._connection = None
-        if connection is None:
-            return
-        inner = getattr(connection, "_conn", None)
-        close = getattr(inner, "close", None)
-        if callable(close):
-            try:
-                await close()
-            except Exception:
-                pass
+        self._sender_tasks = None
+        try:
+            if connection is None:
+                return
+            inner = getattr(connection, "_conn", None)
+            close = getattr(inner, "close", None)
+            if callable(close):
+                try:
+                    await close()
+                except Exception:
+                    pass
+        finally:
+            # The connection closes the transport, which closes the sender and
+            # awaits its loop; this only guarantees the driver-owned supervisor
+            # is drained even when that path did not run to completion.
+            if sender_tasks is not None:
+                try:
+                    await sender_tasks.shutdown()
+                except Exception:
+                    pass
 
     def _require_connection(self) -> Any:
         if self._connection is None:
@@ -444,14 +488,21 @@ class NativeAcpDriver:
                 "prompt response arrived but the prompt wire boundary was "
                 "never snapshotted"
             )
-        # Pre-response delivery barrier: the SDK resolves the prompt future
-        # without awaiting queued session/update handlers, so every
-        # deliverable update frame observed on the wire before this response
-        # must complete its client callback before the turn returns —
-        # otherwise finalization could cancel those handlers and silently
-        # lose final-message/event evidence. The target and the completion
-        # counter share one ordinal domain (SDK-dispatched frames only).
-        # The caller's turn timeout is the only time bound.
+        # Pre-response delivery barrier: every deliverable update frame
+        # observed on the wire before this response must complete its client
+        # callback before the turn returns — otherwise finalization could
+        # cancel those handlers and silently lose final-message/event
+        # evidence. The target and the completion counter share one ordinal
+        # domain (SDK-dispatched frames only). The caller's turn timeout is the
+        # only time bound.
+        #
+        # 0.12.1's own ``_SessionUpdateTracker`` now waits inside
+        # ``prompt()`` too, but only for handlers that already *started*: it
+        # registers a frame when ``session_update`` runs its first step, and
+        # the receive loop resolves the response future without stepping the
+        # notification tasks it created just before. A frame observed on the
+        # wire whose task has not run yet is invisible to that wait and visible
+        # to this one, so this barrier is the strict superset and stays.
         try:
             await self._client.wait_for_updates_completed(self._updates_observed)
         except UpdateCallbackError as exc:

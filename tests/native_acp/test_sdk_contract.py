@@ -8,6 +8,7 @@ C1 symbol drift note (`set_config_option`, `acp.interfaces.Client`).
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import importlib
 import importlib.metadata
@@ -19,7 +20,7 @@ from pathlib import Path
 import pytest
 
 DISTRIBUTION = "agent-client-protocol"
-PINNED_VERSION = "0.12.0"
+PINNED_VERSION = "0.12.1"
 WORKTREE_ROOT = Path(__file__).resolve().parents[2]
 
 # The SDK's own optional extras. ARS is stdio ACP only, so neither may be
@@ -103,9 +104,10 @@ def test_client_callback_protocol_surface() -> None:
 def test_http_and_ws_transport_extras_are_not_installed() -> None:
     """ARS remains stdio ACP only; the SDK's ``[http]`` extra stays uninstalled.
 
-    0.12.0 added Streamable-HTTP and WebSocket transports behind an optional
-    extra. Nothing in this product may depend on them, so the assertion is on
-    the *environment*: the extra's distributions must not resolve at all.
+    The 0.12 line added Streamable-HTTP and WebSocket transports behind an
+    optional extra. Nothing in this product may depend on them, so the
+    assertion is on the *environment*: the extra's distributions must not
+    resolve at all.
     """
     _sdk_module()
     for distribution in HTTP_EXTRA_DISTRIBUTIONS:
@@ -126,27 +128,97 @@ def test_acp_import_does_not_pull_the_http_or_ws_transport_modules() -> None:
     assert "acp.ws.client" not in sys.modules
 
 
-def test_stdio_connection_still_accepts_the_sender_factory_and_observer_seams() -> None:
-    """The two SDK seams ARS's causal Turn boundary is built on.
+def test_connection_seams_the_causal_turn_boundary_is_built_on() -> None:
+    """The SDK seams ARS's causal Turn boundary is built on, on 0.12.1.
 
-    0.12.0 moved the byte framing behind a message-level ``Transport``. The
-    stdio path must still construct a ``MessageSender`` through the injectable
-    ``sender_factory`` (the pre-write tap that pins the prompt boundary) and
-    still fan raw frames out to ``observers`` (the update ordinal domain).
+    0.12.1's connection refactor deleted the pluggable ``queue``/``state_store``
+    /``dispatcher_factory``/``sender_factory`` constructor keywords, so the
+    pre-write tap can no longer be injected into the SDK-constructed
+    ``MessageSender``. What remains is one step further out: the connection
+    still fans raw frames out to ``observers`` (the update ordinal domain), and
+    it still accepts a **message-level** ``Transport`` in place of the
+    (writer, reader) pair. ARS therefore assembles the SDK's own
+    ``NdjsonTransport``/``MessageSender`` around the tap and passes that
+    transport in. All four pieces are pinned here; ``sender_factory`` is pinned
+    *absent*, so a future re-addition is a deliberate decision rather than a
+    silent second way to do this.
     """
     _sdk_module()
     connection_module = importlib.import_module("acp.connection")
     parameters = inspect.signature(connection_module.Connection.__init__).parameters
-    for name in ("sender_factory", "observers"):
-        assert name in parameters, name
-        assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY, name
-    sender_module = importlib.import_module("acp.task.sender")
+    assert "observers" in parameters
+    assert parameters["observers"].kind is inspect.Parameter.KEYWORD_ONLY
+    for removed in ("sender_factory", "queue", "state_store", "dispatcher_factory"):
+        assert removed not in parameters, removed
+
+    task_module = importlib.import_module("acp.task")
     sender_parameters = list(
-        inspect.signature(sender_module.MessageSender.__init__).parameters
+        inspect.signature(task_module.MessageSender.__init__).parameters
     )
     assert sender_parameters[:3] == ["self", "writer", "supervisor"]
+    supervisor_parameters = list(
+        inspect.signature(task_module.TaskSupervisor.__init__).parameters
+    )
+    assert supervisor_parameters[:2] == ["self", "source"]
+    for name in ("create", "shutdown"):
+        assert callable(getattr(task_module.TaskSupervisor, name)), name
+
     transport_module = importlib.import_module("acp._transport")
     assert inspect.isclass(transport_module.NdjsonTransport)
+    ndjson_parameters = list(
+        inspect.signature(transport_module.NdjsonTransport.__init__).parameters
+    )
+    assert ndjson_parameters[:3] == ["self", "reader", "sender"]
+    # The runtime-checkable protocol is what routes a transport to the
+    # message-level construction form inside ``ClientSideConnection``.
+    assert isinstance(
+        transport_module.NdjsonTransport.__new__(transport_module.NdjsonTransport),
+        transport_module.Transport,
+    )
+
+
+def test_client_connection_accepts_a_message_level_transport() -> None:
+    """The injection point ARS's prompt pre-write tap now rides on.
+
+    Passing a ``Transport`` as ``input_stream`` (and no ``output_stream``) must
+    build a working client connection that uses that transport verbatim — and
+    supplying both must still be refused.
+    """
+    _sdk_module()
+    connection_module = importlib.import_module("acp.client.connection")
+    transport_module = importlib.import_module("acp._transport")
+
+    async def case() -> None:
+        left, _right = transport_module.memory_transport_pair()
+        connection = connection_module.ClientSideConnection(object(), left)
+        try:
+            assert connection._conn._transport is left
+        finally:
+            await connection.close()
+        with pytest.raises(TypeError, match="asyncio StreamWriter/StreamReader"):
+            connection_module.ClientSideConnection(object(), left, left)
+
+    asyncio.run(case())
+
+
+def test_prompt_awaits_started_session_updates_before_returning() -> None:
+    """0.12.1 ``fix(connection): preserve notification response ordering``.
+
+    ``ClientSideConnection.prompt`` now waits for the session's *already
+    started* ``session_update`` handlers before returning. ARS keeps its own
+    observed-versus-completed barrier because this one cannot see a frame whose
+    handler task the receive loop created but has not stepped yet; the pin here
+    is that the SDK-side wait exists and is session-scoped, so its removal is
+    noticed rather than assumed.
+    """
+    _sdk_module()
+    connection_module = importlib.import_module("acp.client.connection")
+    tracker = connection_module._SessionUpdateTracker
+    assert inspect.isclass(tracker)
+    assert inspect.iscoroutinefunction(tracker.wait)
+    assert list(inspect.signature(tracker.wait).parameters)[:2] == ["self", "session_id"]
+    prompt_source = inspect.getsource(connection_module.ClientSideConnection.prompt)
+    assert "self._session_updates.wait(session_id)" in prompt_source
 
 
 def test_extension_elicitation_mode_exists_and_never_reaches_a_client_callback() -> None:

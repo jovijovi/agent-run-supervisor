@@ -13,7 +13,7 @@ supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 
 ```text
 base_branch: main
-active_plan: docs/plans/active/2026-08-15-permission-boundary-fixes.md
+active_plan: docs/plans/active/2026-08-19-acp-sdk-0121-upgrade.md
 ```
 
 ## Current position
@@ -83,9 +83,21 @@ active_plan: docs/plans/active/2026-08-15-permission-boundary-fixes.md
   launch schema version are unchanged. Source, tests, and docs only. Its plan stays active in
   [`docs/plans/active/`](../plans/active/2026-08-11-configurable-run-event-budget.md); the board's
   `active_plan` link now names the current task and does not retire that candidate.
-- **Current task:** ARS-owned permission boundary fixes, a task-branch candidate that is not on `main`,
-  released, or deployed
-  ([plan](../plans/active/2026-08-15-permission-boundary-fixes.md)). A `read`/`search`
+- **Current task:** the optional Native ACP SDK pin moves to `agent-client-protocol==0.12.1`, a
+  task-branch candidate that is not on `main`, released, or deployed
+  ([plan](../plans/active/2026-08-19-acp-sdk-0121-upgrade.md)). Upstream 0.12.1 removed the connection's
+  injectable `sender_factory`, so the driver now assembles the SDK's own `MessageSender` and
+  `NdjsonTransport` around its existing pre-write tap and hands that transport to the client connection
+  through the message-level `Transport` seam. ARS reimplements no framing, and the prompt causal boundary
+  keeps its exact instant: it is snapshotted in the sender loop immediately before the `session/prompt`
+  bytes reach the real writer. One prompt per driver/connection, replay/current-turn ordinal separation,
+  the SDK-dispatch-gated observer count, the pre-response delivery barrier, callback-error surfacing,
+  process supervision/reap, and Session load-only semantics are all unchanged. 0.12.1 also creates a
+  notification's handler task synchronously in the receive loop, so a deliverable `session/update` batched
+  ahead of a response now reaches its callback before that response resolves; ARS's existing fail-closed
+  identity rule covers it and gains a regression. No wire, API, schema-version, Session lifecycle, or
+  terminal-vocabulary change. Source, tests, and docs only.
+- The previous ARS-owned permission boundary fixes are merged on `main`. A `read`/`search`
   `session/request_permission` is allow-eligible only when the frozen grant includes `read` and every
   protocol-declared `locations[].path` is absolute and canonically inside the bound workspace — missing,
   malformed, relative, mixed, traversal, and symlink-escape locations deny fail-closed, and no other field is

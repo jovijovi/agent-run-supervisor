@@ -113,7 +113,7 @@ closed, and the Run reports a bounded `EVIDENCE_PIPELINE` failure.
 | Need | Requirement |
 |---|---|
 | Runtime | **Python ≥ 3.11**, with **zero third-party runtime dependencies**. |
-| Driving a real agent | The `native` extra, pinning the official ACP client `agent-client-protocol==0.12.0`. A base install imports fine and fails only when the SDK is used. ARS is stdio ACP only and never installs the SDK's `http` extra. |
+| Driving a real agent | The `native` extra, pinning the official ACP client `agent-client-protocol==0.12.1`. A base install imports fine and fails only when the SDK is used. ARS is stdio ACP only and never installs the SDK's `http` extra. |
 | Running `arsd` | Linux with a POSIX user session for the AF_UNIX socket, plus a supervisor root, an agents file, and at least one caller mapping you supply. Crash containment additionally expects a user-level service manager cgroup and a CPython build with pidfd support. |
 | Running an agent | The agent installed by you, plus one registry entry naming its command. |
 

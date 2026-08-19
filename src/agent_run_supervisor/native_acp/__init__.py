@@ -21,10 +21,12 @@ class NativeSdkUnavailableError(RuntimeError):
 class _RootExceptionDetailRedactor(logging.Filter):
     """Drop exception detail from records emitted *on* the root logger.
 
-    SDK 0.12.0 logs a handler failure with ``logging.exception(...,
-    exc_info=exc)`` in ``_run_request`` and ``_run_notification``, unchanged
-    from 0.11.1 (0.11.0 answered the request and suppressed the notification,
-    emitting nothing).
+    SDK 0.12.1 logs a handler failure with ``logging.exception(...,
+    exc_info=exc)`` in ``_execute_request`` and ``_run_notification``,
+    unchanged in substance from 0.11.1 — 0.12.1's connection refactor only
+    split the request path's response building out of ``_run_request``
+    (0.11.0 answered the request and suppressed the notification, emitting
+    nothing).
     Those are module-level calls, so the records are emitted on the root logger
     — the one ``arsd`` configures — and their ``exc_info`` carries two things
     ARS redacts everywhere else: the wire values a rejected ``session/update``

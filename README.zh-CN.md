@@ -103,7 +103,7 @@ Session 身份完成校验，随后与当前 Run 分离：重放不贡献任何�
 | 需求 | 要求 |
 |---|---|
 | 运行时 | **Python ≥ 3.11**，**零第三方运行时依赖**。 |
-| 驱动真实 agent | `native` 额外依赖，钉住官方 ACP 客户端 `agent-client-protocol==0.12.0`。基础安装可正常导入，只在真正用到 SDK 时才失败。ARS 仅使用 stdio ACP，永不安装 SDK 的 `http` 额外依赖。 |
+| 驱动真实 agent | `native` 额外依赖，钉住官方 ACP 客户端 `agent-client-protocol==0.12.1`。基础安装可正常导入，只在真正用到 SDK 时才失败。ARS 仅使用 stdio ACP，永不安装 SDK 的 `http` 额外依赖。 |
 | 运行 `arsd` | Linux，且有可放置 AF_UNIX 套接字的 POSIX 用户会话，另需 supervisor root、一个 agents 文件与至少一条 caller 映射。崩溃遏制还需要用户级 service manager 的 cgroup 与带 pidfd 支持的 CPython。 |
 | 运行 agent | 由你安装好的 agent，以及一条写明其命令的注册表条目。 |
 
