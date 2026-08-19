@@ -181,10 +181,31 @@ def test_publication_workflow_guards_both_jobs_to_main() -> None:
     assert text.count("    if: github.ref == 'refs/heads/main'\n") == 2
 
 
+#: The reviewed Pages action pins, each on a GitHub-hosted runner Node 24
+#: runtime. The workflow and the gate's canonical fragments must agree on
+#: every one of them, so a bump in either place alone fails here.
+REVIEWED_PAGES_ACTION_PINS = (
+    "actions/configure-pages@v6.0.0",
+    "actions/upload-pages-artifact@v5.0.0",
+    "actions/deploy-pages@v5.0.0",
+)
+
+
+def test_publication_workflow_pins_reviewed_node24_pages_actions() -> None:
+    workflow = ROOT / ".github" / "workflows" / check_docs_site.PUBLICATION_WORKFLOW
+    text = workflow.read_text(encoding="utf-8")
+    fragments = "".join(
+        fragment for _, fragment in check_docs_site.PUBLICATION_CANONICAL_FRAGMENTS
+    )
+    for pin in REVIEWED_PAGES_ACTION_PINS:
+        assert text.count(f"        uses: {pin}\n") == 1
+        assert fragments.count(f"        uses: {pin}\n") == 1
+
+
 @pytest.mark.parametrize(
     ("old", "new", "expected_kind"),
     [
-        ("actions/deploy-pages@v4", "actions/deploy-pages@v5", "publication:canonical_fragment"),
+        ("actions/deploy-pages@v5.0.0", "actions/deploy-pages@v6", "publication:canonical_fragment"),
         ("          enablement: false", "          enablement: true", "publication:pages_enablement"),
         ("    needs: build\n", "", "publication:canonical_fragment"),
         ("      name: github-pages\n", "", "publication:canonical_fragment"),
@@ -230,7 +251,7 @@ def test_gate_rejects_moving_reviewed_pages_step_between_jobs(tmp_path: Path) ->
     text = workflow.read_text(encoding="utf-8")
     step = (
         "\n      - name: Configure GitHub Pages\n"
-        "        uses: actions/configure-pages@v5\n"
+        "        uses: actions/configure-pages@v6.0.0\n"
         "        with:\n"
         "          enablement: false\n"
     )
