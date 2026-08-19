@@ -168,7 +168,7 @@ PUBLICATION_WORKFLOW = "pages-publish.yml"
 #: is intentionally tiny and rarely changed; any trigger, permission, action,
 #: input, job placement, or comment edit must update this reviewed digest.
 PUBLICATION_WORKFLOW_SHA256 = (
-    "7e45790969007ed53fc0fb910a3c16105189b0223dc51750fe35583870e5bec2"
+    "1f2e52c4a5398b3f37d3c2b55015683acefcc5b03181340ce96d536012871d0c"
 )
 
 #: Markers that *are* the reviewed workflow's mechanism — the official
@@ -223,14 +223,14 @@ PUBLICATION_CANONICAL_FRAGMENTS = (
     (
         "configure_pages_step",
         "\n      - name: Configure GitHub Pages\n"
-        "        uses: actions/configure-pages@v5\n"
+        "        uses: actions/configure-pages@v6.0.0\n"
         "        with:\n"
         "          enablement: false\n",
     ),
     (
         "upload_artifact_step",
         "\n      - name: Upload Pages artifact\n"
-        "        uses: actions/upload-pages-artifact@v4\n"
+        "        uses: actions/upload-pages-artifact@v5.0.0\n"
         "        with:\n"
         "          path: site\n",
     ),
@@ -238,7 +238,7 @@ PUBLICATION_CANONICAL_FRAGMENTS = (
         "deploy_step",
         "\n      - name: Deploy to GitHub Pages\n"
         "        id: deployment\n"
-        "        uses: actions/deploy-pages@v4\n",
+        "        uses: actions/deploy-pages@v5.0.0\n",
     ),
     (
         "deploy_job_topology",
