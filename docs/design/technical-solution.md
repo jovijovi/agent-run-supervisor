@@ -785,10 +785,9 @@ deleting the rest would silently drop the only real-agent continuity evidence.
 
 Executable slice sequences, fresh worktree/branch rules, exact commands, and separate push/PR/merge
 approvals live only in `docs/plans/active/`. The board-linked current plan is
-[the ACP SDK 0.12.1 upgrade](../plans/active/2026-08-19-acp-sdk-0121-upgrade.md);
-[the configurable per-Run event budget](../plans/active/2026-08-11-configurable-run-event-budget.md)
-remains separately active as a candidate in pre-integration review and is not the board's current plan.
-Both are planning and execution detail only, and neither authorizes any integration, release, or
-deployment. The completed
-[OMP and Reasonix source-support plan](../plans/archive/2026-08-11-omp-reasonix-source-support.md) is
-retained as cold history and authorizes nothing.
+[the configurable per-Run event budget](../plans/active/2026-08-11-configurable-run-event-budget.md),
+which remains active as a candidate in pre-integration review. Planning and execution detail does not
+authorize any integration, release, or deployment. The completed
+[ACP SDK 0.12.1 upgrade](../plans/archive/2026-08-19-acp-sdk-0121-upgrade.md) and
+[OMP and Reasonix source-support plan](../plans/archive/2026-08-11-omp-reasonix-source-support.md) are
+retained as cold history and authorize nothing.

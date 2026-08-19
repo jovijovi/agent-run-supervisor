@@ -42,7 +42,7 @@ Remaining cell says what happened to the source, because for the boundary reset 
 | F-MODEL-ONLY-FIDELITY-001 | declared configuration-fidelity modes + `cursor-native-acp-v1` | Required | Done | PRD R3/R12; technical solution §5; [registry contract](../design/agent-registry.md) | merged; model-only stops at the exact model readback, dispatches no effort RPC, and reports the shared `N/A` sentinel. Existing profiles keep separate selectors and their `profile_hash` |
 | F-CURSOR-GRANT-MODE-001 | grant-driven Cursor permission mode: `ask` for read-only grants, `agent` otherwise | Required | Done | PRD R7/R12; [archived plan](../plans/archive/2026-08-07-cursor-grant-mode.md); hermetic grant-mode suite | merged on `main`; `cursor-native-acp-v1` revision 3 moves only Cursor's `profile_hash`; a cooperative mode mitigation, not a permission/sandbox guarantee; mediation and the completion backstop unchanged |
 | F-LAUNCH-PERMISSION-001 | profile-selected per-Run launch permission material | Required | Done | PRD R7/R12; technical solution §1.2/§5; [registry contract](../design/agent-registry.md) §7 | merged; one closed read-only policy is available, but no registered profile selects it because the affected backend's configuration-root key would break cross-Run `session/load` continuity |
-| F-ACP-SDK-012-001 | optional `native` extra pinned to `agent-client-protocol==0.12.1` (ACP schema v1.19) | Required | Implemented | PRD R12; technical solution §0/§11 | task-branch candidate, not on `main`. 0.12.1 removed the `sender_factory` seam, so the pre-write tap now rides the message-level `Transport` injection point around the SDK's own sender/NDJSON transport; prompt causal boundary, update ordinal domain, delivery barrier, and SDK root-log containment are re-verified against 0.12.1; the SDK `http` extra stays uninstalled |
+| F-ACP-SDK-012-001 | optional `native` extra pinned to `agent-client-protocol==0.12.1` (ACP schema v1.19) | Required | Done | PRD R12; technical solution §0/§11 | merged on `main` as source. 0.12.1 removed the `sender_factory` seam, so the pre-write tap now rides the message-level `Transport` injection point around the SDK's own sender/NDJSON transport; prompt causal boundary, update ordinal domain, delivery barrier, and SDK root-log containment are re-verified against 0.12.1; the SDK `http` extra stays uninstalled. This tracker records source state only — publication and deployment truth belong to live release and operator sources |
 | F-RECONCILE-ORDERED-001 | total ordered fail-closed startup reconciliation, absent ≠ corrupt | Required | Done | PRD R10; architecture §6.1–§6.2; technical solution §9 | merged; strictly more refusals than the tolerant reader it replaced |
 | F-ARSD-API-002 | api_version 2 with the eight-operation drain matrix | Required | Superseded | PRD R11; superseded by F-SESSION-NOCLOSE-001 | replaced by single-version `api_version` 3 admission; the drain matrix is deleted, not disabled, because no client population exists |
 | F-SESSION-NOCLOSE-001 | one durable resumable Session kind: Runs terminate, Sessions do not close | Required | Done | PRD R4/R5/R9/R11; GOAL contract 3; [plan](../plans/archive/2026-08-06-session-no-close-model.md) | merged: optional `session_id`, deterministic prospective identity, one fully bound record before the dispatch marker, quarantine as independent evidence, `api_version` 3. Session durability and indefinite resumability are the product feature, not debt. This tracker records source state only — publication and runtime truth belong to live release and operator sources |
@@ -63,7 +63,7 @@ Remaining cell says what happened to the source, because for the boundary reset 
 | Session reuse under history replay | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | Configurable per-Run event budget | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 0 |
 | vNext Stage 0/1 | 7 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| Configuration fidelity, SDK pin, launch permission | 3 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| Configuration fidelity, SDK pin, launch permission | 4 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | OMP and Reasonix source support | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | vNext Stage 2 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | Registered per-agent profiles | 0 | 0 | 0 | 0 | 1 | 2 | 0 | 0 | 0 |
@@ -72,10 +72,10 @@ Remaining cell says what happened to the source, because for the boundary reset 
 | Later integration | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 |
 | Explicit exclusions | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
 
-One row is `Implemented`: F-ACP-SDK-012-001 moved to the 0.12.1 SDK pin on a task branch, so that pin is
-not on `main`, released, or deployed. One row is `In review`: F-RUN-EVENT-BUDGET-CONFIG-001 is a
-feature-branch candidate in pre-integration review, so it is not on `main`, and nothing about it is
-released or deployed. F-OMP-REASONIX-SOURCE-001,
+No row is `Implemented`: F-ACP-SDK-012-001 is now `Done`, because the 0.12.1 SDK pin is merged on `main`
+as source — which is neither a release nor a deployment. One row is `In review`:
+F-RUN-EVENT-BUDGET-CONFIG-001 is a feature-branch candidate in pre-integration review, so it is not on
+`main`, and nothing about it is released or deployed. F-OMP-REASONIX-SOURCE-001,
 F-SESSION-REPLAY-BACKPRESSURE-001,
 F-LONG-RUN-TIMEOUT-001, and F-CURSOR-GRANT-MODE-001 are each merged on `main`.
 The acpx removal is merged on `main`. F-LEGACY-COMPAT-001 records it as

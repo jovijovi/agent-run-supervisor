@@ -7,16 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-08-19
+
 ### Changed
 
 - The optional `native` extra now pins the official ACP client
   `agent-client-protocol==0.12.1`. That release removed the connection's
-  injectable `sender_factory`, so the driver assembles the SDK's own message
-  sender and newline-delimited JSON transport around its existing pre-write hook
-  and passes the result in through the SDK's message-level transport seam. ARS
-  implements no framing of its own, and the prompt causal boundary, replay
+  injectable `sender_factory`, so the driver now wraps its existing pre-write
+  hook in the SDK's own message sender and newline-delimited JSON transport and
+  hands that transport to the connection through the SDK's message-level seam.
+  ARS implements no framing of its own, and the prompt causal boundary, replay
   versus current-turn separation, update delivery barrier, process supervision,
   and Session load-only behavior are unchanged.
+- CI: every `setup-uv` cache key now has exactly one job that writes it, and all
+  other jobs restore it read-only. That removes the duplicate same-key
+  cache-save reservation warnings without adding jobs or test matrix entries,
+  and changes no runtime behavior.
+
+### Notes
+
+- Preparing this version implies no tag, GitHub Release, PyPI publication,
+  install, deployment, or service restart — each stays a separate decision.
 
 ## [0.7.6] - 2026-08-16
 
