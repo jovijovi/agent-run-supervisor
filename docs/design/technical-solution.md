@@ -15,7 +15,7 @@ V4 external-AGENT boundary reset. The previous mixed v0.1.7/vNext solution is pr
 
 ARS stays Python and **stdlib-only at runtime**. `tomllib` is standard library on the supported Python
 floor, so the registry parser adds no dependency. The only declared dependency is the optional `native`
-extra, pinned exactly to `agent-client-protocol==0.12.0` (ACP schema v1.19); its own `http` extra is never
+extra, pinned exactly to `agent-client-protocol==0.12.1` (ACP schema v1.19); its own `http` extra is never
 installed, because ARS is stdio ACP only and adds no HTTP/WS transport.
 The retired acpx path was removed from source.
 That removal took its runtime, parser, probe, policy, role, workspace, retention, caller, and fixture
@@ -776,12 +776,19 @@ deleting the rest would silently drop the only real-agent continuity evidence.
   intact because no gate ever wrote to them. Records written while the removed per-Run literal guard was live
   keep their categorical withholding markers; those markers stay readable and schema-valid, and nothing
   rewrites them.
-- Sachima `ArsdBackend` is later work. The ACP SDK pin moved to `0.12.0` under this document; the SDK's
-  `http` extra stays uninstalled and HTTP/WS transport remains a non-goal.
+- Sachima `ArsdBackend` is later work. The ACP SDK pin moved to `0.12.1` under this document; the SDK's
+  `http` extra stays uninstalled and HTTP/WS transport remains a non-goal. 0.12.1 removed the connection's
+  injectable `sender_factory`, so the driver assembles the SDK's own `MessageSender`/`NdjsonTransport`
+  around its pre-write tap and passes the result in through the message-level `Transport` seam; the prompt
+  causal boundary, the update ordinal domain, and the pre-response delivery barrier are unchanged. ARS
+  reimplements no framing.
 
 Executable slice sequences, fresh worktree/branch rules, exact commands, and separate push/PR/merge
-approvals live only in `docs/plans/active/`. The active plan is
-[the configurable per-Run event budget](../plans/active/2026-08-11-configurable-run-event-budget.md), which
-is planning and execution detail only and authorizes no integration, release, or deployment. The completed
+approvals live only in `docs/plans/active/`. The board-linked current plan is
+[the ACP SDK 0.12.1 upgrade](../plans/active/2026-08-19-acp-sdk-0121-upgrade.md);
+[the configurable per-Run event budget](../plans/active/2026-08-11-configurable-run-event-budget.md)
+remains separately active as a candidate in pre-integration review and is not the board's current plan.
+Both are planning and execution detail only, and neither authorizes any integration, release, or
+deployment. The completed
 [OMP and Reasonix source-support plan](../plans/archive/2026-08-11-omp-reasonix-source-support.md) is
 retained as cold history and authorizes nothing.

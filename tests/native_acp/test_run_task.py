@@ -625,12 +625,18 @@ def test_retry_of_run_id_never_mutates_the_original(
 def test_delayed_update_dispatch_is_captured_before_finalization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The SDK receive loop resolves the prompt response future without
-    # awaiting queued session/update handlers. This injects a dispatch delay
-    # into the client callback (the exact raced hop) and proves the turn
-    # still captures the final message and normalized event BEFORE the
-    # terminal result is written — the pre-response delivery barrier, not a
-    # lucky scheduling order.
+    # The SDK receive loop resolves the prompt response future without waiting
+    # for a queued session/update handler to *finish*. This injects a dispatch
+    # delay into the client callback (the exact raced hop) and proves the turn
+    # still captures the final message and normalized event BEFORE the terminal
+    # result is written, rather than by a lucky scheduling order.
+    #
+    # This is the whole-stack pin and it deliberately leaves both barriers in
+    # place, so it does not attribute the outcome to either. Attribution to
+    # ARS's own barrier is the next test's job: the locked SDK also waits here
+    # (0.12.1 ``_SessionUpdateTracker``), and a delay injected *inside*
+    # ``session_update`` is registered with that tracker before it starts, so
+    # this case alone would stay green with ARS's barrier removed.
     from agent_run_supervisor.native_acp.client import NativeAcpClient
 
     original_session_update = NativeAcpClient.session_update
@@ -643,6 +649,64 @@ def test_delayed_update_dispatch_is_captured_before_finalization(
 
     harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
     result = _run(harness.task())
+
+    assert result.status is AgentRunStatus.COMPLETED, result.payload
+    payload = json.loads((harness.run_dir() / "result.json").read_text())
+    assert payload["final_message"] == "FAKE_AGENT_OK"
+    events = [
+        json.loads(line)
+        for line in (harness.run_dir() / "events.jsonl").read_text().splitlines()
+    ]
+    assert any(event["type"] == "agent_message_delta" for event in events)
+
+
+def test_ars_delivery_barrier_alone_captures_a_delayed_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Same raced hop as the test above, with the locked SDK's own wait taken
+    # out of the path so ARS's observed-versus-completed barrier is the only
+    # thing that can preserve the delayed final update.
+    #
+    # 0.12.1's ``ClientSideConnection.prompt`` awaits
+    # ``_SessionUpdateTracker.wait``, which covers every handler that already
+    # ran its first step — which a delay injected inside ``session_update``
+    # always has. Left in, it satisfies the whole-stack assertion by itself and
+    # masks a regression in ARS's barrier. Neutralised, the turn returns as soon
+    # as the prompt response resolves, finalization runs, and ``driver.close()``
+    # cancels the still-sleeping notification task: the chunk reaches no sink,
+    # ``final_message`` is empty and no ``agent_message_delta`` is written unless
+    # ARS waited for the completion counter itself.
+    #
+    # ARS keeps its own barrier because it is the strict superset: the SDK's
+    # wait cannot see a frame whose handler task the receive loop created but
+    # has not yet stepped.
+    from acp.client.connection import _SessionUpdateTracker
+
+    from agent_run_supervisor.native_acp.client import NativeAcpClient
+
+    original_session_update = NativeAcpClient.session_update
+
+    async def delayed_session_update(self, session_id, update, **kwargs):
+        await asyncio.sleep(0.3)
+        return await original_session_update(self, session_id, update, **kwargs)
+
+    monkeypatch.setattr(NativeAcpClient, "session_update", delayed_session_update)
+
+    sdk_waits: list[str] = []
+
+    async def neutralised_sdk_wait(self, session_id):
+        # Reached, recorded, and returns without awaiting anything.
+        sdk_waits.append(session_id)
+
+    monkeypatch.setattr(_SessionUpdateTracker, "wait", neutralised_sdk_wait)
+
+    harness = Harness(tmp_path, monkeypatch, HAPPY_SCRIPT)
+    result = _run(harness.task())
+
+    # If the SDK ever stops routing the prompt through this seam, the
+    # neutralisation is silently a no-op and this case would quietly weaken
+    # back into the whole-stack one — so prove the seam was on the path.
+    assert sdk_waits, "the SDK-side prompt wait was never reached"
 
     assert result.status is AgentRunStatus.COMPLETED, result.payload
     payload = json.loads((harness.run_dir() / "result.json").read_text())

@@ -2,10 +2,11 @@
 
 # Documentation Index
 
-Total: 88 documents tracked across 2 statuses.
+Total: 89 documents tracked across 2 statuses.
 
-## Active (20)
+## Active (21)
 
+- [ACP Python SDK 0.12.1 upgrade](plans/active/2026-08-19-acp-sdk-0121-upgrade.md) — created 2026-08-19
 - [ARS permission boundary fixes](plans/active/2026-08-15-permission-boundary-fixes.md) — created 2026-08-15
 - [Operator-configurable per-Run event-ledger budget](plans/active/2026-08-11-configurable-run-event-budget.md) — created 2026-08-11
 - [ARS Public Documentation Site Design](design/documentation-site.md) — created 2026-08-07
