@@ -4,9 +4,8 @@
 
 Total: 89 documents tracked across 2 statuses.
 
-## Active (21)
+## Active (20)
 
-- [ACP Python SDK 0.12.1 upgrade](plans/active/2026-08-19-acp-sdk-0121-upgrade.md) — created 2026-08-19
 - [ARS permission boundary fixes](plans/active/2026-08-15-permission-boundary-fixes.md) — created 2026-08-15
 - [Operator-configurable per-Run event-ledger budget](plans/active/2026-08-11-configurable-run-event-budget.md) — created 2026-08-11
 - [ARS Public Documentation Site Design](design/documentation-site.md) — created 2026-08-07
@@ -28,8 +27,9 @@ Total: 89 documents tracked across 2 statuses.
 - [Engineering practices](practices/README.md) — created 2026-05-28
 - [Verification gates for implementation PRs](roadmap/verification.md) — created 2026-05-28
 
-## Archived (68)
+## Archived (69)
 
+- [ACP Python SDK 0.12.1 upgrade](plans/archive/2026-08-19-acp-sdk-0121-upgrade.md) — created 2026-08-19
 - [OMP and Reasonix minimal source support](plans/archive/2026-08-11-omp-reasonix-source-support.md) — created 2026-08-11
 - [Long-Run timeout limits implementation](plans/archive/2026-08-09-long-run-timeout-limits.md) — created 2026-08-09
 - [Grant-driven Cursor permission mode — ask for read-only grants, agent otherwise](plans/archive/2026-08-07-cursor-grant-mode.md) — created 2026-08-07

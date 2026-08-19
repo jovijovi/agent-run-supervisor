@@ -1,8 +1,9 @@
 ---
 title: "ACP Python SDK 0.12.1 upgrade"
-status: active
+status: archived
 created_at: 2026-08-19
 last_validated_at: 2026-08-19
+archived_at: 2026-08-19
 ---
 # ACP Python SDK 0.12.1 upgrade
 
@@ -94,6 +95,7 @@ resolves, so only ARS's observed-versus-completed ordinal barrier covers it.
 
 ## Boundaries
 
-This plan authorizes no integration, commit, push, pull request, merge, tag, release, publication,
-deployment, service action, or registry/runtime mutation. It is the board-linked planning artifact and
-nothing more.
+This plan is closed and archived: the source it describes is merged on `main`, and the plan is retained as
+cold history only. It is no longer the board-linked planning artifact, and an archived plan authorizes
+strictly less than an active one — nothing. It authorizes no further integration, commit, push, pull
+request, merge, tag, release, publication, deployment, service action, or registry/runtime mutation.

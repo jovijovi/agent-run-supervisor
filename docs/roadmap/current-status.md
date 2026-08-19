@@ -13,7 +13,7 @@ supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 
 ```text
 base_branch: main
-active_plan: docs/plans/active/2026-08-19-acp-sdk-0121-upgrade.md
+active_plan: docs/plans/active/2026-08-11-configurable-run-event-budget.md
 ```
 
 ## Current position
@@ -80,12 +80,12 @@ active_plan: docs/plans/active/2026-08-19-acp-sdk-0121-upgrade.md
   resolves from strictly validated durable facts whatever the current ceiling is, and never dispatches
   twice. It is a theoretical per-Run event-ledger ceiling, not preallocated memory, a Run-directory disk
   quota, or a daemon-global aggregate. The individual hard limits and every wire, request-digest, Spec, and
-  launch schema version are unchanged. Source, tests, and docs only. Its plan stays active in
-  [`docs/plans/active/`](../plans/active/2026-08-11-configurable-run-event-budget.md); the board's
-  `active_plan` link now names the current task and does not retire that candidate.
-- **Current task:** the optional Native ACP SDK pin moves to `agent-client-protocol==0.12.1`, a
-  task-branch candidate that is not on `main`, released, or deployed
-  ([plan](../plans/active/2026-08-19-acp-sdk-0121-upgrade.md)). Upstream 0.12.1 removed the connection's
+  launch schema version are unchanged. Source, tests, and docs only. **It is the board's current task:**
+  its plan is again the `active_plan` in
+  [`docs/plans/active/`](../plans/active/2026-08-11-configurable-run-event-budget.md).
+- The optional Native ACP SDK pin is closed on `main` as source (F-ACP-SDK-012-001): the `native` extra
+  pins `agent-client-protocol==0.12.1`. That is merged source only — neither a release, a publication, nor
+  a deployment. Upstream 0.12.1 removed the connection's
   injectable `sender_factory`, so the driver now assembles the SDK's own `MessageSender` and
   `NdjsonTransport` around its existing pre-write tap and hands that transport to the client connection
   through the message-level `Transport` seam. ARS reimplements no framing, and the prompt causal boundary
@@ -95,7 +95,7 @@ active_plan: docs/plans/active/2026-08-19-acp-sdk-0121-upgrade.md
   process supervision/reap, and Session load-only semantics are all unchanged. 0.12.1 also creates a
   notification's handler task synchronously in the receive loop, so a deliverable `session/update` batched
   ahead of a response now reaches its callback before that response resolves; ARS's existing fail-closed
-  identity rule covers it and gains a regression. No wire, API, schema-version, Session lifecycle, or
+  identity rule covers it and carries a regression. No wire, API, schema-version, Session lifecycle, or
   terminal-vocabulary change. Source, tests, and docs only.
 - The previous ARS-owned permission boundary fixes are merged on `main`. A `read`/`search`
   `session/request_permission` is allow-eligible only when the frozen grant includes `read` and every
