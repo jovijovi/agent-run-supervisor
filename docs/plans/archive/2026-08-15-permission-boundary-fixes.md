@@ -1,8 +1,9 @@
 ---
 title: "ARS permission boundary fixes"
-status: active
+status: archived
 created_at: 2026-08-15
-last_validated_at: 2026-08-15
+archived_at: 2026-08-21
+last_validated_at: 2026-08-21
 ---
 # ARS permission boundary fixes
 

@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext PRD"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-11
+last_validated_at: 2026-08-21
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/prd.md"
 ---
 # agent-run-supervisor vNext PRD
@@ -405,6 +405,11 @@ guarantees. ARS makes no isolation claim either way.
   `session_reuse` and `ars_session_id` for one optional `session_id`, and the operation set drops
   `session_close`. Silently reinterpreting an older frame is exactly the quiet fallback this product
   forbids.
+- Socket API v3 includes one dedicated read-only `agent_list` operation. It accepts an omitted payload or an
+  empty closed object and returns exactly `{"agent_ids": [...]}`: the unique, stable-sorted canonical IDs in
+  the immutable registry snapshot this daemon loaded at startup. It exposes no command, argv, path,
+  environment, profile, capability, model, role, priority, mention, execution preset, health, or readiness
+  data. Registration is one runtime fact, not execution eligibility; `submit` remains the execution gate.
 - **There is no drain window, per-operation version matrix, dual protocol, alias, shim, or old-client
   grace period, because there is no external or production ARS client population to preserve.** ARS is
   developed and tested on one development machine. An unsupported `api_version` is refused on the
@@ -493,6 +498,10 @@ guarantees. ARS makes no isolation claim either way.
 **One operator-owned TOML file, supplied by a required `--agents-file` daemon flag, read exactly once at
 daemon startup into an immutable in-memory snapshot. Operators replace it atomically; a replacement takes
 effect at the next daemon start.**
+
+The same snapshot is the sole source for `agent_list`. Querying never reopens the file, never reloads the
+registry, and never infers health or routing. A file replacement therefore remains invisible to a serving
+daemon until its next separately authorized restart.
 
 | Layer | Owner | Carries | Never carries |
 |---|---|---|---|
