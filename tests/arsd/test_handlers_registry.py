@@ -18,11 +18,12 @@ from pathlib import Path
 import pytest
 
 from agent_run_supervisor.arsd import admission, handlers, protocol, server
-from agent_run_supervisor.native_acp import storage
+from agent_run_supervisor.native_acp import agent_registry, storage
 from agent_run_supervisor.session import QUARANTINE_DISPATCH_OBSERVATION_LOST, SessionLockError
 
 from tests.arsd.test_admission import (
     Harness,
+    SpyFactory,
     caller_for,
     principal_a,
     principal_b,
@@ -30,6 +31,7 @@ from tests.arsd.test_admission import (
     submit_payload,
     valid_wire_request,
 )
+from tests.native_acp import registry_fixtures as rfx
 from tests.arsd.test_protocol import (
     HostileMaterializeMapping,
     HostileValuesMapping,
@@ -941,6 +943,7 @@ def test_cancel_pre_dispatch_failed_reusable(tmp_path: Path) -> None:
             event_store=event_store,
             run_task_factory=factory,
             cancel_wait_seconds=5.0,
+            agents=rfx.snapshot(),
         )
         factory.handlers = h
         caller = caller_for(principal_a())
@@ -990,6 +993,7 @@ def test_cancel_trustworthy_cancelled_terminal(tmp_path: Path) -> None:
             event_store=event_store,
             run_task_factory=factory,
             cancel_wait_seconds=5.0,
+            agents=rfx.snapshot(),
         )
         factory.handlers = h
         caller = caller_for(principal_a())
@@ -1035,6 +1039,7 @@ def test_cancel_without_terminal_unknown_quarantined(tmp_path: Path) -> None:
             event_store=event_store,
             run_task_factory=factory,
             cancel_wait_seconds=5.0,
+            agents=rfx.snapshot(),
         )
         factory.handlers = h
         caller = caller_for(principal_a())
@@ -1201,6 +1206,7 @@ def test_registry_always_deregisters_on_task_exception(tmp_path: Path) -> None:
             event_store=event_store,
             run_task_factory=factory,
             cancel_wait_seconds=5.0,
+            agents=rfx.snapshot(),
         )
         factory.handlers = h
         caller = caller_for(principal_a())
@@ -3403,3 +3409,304 @@ def test_a_raised_daemon_ceiling_admits_beyond_the_default(tmp_path: Path) -> No
 def test_handlers_refuse_a_ceiling_that_is_not_a_policy(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         Harness(tmp_path, event_budget_policy=4 * 1024**3)
+
+
+# --- agent_list: the read-only runtime roster --------------------------------
+#
+# One operation over the immutable ``AgentRegistrySnapshot`` this daemon parsed
+# once at startup. It reads memory and nothing else: no filesystem, no storage,
+# no adapter, no subprocess, no health probe. Registration is a runtime fact
+# about *this* daemon process, never execution eligibility — ``submit`` remains
+# the admission boundary.
+
+#: A secret-shaped registry value that must never reach an encoded roster frame.
+REGISTRY_SENTINEL = "sk-live-" + "ROSTERCANARY"
+
+
+def roster_stores(tmp_path: Path):
+    root = tmp_path / "svroot"
+    return storage.native_session_store(root), storage.native_event_store(root)
+
+
+def roster_handlers(tmp_path: Path, snapshot, **kwargs) -> handlers.ArsdHandlers:
+    session_store, event_store = roster_stores(tmp_path)
+    options = dict(
+        session_store=session_store,
+        event_store=event_store,
+        run_task_factory=SpyFactory(),
+        agents=snapshot,
+    )
+    options.update(kwargs)
+    return handlers.ArsdHandlers(**options)
+
+
+def roster(handler, request_id: str = "roster-1", payload=None):
+    async def case():
+        return await handler(
+            caller_for(principal_a()), parsed("agent_list", request_id, payload)
+        )
+
+    return run_async(case())
+
+
+def test_handlers_refuse_construction_without_a_registry_snapshot(tmp_path: Path) -> None:
+    """Missing at construction, not discovered on a caller's request.
+
+    A handler with no snapshot is a handler that could answer a roster query
+    with a fabricated default or an INTERNAL failure. Neither is a runtime
+    fact, so the daemon never reaches the point of being asked.
+    """
+    session_store, event_store = roster_stores(tmp_path)
+    with pytest.raises(ValueError):
+        handlers.ArsdHandlers(
+            session_store=session_store,
+            event_store=event_store,
+            run_task_factory=SpyFactory(),
+        )
+
+
+@pytest.mark.parametrize(
+    "agents",
+    [None, {}, [], (), "native-agent", ["native-agent"], object(), {"native-agent": object()}],
+)
+def test_handlers_refuse_a_wrong_type_registry_snapshot(tmp_path: Path, agents) -> None:
+    session_store, event_store = roster_stores(tmp_path)
+    with pytest.raises(ValueError):
+        handlers.ArsdHandlers(
+            session_store=session_store,
+            event_store=event_store,
+            run_task_factory=SpyFactory(),
+            agents=agents,
+        )
+
+
+def test_agent_list_returns_stable_sorted_unique_canonical_ids(tmp_path: Path) -> None:
+    snapshot = rfx.snapshot(
+        entries={
+            "opencode": rfx.minimal_entry(),
+            "claude": rfx.minimal_entry(),
+            "codex": rfx.minimal_entry(),
+        }
+    )
+    handler = roster_handlers(tmp_path, snapshot)
+    result = roster(handler)
+    assert result == {"agent_ids": ["claude", "codex", "opencode"]}
+    ids = result["agent_ids"]
+    assert len(set(ids)) == len(ids)
+    # Stable: the same daemon answers the same question the same way.
+    assert roster(handler, "roster-2") == result
+
+
+def test_agent_list_on_an_empty_registry_returns_an_empty_list(tmp_path: Path) -> None:
+    """A valid empty registry is a fact, not an error and not a default AGENT."""
+    handler = roster_handlers(tmp_path, rfx.snapshot(entries={}))
+    assert roster(handler) == {"agent_ids": []}
+
+
+def test_agent_list_accepts_an_omitted_and_an_empty_payload(tmp_path: Path) -> None:
+    handler = roster_handlers(tmp_path, rfx.snapshot())
+    expected = {"agent_ids": ["native-agent"]}
+    assert roster(handler, "roster-omitted", None) == expected
+    assert roster(handler, "roster-empty", {}) == expected
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["agent_id", "agent_ids", "filter", "limit", "include_health", "role", "profile"],
+)
+def test_agent_list_refuses_any_payload_field(tmp_path: Path, field: str) -> None:
+    """The payload is closed: an unknown field is refused, never ignored."""
+    handler = roster_handlers(tmp_path, rfx.snapshot())
+    with pytest.raises(protocol.ProtocolError) as err:
+        roster(handler, "roster-closed", {field: "x"})
+    assert err.value.code == protocol.INVALID_REQUEST
+    assert field not in err.value.message
+
+
+def test_agent_list_never_reopens_or_reparses_the_registry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Repeated calls read memory. The parser is not reachable from a request.
+
+    The on-disk file is replaced *and* deleted between calls, and every parser
+    entry point is armed to fail: a request-time read would surface as a raised
+    fixture rather than as a quietly refreshed roster.
+    """
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    path = rfx.write_registry(conf, entries={"claude": rfx.minimal_entry()})
+    snapshot = agent_registry.load_agents_file(path)
+    handler = roster_handlers(tmp_path, snapshot)
+    assert roster(handler, "roster-start") == {"agent_ids": ["claude"]}
+
+    def never(*args, **kwargs):
+        raise AssertionError("a roster request re-read the registry")
+
+    for name in (
+        "load_agents_file",
+        "parse_registry_text",
+        "parse_registry_document",
+        "_read_registry_bytes",
+    ):
+        monkeypatch.setattr(agent_registry, name, never)
+
+    # Operator edits the file while the daemon serves: not runtime truth.
+    rfx.write_registry(conf, entries={"codex": rfx.minimal_entry()})
+    assert roster(handler, "roster-after-edit") == {"agent_ids": ["claude"]}
+    path.unlink()
+    assert roster(handler, "roster-after-unlink") == {"agent_ids": ["claude"]}
+
+
+def test_agent_list_encodes_only_agent_ids_and_leaks_no_entry_material(
+    tmp_path: Path,
+) -> None:
+    """AS-5, judged on the bytes the real encoder would put on the wire."""
+    snapshot = rfx.snapshot(
+        entries={
+            "vendor-agent": rfx.minimal_entry(
+                command="/opt/secret-vendor/bin/agent-x",
+                args=["--api-key", REGISTRY_SENTINEL, "acp"],
+                env_passthrough=["SSH_AUTH_SOCK"],
+                env_overlay={"VENDOR_TOKEN": REGISTRY_SENTINEL},
+                model_selector="model",
+                effort_selector="reasoning_effort",
+                forbidden_capabilities=["terminal"],
+                session_epoch=7,
+            )
+        }
+    )
+    handler = roster_handlers(tmp_path, snapshot)
+    result = roster(handler)
+    assert result == {"agent_ids": ["vendor-agent"]}
+    assert set(result) == {"agent_ids"}
+
+    frame = protocol.encode_frame(protocol.build_result("roster-leak", result))
+    decoded = json.loads(frame)
+    assert set(decoded["result"]) == {"agent_ids"}
+    text = frame.decode("utf-8")
+    for forbidden in (
+        REGISTRY_SENTINEL,
+        "/opt/secret-vendor",
+        "--api-key",
+        "SSH_AUTH_SOCK",
+        "VENDOR_TOKEN",
+        "reasoning_effort",
+        "terminal",
+        "standard-native-acp-v1",
+        "command",
+        "args",
+        "env",
+        "profile",
+        "capabilit",
+        "health",
+        "role",
+        "priority",
+    ):
+        assert forbidden not in text
+
+
+def test_server_info_advertises_agent_list_and_gains_no_roster_field(
+    tmp_path: Path,
+) -> None:
+    snapshot = rfx.snapshot(entries={"claude": rfx.minimal_entry()})
+    handler = roster_handlers(tmp_path, snapshot)
+
+    async def case():
+        return await handler(caller_for(principal_a()), parsed("server_info", "si-1"))
+
+    info = run_async(case())
+    assert "agent_list" in info["operations"]
+    assert info["operations"] == sorted(protocol.OPERATIONS)
+    # Discovery advertises the operation; it never embeds the roster itself.
+    assert set(info) == {
+        "version",
+        "api_version",
+        "supported_api_versions",
+        "operations",
+        "limits",
+    }
+    assert set(info["limits"]) == {
+        "max_concurrent_runs",
+        "max_frame_bytes",
+        "max_prompt_bytes",
+        "events_page_limit",
+        "event_follow_queue_size",
+        "max_run_event_budget_bytes",
+    }
+    assert info["api_version"] == protocol.ARSD_API_VERSION
+    assert "claude" not in json.dumps(info)
+
+
+def test_agent_list_over_a_maximum_legal_registry_stays_inside_the_frame_contract(
+    tmp_path: Path,
+) -> None:
+    """The real loader, the real parser, and the real frame encoder decide.
+
+    "Maximum" has to mean the largest roster an operator could actually load,
+    which is the cheapest *values* in the cheapest legal *encoding* — the
+    fixture derives both from repository constants rather than pinning bytes.
+    Anything roomier proves the frame bound against a registry that is not at
+    the limit, which is a weaker claim wearing this test's name.
+
+    Both documents go through ``load_agents_file``, never ``parse_registry_text``:
+    ``MAX_REGISTRY_BYTES`` is enforced by the *read*, so the parser accepts the
+    one-more document quite happily. A test that only parsed would be asserting
+    its own arithmetic about a Python string and never the bound at all.
+    """
+    largest = rfx.maximum_legal_registry()
+    assert len(largest.text.encode("utf-8")) <= agent_registry.MAX_REGISTRY_BYTES
+    assert len(largest.one_more.encode("utf-8")) > agent_registry.MAX_REGISTRY_BYTES
+    # The compact document must stay strictly cheaper than the readable one.
+    # Nothing else here fails when it quietly becomes roomier: a padded entry
+    # still parses, still fits, still encodes — it just buys fewer ids.
+    assert largest.marginal_bytes < rfx.readable_entry_marginal_bytes()
+    # 64 characters is the *grammar's* maximum, not a fixture preference. A
+    # widened grammar would buy more ids under the same byte bound, so it has to
+    # fail here rather than let the fixture keep emitting the old width.
+    widest = rfx.widest_agent_id(0)
+    assert agent_registry.validate_agent_id(widest) == widest
+    with pytest.raises(agent_registry.RegistryRefusal):
+        agent_registry.validate_agent_id(widest + "0")
+    # Sensitivity guard, not the source of truth. The count above is derived; if
+    # these move, the encoding, the id grammar, ``MAX_REGISTRY_BYTES``, or the
+    # shortest registered profile id moved with them, and the new worst case is
+    # worth re-deriving by hand rather than absorbing silently.
+    assert (largest.marginal_bytes, len(widest), largest.count) == (110, 64, 9532)
+
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    largest_file = rfx.write_registry(conf, name="max.toml", text=largest.text)
+    one_more_file = rfx.write_registry(conf, name="one-more.toml", text=largest.one_more)
+
+    # One byte-bound refusal, from the component that actually owns the bound.
+    with pytest.raises(agent_registry.RegistryRefusal) as refusal:
+        agent_registry.load_agents_file(one_more_file)
+    assert refusal.value.rule == "REGISTRY_TOO_LARGE"
+
+    snapshot = agent_registry.load_agents_file(largest_file)
+    assert len(snapshot.ids()) == largest.count
+    handler = roster_handlers(tmp_path, snapshot)
+    result = roster(handler, "roster-max")
+    assert result["agent_ids"] == sorted(snapshot.ids())
+
+    frame = protocol.encode_frame(
+        protocol.build_result("x" * protocol.MAX_REQUEST_ID_CHARS, result)
+    )
+    assert len(frame) <= protocol.MAX_FRAME_BYTES
+
+
+def test_both_startup_wirings_answer_from_the_one_startup_snapshot(
+    tmp_path: Path,
+) -> None:
+    """Injected factory or the daemon's own: the same snapshot object answers."""
+    snapshot = rfx.snapshot(entries={"claude": rfx.minimal_entry()})
+    injected = roster_handlers(tmp_path / "injected", snapshot)
+    default = roster_handlers(
+        tmp_path / "default",
+        snapshot,
+        run_task_factory=None,
+        supervisor_root=tmp_path / "default" / "svroot",
+    )
+    expected = {"agent_ids": ["claude"]}
+    assert roster(injected, "roster-injected") == expected
+    assert roster(default, "roster-default") == expected

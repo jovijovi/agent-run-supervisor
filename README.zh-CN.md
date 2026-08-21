@@ -282,6 +282,10 @@ with ArsdClient(socket_path) as client:
 终态结果里带着本次 Run 所用的 `session_id` —— 下一次 `submit` 回传的就是它。
 `session_list()`、`session_status(id)` 补全其余接口，同样按 owner 限定；两者投影的是身份、最近一次使用
 的观测值与可选的隔离证据，而不是任何生命周期状态。
+`agent_list()` 是唯一的只读名册查询：它返回完整的 `{"agent_ids": [...]}` 对象 —— 也就是**当前这个守护
+进程**启动时载入的那份不可变注册表快照里、去重且稳定排序的规范 id，除此之外不暴露条目的任何信息。请求
+不会重新读取 agents 文件，因此编辑要到下次守护进程启动才生效；而且“已注册”不等于健康、授权或可执行，
+准入边界仍然是 `submit`。
 上面 `request` 的键集是封闭且完整的：未知键会被拒绝；它不携带 shell 文本、argv、环境变量值、可执行
 文件路径或凭据内容 —— 这些字段在协议上根本不存在，而 `credential_refs` 只是**引用**，ARS 从不把它
 解析成值。错误是类型化且失败关闭的：异常携带 `PEER_UID_DENIED`、`OWNER_MISMATCH`、

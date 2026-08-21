@@ -8,10 +8,12 @@ accepts. Every fixture writes below the caller's pytest ``tmp_path``.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, NamedTuple
 
 from agent_run_supervisor.native_acp import agent_registry
+from agent_run_supervisor.native_acp.profile import DEFAULT_REGISTRY
 
 STANDARD_PROFILE = "standard-native-acp-v1"
 COMPAT_PROFILE = "claude-agent-acp-compat-v1"
@@ -81,6 +83,16 @@ def registry_text(
     return "\n".join(lines) + "\n"
 
 
+def snapshot(**kwargs: Any) -> agent_registry.AgentRegistrySnapshot:
+    """The immutable snapshot a started daemon would hold, with no file at all.
+
+    The daemon's snapshot *is* the parse result, so a test that needs one asks
+    the real parser here rather than assembling entries by hand — a hand-built
+    snapshot could hold a shape the parser never admits.
+    """
+    return agent_registry.parse_registry_text(registry_text(**kwargs))
+
+
 def write_registry(
     tmp_path: Path,
     *,
@@ -143,3 +155,110 @@ def reasonix_entry(**overrides: Any) -> dict[str, Any]:
     }
     body.update(overrides)
     return body
+
+
+# -- bounds documents ---------------------------------------------------------
+#
+# Deliberately separate from every fixture above. Those exist to be *read*: they
+# spell an entry the way an operator would write one, and the renderer pads it
+# for legibility. These exist to answer "how many entries fit under
+# MAX_REGISTRY_BYTES", where legibility is the enemy — every byte of padding
+# understates the answer, so a test built on the readable rendering proves its
+# bound against a registry smaller than the one an operator could really load.
+
+#: TOML reads a dotted key as *nesting*, so a compact document may only use ids
+#: that are bare keys. Quoting one back would cost the two bytes this is for.
+_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def widest_agent_id(index: int) -> str:
+    """A distinct canonical id at the exact grammar maximum: 64 chars.
+
+    Widest, because a bounds document wants the largest response its byte
+    budget can buy, and alphanumeric so it is also a legal bare key.
+    """
+    wide = f"a{index:063d}"
+    assert agent_registry.validate_agent_id(wide) == wide
+    return wide
+
+
+def _cheapest_entry() -> dict[str, str]:
+    """The cheapest field *values* the parser accepts.
+
+    Derived rather than spelled: the shortest **registered** profile id — the
+    parser admits exactly that set, so a literal would stop being the cheapest
+    the moment the set changes — and the shortest legal command, which is one
+    basename character.
+    """
+    return {"profile": min(sorted(DEFAULT_REGISTRY.ids()), key=len), "command": "a"}
+
+
+def compact_registry_text(agent_ids: Iterable[str]) -> str:
+    """The most byte-efficient legal encoding of a registry document.
+
+    Cheapest values (:func:`_cheapest_entry`) in the cheapest *encoding*: one
+    ``[agents]`` table instead of a header per entry, bare keys instead of
+    quoted ones, inline tables, no padding around ``=``, no blank lines, and no
+    trailing newline — TOML does not require one, so carrying it would spend a
+    byte this function exists not to spend. Each of those costs bytes in the
+    readable rendering, and bytes are the whole question here. Bounds work only
+    — never a model of operator authoring.
+    """
+    entry = _cheapest_entry()
+    inline = "{" + ",".join(f'{key}="{value}"' for key, value in entry.items()) + "}"
+    lines = [
+        f"schema_version={agent_registry.REGISTRY_SCHEMA_VERSION}",
+        "[agents]",
+    ]
+    for agent_id in agent_ids:
+        if _BARE_KEY_RE.fullmatch(agent_id) is None:
+            raise ValueError(f"a compact bounds id must be a TOML bare key: {agent_id!r}")
+        lines.append(f"{agent_id}={inline}")
+    return "\n".join(lines)
+
+
+class MaximumLegalRegistry(NamedTuple):
+    """The largest legal document, the next one up, and how it was derived."""
+
+    text: str
+    one_more: str
+    count: int
+    marginal_bytes: int
+
+
+def maximum_legal_registry() -> MaximumLegalRegistry:
+    """The largest document the real registry parser accepts, and the next one up.
+
+    Derived from ``MAX_REGISTRY_BYTES`` and the *measured* cost of the compact
+    encoding above — never a hand-estimated threshold and never a pinned count.
+    Both documents come from the same encoding and the same entry, so "one more"
+    is one more of the same thing rather than a second, differently shaped
+    estimate.
+    """
+    header = len(compact_registry_text(()).encode("utf-8"))
+    marginal = len(compact_registry_text((widest_agent_id(0),)).encode("utf-8")) - header
+    count = (agent_registry.MAX_REGISTRY_BYTES - header) // marginal
+
+    def document(entries: int) -> str:
+        return compact_registry_text(widest_agent_id(index) for index in range(entries))
+
+    return MaximumLegalRegistry(
+        text=document(count),
+        one_more=document(count + 1),
+        count=count,
+        marginal_bytes=marginal,
+    )
+
+
+def readable_entry_marginal_bytes() -> int:
+    """What one widest-id entry costs in the *readable* rendering.
+
+    Exists for one assertion: the compact document has to stay strictly cheaper
+    than this. Nothing else in a bounds test fails when the document quietly
+    becomes roomier — a padded entry still parses, still fits, still encodes.
+    """
+    header = len(registry_text(entries={}).encode("utf-8"))
+    one = len(
+        registry_text(entries={widest_agent_id(0): minimal_entry()}).encode("utf-8")
+    )
+    return one - header

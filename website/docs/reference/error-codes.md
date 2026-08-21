@@ -21,7 +21,7 @@ presented as one exhaustive cross-layer list.
 | Code | Meaning | What to do |
 |---|---|---|
 | `UNSUPPORTED_API_VERSION` | the envelope's `api_version` is not `3` | send `3`. There is no drain window, dual protocol, or alias |
-| `UNKNOWN_OP` | `op` is not one of the seven operations | check the [operation list](socket-api.md#operations) |
+| `UNKNOWN_OP` | `op` is not one of the eight operations | check the [operation list](socket-api.md#operations). A daemon older than an operation answers this too — fail closed rather than retry |
 | `MALFORMED_FRAME` | the frame is not decodable JSON, or nests deeper than 64 | fix the encoder |
 | `FRAME_TOO_LARGE` | the frame exceeds 1 048 576 bytes | send less; prompts have their own 262 144-byte ceiling |
 | `INVALID_REQUEST` | a field is missing, malformed, unknown, or refused | see below — this is the code that carries the closed-key rules |

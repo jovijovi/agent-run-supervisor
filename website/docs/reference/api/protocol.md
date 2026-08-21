@@ -29,7 +29,7 @@ assert protocol.ARSD_API_VERSION in protocol.SUPPORTED_API_VERSIONS
 
 ::: agent_run_supervisor.arsd.protocol.OPERATIONS
 
-Seven, and deliberately no eighth. See the [socket API](../socket-api.md#operations).
+Eight, and deliberately no ninth. See the [socket API](../socket-api.md#operations).
 
 ## Error codes
 

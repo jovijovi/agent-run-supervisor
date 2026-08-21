@@ -3,15 +3,17 @@ title: "ARS live AGENT roster query"
 status: active
 created_at: 2026-08-21
 last_validated_at: 2026-08-21
-implementation_authorized: false
+implementation_authorized: true
 production_authorized: false
 ---
 
 # ARS Live AGENT Roster Query Implementation Plan
 
-> **Active planning context, not implementation authorization.** Start source work only after explicit
-> approval and a fresh Definition of Ready check from live `origin/main`. Release, publication, package
-> installation, daemon restart, downstream activation, and production changes remain separate approvals.
+> **Source implementation of Stages 1–4 is authorized and done on the task branch; nothing beyond it is.**
+> `implementation_authorized: true` is a statement of fact about source, tests, and documentation only.
+> Commit, pull request, merge, release, publication, package installation, daemon restart, downstream
+> activation, and production changes each remain separate approvals, and `production_authorized` stays
+> `false`.
 
 **Goal:** Add a minimal, read-only Socket API v3 operation that exposes the canonical AGENT IDs actually loaded in the running `arsd` daemon.
 

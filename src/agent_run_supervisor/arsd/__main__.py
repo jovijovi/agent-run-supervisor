@@ -778,16 +778,22 @@ async def serve_daemon(
             "max_concurrent_runs": max_concurrent_runs,
             "cancel_wait_seconds": cancel_wait_seconds,
             "event_budget_policy": budget_policy,
+            # The immutable snapshot, handed on as a value. The registry was
+            # opened exactly once, above; nothing below this line can reopen it,
+            # so a serving daemon cannot be re-pointed and two concurrent Runs
+            # cannot resolve different registry contents.
+            #
+            # It is wired identically whatever the Run path is. Which factory
+            # runs a Run says nothing about which registry this daemon loaded,
+            # and the roster answer is a fact about the daemon: leaving it out
+            # of the injected-factory branch would make the same daemon answer
+            # a read-only query differently depending on how Runs get built.
+            "agents": agents,
         }
         if run_task_factory is not None:
             handler_kwargs["run_task_factory"] = run_task_factory
         else:
             handler_kwargs["supervisor_root"] = root
-            # The immutable snapshot, handed on as a value. The registry was
-            # opened exactly once, above; nothing below this line can reopen it,
-            # so a serving daemon cannot be re-pointed and two concurrent Runs
-            # cannot resolve different registry contents.
-            handler_kwargs["agents"] = agents
         arsd_handlers = handlers.ArsdHandlers(**handler_kwargs)
         try:
             # Descriptor lookup/setter and server construction are inside the

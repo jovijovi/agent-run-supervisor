@@ -304,6 +304,11 @@ with ArsdClient(socket_path) as client:
 The terminal result carries the `session_id` this Run used — the one to pass back on the next `submit`.
 `session_list()` and `session_status(id)` round out the surface, both owner-scoped, and both project
 identity, last-use observations, and optional quarantine evidence rather than any lifecycle state.
+`agent_list()` is the one read-only roster query: it returns the complete `{"agent_ids": [...]}` object —
+the unique, stable-sorted canonical ids in the immutable registry snapshot *this daemon* loaded at startup,
+and nothing else about an entry. A request never re-reads the agents file, so an edit takes effect at the
+next daemon start; and registration is not health, authorization, or execution eligibility, because `submit`
+remains the admission boundary.
 The `request` key set above is closed and complete: unknown keys are refused, and there is no shell text,
 argv, environment value, executable path, or credential material on it — those fields do not exist on the
 wire, and `credential_refs` are *references* ARS never resolves to values. Errors are typed and fail
