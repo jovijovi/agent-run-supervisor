@@ -26,7 +26,8 @@ from agent_run_supervisor.arsd import protocol
 
 SOURCE = Path(protocol.__file__)
 
-ALL_OPERATIONS = (
+#: The seven operations the no-close wire shipped with, in their original order.
+SESSION_NOCLOSE_OPERATIONS = (
     "server_info",
     "submit",
     "run_status",
@@ -35,6 +36,9 @@ ALL_OPERATIONS = (
     "session_status",
     "session_list",
 )
+
+#: Plus the one additive read-only roster query. Additive, so still ``api_version`` 3.
+ALL_OPERATIONS = SESSION_NOCLOSE_OPERATIONS + ("agent_list",)
 
 
 def envelope(op: str, *, api_version: int, payload=None) -> dict:
@@ -54,10 +58,23 @@ def test_api_version_is_three_and_it_is_the_only_supported_one():
     assert protocol.SUPPORTED_API_VERSIONS == (3,)
 
 
-def test_operation_set_is_exactly_seven_and_excludes_session_close():
+def test_operation_set_is_exactly_eight_and_excludes_session_close():
     assert protocol.OPERATIONS == frozenset(ALL_OPERATIONS)
-    assert len(ALL_OPERATIONS) == 7
+    assert len(ALL_OPERATIONS) == 8
     assert "session_close" not in protocol.OPERATIONS
+
+
+def test_the_eighth_operation_is_additive_and_costs_no_version():
+    """``agent_list`` joins the set; nothing about the other seven moves.
+
+    An additive read-only operation is exactly the change a version bump is
+    *not* for: an old caller never sends it, and a new caller sending it to a
+    daemon that predates it gets ``UNKNOWN_OP`` — the existing refusal, not a
+    version negotiation and not a feature-specific code.
+    """
+    assert frozenset(SESSION_NOCLOSE_OPERATIONS) < protocol.OPERATIONS
+    assert protocol.OPERATIONS - frozenset(SESSION_NOCLOSE_OPERATIONS) == {"agent_list"}
+    assert protocol.SUPPORTED_API_VERSIONS == (3,)
 
 
 def test_no_per_operation_version_matrix_constant_survives():

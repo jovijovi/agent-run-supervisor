@@ -100,6 +100,12 @@ OPERATIONS = frozenset(
         "run_cancel",
         "session_status",
         "session_list",
+        # Read-only roster of the canonical agent ids this daemon loaded at
+        # startup. Purely additive: the seven above keep their names and their
+        # payload contracts, an old caller never sends it, and a new caller
+        # sending it to a daemon that predates it gets the ordinary UNKNOWN_OP.
+        # That is not a wire change, so the wire stays v3.
+        "agent_list",
     }
 )
 

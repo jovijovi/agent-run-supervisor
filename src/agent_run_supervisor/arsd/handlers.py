@@ -69,6 +69,7 @@ _UNTRUSTED_TERMINAL_MESSAGE = "untrusted or corrupt terminal evidence"
 _PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
     "server_info": frozenset(),
     "session_list": frozenset(),
+    "agent_list": frozenset(),
     "run_status": frozenset({"run_id"}),
     "run_cancel": frozenset({"run_id"}),
     "run_events": frozenset(
@@ -874,6 +875,15 @@ class ArsdHandlers:
         # a caller's submit instead of refusing at construction.
         if not isinstance(event_budget_policy, EventBudgetPolicy):
             raise ValueError("event_budget_policy must be an EventBudgetPolicy")
+        # The one registry read, judged the same way and for the same reason.
+        # Handlers that answer a roster query without a snapshot could only
+        # fabricate a default or fail on a caller's request; a daemon that
+        # parsed no registry must therefore not reach the point of being asked.
+        # Startup wiring, never caller input: the default is ``None`` purely so
+        # that omitting it refuses here rather than at an argument-binding site.
+        if not isinstance(agents, agent_registry.AgentRegistrySnapshot):
+            raise ValueError("agents must be an AgentRegistrySnapshot")
+        self._agents = agents
         self._session_store = session_store
         self._event_store = event_store
         self._event_budget_policy = event_budget_policy
@@ -912,6 +922,8 @@ class ArsdHandlers:
             return await self._session_status(caller, request.payload)
         if op == "session_list":
             return await self._session_list(caller)
+        if op == "agent_list":
+            return self._agent_list()
         raise protocol.ProtocolError(protocol.UNKNOWN_OP, "unknown v1 op")
 
     async def disconnect(self, caller: server.AuthenticatedCaller) -> None:
@@ -954,6 +966,21 @@ class ArsdHandlers:
                 ),
             },
         }
+
+    def _agent_list(self) -> dict[str, Any]:
+        """The canonical agent ids this daemon loaded at startup, and nothing else.
+
+        One in-memory read of the immutable snapshot: no filesystem, no storage,
+        no adapter, no subprocess, no health probe. The snapshot's own accessor
+        supplies the order and the uniqueness, so the wire answer cannot drift
+        from the set admission resolves against.
+
+        Membership is a registration fact about *this* daemon process. It is not
+        health, readiness, authorization, capability, role suitability, or
+        execution eligibility — ``submit`` remains the admission boundary — and
+        the result is one allowlisted key so no entry field can ride along.
+        """
+        return {"agent_ids": list(self._agents.ids())}
 
     def _require_owner(
         self, caller: server.AuthenticatedCaller, owner: str, namespace: str

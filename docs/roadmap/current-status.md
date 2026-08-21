@@ -76,11 +76,18 @@ active_plan: docs/plans/active/2026-08-21-live-agent-roster-query.md
   admission evidence. The individual hard limits and wire, request-digest, Spec, and launch schema versions
   are unchanged. The completed plan is retained in
   [`docs/plans/archive/`](../plans/archive/2026-08-11-configurable-run-event-budget.md).
-- The board's current task is the planned read-only daemon roster query
-  (F-ARSD-AGENT-ROSTER-001). It will expose only the stable canonical `agent_id` values in the immutable
-  registry snapshot already loaded by this daemon. It adds no routing, role, priority, mention, health,
-  execution-preset, registry-reload, release, or deployment semantics. Source implementation is not yet
-  authorized; the sole current plan is
+- The board's current task is the read-only daemon roster query (F-ARSD-AGENT-ROSTER-001), whose source is
+  implemented on the task branch and not merged. Socket API v3 gains one additive read-only `agent_list`
+  operation: it accepts an omitted payload or an empty closed object, refuses any payload field through the
+  existing invalid-request contract, and returns exactly `{"agent_ids": [...]}` — the unique, stable-sorted
+  canonical `agent_id` values in the immutable registry snapshot this daemon loaded at startup. `ArsdHandlers`
+  now requires that snapshot at construction, and both the default and injected run-task-factory startup
+  paths receive the exact same object. A request never reopens or reparses the agents file, so an edited file
+  becomes effective only at a separately authorized restart. `server_info` advertises the operation and gains
+  no roster field, the existing seven operations are unchanged, and the wire stays `api_version` 3 because the
+  addition is purely additive. It adds no routing, role, priority, mention, health, execution-preset, or
+  registry-reload semantics. Merge, review, release, deployment, and runtime activation are separate
+  decisions and none is claimed. The sole current plan is
   [`docs/plans/active/2026-08-21-live-agent-roster-query.md`](../plans/active/2026-08-21-live-agent-roster-query.md).
 - The optional Native ACP SDK pin is closed on `main` as source (F-ACP-SDK-012-001): the `native` extra
   pins `agent-client-protocol==0.12.1`. That is merged source only — neither a release, a publication, nor

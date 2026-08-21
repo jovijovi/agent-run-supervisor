@@ -20,14 +20,15 @@ Status markers:
 - ✅ legacy released code still present on `main`, untouched by the reset and not a compatibility target;
 - 🟦 vNext supervision plane, merged on `main` (Stage 0/1 closed, Stage 2 closed, the V4 boundary reset
   closed);
-- 🟨 planned additive read-only `agent_list` query over the daemon's immutable startup registry snapshot;
+- 🟨 additive read-only `agent_list` query over the daemon's immutable startup registry snapshot —
+  implemented on its task branch, not merged;
 - ⏸ separately approved later integration.
 
 **Authority and source are aligned on `main`.** The boundary reset described here — the operator agent
 registry read once at startup, the four-way boundary, value-blind sealed launch material, `api_version` 3,
 fail-closed load-only reuse, and total ordered reconciliation — is merged, and the retired Binding reader,
 attestation module, and three per-agent profiles are deleted from source. The former broad 🟨 boundary-reset
-marker is retired; the current narrow 🟨 marker applies only to the unimplemented `agent_list` addition.
+marker is retired; the current narrow 🟨 marker applies only to the not-yet-merged `agent_list` addition.
 `docs/archive/binding-era-2026-07/` holds the retired architecture as cold history.
 
 Four later decisions are folded in: the per-Run exact-literal guard over free-form Run text is **removed**
@@ -62,7 +63,7 @@ plan, and open gates. No marker here is an approval.
 ║  startup ──── parse the agents file ONCE → immutable snapshot                 ║
 ║          ──── reconcile (ordered, fail-closed) → then bind the socket         ║
 ║  ingress ──── SO_PEERCRED · caller-UID policy · owner/namespace scoping       ║
-║          ──── planned read-only agent_list → canonical ids from snapshot      ║
+║          ──── read-only agent_list → canonical ids from the snapshot          ║
 ║  admission ── resolve profile · resolve agent from the snapshot (no I/O) ·    ║
 ║               bind workspace · validate grant · resolve child env in memory · ║
 ║               seal Spec then launch snapshot                                  ║
@@ -98,7 +99,7 @@ plan, and open gates. No marker here is an approval.
 | AGENT `$HOME`, auth store, plugins, caches, user + project config, Session state | AGENT / user | project declared environment names; read nothing there for control purposes | create, populate, stage, mirror, write, manage, inspect as a control surface, stat-audit, digest, or require-absent |
 | AGENT writes to its own HOME/config/cache/Session state during a Run | AGENT | expect and permit them | treat them as a violation, diff them, or fail a Run over them |
 | Agent registry file | operator | open read-only, exactly once at daemon startup, wherever it lives, including through a symlink; refuse to listen on defect | write, create, repair, migrate, promote, or re-read while serving |
-| Loaded registry roster | ARS daemon snapshot | return stable canonical `agent_id` values through planned read-only `agent_list` | expose entry configuration, infer health/roles/routing, or reload the registry |
+| Loaded registry roster | ARS daemon snapshot | return stable canonical `agent_id` values through the read-only `agent_list` operation | expose entry configuration, infer health/roles/routing, or reload the registry |
 | ACP compatibility profiles | ARS source | version, register, revise under review with cited evidence | contain any path, version, digest, model literal, or deployment fact |
 | Permission-mediation env binding | ARS source (key **and** value) | apply last, unconditionally | let a registry entry author, replace, or disable it |
 | Environment values reaching the child | operator for ambient/pass-through/overlay; ARS source for mediation | resolve once in memory and hand only the mapping to exec | copy into sealed material, hash, render the carrier into a log line or an exception, or return it from any API |

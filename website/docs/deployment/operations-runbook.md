@@ -606,7 +606,9 @@ journalctl --user -u "$ARS_SERVICE" --since today --no-pager
 
 Call `server_info` as shown above for an authenticated liveness and version
 check. Use `run_status`, `run_events`, `session_status`, and `session_list` over
-the [Socket API](../reference/socket-api.md) for owner-scoped technical facts.
+the [Socket API](../reference/socket-api.md) for owner-scoped technical facts,
+and `agent_list` to read back which canonical agent ids *this running daemon*
+loaded — the answer a restart, not a file edit, changes.
 Inspect one persisted Run without changing it:
 
 ```bash

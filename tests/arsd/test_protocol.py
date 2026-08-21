@@ -32,6 +32,7 @@ OPS = (
     "run_cancel",
     "session_status",
     "session_list",
+    "agent_list",
 )
 
 ERROR_CODES = {
@@ -939,8 +940,58 @@ def test_session_close_is_not_an_operation() -> None:
             "run_cancel",
             "session_status",
             "session_list",
+            "agent_list",
         }
     )
+
+
+# -- agent_list: the read-only roster operation ------------------------------
+#
+# One additive read-only operation over the immutable startup snapshot. It is
+# additive by construction — the seven existing operations keep their names and
+# their payload contracts — so it costs no wire version.
+
+
+def test_agent_list_is_an_operation_on_the_v3_wire() -> None:
+    assert "agent_list" in protocol.OPERATIONS
+    parsed = protocol.parse_request(envelope(op="agent_list"))
+    assert parsed.op == "agent_list"
+    assert parsed.api_version == protocol.ARSD_API_VERSION
+
+
+def test_agent_list_payload_may_be_omitted_under_the_generic_envelope() -> None:
+    """The envelope already defaults an absent payload to ``{}``."""
+    frame = {"api_version": 3, "op": "agent_list", "request_id": "req-1"}
+    parsed = protocol.parse_request(frame)
+    assert parsed.payload == {}
+
+
+def test_agent_list_accepts_an_explicit_empty_payload() -> None:
+    parsed = protocol.parse_request(envelope(op="agent_list", payload={}))
+    assert parsed.payload == {}
+
+
+@pytest.mark.parametrize("payload", [[], "", 0, 1.0, True, None])
+def test_agent_list_payload_must_still_be_a_json_object(payload) -> None:
+    """No per-operation relaxation of the envelope's payload type rule."""
+    err = _reject(
+        "INVALID_REQUEST", protocol.parse_request, envelope(op="agent_list", payload=payload)
+    )
+    assert "payload" in err.message
+
+
+def test_adding_agent_list_left_the_seven_existing_operations_alone() -> None:
+    for op in (
+        "server_info",
+        "submit",
+        "run_status",
+        "run_events",
+        "run_cancel",
+        "session_status",
+        "session_list",
+    ):
+        assert op in protocol.OPERATIONS
+    assert len(protocol.OPERATIONS) == 8
 
 
 # -- B1: absent creates; present null is not a create ------------------------

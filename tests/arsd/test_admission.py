@@ -30,6 +30,8 @@ from agent_run_supervisor.native_acp import storage
 from agent_run_supervisor.native_acp.spec import DEFAULT_EVENT_BUDGET_POLICY
 from agent_run_supervisor.session import QUARANTINE_DISPATCH_OBSERVATION_LOST
 
+from tests.native_acp import registry_fixtures as rfx
+
 SECRET_SENTINEL = "sk-live-" + "LEAKCANARY"  # concatenated; no scannable literal
 
 
@@ -223,6 +225,9 @@ class Harness:
             event_store=self.event_store,
             run_task_factory=self.factory,
             cancel_wait_seconds=5.0,
+            # The startup snapshot every daemon hands its handlers, injected
+            # factory or not. Handlers require one at construction.
+            agents=rfx.snapshot(),
         )
         options.update(kwargs)
         self.handlers = handlers.ArsdHandlers(**options)

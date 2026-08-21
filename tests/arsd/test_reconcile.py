@@ -40,6 +40,8 @@ from agent_run_supervisor.session import (
 )
 from agent_run_supervisor.session import QUARANTINE_DISPATCH_OBSERVATION_LOST, derive_session_id_for_run
 
+from tests.native_acp import registry_fixtures as rfx
+
 T0 = dt.datetime(2026, 7, 22, 12, 0, 0, tzinfo=dt.timezone.utc)
 T_EXPIRED = dt.datetime(2026, 7, 22, 10, 0, 0, tzinfo=dt.timezone.utc)
 
@@ -307,6 +309,7 @@ class HandlerHarness:
             event_store=self.event_store,
             run_task_factory=self.factory,
             max_concurrent_runs=4,
+            agents=rfx.snapshot(),
         )
 
     async def submit(self, request_id: str, payload: dict | None = None):

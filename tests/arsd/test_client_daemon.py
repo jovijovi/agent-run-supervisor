@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import fcntl
+import json
 import os
 import shutil
 import signal
@@ -153,6 +154,8 @@ class ThreadedDaemon:
         *,
         policy: server.CallerPolicy | None = None,
         factory=None,
+        agents_file: Path | str | None = None,
+        inject_factory: bool = True,
         max_concurrent_runs: int = 4,
         max_connections: int = 32,
         cancel_wait_seconds: float = 2.0,
@@ -163,6 +166,12 @@ class ThreadedDaemon:
         self.root = root
         self.policy = same_uid_policy() if policy is None else policy
         self.factory = CompletingFactory() if factory is None else factory
+        # False exercises the daemon's own run-task factory path — the wiring a
+        # production start uses — rather than the injected-factory one.
+        self.inject_factory = inject_factory
+        self.agents_file = (
+            make_agents_file(self.root.parent) if agents_file is None else agents_file
+        )
         # None means "pass nothing", so the daemon default stays under test.
         self.max_run_event_budget_bytes = max_run_event_budget_bytes
         self.max_concurrent_runs = max_concurrent_runs
@@ -200,14 +209,15 @@ class ThreadedDaemon:
             if self.max_run_event_budget_bytes is None
             else {"max_run_event_budget_bytes": self.max_run_event_budget_bytes}
         )
+        if self.inject_factory:
+            extra["run_task_factory"] = self.factory
         await arsd_main.serve_daemon(
             socket_path=self.path,
             supervisor_root=self.root,
             policy=self.policy,
-            agents_file=str(make_agents_file(self.root.parent)),
+            agents_file=str(self.agents_file),
             max_concurrent_runs=self.max_concurrent_runs,
             max_connections=self.max_connections,
-            run_task_factory=self.factory,
             cancel_wait_seconds=self.cancel_wait_seconds,
             shutdown_timeout=self.shutdown_timeout,
             stop_event=self._stop,
@@ -232,6 +242,8 @@ def running_daemon(
     *,
     policy: server.CallerPolicy | None = None,
     factory=None,
+    agents_file: Path | str | None = None,
+    inject_factory: bool = True,
     max_concurrent_runs: int = 4,
     max_connections: int = 32,
     cancel_wait_seconds: float = 2.0,
@@ -243,6 +255,8 @@ def running_daemon(
         root,
         policy=policy,
         factory=factory,
+        agents_file=agents_file,
+        inject_factory=inject_factory,
         max_concurrent_runs=max_concurrent_runs,
         max_connections=max_connections,
         cancel_wait_seconds=cancel_wait_seconds,
@@ -500,7 +514,6 @@ def test_serve_daemon_passes_the_snapshot_into_handlers(
         def capturing(**kwargs):
             seen.update(kwargs)
             passthrough = dict(kwargs)
-            passthrough.pop("agents", None)
             passthrough.pop("supervisor_root", None)
             passthrough["run_task_factory"] = CompletingFactory()
             return real_cls(**passthrough)
@@ -741,7 +754,6 @@ def test_serve_daemon_opens_a_disjoint_agents_file_exactly_once(
 
         def capturing(**kwargs):
             passthrough = dict(kwargs)
-            passthrough.pop("agents", None)
             passthrough.pop("supervisor_root", None)
             passthrough["run_task_factory"] = CompletingFactory()
             return real_cls(**passthrough)
@@ -1316,7 +1328,6 @@ def test_serve_daemon_hands_handlers_a_frozen_standard_agents_file(
         def capturing(**kwargs):
             seen.update(kwargs)
             passthrough = dict(kwargs)
-            passthrough.pop("agents", None)
             passthrough.pop("supervisor_root", None)
             passthrough["run_task_factory"] = CompletingFactory()
             return real_cls(**passthrough)
@@ -1642,7 +1653,6 @@ def test_agents_file_operand_is_unreachable_after_capture(
         def capturing(**kwargs):
             seen.update(kwargs)
             passthrough = dict(kwargs)
-            passthrough.pop("agents", None)
             passthrough.pop("supervisor_root", None)
             passthrough["run_task_factory"] = CompletingFactory()
             return real_cls(**passthrough)
@@ -4241,3 +4251,158 @@ def test_a_default_daemon_reports_four_gibibytes(sock_root: Path) -> None:
         with arsd_client.ArsdClient(path) as cli:
             info = cli.server_info()
             assert info["limits"]["max_run_event_budget_bytes"] == FOUR_GIB
+
+
+# --- agent_list over a real socket -------------------------------------------
+#
+# The roster query end to end: a real AF_UNIX round trip against a daemon that
+# parsed a real operator file once at startup.
+
+ROSTER_SENTINEL = "sk-live-" + "SOCKETCANARY"
+
+
+def roster_agents_file(root: Path, entries) -> Path:
+    """A real operator registry for a daemon under test, on its own path."""
+    from tests.native_acp import registry_fixtures as rfx
+
+    conf = root / "conf"
+    conf.mkdir(parents=True, exist_ok=True)
+    return rfx.write_registry(conf, entries=entries)
+
+
+def test_agent_list_round_trip_returns_the_complete_result_object(
+    sock_root: Path,
+) -> None:
+    """The client facade returns the result object, not a bare list."""
+    from tests.native_acp import registry_fixtures as rfx
+
+    path = sock_path(sock_root)
+    root = supervisor_root(sock_root)
+    agents_file = roster_agents_file(
+        sock_root,
+        {
+            "opencode": rfx.minimal_entry(),
+            "claude": rfx.minimal_entry(),
+            "codex": rfx.minimal_entry(),
+        },
+    )
+    with running_daemon(path, root, agents_file=agents_file):
+        with arsd_client.ArsdClient(path) as cli:
+            result = cli.agent_list()
+            assert result == {"agent_ids": ["claude", "codex", "opencode"]}
+            assert isinstance(result, dict)
+            assert "agent_list" in cli.server_info()["operations"]
+
+
+def test_agent_list_over_the_wire_carries_no_registry_material(
+    sock_root: Path,
+) -> None:
+    """AS-5 at the socket: one allowlisted key, and no entry material."""
+    from tests.native_acp import registry_fixtures as rfx
+
+    path = sock_path(sock_root)
+    root = supervisor_root(sock_root)
+    agents_file = roster_agents_file(
+        sock_root,
+        {
+            "vendor-agent": rfx.minimal_entry(
+                command="/opt/secret-vendor/bin/agent-x",
+                args=["--api-key", ROSTER_SENTINEL, "acp"],
+                env_overlay={"VENDOR_TOKEN": ROSTER_SENTINEL},
+            )
+        },
+    )
+    with running_daemon(path, root, agents_file=agents_file):
+        with arsd_client.ArsdClient(path) as cli:
+            result = cli.agent_list()
+    assert set(result) == {"agent_ids"}
+    assert result["agent_ids"] == ["vendor-agent"]
+    rendered = json.dumps(result)
+    for forbidden in (ROSTER_SENTINEL, "/opt/secret-vendor", "--api-key", "VENDOR_TOKEN"):
+        assert forbidden not in rendered
+
+
+def test_agent_list_keeps_answering_from_the_startup_snapshot(sock_root: Path) -> None:
+    """AS-3: a file replaced under a serving daemon is not runtime truth."""
+    from tests.native_acp import registry_fixtures as rfx
+
+    path = sock_path(sock_root)
+    root = supervisor_root(sock_root)
+    agents_file = roster_agents_file(sock_root, {"claude": rfx.minimal_entry()})
+    with running_daemon(path, root, agents_file=agents_file):
+        with arsd_client.ArsdClient(path) as cli:
+            assert cli.agent_list() == {"agent_ids": ["claude"]}
+
+        # The operator edits the live file. Effective at the next start only.
+        agents_file.write_text(
+            rfx.registry_text(entries={"codex": rfx.minimal_entry()}), encoding="utf-8"
+        )
+        with arsd_client.ArsdClient(path) as cli:
+            assert cli.agent_list() == {"agent_ids": ["claude"]}
+        agents_file.unlink()
+        with arsd_client.ArsdClient(path) as cli:
+            assert cli.agent_list() == {"agent_ids": ["claude"]}
+
+
+def test_agent_list_against_a_daemon_without_the_operation_fails_closed(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AS-6: a new client, a rolled-back daemon, and the existing refusal.
+
+    The operation is removed from the served set while the daemon runs, which
+    is exactly what a caller reaching a daemon that predates it would find. The
+    answer is ``UNKNOWN_OP`` — no feature-specific code, and no silent success.
+    """
+    from tests.native_acp import registry_fixtures as rfx
+
+    path = sock_path(sock_root)
+    root = supervisor_root(sock_root)
+    agents_file = roster_agents_file(sock_root, {"claude": rfx.minimal_entry()})
+    with running_daemon(path, root, agents_file=agents_file):
+        rolled_back = frozenset(protocol.OPERATIONS - {"agent_list"})
+        monkeypatch.setattr(protocol, "OPERATIONS", rolled_back)
+        with arsd_client.ArsdClient(path) as cli:
+            with pytest.raises(arsd_client.ArsdClientError) as err:
+                cli.agent_list()
+        assert err.value.code == protocol.UNKNOWN_OP
+        assert type(err.value) is arsd_client.ERROR_CODE_TO_EXCEPTION[protocol.UNKNOWN_OP]
+
+
+@contextlib.contextmanager
+def _recorded_startup_wiring(monkeypatch: pytest.MonkeyPatch):
+    """Record the startup snapshot and the kwargs the handlers were built with."""
+    seen: dict[str, object] = {}
+    real_load = arsd_main.agent_registry.load_agents_file
+    real_handlers = arsd_main.handlers.ArsdHandlers
+
+    def load(path):
+        snapshot = real_load(path)
+        seen["snapshot"] = snapshot
+        return snapshot
+
+    def build(**kwargs):
+        seen["kwargs"] = dict(kwargs)
+        return real_handlers(**kwargs)
+
+    monkeypatch.setattr(arsd_main.agent_registry, "load_agents_file", load)
+    monkeypatch.setattr(arsd_main.handlers, "ArsdHandlers", build)
+    yield seen
+
+
+@pytest.mark.parametrize("inject_factory", [True, False])
+def test_both_startup_paths_hand_handlers_the_exact_startup_snapshot(
+    sock_root: Path, monkeypatch: pytest.MonkeyPatch, inject_factory: bool
+) -> None:
+    """One object, one read. The injected-factory path is not a second wiring."""
+    from tests.native_acp import registry_fixtures as rfx
+
+    path = sock_path(sock_root)
+    root = supervisor_root(sock_root)
+    agents_file = roster_agents_file(sock_root, {"claude": rfx.minimal_entry()})
+    with _recorded_startup_wiring(monkeypatch) as seen:
+        with running_daemon(
+            path, root, agents_file=agents_file, inject_factory=inject_factory
+        ):
+            with arsd_client.ArsdClient(path) as cli:
+                assert cli.agent_list() == {"agent_ids": ["claude"]}
+    assert seen["kwargs"]["agents"] is seen["snapshot"]

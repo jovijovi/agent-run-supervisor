@@ -14,7 +14,7 @@ description: ArsdClient — the supported caller boundary for the arsd local soc
 ### Usage notes
 
 The methods map one-to-one onto the [socket API](../socket-api.md) operations.
-Two of them carry rules a signature cannot express:
+Three of them carry rules a signature cannot express:
 
 **`submit`** — omitting `session_id` creates one new durable Session and runs its
 first Run; sending an existing id reuses it, existing-only. A *present* `None` is
@@ -34,6 +34,21 @@ with client.run_events(run_id, follow=True) as stream:
     for frame in stream:
         ...
 ```
+
+**`agent_list`** — returns the complete result object, not a bare list, so a
+later result field cannot silently change the return type:
+
+```python
+result = client.agent_list()
+assert result == {"agent_ids": ["claude", "codex"]}
+```
+
+The ids are the canonical `agent_id` values the connected daemon loaded at
+startup, unique and stable-sorted. Membership is a registration fact about that
+daemon — not health, readiness, authorization, or execution eligibility, and
+`submit` remains the admission boundary. Against a daemon that predates the
+operation this raises the `UNKNOWN_OP` exception; fail closed rather than
+falling back to a roster you read from a file yourself.
 
 ## Follow subscription
 

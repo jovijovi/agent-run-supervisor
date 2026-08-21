@@ -82,7 +82,7 @@ identity, promotion, digests, ownership or mode gates, or credential-root inspec
 | Module | Responsibility |
 |---|---|
 | `server.py` | asyncio UDS accept loop, `SO_PEERCRED`, finite backlog, per-connection isolation; UDS create/chmod/replace/unlink as the second writable surface |
-| `protocol.py` | bounded JSON frames, mandatory `api_version`, **single-version** envelope admission (exactly 3; no per-operation matrix and no drain window, because no client population exists), the eight-operation target including read-only `agent_list`, and the submit wire mapping with one optional `session_id` |
+| `protocol.py` | bounded JSON frames, mandatory `api_version`, **single-version** envelope admission (exactly 3; no per-operation matrix and no drain window, because no client population exists), the eight-operation set including read-only `agent_list`, and the submit wire mapping with one optional `session_id` |
 | `handlers.py` | submit/status/events/cancel, Session status/list, and read-only `agent_list`; Session creation is part of `submit` and there is no Session-close operation; `server_info` reports the supported version set and operation names without embedding roster data; responses expose only allowlisted fields and never raw stored objects or exceptions |
 | `admission.py` | durable submission/idempotency records, keyed admission locks, typed terminal-result inspection; the strict submission writer/validator shared with reconciliation; **pure in-memory** agent resolution against the startup snapshot with zero filesystem access; value-blind digest material; the forbidden runtime-selection field set |
 | `reconcile.py` | startup-only, ordered, exhaustive, fail-closed reconciliation (§9); no prompt replay, resume, or repair |
@@ -156,11 +156,20 @@ daemon startup and injected into `ArsdHandlers`. The response is exactly one all
 returns an empty list. The handler performs no filesystem access, process launch, adapter call, storage
 write, or health probe, and never serializes registry entries or their command/environment material.
 
+The request payload may be omitted under the generic envelope or supplied as `{}`; it is otherwise closed,
+so any field is refused with the existing `INVALID_REQUEST` contract rather than ignored. `ArsdHandlers`
+requires a valid snapshot **at construction** — a missing or wrong-type one fails there, never on a caller's
+request — and `serve_daemon` hands the exact same startup object to the default and the injected
+`run_task_factory` wiring alike, because which factory builds a Run says nothing about which registry this
+daemon loaded.
+
 `server_info.operations` advertises `agent_list`, but `server_info` gains no roster field. A changed agents
 file is not runtime truth for the serving daemon: the query keeps returning the startup snapshot until the
 daemon is restarted. ARS supplies no role, priority, mention, recommendation, execution preset, readiness,
 or routing semantics; callers combine roster membership with their own independently authorized policy and
-must fail closed when the query or membership check fails.
+must fail closed when the query or membership check fails. Adding the operation is additive — the seven
+existing operations keep their names, payloads, and semantics — so the wire stays `api_version` 3, and a
+caller reaching a daemon that predates it receives the ordinary `UNKNOWN_OP` refusal.
 
 ### `ResolvedEnvironment` versus `EnvProjection`
 
@@ -799,8 +808,9 @@ deleting the rest would silently drop the only real-agent continuity evidence.
 
 Executable slice sequences, fresh worktree/branch rules, exact commands, and separate push/PR/merge
 approvals live only in `docs/plans/active/`. The board-linked current plan is the
-[live AGENT roster query](../plans/active/2026-08-21-live-agent-roster-query.md). It is active planning
-context only; source implementation, integration, release, and deployment remain separately authorized.
+[live AGENT roster query](../plans/active/2026-08-21-live-agent-roster-query.md), whose source stages are
+implemented on the task branch and not merged; integration, release, and deployment remain separately
+authorized, and a plan authorizes none of them by existing.
 The completed [configurable per-Run event budget](../plans/archive/2026-08-11-configurable-run-event-budget.md),
 [permission boundary fixes](../plans/archive/2026-08-15-permission-boundary-fixes.md),
 [ACP SDK 0.12.1 upgrade](../plans/archive/2026-08-19-acp-sdk-0121-upgrade.md) and

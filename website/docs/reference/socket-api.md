@@ -22,7 +22,8 @@ There is no TCP listener and no other transport.
 
 ## The request envelope
 
-Every request is one JSON object with exactly these four keys:
+Every request is one JSON object drawn from exactly these four keys. Three are
+always required; `payload` is operation-dependent:
 
 ```json
 {
@@ -33,12 +34,17 @@ Every request is one JSON object with exactly these four keys:
 }
 ```
 
-| Key | Type | Rule |
-|---|---|---|
-| `api_version` | `int` | Must be `3`. Anything else is refused with `UNSUPPORTED_API_VERSION` rather than guessed — for every operation, including `server_info` |
-| `op` | `string` | One of the operations below, else `UNKNOWN_OP` |
-| `request_id` | `string` | Caller-owned. Matches `[A-Za-z0-9._-]{1,128}`. **This is the idempotency key** |
-| `payload` | `object` | Operation-specific. Unknown keys are refused |
+| Key | Required | Type | Rule |
+|---|---|---|---|
+| `api_version` | yes | `int` | Must be `3`. Anything else is refused with `UNSUPPORTED_API_VERSION` rather than guessed — for every operation, including `server_info` |
+| `op` | yes | `string` | One of the operations below, else `UNKNOWN_OP` |
+| `request_id` | yes | `string` | Caller-owned. Matches `[A-Za-z0-9._-]{1,128}`. **This is the idempotency key** |
+| `payload` | operation-dependent | `object` | Operation-specific and closed: unknown keys are refused. When present it must be a JSON object; when omitted it is read as an empty one, so you may leave it out exactly where the operation below takes `{}` |
+
+There is no fifth key: an unrecognised envelope key is `INVALID_REQUEST`. Leaving
+`payload` out of an operation that requires fields is not a shortcut either — the
+empty payload simply fails that operation's own field rules with
+`INVALID_REQUEST`.
 
 Result and error frames carry the correlating `request_id`, **not** a version.
 
@@ -54,7 +60,7 @@ Result and error frames carry the correlating `request_id`, **not** a version.
 
 ## Operations
 
-Seven, and deliberately no eighth.
+Eight, and deliberately no ninth.
 
 | `op` | Payload | Returns |
 |---|---|---|
@@ -65,6 +71,7 @@ Seven, and deliberately no eighth.
 | `run_cancel` | `{"run_id"}` | cooperative cancel; never rewrites a terminal fact |
 | `session_status` | `{"session_id"}` | the Session projection |
 | `session_list` | `{}` | owner-scoped Session projections |
+| `agent_list` | `{}` or omitted | `{"agent_ids": [...]}` — the canonical agent ids this daemon loaded |
 
 Runs and Sessions are owner-scoped: reaching another owner's is `OWNER_MISMATCH`.
 
@@ -183,6 +190,54 @@ resubmit the *same* `request_id` to learn the real outcome, never a new one.
   connection-exclusive and never sends `run_cancel` on your behalf.
 - A subscriber that falls too far behind its bounded queue is dropped with
   `EVENT_BACKLOG_EXCEEDED`.
+
+## `agent_list`
+
+The read-only roster of canonical `agent_id` values this daemon loaded at startup.
+
+```json
+{"api_version": 3, "op": "agent_list", "request_id": "my-caller-request-id", "payload": {}}
+```
+
+The `payload` key may be omitted entirely, or sent as `{}`. It is otherwise
+closed: any field is refused with `INVALID_REQUEST` rather than ignored.
+
+The reply is the generic result frame, like every other operation's — the roster
+is the `result` object inside it, not the frame:
+
+```json
+{
+  "request_id": "my-caller-request-id",
+  "result": {"agent_ids": ["claude", "codex", "cursor", "oh-my-pi", "opencode"]}
+}
+```
+
+The [Python client](api/client.md) unwraps that frame and returns the complete
+`result` object, so `client.agent_list()` gives you
+`{"agent_ids": [...]}` — the object, deliberately not a bare list.
+
+- The ids are unique and returned in stable sorted order. A valid empty registry
+  returns `{"agent_ids": []}` — success, not an error and not a default agent.
+- The `result` object has exactly one key. There is no command, argv, executable
+  path, environment name or value, profile, credential, adapter parameter,
+  capability, model, role, priority, or health field, and none is coming.
+- The source is the daemon's **immutable in-memory snapshot**, parsed once at
+  startup. A request never reopens or re-parses the agents file, so editing that
+  file under a serving daemon changes nothing until the daemon is restarted —
+  which is an operator action, not something this operation triggers.
+
+!!! contract "Registration is not eligibility"
+
+    Membership means one thing: this daemon process has a registry entry with
+    that id. It is **not** health, readiness, authorization, capability, role
+    suitability, or permission to run anything. `submit` remains the execution
+    admission boundary, and it can still refuse a Run for an id that appears
+    here. A caller may use membership as one admission fact of its own, and must
+    fail closed when the query fails or the id it wanted is absent.
+
+`server_info.operations` advertises the operation, but `server_info` itself
+carries no roster. Against a daemon that predates `agent_list` the answer is the
+ordinary `UNKNOWN_OP` — there is no feature-specific code and no partial answer.
 
 ## Errors
 

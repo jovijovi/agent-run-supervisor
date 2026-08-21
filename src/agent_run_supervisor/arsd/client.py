@@ -288,6 +288,24 @@ class ArsdClient:
     def session_list(self, *, request_id: str | None = None) -> dict[str, Any]:
         return self._roundtrip("session_list", {}, request_id=request_id)
 
+    def agent_list(self, *, request_id: str | None = None) -> dict[str, Any]:
+        """The canonical agent ids the connected daemon loaded at startup.
+
+        Returns the complete result object — ``{"agent_ids": [...]}`` — rather
+        than a bare list, so a later result field cannot silently change this
+        method's return type. The ids are unique and stable-sorted.
+
+        Membership is a registration fact about the daemon you are talking to.
+        It is not health, readiness, authorization, or execution eligibility;
+        ``submit`` remains the admission boundary. A registry file edited under
+        a serving daemon is not visible here until that daemon is restarted.
+
+        Against a daemon that predates the operation this raises the ordinary
+        ``UNKNOWN_OP`` exception — there is no feature-specific code and no
+        degraded answer, so a caller fails closed.
+        """
+        return self._roundtrip("agent_list", {}, request_id=request_id)
+
     def _next_request_id(self) -> str:
         return f"cli-{next(self._req_counter)}"
 
