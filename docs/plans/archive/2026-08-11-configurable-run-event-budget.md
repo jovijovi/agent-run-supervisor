@@ -1,8 +1,9 @@
 ---
 title: "Operator-configurable per-Run event-ledger budget"
-status: active
+status: archived
 created_at: 2026-08-11
-last_validated_at: 2026-08-11
+archived_at: 2026-08-21
+last_validated_at: 2026-08-21
 ---
 # Operator-configurable per-Run event-ledger budget
 

@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext Technical Solution"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-11
+last_validated_at: 2026-08-21
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/technical-solution.md"
 ---
 # agent-run-supervisor vNext Technical Solution
@@ -82,11 +82,11 @@ identity, promotion, digests, ownership or mode gates, or credential-root inspec
 | Module | Responsibility |
 |---|---|
 | `server.py` | asyncio UDS accept loop, `SO_PEERCRED`, finite backlog, per-connection isolation; UDS create/chmod/replace/unlink as the second writable surface |
-| `protocol.py` | bounded JSON frames, mandatory `api_version`, **single-version** envelope admission (exactly 3; no per-operation matrix and no drain window, because no client population exists), the seven-operation set, and the submit wire mapping with one optional `session_id` |
-| `handlers.py` | submit/status/events/cancel and Session status/list with owner checks; Session creation is part of `submit` and there is no Session-close operation; `server_info` reports the supported version set; responses expose only allowlisted fields and never raw stored objects or exceptions |
+| `protocol.py` | bounded JSON frames, mandatory `api_version`, **single-version** envelope admission (exactly 3; no per-operation matrix and no drain window, because no client population exists), the eight-operation target including read-only `agent_list`, and the submit wire mapping with one optional `session_id` |
+| `handlers.py` | submit/status/events/cancel, Session status/list, and read-only `agent_list`; Session creation is part of `submit` and there is no Session-close operation; `server_info` reports the supported version set and operation names without embedding roster data; responses expose only allowlisted fields and never raw stored objects or exceptions |
 | `admission.py` | durable submission/idempotency records, keyed admission locks, typed terminal-result inspection; the strict submission writer/validator shared with reconciliation; **pure in-memory** agent resolution against the startup snapshot with zero filesystem access; value-blind digest material; the forbidden runtime-selection field set |
 | `reconcile.py` | startup-only, ordered, exhaustive, fail-closed reconciliation (§9); no prompt replay, resume, or repair |
-| `client.py` | typed local caller for Hermes/CLI; explicit connect/close, no silent reconnect or replay |
+| `client.py` | typed local caller for trusted local callers; explicit connect/close, no silent reconnect or replay; `agent_list()` returns the complete `{"agent_ids": [...]}` result object |
 | `service_unit.py` | pure data→text renderer for the user-scope service unit; never installs, enables, or starts anything |
 | `operand.py` | the single operand-admission seam: the shape-checking capture behind the daemon's operand doors. The rule is unchanged by the reset and must not be duplicated; only the entry it captures moves |
 | `__main__.py` | unprivileged daemon entrypoint and the side-effect-free unit-rendering mode. Startup order is strictly **parse the agents file → reconcile → bind**, with the same fail-closed discipline at every step |
@@ -147,6 +147,20 @@ are normative in [`agent-registry.md`](agent-registry.md).
 
 `AgentInstance` is the `(profile, entry)` pair every generic consumer asks, so no runtime path branches on
 an agent name. Selector ids come from the instance; there is no source-domain preflight.
+
+### Read-only runtime roster query
+
+The Socket API v3 `agent_list` operation reads only the immutable `AgentRegistrySnapshot` already created at
+daemon startup and injected into `ArsdHandlers`. The response is exactly one allowlisted field,
+`{"agent_ids": [...]}`, containing unique canonical IDs in stable sorted order. An empty valid snapshot
+returns an empty list. The handler performs no filesystem access, process launch, adapter call, storage
+write, or health probe, and never serializes registry entries or their command/environment material.
+
+`server_info.operations` advertises `agent_list`, but `server_info` gains no roster field. A changed agents
+file is not runtime truth for the serving daemon: the query keeps returning the startup snapshot until the
+daemon is restarted. ARS supplies no role, priority, mention, recommendation, execution preset, readiness,
+or routing semantics; callers combine roster membership with their own independently authorized policy and
+must fail closed when the query or membership check fails.
 
 ### `ResolvedEnvironment` versus `EnvProjection`
 
@@ -784,10 +798,11 @@ deleting the rest would silently drop the only real-agent continuity evidence.
   reimplements no framing.
 
 Executable slice sequences, fresh worktree/branch rules, exact commands, and separate push/PR/merge
-approvals live only in `docs/plans/active/`. The board-linked current plan is
-[the configurable per-Run event budget](../plans/active/2026-08-11-configurable-run-event-budget.md),
-which remains active as a candidate in pre-integration review. Planning and execution detail does not
-authorize any integration, release, or deployment. The completed
+approvals live only in `docs/plans/active/`. The board-linked current plan is the
+[live AGENT roster query](../plans/active/2026-08-21-live-agent-roster-query.md). It is active planning
+context only; source implementation, integration, release, and deployment remain separately authorized.
+The completed [configurable per-Run event budget](../plans/archive/2026-08-11-configurable-run-event-budget.md),
+[permission boundary fixes](../plans/archive/2026-08-15-permission-boundary-fixes.md),
 [ACP SDK 0.12.1 upgrade](../plans/archive/2026-08-19-acp-sdk-0121-upgrade.md) and
 [OMP and Reasonix source-support plan](../plans/archive/2026-08-11-omp-reasonix-source-support.md) are
 retained as cold history and authorize nothing.

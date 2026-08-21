@@ -2,7 +2,7 @@
 title: "ARS vNext Roadmap Current Status"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-11
+last_validated_at: 2026-08-21
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 ---
 # ARS vNext Roadmap Current Status
@@ -13,7 +13,7 @@ supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 
 ```text
 base_branch: main
-active_plan: docs/plans/active/2026-08-11-configurable-run-event-budget.md
+active_plan: docs/plans/active/2026-08-21-live-agent-roster-query.md
 ```
 
 ## Current position
@@ -70,19 +70,18 @@ active_plan: docs/plans/active/2026-08-11-configurable-run-event-budget.md
   contract: a persisted terminal carrying an undefined key is untrusted evidence, and nothing migrates or
   rewrites a stored record. The removal is merged on `main`; no removal-landing task remains open on this
   board.
-- The per-Run event-ledger admission budget is operator-configurable in a feature-branch candidate pending
-  integration to `main` (F-RUN-EVENT-BUDGET-CONFIG-001); it is not on `main`, released, or deployed.
-  `arsd --max-run-event-budget-bytes` sets one ceiling on `max_event_bytes * max_events` for every Run that
-  daemon accepts, defaulting to 4 GiB and reported by `server_info`. The effective ceiling is also written
-  into each accepted Run's durable admission record and strictly validated there, so which policy admitted a
-  historical Run stays auditable after a reconfigure or restart; that record's material change moves
-  `SUBMISSION_SCHEMA_VERSION` to 4 alone. Admission policy governs new work only: an already-accepted key
-  resolves from strictly validated durable facts whatever the current ceiling is, and never dispatches
-  twice. It is a theoretical per-Run event-ledger ceiling, not preallocated memory, a Run-directory disk
-  quota, or a daemon-global aggregate. The individual hard limits and every wire, request-digest, Spec, and
-  launch schema version are unchanged. Source, tests, and docs only. **It is the board's current task:**
-  its plan is again the `active_plan` in
-  [`docs/plans/active/`](../plans/active/2026-08-11-configurable-run-event-budget.md).
+- The per-Run event-ledger admission budget is closed on `main`
+  (F-RUN-EVENT-BUDGET-CONFIG-001). `arsd --max-run-event-budget-bytes` configures the admission ceiling,
+  defaulting to 4 GiB and reported by `server_info`; the effective ceiling is preserved in strict durable
+  admission evidence. The individual hard limits and wire, request-digest, Spec, and launch schema versions
+  are unchanged. The completed plan is retained in
+  [`docs/plans/archive/`](../plans/archive/2026-08-11-configurable-run-event-budget.md).
+- The board's current task is the planned read-only daemon roster query
+  (F-ARSD-AGENT-ROSTER-001). It will expose only the stable canonical `agent_id` values in the immutable
+  registry snapshot already loaded by this daemon. It adds no routing, role, priority, mention, health,
+  execution-preset, registry-reload, release, or deployment semantics. Source implementation is not yet
+  authorized; the sole current plan is
+  [`docs/plans/active/2026-08-21-live-agent-roster-query.md`](../plans/active/2026-08-21-live-agent-roster-query.md).
 - The optional Native ACP SDK pin is closed on `main` as source (F-ACP-SDK-012-001): the `native` extra
   pins `agent-client-protocol==0.12.1`. That is merged source only — neither a release, a publication, nor
   a deployment. Upstream 0.12.1 removed the connection's
