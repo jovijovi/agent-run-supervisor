@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext System Architecture"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-21
+last_validated_at: 2026-08-22
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/architecture.md"
 ---
 # agent-run-supervisor vNext System Architecture
@@ -19,16 +19,15 @@ Status markers:
 
 - ✅ legacy released code still present on `main`, untouched by the reset and not a compatibility target;
 - 🟦 vNext supervision plane, merged on `main` (Stage 0/1 closed, Stage 2 closed, the V4 boundary reset
-  closed);
-- 🟨 additive read-only `agent_list` query over the daemon's immutable startup registry snapshot —
-  implemented on its task branch, not merged;
+  closed, and the additive read-only `agent_list` query over the daemon's immutable startup registry
+  snapshot merged);
 - ⏸ separately approved later integration.
 
 **Authority and source are aligned on `main`.** The boundary reset described here — the operator agent
 registry read once at startup, the four-way boundary, value-blind sealed launch material, `api_version` 3,
 fail-closed load-only reuse, and total ordered reconciliation — is merged, and the retired Binding reader,
-attestation module, and three per-agent profiles are deleted from source. The former broad 🟨 boundary-reset
-marker is retired; the current narrow 🟨 marker applies only to the not-yet-merged `agent_list` addition.
+attestation module, and three per-agent profiles are deleted from source. The former 🟨 implementation marker
+is retired because the `agent_list` addition is now merged on `main`.
 `docs/archive/binding-era-2026-07/` holds the retired architecture as cold history.
 
 Four later decisions are folded in: the per-Run exact-literal guard over free-form Run text is **removed**
@@ -43,8 +42,8 @@ cooperative mitigation and never a sandbox claim.
 Merge, publication, deployment, and activation stay separate facts; a merge implies none of the others, and
 each is its own explicit decision. Published package/release facts come from live GitHub Releases and PyPI;
 deployed/running facts come from operator-held runtime/live checks.
-[`docs/roadmap/current-status.md`](../roadmap/current-status.md) carries only lean task state, the active
-plan, and open gates. No marker here is an approval.
+[`docs/roadmap/current-status.md`](../roadmap/current-status.md) carries only lean task state, an active-plan
+pointer when work is in flight, and open gates. No marker here is an approval.
 
 ## 1. System context and ownership
 
