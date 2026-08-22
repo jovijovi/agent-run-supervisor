@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext Technical Solution"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-21
+last_validated_at: 2026-08-22
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/technical-solution.md"
 ---
 # agent-run-supervisor vNext Technical Solution
@@ -807,10 +807,10 @@ deleting the rest would silently drop the only real-agent continuity evidence.
   reimplements no framing.
 
 Executable slice sequences, fresh worktree/branch rules, exact commands, and separate push/PR/merge
-approvals live only in `docs/plans/active/`. The board-linked current plan is the
-[live AGENT roster query](../plans/active/2026-08-21-live-agent-roster-query.md), whose source stages are
-implemented on the task branch and not merged; integration, release, and deployment remain separately
-authorized, and a plan authorizes none of them by existing.
+approvals live only in `docs/plans/active/`. No implementation plan is currently active. The completed
+[live AGENT roster query](../plans/archive/2026-08-21-live-agent-roster-query.md) is merged on `main` and
+retained as cold history; integration, release, and deployment remain separately authorized, and an archived
+plan authorizes none of them.
 The completed [configurable per-Run event budget](../plans/archive/2026-08-11-configurable-run-event-budget.md),
 [permission boundary fixes](../plans/archive/2026-08-15-permission-boundary-fixes.md),
 [ACP SDK 0.12.1 upgrade](../plans/archive/2026-08-19-acp-sdk-0121-upgrade.md) and

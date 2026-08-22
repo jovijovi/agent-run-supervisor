@@ -2,7 +2,7 @@
 title: "ARS agent registry — the operator contract"
 status: active
 created_at: 2026-07-30
-last_validated_at: 2026-08-21
+last_validated_at: 2026-08-22
 ---
 # ARS agent registry — the operator contract
 
@@ -106,7 +106,7 @@ the only registry-facing value that ever crosses the wire.
 The Socket API v3 `agent_list` operation returns the stable-sorted set of these table keys from the
 immutable snapshot already loaded by the serving daemon. It returns no entry field or health/readiness
 claim, never reopens this file, and does not make a replaced file effective before the next daemon restart.
-See the board-linked [active plan](../plans/active/2026-08-21-live-agent-roster-query.md).
+See the [completed plan](../plans/archive/2026-08-21-live-agent-roster-query.md), retained as cold history.
 
 ## 4. Complete field set
 

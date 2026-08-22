@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.8] - 2026-08-22
+
+### Added
+
+- Socket API v3 now provides the read-only `agent_list` operation and matching
+  client facade. It returns the unique, stable-sorted canonical AGENT IDs from
+  the immutable registry snapshot loaded by the running daemon; it does not
+  report health, authorization, routing suitability, or execution presets.
+
+### Notes
+
+- Existing clients remain compatible with the additive operation. A 0.7.8
+  client calling an older daemon receives the existing `UNKNOWN_OP` failure
+  rather than treating roster lookup as empty or available.
+
 ## [0.7.7] - 2026-08-19
 
 ### Changed
