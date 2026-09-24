@@ -13,19 +13,20 @@ supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 
 ```text
 base_branch: main
-active_plan: docs/plans/active/2026-09-24-cursor-parameterized-acp.md
+active_plan: none
 ```
 
 ## Current position
 
-- Parameterized Cursor ACP is implemented on its task branch and not merged
-  (F-CURSOR-PARAMETERIZED-001, [active plan](../plans/active/2026-09-24-cursor-parameterized-acp.md)).
+- Parameterized Cursor ACP is closed on `main` (F-CURSOR-PARAMETERIZED-001).
   `cursor-native-acp-v1` revision 4 negotiates the agent's parameterized model picker and declares
   parameterized fidelity: the unchanged request model string `base[id=value,...]` names the base model
   and every advertised parameter, each is set on its own selector, and a whole-configuration readback
   gates the prompt on `session/new` and real `session/load` alike, with exact rollback or quarantine on a
   partial switch. Revision-3 Cursor Sessions are refused by the ordinary profile-identity check.
-  Independent review, merge, runtime activation, and live Cursor acceptance remain separate decisions.
+  Release, publication, deployment, runtime activation, and live Cursor acceptance remain separate
+  decisions and none is claimed. The completed plan is retained in
+  [`docs/plans/archive/`](../plans/archive/2026-09-24-cursor-parameterized-acp.md).
 
 - OMP and Reasonix minimal source support is closed on `main`
   (F-OMP-REASONIX-SOURCE-001). The merged source adds the Reasonix
@@ -55,11 +56,12 @@ active_plan: docs/plans/active/2026-09-24-cursor-parameterized-acp.md
   schema-version, or Session lifecycle change; no release, deployment, or publication claim.
 - The V4 external-AGENT boundary reset and its relevant refinements are implemented on `main`; the
   [feature tracker](features.md) records their current capability state.
-- Cursor cross-Run Session resume is closed on `main`: `cursor-native-acp-v1` uses model-only fidelity and
-  no registered profile selects per-Run launch-permission material, preserving the AGENT-owned Session state
-  needed for real `session/load` continuity.
+- Cursor cross-Run Session resume is closed on `main`: no registered profile selects per-Run
+  launch-permission material, preserving the AGENT-owned Session state needed for real `session/load`
+  continuity. `cursor-native-acp-v1` revisions 1–3 used model-only fidelity; revision 4 replaced it with the
+  parameterized fidelity above.
 - Grant-driven Cursor permission mode is closed on `main` (F-CURSOR-GRANT-MODE-001):
-  `cursor-native-acp-v1` revision 3 requires Cursor ACP mode `ask`
+  `cursor-native-acp-v1`, since revision 3 and unchanged in revision 4, requires Cursor ACP mode `ask`
   when the Run's frozen grant is exactly a subset of `{read, search}` and `agent` for every other valid
   grant, set and exact-read-back before the model, re-proven after the model set, failing pre-Prompt as
   `CONFIG_FIDELITY` otherwise, recomputed on every Run including real `session/load` reuse. `ask` is a

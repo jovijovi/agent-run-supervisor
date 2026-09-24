@@ -7,13 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.9] - 2026-09-24
+
 ### Changed
 
-- `cursor-native-acp-v1` revision 4 negotiates Cursor CLI's parameterized model picker and uses the new
-  `parameterized` configuration fidelity: the request's model string `base[id=value,...]` names the base
-  model and every advertised parameter, each is set on its own selector, and the whole configuration is read
-  back exactly before any prompt. The requested effort stays `N/A`. Cursor Sessions created under revision 3
-  are refused for reuse by the profile-identity check; continue that work in a new Session.
+- Cursor is now configured through its parameterized model picker. `cursor-native-acp-v1` revision 4
+  negotiates the picker and adds the `parameterized` configuration fidelity: the request keeps its existing
+  shape — one model string and effort `N/A` — and the model string `base[id=value,...]` names the base model
+  and a value for every parameter Cursor advertises for it. ARS sets each on its own selector and reads the
+  whole configuration back exactly before any prompt, for new and resumed Sessions alike. A malformed string,
+  an unadvertised value, or an omitted advertised parameter fails before the prompt instead of running at an
+  agent default.
+
+### Notes
+
+- Action for Cursor users: revision 4 changes the Cursor profile identity, so once this version is activated
+  ARS refuses to resume Cursor Sessions created under revision 3. Start new Cursor Sessions. Stored records
+  are neither deleted nor migrated, and every other registered profile keeps its identity.
+- Live Cursor generation and Session reuse on a deployed 0.7.9 are not yet accepted; the parameterized path
+  is covered by hermetic tests. Preparing this version implies no tag, publication, install, deployment, or
+  service restart.
 
 ## [0.7.8] - 2026-08-22
 

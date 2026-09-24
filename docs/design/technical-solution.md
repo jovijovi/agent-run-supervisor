@@ -819,12 +819,11 @@ deleting the rest would silently drop the only real-agent continuity evidence.
   reimplements no framing.
 
 Executable slice sequences, fresh worktree/branch rules, exact commands, and separate push/PR/merge
-approvals live only in `docs/plans/active/`. The one active plan is
-[parameterized Cursor ACP](../plans/active/2026-09-24-cursor-parameterized-acp.md); it authorizes no merge,
-release, deployment, or activation. The completed
-[live AGENT roster query](../plans/archive/2026-08-21-live-agent-roster-query.md) is merged on `main` and
-retained as cold history; integration, release, and deployment remain separately authorized, and an archived
-plan authorizes none of them.
+approvals live only in `docs/plans/active/`. No implementation plan is currently active. The completed
+[parameterized Cursor ACP](../plans/archive/2026-09-24-cursor-parameterized-acp.md) and
+[live AGENT roster query](../plans/archive/2026-08-21-live-agent-roster-query.md) plans are merged on `main`
+and retained as cold history; integration, release, deployment, and activation remain separately authorized,
+and an archived plan authorizes none of them.
 The completed [configurable per-Run event budget](../plans/archive/2026-08-11-configurable-run-event-budget.md),
 [permission boundary fixes](../plans/archive/2026-08-15-permission-boundary-fixes.md),
 [ACP SDK 0.12.1 upgrade](../plans/archive/2026-08-19-acp-sdk-0121-upgrade.md) and

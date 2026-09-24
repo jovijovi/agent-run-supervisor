@@ -1,8 +1,9 @@
 ---
 title: "Parameterized Cursor ACP"
-status: active
+status: archived
 created_at: 2026-09-24
 last_validated_at: 2026-09-24
+archived_at: 2026-09-24
 ---
 # Parameterized Cursor ACP
 
@@ -50,8 +51,8 @@ and the `N/A` effort.
   cross-Run parameter and base-model switch, partial failure with exact rollback, unprovable rollback, and
   the create-path window; existing Cursor suites migrated to revision 4.
 - [x] Authority, operator, README, and website documentation synchronized.
-- [ ] Independent fresh-context review.
-- [ ] Merge, then archive this plan.
+- [x] Independent fresh-context review.
+- [x] Merge, then archive this plan.
 
 ## Acceptance
 
