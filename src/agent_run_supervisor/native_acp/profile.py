@@ -39,10 +39,13 @@ The advertised ``agent-full-access`` literal is evidence only and is never
 selected. The adapter's ambient initial mode is not authority because every
 Run performs the set and exact readback.
 
-``cursor-native-acp-v1`` exists for another cited ACP-semantic deviation:
-an agent whose model selector *is* the whole configuration, with no independent
-effort selector to discover or set. That is expressed as a declared
-configuration-fidelity mode. Revision 3 adds this profile's second frozen term:
+``cursor-native-acp-v1`` exists for another cited ACP-semantic deviation in
+how the agent is configured, expressed as a declared configuration-fidelity
+mode. Revision 4 negotiates the agent's parameterized model picker through a
+frozen ``clientCapabilities._meta`` term and declares parameterized fidelity:
+the requested literal names a base model plus every model parameter, each set
+on its own advertised selector and proven by a whole-configuration readback,
+with ``N/A`` as the effort. Revision 3 added this profile's other frozen term:
 its ``mode`` selector is driven by one closed, source-owned, grant-driven
 permission-mode policy — ``ask`` when the Run's frozen grant is exactly a
 subset of ``{read, search}``, ``agent`` for every other valid grant — proven by
@@ -77,7 +80,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 from .config_fidelity import (
     EFFORT_NOT_APPLICABLE,
-    FIDELITY_MODEL_ONLY,
+    FIDELITY_PARAMETERIZED,
     FIDELITY_SEPARATE_SELECTORS,
     ConfigFidelityError,
     validate_fidelity_pairing,
@@ -98,6 +101,31 @@ class ProfileValidationError(ValueError):
 
 def _canonical_json(payload: Any) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _validate_frozen_meta(name: str, value: Any) -> None:
+    """Frozen ACP ``_meta`` text: a bounded, canonical JSON object."""
+    if not isinstance(value, str) or not value:
+        raise ProfileValidationError(f"{name} must be a non-empty string")
+    if len(value) > _MAX_SESSION_META_LENGTH:
+        raise ProfileValidationError(
+            f"{name} exceeds {_MAX_SESSION_META_LENGTH} characters"
+        )
+    try:
+        parsed = json.loads(value)
+    except ValueError as exc:
+        raise ProfileValidationError(f"{name} must be valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ProfileValidationError(f"{name} must be a JSON object")
+    if _canonical_json(parsed) != value:
+        raise ProfileValidationError(
+            f"{name} must equal its canonical re-serialization byte for byte"
+        )
+    for key in parsed:
+        if not isinstance(key, str) or not key:
+            raise ProfileValidationError(
+                f"{name} top-level keys must be non-empty strings"
+            )
 
 
 def _sha256_hex(text: str) -> str:
@@ -320,6 +348,11 @@ class AcpCompatProfile:
     # would silently restore ambient setting sources on every reused Session.
     # There is no caller metadata surface anywhere; this is the only source.
     session_meta: str | None = None
+    # Frozen ``clientCapabilities._meta`` for ``initialize``, as canonical JSON
+    # text under the same rules as ``session_meta``. It negotiates an evidenced
+    # ACP extension the agent keys its advertised configuration on; profiles
+    # without it keep byte-identical ``initialize`` frames.
+    client_capabilities_meta: str | None = None
 
     def __post_init__(self) -> None:
         if not self.profile_id or not isinstance(self.profile_id, str):
@@ -449,30 +482,10 @@ class AcpCompatProfile:
                 raise ProfileValidationError(f"{name} contains non-printable characters")
 
     def _validate_session_meta(self) -> None:
-        value = self.session_meta
-        if value is None:
-            return
-        if not isinstance(value, str) or not value:
-            raise ProfileValidationError("session_meta must be a non-empty string")
-        if len(value) > _MAX_SESSION_META_LENGTH:
-            raise ProfileValidationError(
-                f"session_meta exceeds {_MAX_SESSION_META_LENGTH} characters"
-            )
-        try:
-            parsed = json.loads(value)
-        except ValueError as exc:
-            raise ProfileValidationError("session_meta must be valid JSON") from exc
-        if not isinstance(parsed, dict):
-            raise ProfileValidationError("session_meta must be a JSON object")
-        if _canonical_json(parsed) != value:
-            raise ProfileValidationError(
-                "session_meta must equal its canonical re-serialization byte for byte"
-            )
-        for key in parsed:
-            if not isinstance(key, str) or not key:
-                raise ProfileValidationError(
-                    "session_meta top-level keys must be non-empty strings"
-                )
+        for name in ("session_meta", "client_capabilities_meta"):
+            value = getattr(self, name)
+            if value is not None:
+                _validate_frozen_meta(name, value)
 
     def _validate_mediation_disjointness(self) -> None:
         """One environment key never has two owners.
@@ -541,6 +554,12 @@ class AcpCompatProfile:
             raise UnknownProfileError(f"unknown session call: {call!r}")
         return self.session_meta_payload()
 
+    def client_capabilities_meta_payload(self) -> dict[str, Any] | None:
+        """A fresh copy of the frozen ``clientCapabilities._meta``, or ``None``."""
+        if self.client_capabilities_meta is None:
+            return None
+        return json.loads(self.client_capabilities_meta)
+
     # -- identity ----------------------------------------------------------
 
     def snapshot(self) -> dict[str, Any]:
@@ -571,6 +590,10 @@ class AcpCompatProfile:
                 payload["permission_mode_policy_id"] = self.permission_mode_policy_id
         if self.session_meta is not None:
             payload["session_meta"] = json.loads(self.session_meta)
+        if self.client_capabilities_meta is not None:
+            payload["client_capabilities_meta"] = json.loads(
+                self.client_capabilities_meta
+            )
         return payload
 
     def snapshot_ref(self) -> str:
@@ -609,12 +632,13 @@ class AgentInstance:
                 "registry entry names a different profile than the one resolving it"
             )
         if (
-            self.profile.config_fidelity_mode == FIDELITY_MODEL_ONLY
+            self.profile.config_fidelity_mode != FIDELITY_SEPARATE_SELECTORS
             and getattr(self.entry, "effort_selector_id", None) is not None
         ):
             raise ProfileValidationError(
-                "a model-only profile sets no effort selector, so an entry "
-                "hint for one would name a call that never happens"
+                f"a {self.profile.config_fidelity_mode} profile sets no effort "
+                "selector, so an entry hint for one would name a call that "
+                "never happens"
             )
 
     # -- identity ----------------------------------------------------------
@@ -704,8 +728,8 @@ class AgentInstance:
 
     @property
     def effort_selector_id(self) -> str | None:
-        """``None`` under model-only fidelity, and only there."""
-        if self.profile.config_fidelity_mode == FIDELITY_MODEL_ONLY:
+        """``None`` unless the fidelity mode has a separate effort selector."""
+        if self.profile.config_fidelity_mode != FIDELITY_SEPARATE_SELECTORS:
             return None
         return self.entry.effort_selector_id or self.profile.effort_selector_id
 
@@ -800,14 +824,12 @@ CODEX_AGENT_ACP_COMPAT_V1 = AcpCompatProfile(
 
 # The one profile whose *configuration fidelity* deviates, with cited evidence.
 #
-# The agent advertises a single model selector whose value carries the whole
-# configuration — the observed literal is ``grok-4.5[effort=high,fast=true]`` —
-# and advertises no independent effort selector at all. ARS therefore sets and
-# exact-reads-back that one opaque literal and reports ``N/A`` as the effective
-# effort. It does not parse the literal, infer an effort from it, map a model
-# name, or read the agent's unrelated ACP ``mode`` selector as an effort. Every
-# other frozen term equals ``standard-native-acp-v1``, and configuration
-# fidelity is this profile's **only** deviation.
+# Revisions 1–3: without the negotiation revision 4 adds, the agent advertises a
+# single model selector whose value carries the whole configuration — the
+# observed literal is ``grok-4.5[effort=high,fast=true]`` — and no independent
+# effort selector at all, so those revisions set and exact-read-back that one
+# opaque literal under model-only fidelity and reported ``N/A`` as the effective
+# effort, never reading the agent's unrelated ACP ``mode`` selector as one.
 #
 # Revision 2 removed the launch-permission policy revision 1 selected. That
 # backend's environment key is the agent's *whole* configuration root, not a
@@ -837,17 +859,35 @@ CODEX_AGENT_ACP_COMPAT_V1 = AcpCompatProfile(
 # and not a launch-permission replacement, and the enforcement line named above
 # is unchanged. Moving the mode into profile semantics moved this profile's
 # hash — a deliberate identity change for existing revision-2 Sessions.
+#
+# Revision 4 negotiates the agent's parameterized model picker and moves
+# configuration fidelity from model-only to parameterized. Cited ACP-level
+# evidence: with ``clientCapabilities._meta.parameterizedModelPicker = true`` on
+# ``initialize``, the agent's zero-prompt option set advertises a base-model
+# ``model`` selector plus independent model-dependent select options (observed
+# ids ``context``, ``reasoning_effort``, ``fast``, with string values including
+# ``"false"``), each accepted by ``session/set_config_option`` and read back
+# exactly; without the flag it advertises only the variants catalog revision 3
+# configured. Setting the base model resets its parameters to agent-held
+# defaults, which is why every requested parameter is set and the whole
+# configuration read back on every Run. The observed ids and values are
+# evidence, never source constants: the live option set is the domain. The
+# grant-driven ``mode`` term is unchanged. Moving the fidelity mode and the
+# negotiated capability into profile semantics moves this profile's hash — a
+# deliberate identity change for existing revision-3 Sessions, whose recorded
+# variants literal this revision could not restore.
 CURSOR_NATIVE_ACP_V1 = AcpCompatProfile(
     profile_id="cursor-native-acp-v1",
-    revision=3,
+    revision=4,
     acp_protocol_version="1",
     required_capabilities=("loadSession",),
     forbidden_capabilities=(),
     requires_session_load=True,
-    config_fidelity_mode=FIDELITY_MODEL_ONLY,
+    config_fidelity_mode=FIDELITY_PARAMETERIZED,
     effort_selector_id=None,
     permission_mode_selector_id="mode",
     permission_mode_policy_id=PERMISSION_MODE_POLICY_READ_ONLY_ASK,
+    client_capabilities_meta='{"parameterizedModelPicker":true}',
 )
 
 # Reasonix's sole compatibility deviation is configuration semantic rather

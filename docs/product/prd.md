@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext PRD"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-21
+last_validated_at: 2026-09-24
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/prd.md"
 ---
 # agent-run-supervisor vNext PRD
@@ -106,15 +106,28 @@ initialize / capability discovery
 Missing capability, unadvertised value, alias/coercion, stale option set, failed set, or inexact readback
 produces zero Turn and no prompt. Literal `max` must never be downgraded to `high` or another value.
 
-**Two configuration-fidelity modes exist, and a profile declares exactly one.** `separate-selectors` is the
-sequence above and is the default every existing profile keeps. `model-only` describes an agent whose model
-selector *is* the whole configuration: it advertises no independent effort selector, so the sequence stops at
-the exact model readback, **no effort option is discovered and no effort set is ever dispatched**, and the
-effective effort is one shared `N/A` sentinel. A `model-only` Run must request that sentinel; any other
-requested effort fails before the prompt rather than being silently ignored, because ignoring a requested
-effort is the coercion this requirement forbids. The selector value stays opaque in both modes — a literal
-such as `grok-4.5[effort=high,fast=true]` is set and read back byte-for-byte, and no code path parses it,
-infers an effort from it, maps a model name, or reads an agent's ACP `mode` selector as an effort.
+**Three configuration-fidelity modes exist, and a profile declares exactly one.** `separate-selectors` is
+the sequence above and is the default every existing profile keeps. `model-only` describes an agent whose
+model selector *is* the whole configuration: it advertises no independent effort selector, so the sequence
+stops at the exact model readback, **no effort option is discovered and no effort set is ever dispatched**,
+and the effective effort is one shared `N/A` sentinel. A `model-only` Run must request that sentinel; any
+other requested effort fails before the prompt rather than being silently ignored, because ignoring a
+requested effort is the coercion this requirement forbids. The `model-only` selector value stays opaque — a
+literal such as `grok-4.5[effort=high,fast=true]` is set and read back byte-for-byte, and no code path parses
+it, infers an effort from it, maps a model name, or reads an agent's ACP `mode` selector as an effort.
+
+`parameterized` describes an agent that advertises a base-model selector plus independent, model-dependent
+parameter selectors. The request keeps its shape — one model string and the `N/A` effort — and the model
+string is the whole configuration, spelled `base[id=value,...]` (a bare `base` names a model with no
+parameters). ARS sets `base` on the model selector, consumes the complete post-set-model set, and requires the
+request to name **exactly** the parameter options advertised there: an advertised parameter the request omits
+would run at an unproven agent default, so it fails before the prompt. Each named `id` is then set to its
+`value` on the config option of that exact id, rediscovered from the latest complete set, and the prompt is
+reachable only after a final readback proves the base model, every parameter, and any required permission
+mode exact. The string itself is never sent to the agent — sending a composed literal to a variants catalog
+is the silent fallback this forbids — ids and values are opaque text checked against the live option set,
+and a malformed string fails before the first ACP frame. The effective model is re-composed from the readback
+and therefore equals the requested string; the effective effort is `N/A`.
 
 **The live-advertised option set is the domain authority.** No source-frozen `registered_models`,
 `allowed_efforts`, or selector value domain gates admission: "an unadvertised value ⇒ zero Turn, no
@@ -445,7 +458,8 @@ guarantees. ARS makes no isolation claim either way.
   ACP protocol major; required capabilities; a forbidden-capability floor; session semantics including
   required real `session/load` and never `session/new` on a reuse path; default selector-id conventions;
   the base environment allowlist; permission-mediation semantics; and — only where evidenced — frozen ACP
-  session metadata and a required permission-mode selector, whose required value is either one frozen
+  session metadata, frozen `initialize` `clientCapabilities._meta`, and a required permission-mode selector,
+  whose required value is either one frozen
   literal or computed per Run from the Run's frozen grant by one closed, source-owned grant-driven policy.
 - A profile contains **no** path, version, digest, model literal, agent name, value domain, launch kind,
   artifact identity, or deployment fact. `profile_hash` therefore moves **only when ACP semantics move**,
@@ -463,9 +477,12 @@ guarantees. ARS makes no isolation claim either way.
     the model; after model and effort are configured, it is re-proven once at the post-effort readback.
     It is recomputed on every Run including `session/load`. `agent-full-access` may be advertised but is
     never selected by this policy;
-  - `cursor-native-acp-v1` carries model-only configuration fidelity and, at revision 3, a grant-driven
-    permission mode: `ask` for exactly the `{read, search}` subsets and `agent` otherwise, set before and
-    re-proven after the model;
+  - `cursor-native-acp-v1` carries, since revision 3, a grant-driven permission mode: `ask` for exactly
+    the `{read, search}` subsets and `agent` otherwise, set before and re-proven after the model. Revision 4
+    freezes `clientCapabilities._meta.parameterizedModelPicker = true` on `initialize` and moves the
+    profile from model-only to parameterized configuration fidelity; its cited evidence is a zero-prompt
+    ACP exchange that advertised a base model plus independent parameter selectors only under that
+    negotiation. The observed parameter ids and values are evidence, never source constants;
   - `reasonix-agent-acp-compat-v1` keeps the standard separate model and effort selectors and freezes
     Reasonix's `tool_approval` selector to the static literal `ask`, set and exactly read back before model
     and effort on every Run, including both `session/new` and real `session/load`. It does not select

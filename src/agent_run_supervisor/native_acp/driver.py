@@ -82,10 +82,12 @@ class NativeAcpDriver:
         self,
         *,
         client: NativeAcpClient,
-        machine: ConfigFidelityMachine,
+        machine: ConfigFidelityMachine | None,
         on_config_switch_started: Callable[[], None] | None = None,
     ) -> None:
         self._client = client
+        # ``None`` only for a diagnostic that stops at ``initialize`` and so
+        # carries no configuration request; every session call refuses then.
         self._machine = machine
         self._connection: Any | None = None
         # Supervisor for the one SDK sender-loop task this driver constructs;
@@ -299,6 +301,11 @@ class NativeAcpDriver:
             raise NativeDriverError("no active external session")
         return self._session_id
 
+    def _require_machine(self) -> ConfigFidelityMachine:
+        if self._machine is None:
+            raise NativeDriverError("driver carries no configuration request")
+        return self._machine
+
     def _check_identity(self) -> None:
         violation = self._client.identity_violation
         if violation is not None:
@@ -361,10 +368,11 @@ class NativeAcpDriver:
         self, *, cwd: str, meta: Mapping[str, Any] | None = None
     ) -> str:
         connection = self._require_connection()
+        machine = self._require_machine()
         response = await self._call(
             "session/new", connection.new_session(cwd=cwd, **self._meta_kwargs(meta))
         )
-        self._machine.record_initial_options(_dump_options(response.config_options))
+        machine.record_initial_options(_dump_options(response.config_options))
         self._session_id = response.session_id
         self._client.expected_session_id = response.session_id
         return response.session_id
@@ -377,6 +385,7 @@ class NativeAcpDriver:
         meta: Mapping[str, Any] | None = None,
     ) -> None:
         connection = self._require_connection()
+        machine = self._require_machine()
         self._client.expected_session_id = agent_session_id
         response = await self._call(
             "session/load",
@@ -386,7 +395,7 @@ class NativeAcpDriver:
                 **self._meta_kwargs(meta),
             ),
         )
-        self._machine.record_initial_options(_dump_options(response.config_options))
+        machine.record_initial_options(_dump_options(response.config_options))
         self._session_id = agent_session_id
         self._check_identity()
 
@@ -401,11 +410,13 @@ class NativeAcpDriver:
         readback: no effort option is discovered and no effort
         ``set_config_option`` frame is ever written. That is a structural
         property of this method, not a value the machine happens to accept.
+        Under **parameterized** fidelity the model leg sets the base model and
+        is followed by one set per requested parameter, never by an effort leg.
 
         ``machine`` overrides the Run's machine for the rollback sequence;
         the prompt gate always stays on the Run's own machine.
         """
-        active = machine or self._machine
+        active = machine or self._require_machine()
         connection = self._require_connection()
         session_id = self._require_session()
         self._announce_config_switch()
@@ -431,13 +442,32 @@ class NativeAcpDriver:
             connection.set_config_option(
                 config_id=model_selector,
                 session_id=session_id,
-                value=active.requested_model,
+                value=active.model_selector_value,
             ),
         )
         active.record_post_model_options(
             _dump_options(model_response.config_options)
         )
         if active.is_model_only:
+            self._check_identity()
+            return active.require_ready()
+        if active.is_parameterized:
+            # One leg per requested parameter, each planned from the complete
+            # set the previous leg returned; the machine verifies only after
+            # the final whole-configuration readback.
+            while active.has_pending_parameter:
+                parameter_id, parameter_value = active.parameter_plan()
+                parameter_response = await self._call(
+                    "session/set_config_option(parameter)",
+                    connection.set_config_option(
+                        config_id=parameter_id,
+                        session_id=session_id,
+                        value=parameter_value,
+                    ),
+                )
+                active.record_post_parameter_options(
+                    _dump_options(parameter_response.config_options)
+                )
             self._check_identity()
             return active.require_ready()
         effort_selector = active.effort_plan()
@@ -472,7 +502,7 @@ class NativeAcpDriver:
                 "is write-once, one prompt per driver/connection"
             )
         self._prompt_dispatched = True
-        self._machine.require_ready()
+        self._require_machine().require_ready()
         self._check_identity()
         schema = require_sdk().schema
         block = schema.TextContentBlock(type="text", text=text)

@@ -2,7 +2,7 @@
 title: "ARS agent registry — the operator contract"
 status: active
 created_at: 2026-07-30
-last_validated_at: 2026-08-22
+last_validated_at: 2026-09-24
 ---
 # ARS agent registry — the operator contract
 
@@ -343,11 +343,17 @@ exact literal readback is the proof. A value the agent does not advertise yields
 is why "the agent added a model today" is a non-event for ARS, and why `model_selector` and `effort_selector`
 carry an id hint only.
 
-**`effort_selector` is refused on a `model-only` profile.** Such a profile declares that the agent advertises
-no independent effort selector, so ARS discovers none, sets none, and reports `N/A` as the effective effort.
-An id hint for a selector no Run ever sets would be a fiction in every launch snapshot, so the pairing is
-refused rather than ignored. A caller targeting such an agent must request effort `N/A`; any other value
-fails before the prompt.
+**`effort_selector` is refused on a `model-only` or `parameterized` profile.** Such a profile declares that
+the request's model string is the whole configuration, so ARS discovers no separate effort selector, sets
+none, and reports `N/A` as the effective effort. An id hint for a selector no Run ever sets would be a fiction
+in every launch snapshot, so the pairing is refused rather than ignored. A caller targeting such an agent must
+request effort `N/A`; any other value fails before the prompt.
+
+On a `parameterized` profile — `cursor-native-acp-v1` from revision 4 — the caller spells the whole
+configuration as `base[id=value,...]`, naming the base model and **every** parameter the agent advertises for
+it, for example `<base-model>[context=<value>,reasoning_effort=<value>,fast=<value>]`. The ids and values are
+whatever the running agent advertises; the placeholders here are not a registered domain. Nothing in the
+registry entry changes: `model_selector` still hints only the base-model selector id.
 
 ### Pinning an exact model through Claude Code / `claude-agent-acp`
 

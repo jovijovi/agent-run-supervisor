@@ -18,7 +18,7 @@ mode is ``bypassPermissions``: a session that starts there would never consult
 the frozen grant. Profiles without the binding keep the exact legacy phases,
 snapshot labels, and wire sequence.
 
-Two **configuration-fidelity modes** exist, and a profile declares exactly one.
+Three **configuration-fidelity modes** exist, and a profile declares exactly one.
 
 ``separate-selectors`` is the sequence above: an independent effort selector is
 rediscovered from the post-set-model set, set, and read back exactly.
@@ -29,12 +29,27 @@ sequence stops at the exact model readback: no effort option is discovered, no
 effort ``set_config_option`` is dispatched, and the effective effort is the
 shared :data:`EFFORT_NOT_APPLICABLE` sentinel. A request for such an agent must
 carry that sentinel; any other effort is refused before the prompt rather than
-silently ignored.
+silently ignored. The selector value stays **opaque**: a model literal such as
+``grok-4.5[effort=high,fast=true]`` is set and read back byte-for-byte, and
+nothing parses it, infers an effort from it, maps a model name, or treats an
+agent's ACP ``mode`` selector as an effort.
 
-The selector value stays **opaque** in both modes. A model literal such as
-``grok-4.5[effort=high,fast=true]`` is set and read back byte-for-byte: nothing
-parses it, infers an effort from it, maps a model name, or treats an agent's
-ACP ``mode`` selector as an effort.
+``parameterized`` describes an agent that advertises a base model selector plus
+independent, model-dependent parameter selectors. The requested model literal is
+the whole configuration, spelled ``base[id=value,...]`` (or a bare ``base`` for a
+model with no parameters): ``base`` is set on the model selector, the complete
+post-set-model set is consumed, and then every ``id`` is set to its ``value`` on
+the config option of that exact id, one leg per parameter, each rediscovered
+from the fresh set the previous leg returned. The requested parameter ids must
+be **exactly** the parameter options the agent advertises for that base model —
+an advertised parameter the request does not name would run at an unproven
+agent default, so it refuses rather than passing silently. Prompt is reachable
+only after a final whole-configuration readback shows the base model and every
+parameter exact. Ids and values are compared as opaque strings against the live
+option set; no id, value, or value domain is known to this module, and the
+literal is never sent to the agent. The effective effort is the shared
+:data:`EFFORT_NOT_APPLICABLE` sentinel, because an effort-like parameter is part
+of the model literal rather than a separate request field.
 
 Option inputs are wire-shaped plain dicts (``id`` / ``currentValue`` /
 ``options``) — the SDK-facing driver dumps models by alias before they reach
@@ -43,6 +58,7 @@ this stdlib-only module.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 
@@ -57,10 +73,15 @@ EFFORT_NOT_APPLICABLE = "N/A"
 
 FIDELITY_SEPARATE_SELECTORS = "separate-selectors"
 FIDELITY_MODEL_ONLY = "model-only"
+FIDELITY_PARAMETERIZED = "parameterized"
 FIDELITY_MODES: tuple[str, ...] = (
     FIDELITY_SEPARATE_SELECTORS,
     FIDELITY_MODEL_ONLY,
+    FIDELITY_PARAMETERIZED,
 )
+# The modes whose model literal is the whole configuration: no independent
+# effort selector is discovered or set, and the effort is the shared sentinel.
+_WHOLE_CONFIGURATION_MODES = frozenset({FIDELITY_MODEL_ONLY, FIDELITY_PARAMETERIZED})
 
 
 def validate_fidelity_pairing(
@@ -79,22 +100,114 @@ def validate_fidelity_pairing(
             f"unknown configuration fidelity mode {fidelity_mode!r} "
             f"(known: {list(FIDELITY_MODES)})"
         )
-    if fidelity_mode == FIDELITY_MODEL_ONLY:
+    if fidelity_mode in _WHOLE_CONFIGURATION_MODES:
         if effort_selector_id is not None:
             raise ConfigFidelityError(
-                "model-only fidelity has no effort selector; declaring "
+                f"{fidelity_mode} fidelity has no effort selector; declaring "
                 f"{effort_selector_id!r} would name a selector no Run ever sets"
             )
         if requested_effort != EFFORT_NOT_APPLICABLE:
             raise ConfigFidelityError(
-                f"model-only fidelity requires effort {EFFORT_NOT_APPLICABLE!r}, "
-                f"requested {requested_effort!r}"
+                f"{fidelity_mode} fidelity requires effort "
+                f"{EFFORT_NOT_APPLICABLE!r}, requested {requested_effort!r}"
             )
         return
     if not isinstance(effort_selector_id, str) or not effort_selector_id:
         raise ConfigFidelityError(
             "separate-selector fidelity requires an effort selector id"
         )
+
+
+# -- the parameterized model literal ------------------------------------------
+
+# The grammar's four structural characters. They can appear in neither an id
+# nor a value, which is what makes one literal parse exactly one way and
+# re-compose byte for byte.
+_PARAMETERS_OPEN = "["
+_PARAMETERS_CLOSE = "]"
+_PARAMETER_SEPARATOR = ","
+_PARAMETER_ASSIGN = "="
+_STRUCTURAL = frozenset(
+    _PARAMETERS_OPEN + _PARAMETERS_CLOSE + _PARAMETER_SEPARATOR + _PARAMETER_ASSIGN
+)
+
+
+@dataclass(frozen=True)
+class ParameterizedModel:
+    """One requested parameterized configuration: a base plus ordered pairs."""
+
+    base: str
+    parameters: tuple[tuple[str, str], ...]
+
+
+def compose_parameterized_model(
+    base: str, parameters: Sequence[tuple[str, str]]
+) -> str:
+    """The one spelling of a parameterized configuration."""
+    if not parameters:
+        return base
+    body = _PARAMETER_SEPARATOR.join(
+        f"{config_id}{_PARAMETER_ASSIGN}{value}" for config_id, value in parameters
+    )
+    return f"{base}{_PARAMETERS_OPEN}{body}{_PARAMETERS_CLOSE}"
+
+
+def parse_parameterized_model(literal: Any) -> ParameterizedModel:
+    """Split ``base[id=value,...]`` into its parts, or refuse.
+
+    Strict and whitespace-preserving: nothing is trimmed, normalized, reordered,
+    or defaulted, so the parts re-compose to the exact requested bytes. An
+    empty base, id, or value, an empty or unterminated parameter list, a
+    duplicated id, or a structural character anywhere it does not belong is
+    refused — the Run then fails before any ACP frame instead of guessing.
+    """
+    if not isinstance(literal, str) or not literal:
+        raise ConfigFidelityError(
+            "parameterized fidelity requires a non-empty model literal"
+        )
+    open_at = literal.find(_PARAMETERS_OPEN)
+    if open_at < 0:
+        base, body = literal, None
+    else:
+        if not literal.endswith(_PARAMETERS_CLOSE):
+            raise ConfigFidelityError(
+                "parameterized model literal must end its parameter list with "
+                f"{_PARAMETERS_CLOSE!r}"
+            )
+        base, body = literal[:open_at], literal[open_at + 1 : -1]
+    if not base or _PARAMETERS_OPEN in base or _PARAMETERS_CLOSE in base:
+        raise ConfigFidelityError(
+            "parameterized model literal needs a non-empty base model without "
+            "brackets"
+        )
+    if body is None:
+        return ParameterizedModel(base=base, parameters=())
+    if not body:
+        raise ConfigFidelityError(
+            "parameterized model literal has an empty parameter list"
+        )
+    parameters: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for assignment in body.split(_PARAMETER_SEPARATOR):
+        config_id, assign, value = assignment.partition(_PARAMETER_ASSIGN)
+        if (
+            not assign
+            or not config_id
+            or not value
+            or _STRUCTURAL & set(config_id)
+            or _STRUCTURAL & set(value)
+        ):
+            raise ConfigFidelityError(
+                "parameterized model literal has a malformed parameter "
+                f"assignment {assignment!r}"
+            )
+        if config_id in seen:
+            raise ConfigFidelityError(
+                f"parameterized model literal names parameter {config_id!r} twice"
+            )
+        seen.add(config_id)
+        parameters.append((config_id, value))
+    return ParameterizedModel(base=base, parameters=tuple(parameters))
 
 
 _PHASE_INIT = "init"
@@ -104,6 +217,8 @@ _PHASE_POST_MODE = "post_mode"
 _PHASE_MODEL_PLANNED = "model_planned"
 _PHASE_POST_MODEL = "post_model"
 _PHASE_EFFORT_PLANNED = "effort_planned"
+_PHASE_PARAMETER_PLANNED = "parameter_planned"
+_PHASE_POST_PARAMETER = "post_parameter"
 _PHASE_VERIFIED = "verified"
 
 
@@ -182,6 +297,25 @@ class ConfigFidelityMachine:
         self._requested_effort = requested_effort
         self._permission_mode_selector_id = permission_mode_selector_id
         self._required_permission_mode = required_permission_mode
+        # Parsed at construction, so a malformed literal refuses before the
+        # first ACP frame rather than after a set has moved the agent.
+        self._parameterized: ParameterizedModel | None = None
+        if fidelity_mode == FIDELITY_PARAMETERIZED:
+            self._parameterized = parse_parameterized_model(requested_model)
+            for config_id, _value in self._parameterized.parameters:
+                if config_id in (model_selector_id, permission_mode_selector_id):
+                    # The model selector carries the base, and the permission
+                    # mode is profile-owned and grant-derived: a request may
+                    # set neither through a parameter.
+                    raise ConfigFidelityError(
+                        f"parameter {config_id!r} names a selector this machine "
+                        "already owns"
+                    )
+        self._pending_parameters: list[tuple[str, str]] = list(
+            self._parameterized.parameters if self._parameterized else ()
+        )
+        self._planned_parameter: tuple[str, str] | None = None
+        self._effective_model: str | None = None
         self._phase = _PHASE_INIT
         self._initial_options: dict[str, _Option] | None = None
         self._post_mode_options: dict[str, _Option] | None = None
@@ -209,6 +343,25 @@ class ConfigFidelityMachine:
     @property
     def is_model_only(self) -> bool:
         return self._fidelity_mode == FIDELITY_MODEL_ONLY
+
+    @property
+    def is_parameterized(self) -> bool:
+        return self._fidelity_mode == FIDELITY_PARAMETERIZED
+
+    @property
+    def model_selector_value(self) -> str:
+        """The value the model selector is set to.
+
+        The requested literal itself, except under parameterized fidelity,
+        where it is the literal's base: the literal is never sent to the agent.
+        """
+        if self._parameterized is not None:
+            return self._parameterized.base
+        return self._requested_model
+
+    @property
+    def has_pending_parameter(self) -> bool:
+        return bool(self._pending_parameters)
 
     @property
     def has_permission_mode(self) -> bool:
@@ -311,9 +464,9 @@ class ConfigFidelityMachine:
                 f"model selector {self._model_selector_id!r} is not advertised "
                 "as a select option"
             )
-        if self._requested_model not in option.choices:
+        if self.model_selector_value not in option.choices:
             raise ConfigFidelityError(
-                f"requested model {self._requested_model!r} is not advertised "
+                f"requested model {self.model_selector_value!r} is not advertised "
                 f"(choices: {sorted(option.choices)})"
             )
         self._phase = _PHASE_MODEL_PLANNED
@@ -327,34 +480,162 @@ class ConfigFidelityMachine:
         Under model-only fidelity this is also the *final* readback: there is
         no effort leg after it, so a verified machine — and therefore a
         reachable prompt — exists only once the exact model literal has been
-        read back here.
+        read back here. Under parameterized fidelity this set is where the
+        base model's parameter options are discovered, and it must advertise
+        exactly the parameters the request names.
         """
         self._expect_phase(_PHASE_MODEL_PLANNED, "record_post_model_options")
         parsed = _parse_options(options, phase="post-set-model")
-        model = parsed.get(self._model_selector_id)
-        if model is None or model.current_value != self._requested_model:
-            observed = None if model is None else model.current_value
-            raise ConfigFidelityError(
-                f"model readback mismatch: requested {self._requested_model!r}, "
-                f"effective {observed!r}"
-            )
-        if self.is_model_only and self._permission_mode_selector_id is not None:
+        self._require_model_exact(parsed, "model readback")
+        if (
+            self._fidelity_mode in _WHOLE_CONFIGURATION_MODES
+            and self._permission_mode_selector_id is not None
+        ):
             # The same re-proof the effort leg performs for the other mode: a
             # mode restored as a side effect of the model switch must not reach
-            # a prompt.
+            # a parameter leg or a prompt.
             self._require_permission_mode_exact(
                 parsed, "permission mode readback after model set"
             )
+        if self.is_parameterized:
+            # Recorded before the parameter check: a refused Run must keep the
+            # parameter set the agent actually advertised as evidence.
+            self._record_snapshot("post_model", options or [])
+            self._require_parameter_ids(parsed, "post-set-model")
+            self._post_model_options = parsed
+            if self._pending_parameters:
+                self._phase = _PHASE_POST_MODEL
+            else:
+                self._verify_whole_configuration(parsed)
+            return
         self._post_model_options = parsed
         self._record_snapshot("post_model", options or [])
         self._phase = _PHASE_VERIFIED if self.is_model_only else _PHASE_POST_MODEL
 
+    def _require_model_exact(self, parsed: dict[str, _Option], label: str) -> None:
+        model = parsed.get(self._model_selector_id)
+        expected = self.model_selector_value
+        if model is None or model.current_value != expected:
+            observed = None if model is None else model.current_value
+            raise ConfigFidelityError(
+                f"{label} mismatch: requested {expected!r}, effective {observed!r}"
+            )
+
+    # -- parameterized legs --------------------------------------------------
+
+    def _require_parameter_ids(self, parsed: dict[str, _Option], label: str) -> None:
+        """The request names exactly the parameters the agent advertises.
+
+        Every advertised option other than the model and permission-mode
+        selectors is a parameter of the selected model. One the request does
+        not name would keep whatever default the agent holds, which is exactly
+        the unproven configuration this machine exists to refuse.
+        """
+        assert self._parameterized is not None
+        owned = {self._model_selector_id, self._permission_mode_selector_id}
+        advertised = {option_id for option_id in parsed if option_id not in owned}
+        requested = {config_id for config_id, _ in self._parameterized.parameters}
+        unknown = sorted(requested - advertised)
+        if unknown:
+            raise ConfigFidelityError(
+                f"requested model parameters {unknown} are not advertised for "
+                f"model {self._parameterized.base!r} at {label}"
+            )
+        unrequested = sorted(advertised - requested)
+        if unrequested:
+            raise ConfigFidelityError(
+                f"advertised model parameters {unrequested} are not requested at "
+                f"{label}; their values would be unproven agent defaults"
+            )
+
+    def parameter_plan(self) -> tuple[str, str]:
+        """The next parameter leg, rediscovered from the latest complete set."""
+        if not self.is_parameterized:
+            raise ConfigFidelityError(
+                "parameter_plan is reachable only under parameterized fidelity"
+            )
+        if self._phase not in (_PHASE_POST_MODEL, _PHASE_POST_PARAMETER):
+            raise ConfigFidelityError(
+                f"parameter_plan is invalid in phase {self._phase!r}"
+            )
+        if not self._pending_parameters:
+            raise ConfigFidelityError("no parameter leg remains to plan")
+        assert self._post_model_options is not None
+        config_id, value = self._pending_parameters[0]
+        option = self._post_model_options.get(config_id)
+        if option is None or not option.is_select:
+            raise ConfigFidelityError(
+                f"model parameter {config_id!r} is not advertised as a select "
+                "option"
+            )
+        if value not in option.choices:
+            raise ConfigFidelityError(
+                f"requested value {value!r} for model parameter {config_id!r} is "
+                f"not advertised (choices: {sorted(option.choices)})"
+            )
+        self._planned_parameter = (config_id, value)
+        self._phase = _PHASE_PARAMETER_PLANNED
+        return config_id, value
+
+    def record_post_parameter_options(
+        self, options: Sequence[Mapping[str, Any]] | None
+    ) -> None:
+        """Consume the complete set after one parameter set; prove that leg.
+
+        After the last leg this is the final whole-configuration readback.
+        """
+        self._expect_phase(_PHASE_PARAMETER_PLANNED, "record_post_parameter_options")
+        assert self._planned_parameter is not None
+        parsed = _parse_options(options, phase="post-set-parameter")
+        self._record_snapshot("post_parameter", options or [])
+        self._require_model_exact(parsed, "model readback after parameter set")
+        config_id, value = self._planned_parameter
+        option = parsed.get(config_id)
+        effective = None if option is None else option.current_value
+        if effective != value:
+            raise ConfigFidelityError(
+                f"model parameter {config_id!r} readback mismatch: requested "
+                f"{value!r}, effective {effective!r}"
+            )
+        self._pending_parameters.pop(0)
+        self._planned_parameter = None
+        self._post_model_options = parsed
+        if self._pending_parameters:
+            self._phase = _PHASE_POST_PARAMETER
+            return
+        self._verify_whole_configuration(parsed)
+
+    def _verify_whole_configuration(self, parsed: dict[str, _Option]) -> None:
+        """The final readback: base, every parameter, and the mode, exact."""
+        assert self._parameterized is not None
+        self._require_model_exact(parsed, "final model readback")
+        self._require_parameter_ids(parsed, "final readback")
+        observed: list[tuple[str, str]] = []
+        for config_id, value in self._parameterized.parameters:
+            effective = parsed[config_id].current_value
+            if effective != value:
+                raise ConfigFidelityError(
+                    f"final readback of model parameter {config_id!r} mismatch: "
+                    f"requested {value!r}, effective {effective!r}"
+                )
+            observed.append((config_id, effective))
+        if self._permission_mode_selector_id is not None:
+            self._require_permission_mode_exact(
+                parsed, "permission mode readback after parameter set"
+            )
+        # Composed from what was read back, never echoed from the request; the
+        # checks above make the two byte-identical.
+        self._effective_model = compose_parameterized_model(
+            parsed[self._model_selector_id].current_value, observed
+        )
+        self._phase = _PHASE_VERIFIED
+
     def effort_plan(self) -> str:
         """Rediscover effort from the post-set-model set only."""
-        if self.is_model_only:
+        if self._fidelity_mode in _WHOLE_CONFIGURATION_MODES:
             raise ConfigFidelityError(
-                "model-only fidelity discovers no effort selector; effort_plan "
-                "is unreachable"
+                f"{self._fidelity_mode} fidelity discovers no effort selector; "
+                "effort_plan is unreachable"
             )
         self._expect_phase(_PHASE_POST_MODEL, "effort_plan")
         assert self._post_model_options is not None
@@ -376,10 +657,10 @@ class ConfigFidelityMachine:
         self, options: Sequence[Mapping[str, Any]] | None
     ) -> None:
         """Consume the complete set and require the exact effective pair."""
-        if self.is_model_only:
+        if self._fidelity_mode in _WHOLE_CONFIGURATION_MODES:
             raise ConfigFidelityError(
-                "model-only fidelity sets no effort option; there is no "
-                "post-set-effort set to consume"
+                f"{self._fidelity_mode} fidelity sets no effort option; there is "
+                "no post-set-effort set to consume"
             )
         self._expect_phase(_PHASE_EFFORT_PLANNED, "record_post_effort_options")
         parsed = _parse_options(options, phase="post-set-effort")
@@ -413,13 +694,17 @@ class ConfigFidelityMachine:
     def require_ready(self) -> tuple[str, str]:
         """The prompt gate: only a verified machine releases the exact pair.
 
-        Under model-only fidelity the effort half is the ``N/A`` sentinel the
-        request had to carry, so what is returned and persisted is exactly what
-        was proven — never a value inferred from the model literal.
+        Under model-only and parameterized fidelity the effort half is the
+        ``N/A`` sentinel the request had to carry, so what is returned and
+        persisted is exactly what was proven — never a value inferred from the
+        model literal. The parameterized model half is the literal re-composed
+        from the final readback.
         """
         if self._phase != _PHASE_VERIFIED:
             raise ConfigFidelityError(
                 f"prompt is unreachable: config fidelity phase is {self._phase!r}, "
                 "not 'verified'"
             )
+        if self._effective_model is not None:
+            return self._effective_model, self._requested_effort
         return self._requested_model, self._requested_effort

@@ -11,6 +11,10 @@ The Cursor evidence is one selector value, ``grok-4.5[effort=high,fast=true]``,
 and it is treated as **opaque**: ARS sets it and reads it back byte-for-byte.
 Nothing here parses ``high`` out of it, infers an effort from it, maps a model
 name, or reads the agent's unrelated ACP ``mode`` selector as an effort.
+
+The registered Cursor profile now negotiates its parameterized picker instead
+(``test_cursor_parameterized_fidelity``); these tests keep the model-only mode
+itself under test through a test-local profile.
 """
 
 from __future__ import annotations
@@ -36,6 +40,8 @@ from agent_run_supervisor.native_acp.client import NativeAcpClient
 from agent_run_supervisor.native_acp.config_fidelity import (
     EFFORT_NOT_APPLICABLE,
     FIDELITY_MODEL_ONLY,
+    FIDELITY_MODES,
+    FIDELITY_PARAMETERIZED,
     FIDELITY_SEPARATE_SELECTORS,
     ConfigFidelityError,
     ConfigFidelityMachine,
@@ -161,52 +167,16 @@ def _sentinel_lineno() -> int:
 # -- the registry and its declared modes ------------------------------------
 
 
-def test_cursor_native_acp_v1_is_registered_and_model_only() -> None:
+def test_the_registered_cursor_profile_left_model_only_for_parameterized() -> None:
+    """Model-only stays a declared mode; the registered Cursor profile moved.
+
+    Its revision-4 contract lives in ``test_cursor_parameterized_fidelity``.
+    """
     profile = DEFAULT_REGISTRY.get("cursor-native-acp-v1")
     assert profile is CURSOR_NATIVE_ACP_V1
-    assert profile.config_fidelity_mode == FIDELITY_MODEL_ONLY
+    assert profile.config_fidelity_mode == FIDELITY_PARAMETERIZED
     assert profile.effort_selector_id is None
-    assert "cursor-native-acp-v1" in DEFAULT_REGISTRY.ids()
-
-
-def test_the_cursor_profile_deviates_only_in_its_two_proven_terms() -> None:
-    """Its two proven deviations, and nothing else.
-
-    Configuration fidelity (model-only) and the grant-driven permission-mode
-    selection are the profile's evidenced deviations. Everything else a profile
-    freezes must equal the standard conformance contract, or the deviation
-    would be broader than the evidence supports.
-    """
-    standard = STANDARD_NATIVE_ACP_V1.snapshot()
-    cursor = CURSOR_NATIVE_ACP_V1.snapshot()
-    for shared in (
-        "acp_protocol_version",
-        "required_capabilities",
-        "forbidden_capabilities",
-        "requires_session_load",
-        "base_allowlist",
-        "model_selector_id",
-    ):
-        assert cursor[shared] == standard[shared], shared
-    assert cursor["profile_id"] == "cursor-native-acp-v1"
-    assert cursor["effort_selector_id"] is None
-    assert cursor["config_fidelity_mode"] == FIDELITY_MODEL_ONLY
-    # The second deviation is the grant-driven mode policy — a policy id, never
-    # a frozen literal, because the required mode is computed per Run from the
-    # frozen grant. No frozen session metadata and no launch-permission policy.
-    assert cursor["permission_mode_selector_id"] == "mode"
-    assert cursor["permission_mode_policy_id"] == (
-        "read-only-grant-ask-else-agent-v1"
-    )
-    assert "required_permission_mode" not in cursor
-    assert "session_meta" not in cursor
-    assert "launch_permission_policy_id" not in cursor
-    # Revision 2 recorded removing the launch-permission selection revision 1
-    # carried; revision 3 records adding the grant-driven mode selection, which
-    # is a deviation in ACP permission-mediation semantics and therefore moved
-    # this profile's hash.
-    assert cursor["revision"] == 3
-    assert standard["revision"] == 1
+    assert FIDELITY_MODEL_ONLY in FIDELITY_MODES
 
 
 def test_existing_profiles_declare_separate_selectors_unchanged() -> None:

@@ -103,6 +103,15 @@ Script keys (all optional):
   the argument was absent) — proves the frozen session metadata on the wire.
 - ``capture_cwd_path``: append one JSON line per session/new and session/load
   recording the exact workspace ``cwd`` received on the ACP wire.
+- ``parameterized_picker``: ``{"initial_options": [...],
+  "post_model_options_by_value": {...}}`` served **instead of** the top-level
+  keys, but only when ``initialize`` carried
+  ``clientCapabilities._meta.parameterizedModelPicker == true`` — models an
+  agent whose advertised configuration shape depends on that negotiation.
+  Setting the model swaps to that model's own set, which also models the
+  agent resetting the model's parameters to their defaults.
+- ``capture_client_capabilities_path``: append one JSON line per
+  ``initialize`` recording the exact ``clientCapabilities`` received.
 """
 
 from __future__ import annotations
@@ -155,6 +164,9 @@ class FakeAgent:
         self.session_id = script.get("session_id", "fake-external-session-1")
         initial = script.get("initial_options") or _default_initial_options()
         self.options = {option["id"]: dict(option) for option in initial}
+        # The option catalog in force: the top-level script keys, or the
+        # parameterized picker once ``initialize`` negotiated it.
+        self.catalog: dict[str, Any] = script
         self.pending_prompt_id: Any = None
         self.pending_fs_prompt_id: Any = None
         self.pending_permission_prompt_id: Any = None
@@ -291,6 +303,18 @@ class FakeAgent:
             sys.stdout.write("this line is not a json-rpc frame\n")
             sys.stdout.flush()
             sys.exit(0)
+        capabilities = params.get("clientCapabilities")
+        capture = self.script.get("capture_client_capabilities_path")
+        if capture:
+            with open(capture, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(capabilities) + "\n")
+        picker = self.script.get("parameterized_picker")
+        meta = (capabilities or {}).get("_meta") or {}
+        if picker and meta.get("parameterizedModelPicker") is True:
+            self.catalog = picker
+            self.options = {
+                option["id"]: dict(option) for option in picker["initial_options"]
+            }
         _result(
             request_id,
             {
@@ -387,15 +411,15 @@ class FakeAgent:
             self._notify_update({"sessionUpdate": "session_info_update"})
         readback = self.script.get("wrong_readback", {}).get(config_id, value)
         if config_id == "model":
-            by_value = self.script.get("post_model_options_by_value", {})
+            by_value = self.catalog.get("post_model_options_by_value", {})
             if value in by_value:
                 self.options = {
                     option["id"]: dict(option) for option in by_value[value]
                 }
-            elif "post_model_options" in self.script:
+            elif "post_model_options" in self.catalog:
                 self.options = {
                     option["id"]: dict(option)
-                    for option in self.script["post_model_options"]
+                    for option in self.catalog["post_model_options"]
                 }
         if config_id in self.options:
             self.options[config_id]["currentValue"] = readback

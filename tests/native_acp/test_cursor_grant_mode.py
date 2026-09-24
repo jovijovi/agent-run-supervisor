@@ -1,6 +1,6 @@
 """Grant-driven Cursor permission mode: ``ask`` for read-only grants, else ``agent``.
 
-The registered ``cursor-native-acp-v1`` (revision 3) declares Cursor's ACP
+The registered ``cursor-native-acp-v1`` (since revision 3) declares Cursor's ACP
 ``mode`` selector together with one closed, source-owned, grant-driven
 permission-mode policy: a Run whose frozen ``grant_capabilities`` are exactly a
 subset of ``{read, search}`` requires mode ``ask``, and every other valid grant
@@ -48,12 +48,17 @@ from agent_run_supervisor.native_acp.profile import (
 from agent_run_supervisor.native_acp.run_task import DISPATCH_STARTED_MARKER
 
 from .test_model_only_fidelity import (
-    CURSOR_MODEL,
-    CURSOR_MODEL_OTHER,
     _lines,
     _model_only_profile,
 )
 from .test_run_task import FAKE_AGENT_PATH, Harness, _request, _run
+
+# Bare base models that advertise no parameters, so the registered profile's
+# parameterized legs reduce to the model set and the grant-driven mode leg stays
+# the subject here; the parameter legs are pinned in
+# ``test_cursor_parameterized_fidelity``.
+CURSOR_MODEL = "grok-4.7"
+CURSOR_MODEL_OTHER = "grok-4.7-mini"
 
 REGISTERED_PROFILE_ID = "cursor-native-acp-v1"
 CURSOR_AGENT_ID = "cursor-registered"
@@ -91,8 +96,8 @@ def _options(mode_current: str, model_current: str = CURSOR_MODEL_OTHER):
             "type": "select",
             "currentValue": model_current,
             "options": [
-                {"value": CURSOR_MODEL_OTHER, "name": "Grok 4.5 (low)"},
-                {"value": CURSOR_MODEL, "name": "Grok 4.5 (high, fast)"},
+                {"value": CURSOR_MODEL_OTHER, "name": "Grok 4.7 mini"},
+                {"value": CURSOR_MODEL, "name": "Grok 4.7"},
             ],
         },
         {
@@ -191,12 +196,12 @@ def _events(harness: Harness, run_id: str = "run-0001") -> list[str]:
     ]
 
 
-# -- the profile contract: revision 3 owns the closed policy -----------------
+# -- the profile contract: the closed policy, owned since revision 3 ----------
 
 
-def test_cursor_revision_3_declares_the_grant_driven_mode_policy() -> None:
+def test_cursor_revision_4_keeps_the_grant_driven_mode_policy() -> None:
     profile = CURSOR_NATIVE_ACP_V1
-    assert profile.revision == 3
+    assert profile.revision == 4
     assert profile.permission_mode_selector_id == "mode"
     # Grant-driven, not static: the per-Run required mode is computed from the
     # frozen grant, so no single literal may be frozen here.
@@ -217,11 +222,11 @@ def test_only_the_cursor_profile_identity_moved() -> None:
     assert STANDARD_NATIVE_ACP_V1.profile_hash() == STANDARD_HASH
     assert CLAUDE_AGENT_ACP_COMPAT_V1.profile_hash() == CLAUDE_HASH
     assert CURSOR_NATIVE_ACP_V1.profile_hash() != CURSOR_REVISION_2_HASH
-    # The revision-3 identity, pinned: existing revision-2 Sessions are refused
-    # by the existing profile-binding mismatch — deliberately, with no
+    # The current (revision-4) identity, pinned: earlier-revision Sessions are
+    # refused by the existing profile-binding mismatch — deliberately, with no
     # compatibility or migration logic.
     assert CURSOR_NATIVE_ACP_V1.profile_hash() == (
-        "9ec329a6ac5844ea9df789344fbaeeab7ec2cca7b704da66f470a118a68063e4"
+        "cfcae1463d8e5487bd9e3fef512e5c19a16baf26db16f34ffe4323a7dd1f2395"
     )
 
 
@@ -536,7 +541,7 @@ def test_reuse_recomputes_the_mode_from_each_runs_own_grant(
     assert _snapshot_mode(effective, "post_model") == "agent"
 
 
-def test_the_mode_leg_keeps_model_only_fidelity_intact(
+def test_the_mode_leg_dispatches_no_effort_selector(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """No effort selector appears anywhere: no RPC, no seal, ``N/A`` effective."""

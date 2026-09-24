@@ -234,7 +234,7 @@ def test_adding_reasonix_does_not_move_existing_profile_identity() -> None:
             "de3c26137e30319336c271710d47e235fd895ce43253c364782f6b007900b309"
         ),
         "cursor-native-acp-v1": (
-            "9ec329a6ac5844ea9df789344fbaeeab7ec2cca7b704da66f470a118a68063e4"
+            "cfcae1463d8e5487bd9e3fef512e5c19a16baf26db16f34ffe4323a7dd1f2395"
         ),
         "standard-native-acp-v1": (
             "fcf4d46c2c072ba9bd23b198beb096cb9748e62e8168c2a48e5c76432d55f9b9"

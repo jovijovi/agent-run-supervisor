@@ -3,8 +3,8 @@
 GOAL contract 3 and PRD R4: v1 is process-per-Run, and same-Session continuity
 is one external AGENT Session id plus a real ``session/load``. Run 1 creates and
 uses the external Session, its process exits, and Run 2 starts a **new** process,
-loads the stored id, proves exact model-only fidelity, and prompts in the same
-conversation.
+loads the stored id, proves the exact parameterized configuration, and prompts
+in the same conversation.
 
 That contract is a claim about state ARS does **not** own. The external AGENT is
 the conversation authority (GOAL *Authority split*), its configuration and
@@ -64,7 +64,8 @@ from agent_run_supervisor.native_acp.profile import (
 )
 from agent_run_supervisor.native_acp.spec import resolve_run_environment
 
-from .test_model_only_fidelity import CURSOR_MODEL, CURSOR_SCRIPT
+from .test_cursor_parameterized_fidelity import REQUESTED as CURSOR_MODEL
+from .test_cursor_parameterized_fidelity import _script as _cursor_script
 from agent_run_supervisor.native_acp.run_task import DISPATCH_STARTED_MARKER
 from .test_run_task import FAKE_AGENT_PATH, Harness, _request, _run
 
@@ -108,7 +109,7 @@ def _script() -> dict:
     two the child ends up using is decided entirely by what ARS projects, which
     is exactly what these tests are about.
     """
-    script = dict(CURSOR_SCRIPT)
+    script = _cursor_script()
     script["config_home_env"] = [lp.CURSOR_CONFIG_DIR_ENV, "HOME"]
     script["nonce_memory"] = True
     return script
@@ -220,7 +221,7 @@ def test_run_two_loads_the_same_external_session_and_prompts_in_it(
     # The conversation continued: Run 1's token came back out of the agent's
     # own state, across a process boundary.
     assert RUN_ONE_NONCE in payload["final_message"]
-    # Model-only fidelity is unchanged and exact, with no effort RPC.
+    # The whole parameterized configuration was re-proven, with no effort RPC.
     effective = json.loads((harness.run_dir("run-0002") / "effective.json").read_text())
     assert effective["effective_model"] == CURSOR_MODEL
     assert effective["effective_effort"] == EFFORT_NOT_APPLICABLE
@@ -329,6 +330,9 @@ def test_a_config_root_repointed_per_run_cannot_carry_the_session(
         requires_session_load=True,
         config_fidelity_mode=CURSOR_NATIVE_ACP_V1.config_fidelity_mode,
         effort_selector_id=None,
+        permission_mode_selector_id=CURSOR_NATIVE_ACP_V1.permission_mode_selector_id,
+        permission_mode_policy_id=CURSOR_NATIVE_ACP_V1.permission_mode_policy_id,
+        client_capabilities_meta=CURSOR_NATIVE_ACP_V1.client_capabilities_meta,
         launch_permission_policy_id=lp.POLICY_DENY_WRITE_AND_SHELL_V1,
     )
     harness = Harness(tmp_path, monkeypatch, _script())
