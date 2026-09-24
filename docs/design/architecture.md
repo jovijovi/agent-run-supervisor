@@ -2,7 +2,7 @@
 title: "agent-run-supervisor vNext System Architecture"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-22
+last_validated_at: 2026-09-24
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/architecture.md"
 ---
 # agent-run-supervisor vNext System Architecture
@@ -37,7 +37,11 @@ lifecycle is **deleted** in favour of one durable, resumable Session kind on `ap
 — Runs terminate, Sessions do not close; and `cursor-native-acp-v1` revision 3 drives Cursor's cooperative
 ACP `mode` from the Run's frozen grant — `ask` when the grant is exactly a subset of `{read, search}`,
 `agent` otherwise — proven by exact readback before the model and re-proven after it (PRD R7/R12), a
-cooperative mitigation and never a sandbox claim.
+cooperative mitigation and never a sandbox claim. `cursor-native-acp-v1` revision 4 then negotiates the
+agent's parameterized model picker through a frozen `clientCapabilities._meta` term and moves from
+model-only to the third, **parameterized** fidelity mode: the request's model string names a base model and
+every model parameter, each is set on its own advertised selector, and a whole-configuration readback gates
+the prompt (PRD R3/R12). The request, Spec, and Session record shapes are unchanged.
 
 Merge, publication, deployment, and activation stay separate facts; a merge implies none of the others, and
 each is its own explicit decision. Published package/release facts come from live GitHub Releases and PyPI;
@@ -189,6 +193,8 @@ runtime it served. `ManagedProcess` is the only supervision layer.
       · other        → SPAWN_FAILED
  17 record non-authoritative resolution evidence
  18 ACP initialize over the child's stdin/stdout
+      · clientCapabilities from the frozen grant, plus only the
+        profile's frozen _meta term when it declares one
       · protocol major must equal the profile's               ✗ PROTOCOL_MISMATCH
       · required capabilities present                         ✗ CAPABILITY_MISSING
       · forbidden capabilities absent (floor ∪ entry)         ✗ CAPABILITY_FORBIDDEN
@@ -204,6 +210,9 @@ runtime it served. `ManagedProcess` is the only supervision layer.
  23 [separate-selectors] rediscover effort; set it → exact
     (model-only stops here: no effort option is discovered and
      no effort set is dispatched; effective effort is "N/A")
+    [parameterized] step 21 sets the requested base model; the
+     advertised parameter ids must equal the requested ones; set
+     each parameter → exact; effective effort is "N/A"
  24 exact readback: requested == effective, literal, no coercion ✗ CONFIG_INEXACT
     (a compatibility profile additionally proves its required mode)
  25 persist observed runtime state; ready to prompt

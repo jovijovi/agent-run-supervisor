@@ -172,8 +172,12 @@ every other valid grant requires `agent`, and the policy never selects `agent-fu
 the mode and reads it back exactly before the model, then configures model and effort and re-proves it once
 at the post-effort readback before any prompt. The mode is recomputed on every Run, including
 `session/load`.
-`cursor-native-acp-v1` deviates twice. It uses model-only configuration fidelity — its model selector
-*is* the whole configuration, with no separate effort selector — and, at revision 3, it drives
+`cursor-native-acp-v1` deviates twice. At revision 4 it negotiates Cursor's parameterized model
+picker (`clientCapabilities._meta.parameterizedModelPicker = true`) and uses parameterized configuration
+fidelity: the requested model string `base[id=value,...]` names the base model and every parameter the
+agent advertises for it (for example context, reasoning effort, and fast mode), each is set on its own
+advertised selector, and the whole configuration is read back exactly before any prompt; the requested
+effort is `N/A`. Since revision 3 it also drives
 Cursor's own ACP `mode` from the Run's frozen grant: a Run whose grant capabilities are exactly a
 subset of `{read, search}` must run in `ask` mode, every other valid grant runs in `agent` mode, and
 the mode is set and exact-read-back before the model and re-proven after it, failing before any

@@ -2,7 +2,7 @@
 title: "ARS vNext Roadmap Current Status"
 status: active
 created_at: 2026-07-21
-last_validated_at: 2026-08-22
+last_validated_at: 2026-09-24
 supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 ---
 # ARS vNext Roadmap Current Status
@@ -13,10 +13,19 @@ supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 
 ```text
 base_branch: main
-active_plan: none
+active_plan: docs/plans/active/2026-09-24-cursor-parameterized-acp.md
 ```
 
 ## Current position
+
+- Parameterized Cursor ACP is implemented on its task branch and not merged
+  (F-CURSOR-PARAMETERIZED-001, [active plan](../plans/active/2026-09-24-cursor-parameterized-acp.md)).
+  `cursor-native-acp-v1` revision 4 negotiates the agent's parameterized model picker and declares
+  parameterized fidelity: the unchanged request model string `base[id=value,...]` names the base model
+  and every advertised parameter, each is set on its own selector, and a whole-configuration readback
+  gates the prompt on `session/new` and real `session/load` alike, with exact rollback or quarantine on a
+  partial switch. Revision-3 Cursor Sessions are refused by the ordinary profile-identity check.
+  Independent review, merge, runtime activation, and live Cursor acceptance remain separate decisions.
 
 - OMP and Reasonix minimal source support is closed on `main`
   (F-OMP-REASONIX-SOURCE-001). The merged source adds the Reasonix

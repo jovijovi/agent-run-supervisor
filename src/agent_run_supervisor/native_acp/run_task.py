@@ -762,9 +762,10 @@ class RunTask:
                 fidelity_mode=instance.config_fidelity_mode,
             )
         except ConfigFidelityError as exc:
-            # An effort the declared fidelity mode cannot honour — a non-``N/A``
-            # effort against a model-only agent — is refused here, before any
-            # ACP frame and long before a prompt.
+            # A request the declared fidelity mode cannot honour — a non-``N/A``
+            # effort against a model-only or parameterized agent, or a
+            # malformed parameterized model literal — is refused here, before
+            # any ACP frame and long before a prompt.
             raise _PreDispatchFailure(str(exc), "CONFIG_FIDELITY") from exc
         ctx.driver = NativeAcpDriver(
             client=client,
@@ -1086,12 +1087,16 @@ class RunTask:
         # there would silently restore ambient setting sources on every reused
         # Session. No caller value can reach this argument.
         session_meta = ctx.profile.session_meta_for("new")
+        # The grant decides the capabilities; the profile alone may add its
+        # frozen ``_meta`` negotiation, and no caller value can reach it.
+        client_capabilities = ctx.bridge.client_capabilities()
+        capabilities_meta = ctx.profile.client_capabilities_meta_payload()
+        if capabilities_meta is not None:
+            client_capabilities["_meta"] = capabilities_meta
         try:
             self._emit(ctx, {"type": "run_started", "method": "initialize"})
             await driver.open(ctx.proc)
-            summary = await driver.initialize(
-                client_capabilities=ctx.bridge.client_capabilities()
-            )
+            summary = await driver.initialize(client_capabilities=client_capabilities)
             ctx.effective.agent_info = summary.agent_info
             ctx.effective.protocol_version = summary.protocol_version
             ctx.effective.capabilities = summary.capabilities

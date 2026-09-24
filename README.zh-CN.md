@@ -159,8 +159,11 @@ forbidden_capabilities = ["terminal"]
 `agent`，且该策略绝不选择 `agent-full-access`。ARS 在 model 之前设置 mode 并逐字读回，随后配置
 model 与 effort，只在 post-effort 读回时复验一次 mode，之后才允许 prompt。每个 Run 都重新计算 mode，
 包括 `session/load`。
-`cursor-native-acp-v1` 有两处偏差。其一是 model-only 配置保真 —— 它的 model
-选择器**就是**全部配置，没有独立的 effort 选择器；其二（revision 3 起）是由 Run 的冻结授权驱动
+`cursor-native-acp-v1` 有两处偏差。其一（revision 4 起）是协商 Cursor 的参数化模型选择器
+（`clientCapabilities._meta.parameterizedModelPicker = true`）并采用参数化配置保真：请求的 model
+字符串 `base[id=value,...]` 写明基础模型以及 agent 为它公布的**每一个**参数（例如 context、推理
+effort 与 fast 模式），每个参数都在它自己公布的选择器上设置，并在任何 prompt 之前逐字读回整份配置；
+请求的 effort 为 `N/A`。其二（revision 3 起）是由 Run 的冻结授权驱动
 Cursor 自己的 ACP `mode`：授权能力恰好是 `{read, search}` 子集的 Run 必须运行在 `ask` 模式，其余
 一切有效授权运行在 `agent` 模式，且 mode 在 model 之前设置并逐字读回验证、在 model 设置之后再次
 复验，否则在任何 prompt 之前失败。这一模式选择是对"`agent` 模式下可以不经询问就完成编辑"的

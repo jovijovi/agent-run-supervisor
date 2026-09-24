@@ -1,6 +1,6 @@
 ---
 title: Cursor CLI
-description: Registering Cursor CLI with ARS on the model-only profile, and how its permission mode is driven by the Run's frozen grant.
+description: Registering Cursor CLI with ARS on its parameterized profile, and how its permission mode is driven by the Run's frozen grant.
 ---
 
 # Cursor CLI
@@ -19,26 +19,43 @@ command = "<the-cursor-cli-executable>"
 args    = ["<acp-subcommand-or-flags>"]
 ```
 
-## Deviation 1 — model-only configuration fidelity
+## Deviation 1 — parameterized configuration fidelity
 
-This agent's **model selector is the whole configuration**. There is no
-independent effort selector to discover or set, so the profile declares
-model-only configuration fidelity and ARS behaves accordingly:
+At revision 4 the profile negotiates Cursor's parameterized model picker by
+sending `clientCapabilities._meta.parameterizedModelPicker = true` on
+`initialize`. The agent then advertises a base-model selector plus independent
+parameter selectors for the selected model, and the profile declares
+parameterized configuration fidelity:
 
-- it discovers no effort selector,
-- it sets none, and
-- it reports `N/A` as the effective effort.
+- the caller's model string is the whole configuration, spelled
+  `<base-model>[<id>=<value>,...]` — for example
+  `<base-model>[context=<value>,reasoning_effort=<value>,fast=<value>]`;
+- ARS sets the base model, then requires the request to name **exactly** the
+  parameters the agent advertises for that model, sets each on its own
+  selector, and reads the whole configuration back before any prompt;
+- the composed string is never sent to the agent, and ids and values come from
+  what the running agent advertises — nothing is hard-coded;
+- it reports the proven string as the effective model and `N/A` as the
+  effective effort.
 
 !!! warning "A caller targeting this agent must request effort `N/A`"
 
-    Any other value fails before the prompt. And `effort_selector` is **refused
-    on this profile** at parse time: an id hint for a selector no Run ever sets
-    would be a fiction in every launch snapshot, so the pairing is refused rather
-    than quietly ignored.
+    Any other value fails before the prompt, as does a malformed model string,
+    an unadvertised base model, parameter, or value, or an advertised parameter
+    the request leaves out. And `effort_selector` is **refused on this profile**:
+    an id hint for a selector no Run ever sets would be a fiction in every launch
+    snapshot, so the pairing is refused rather than quietly ignored.
+
+A reused Session is loaded under its unchanged external id and reconfigured on
+every Run, so a later Run may request different parameters or a different base
+model. A switch that fails part-way sends no prompt: an exact rollback to the
+previous proven configuration keeps the Session reusable, and an unprovable one
+quarantines it. Sessions created under revision 3 are refused for reuse by the
+ordinary profile-identity check; continue that work in a new Session.
 
 ## Deviation 2 — a grant-driven permission mode
 
-At revision 3 the profile adds its second frozen term: the agent's ACP `mode` is
+At revision 3 the profile added its second frozen term: the agent's ACP `mode` is
 driven by one closed, source-owned policy from the Run's **frozen grant**.
 
 | The Run's `grant_capabilities` | Mode |
@@ -94,7 +111,9 @@ exercises `agent` mode. Prove denial in whichever mode your real Runs will use.
 
 ## After a Cursor CLI upgrade
 
-The mode and model selectors are ACP-level observations of a specific agent
-version. Re-run `agents doctor` and the canary after an upgrade. An upgrade
+The mode, model, and parameter selectors are ACP-level observations of a
+specific agent version. Re-run `agents doctor` and the canary after an upgrade;
+if the upgrade changes which parameters a model advertises, requests must name
+the new set before they pass. An upgrade
 behind an unchanged registered command costs no ARS action and does not
 invalidate Sessions.

@@ -471,9 +471,10 @@ while True:
 print(json.dumps({"ack": ack, "status": status, "events": events}, indent=2))
 ```
 
-Prepare the values shared by all three acceptance Runs. A model-only profile
-uses its documented effort sentinel; other profiles use an effort the agent
-advertises.
+Prepare the values shared by all three acceptance Runs. A model-only or
+parameterized profile uses its documented effort sentinel (and, when
+parameterized, a `base[id=value,...]` model string naming every advertised
+parameter); other profiles use an effort the agent advertises.
 
 ```bash
 chmod 0600 "$ARS_CONFIG/acceptance_submit.py"

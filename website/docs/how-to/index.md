@@ -29,7 +29,7 @@ every guide below assumes. Then pick the guide for the agent you installed.
 
 <a class="ars-panel" href="cursor-cli/">
   <p class="ars-panel__name">Cursor CLI</p>
-  <p class="ars-panel__note">Model-only configuration fidelity and a grant-driven permission mode.</p>
+  <p class="ars-panel__note">Parameterized configuration fidelity and a grant-driven permission mode.</p>
 </a>
 
 <a class="ars-panel" href="oh-my-pi/">

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `cursor-native-acp-v1` revision 4 negotiates Cursor CLI's parameterized model picker and uses the new
+  `parameterized` configuration fidelity: the request's model string `base[id=value,...]` names the base
+  model and every advertised parameter, each is set on its own selector, and the whole configuration is read
+  back exactly before any prompt. The requested effort stays `N/A`. Cursor Sessions created under revision 3
+  are refused for reuse by the profile-identity check; continue that work in a new Session.
+
 ## [0.7.8] - 2026-08-22
 
 ### Added

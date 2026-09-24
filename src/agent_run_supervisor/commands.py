@@ -152,26 +152,14 @@ def _probe_client(instance: Any) -> Any:
     therefore happens while there is still nothing to leak.
     """
     from agent_run_supervisor.native_acp.client import NativeAcpClient
-    from agent_run_supervisor.native_acp.config_fidelity import (
-        EFFORT_NOT_APPLICABLE,
-        FIDELITY_MODEL_ONLY,
-        ConfigFidelityMachine,
-    )
     from agent_run_supervisor.native_acp.driver import NativeAcpDriver
 
-    # The probe reaches ``initialize`` and stops, so the machine is never
-    # driven — but it still has to be constructible under the instance's own
-    # fidelity mode rather than under an assumed one.
-    model_only = instance.config_fidelity_mode == FIDELITY_MODEL_ONLY
+    # The probe reaches ``initialize`` and stops, so it carries no
+    # configuration request at all: inventing a model literal for a machine
+    # that is never driven would fabricate a request under every fidelity mode.
     return NativeAcpDriver(
         client=NativeAcpClient(on_update=lambda _update: None),
-        machine=ConfigFidelityMachine(
-            model_selector_id=instance.model_selector_id,
-            effort_selector_id=instance.effort_selector_id,
-            requested_model="",
-            requested_effort=EFFORT_NOT_APPLICABLE if model_only else "",
-            fidelity_mode=instance.config_fidelity_mode,
-        ),
+        machine=None,
     )
 
 
