@@ -4,9 +4,8 @@
 
 Total: 91 documents tracked across 2 statuses.
 
-## Active (19)
+## Active (18)
 
-- [Parameterized Cursor ACP](plans/active/2026-09-24-cursor-parameterized-acp.md) — created 2026-09-24
 - [ARS Public Documentation Site Design](design/documentation-site.md) — created 2026-08-07
 - [Session reuse acceptance test plan](roadmap/session-reuse-acceptance.md) — created 2026-08-07
 - [ARS agent registry — the operator contract](design/agent-registry.md) — created 2026-07-30
@@ -26,8 +25,9 @@ Total: 91 documents tracked across 2 statuses.
 - [Engineering practices](practices/README.md) — created 2026-05-28
 - [Verification gates for implementation PRs](roadmap/verification.md) — created 2026-05-28
 
-## Archived (72)
+## Archived (73)
 
+- [Parameterized Cursor ACP](plans/archive/2026-09-24-cursor-parameterized-acp.md) — created 2026-09-24
 - [ARS live AGENT roster query](plans/archive/2026-08-21-live-agent-roster-query.md) — created 2026-08-21
 - [ACP Python SDK 0.12.1 upgrade](plans/archive/2026-08-19-acp-sdk-0121-upgrade.md) — created 2026-08-19
 - [ARS permission boundary fixes](plans/archive/2026-08-15-permission-boundary-fixes.md) — created 2026-08-15

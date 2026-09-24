@@ -41,7 +41,7 @@ Remaining cell says what happened to the source, because for the boundary reset 
 | F-ENV-EVIDENCE-001 | environment values never enter sealed material, hash input, or the rendered carrier | Required | Done | PRD R15; technical solution §7; result/event schema §9.2 | merged; the dynamic per-Run literal guard is removed, and agent-authored free-form text may retain projected values as stated in PRD R15 |
 | F-MODEL-ONLY-FIDELITY-001 | declared configuration-fidelity modes + `cursor-native-acp-v1` | Required | Done | PRD R3/R12; technical solution §5; [registry contract](../design/agent-registry.md) | merged; model-only stops at the exact model readback, dispatches no effort RPC, and reports the shared `N/A` sentinel. Existing profiles keep separate selectors and their `profile_hash` |
 | F-CURSOR-GRANT-MODE-001 | grant-driven Cursor permission mode: `ask` for read-only grants, `agent` otherwise | Required | Done | PRD R7/R12; [archived plan](../plans/archive/2026-08-07-cursor-grant-mode.md); hermetic grant-mode suite | merged on `main`; `cursor-native-acp-v1` revision 3 moves only Cursor's `profile_hash`; a cooperative mode mitigation, not a permission/sandbox guarantee; mediation and the completion backstop unchanged |
-| F-CURSOR-PARAMETERIZED-001 | parameterized Cursor ACP: negotiated picker, base model plus independent advertised parameters, whole-configuration readback | Required | Implemented | PRD R3/R12; [active plan](../plans/active/2026-09-24-cursor-parameterized-acp.md); hermetic parameterized suite | task-branch source only, not merged; `cursor-native-acp-v1` revision 4 moves only Cursor's `profile_hash`; request, Spec, and Session shapes unchanged; review, merge, activation, and live acceptance remain separate |
+| F-CURSOR-PARAMETERIZED-001 | parameterized Cursor ACP: negotiated picker, base model plus independent advertised parameters, whole-configuration readback | Required | Done | PRD R3/R12; [archived plan](../plans/archive/2026-09-24-cursor-parameterized-acp.md); hermetic parameterized suite | merged on `main`; `cursor-native-acp-v1` revision 4 moves only Cursor's `profile_hash`; request, Spec, and Session shapes unchanged. No release, deployment, runtime-activation, or live Cursor acceptance claim |
 | F-LAUNCH-PERMISSION-001 | profile-selected per-Run launch permission material | Required | Done | PRD R7/R12; technical solution §1.2/§5; [registry contract](../design/agent-registry.md) §7 | merged; one closed read-only policy is available, but no registered profile selects it because the affected backend's configuration-root key would break cross-Run `session/load` continuity |
 | F-ACP-SDK-012-001 | optional `native` extra pinned to `agent-client-protocol==0.12.1` (ACP schema v1.19) | Required | Done | PRD R12; technical solution §0/§11 | merged on `main` as source. 0.12.1 removed the `sender_factory` seam, so the pre-write tap now rides the message-level `Transport` injection point around the SDK's own sender/NDJSON transport; prompt causal boundary, update ordinal domain, delivery barrier, and SDK root-log containment are re-verified against 0.12.1; the SDK `http` extra stays uninstalled. This tracker records source state only — publication and deployment truth belong to live release and operator sources |
 | F-RECONCILE-ORDERED-001 | total ordered fail-closed startup reconciliation, absent ≠ corrupt | Required | Done | PRD R10; architecture §6.1–§6.2; technical solution §9 | merged; strictly more refusals than the tolerant reader it replaced |
@@ -66,7 +66,7 @@ Remaining cell says what happened to the source, because for the boundary reset 
 | Configurable per-Run event budget | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | Live AGENT roster query | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | vNext Stage 0/1 | 7 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| Configuration fidelity, SDK pin, launch permission | 4 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| Configuration fidelity, SDK pin, launch permission | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | OMP and Reasonix source support | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | vNext Stage 2 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | Registered per-agent profiles | 0 | 0 | 0 | 0 | 1 | 2 | 0 | 0 | 0 |
@@ -75,8 +75,8 @@ Remaining cell says what happened to the source, because for the boundary reset 
 | Later integration | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 |
 | Explicit exclusions | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
 
-No row is `In review`. F-CURSOR-PARAMETERIZED-001 is `Implemented`: its source exists on its task branch
-only, and independent review, merge, runtime activation, and live Cursor acceptance are each still separate.
+No row is `In review`. F-CURSOR-PARAMETERIZED-001 is `Done` because its source is merged on `main`; that
+claim is neither a release nor a deployment, and runtime activation and live Cursor acceptance remain separate.
 F-ACP-SDK-012-001 and F-RUN-EVENT-BUDGET-CONFIG-001 are `Done`
 because their source is merged on `main`; that claim is neither a publication nor a deployment.
 F-ARSD-AGENT-ROSTER-001 is `Done` because its source is merged on `main`; that claim is neither a release,
