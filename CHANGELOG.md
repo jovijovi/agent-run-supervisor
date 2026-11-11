@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.10] - 2026-11-11
+
+### Added
+
+- `opencode-acp-compat-v1`, a new source profile that an operator must select explicitly for an OpenCode
+  registry entry. It is the standard contract plus one bounded effort re-proof before the prompt: when the
+  post-effort readback shows the model (and any required mode) exact and the requested effort still
+  advertised but not current, ARS re-sets that same effort value once. It then still requires an exact
+  readback of the whole configuration before any prompt. A second mismatch, a missing or unadvertised
+  value, a malformed response, or an RPC error still fails before the prompt. This is not a general Run
+  or Prompt retry, and the five existing profiles and their identities are unchanged.
+
+### Changed
+
+- Locked dependency updates in `uv.lock`: `urllib3` 2.7.0 → 2.8.0 and `certifi` 2026.6.17 → 2026.10.19.
+  Both arrive only through the `release` and `docs` extras' tooling. The package's declared dependencies
+  are unchanged — the runtime still declares none — and installing the package does not read `uv.lock`.
+
+### Notes
+
+- The new profile is off by default. Publishing this version selects it in no registry; using it is a
+  separate operator registry change. Like any profile change, selecting it changes the Session's profile
+  identity, so existing OpenCode Sessions created under `standard-native-acp-v1` are refused for reuse:
+  start new Sessions.
+- The re-proof path is covered by hermetic tests. Live permission mediation and Session reuse under the new
+  profile are not accepted, and the per-agent denied-action canary stays required before it is admitted
+  to a live registry.
+
 ## [0.7.9] - 2026-09-24
 
 ### Changed
