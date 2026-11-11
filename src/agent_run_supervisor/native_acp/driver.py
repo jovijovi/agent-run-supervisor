@@ -482,6 +482,22 @@ class NativeAcpDriver:
         active.record_post_effort_options(
             _dump_options(effort_response.config_options)
         )
+        if active.effort_reproof_pending:
+            # The machine granted its one identical re-set: same selector, same
+            # requested value. Its response is proven by the same strict checks,
+            # and a failed call or malformed reply raises before any of them.
+            reproof_selector = active.effort_reproof_plan()
+            reproof_response = await self._call(
+                "session/set_config_option(effort reproof)",
+                connection.set_config_option(
+                    config_id=reproof_selector,
+                    session_id=session_id,
+                    value=active.requested_effort,
+                ),
+            )
+            active.record_post_effort_reproof_options(
+                _dump_options(reproof_response.config_options)
+            )
         self._check_identity()
         return active.require_ready()
 

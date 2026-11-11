@@ -208,6 +208,11 @@ runtime it served. `ManagedProcess` is the only supervision layer.
  21 set requested model → exact                               ✗ CONFIG_*
  22 consume the model-dependent option set
  23 [separate-selectors] rediscover effort; set it → exact
+    [opt-in effort_readback_reproof term only] a readback with
+     model and mode exact and the requested effort still
+     advertised but not current earns exactly ONE identical
+     effort re-set; step 24 judges the new response. Never on
+     a rollback; at most one per Run
     (model-only stops here: no effort option is discovered and
      no effort set is dispatched; effective effort is "N/A")
     [parameterized] step 21 sets the requested base model; the

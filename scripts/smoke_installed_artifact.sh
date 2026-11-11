@@ -27,7 +27,7 @@ if ! compgen -G "$PATTERN" > /dev/null; then
   exit 1
 fi
 
-VENV="$(mktemp -d "/tmp/ars-${KIND}-smoke.XXXXXX")"
+VENV="$(mktemp -d "${TMPDIR:-/tmp}/ars-${KIND}-smoke.XXXXXX")"
 trap 'rm -rf "$VENV"' EXIT
 
 uv venv "$VENV" --quiet

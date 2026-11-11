@@ -11,7 +11,7 @@ It contains no path, version, digest, model literal, agent name, value domain,
 launch kind, artifact identity, or deployment fact. Every AGENT is instead one
 operator-owned registry entry.
 
-Exactly five profiles are registered. The three retired per-agent profiles
+Exactly six profiles are registered. The three retired per-agent profiles
 (``opencode-native-acp``, ``codex-acp-1.1.7``, ``claude-agent-acp-0.63.0``) are
 retired by deletion — not by an alias, a redirect, a disable flag, or any other
 mechanism capable of retiring one.
@@ -70,15 +70,16 @@ def entry(**overrides):
 
 # -- WP3.3: a closed, enumerated registry -----------------------------------
 #
-# The registry stays closed and small. It is five entries now: the conformance
-# contract and the four profiles with evidenced ACP-semantic deviations.
+# The registry stays closed and small. It is six entries now: the conformance
+# contract and the five profiles with evidenced ACP-semantic deviations.
 
 
-def test_registry_holds_exactly_the_five_registered_profiles():
+def test_registry_holds_exactly_the_six_registered_profiles():
     assert DEFAULT_REGISTRY.ids() == (
         "claude-agent-acp-compat-v1",
         "codex-agent-acp-compat-v1",
         "cursor-native-acp-v1",
+        "opencode-acp-compat-v1",
         "reasonix-agent-acp-compat-v1",
         "standard-native-acp-v1",
     )
@@ -247,6 +248,92 @@ def test_reasonix_profile_identity_is_pinned() -> None:
         "reasonix-agent-acp-compat-v1"
     ).profile_hash() == (
         "f4ec5820964391fe6e8bd269bbbf5cef553f842a03f71165745de27bb500ff68"
+    )
+
+
+FIVE_EXISTING_PROFILE_HASHES = {
+    "claude-agent-acp-compat-v1": (
+        "c9e9258bfcc01e2962b87466c803d0a3ae25a1676936864bdbd78b75a544a241"
+    ),
+    "codex-agent-acp-compat-v1": (
+        "de3c26137e30319336c271710d47e235fd895ce43253c364782f6b007900b309"
+    ),
+    "cursor-native-acp-v1": (
+        "cfcae1463d8e5487bd9e3fef512e5c19a16baf26db16f34ffe4323a7dd1f2395"
+    ),
+    "reasonix-agent-acp-compat-v1": (
+        "f4ec5820964391fe6e8bd269bbbf5cef553f842a03f71165745de27bb500ff68"
+    ),
+    "standard-native-acp-v1": (
+        "fcf4d46c2c072ba9bd23b198beb096cb9748e62e8168c2a48e5c76432d55f9b9"
+    ),
+}
+
+
+def test_opencode_profile_is_the_standard_contract_plus_the_reproof_term() -> None:
+    profile = DEFAULT_REGISTRY.get("opencode-acp-compat-v1")
+    expected = STANDARD_NATIVE_ACP_V1.snapshot()
+    expected.update(
+        profile_id="opencode-acp-compat-v1",
+        revision=1,
+        effort_readback_reproof=True,
+    )
+    assert profile.snapshot() == expected
+    assert profile.effort_readback_reproof is True
+    assert profile.config_fidelity_mode == "separate-selectors"
+    assert profile.model_selector_id == "model"
+    assert profile.effort_selector_id == "effort"
+    assert profile.permission_mode_selector_id is None
+    assert profile.session_meta is None
+    assert profile.client_capabilities_meta is None
+    assert profile.snapshot_ref() == "registry:opencode-acp-compat-v1@r1"
+    assert profile.profile_hash() == (
+        "8bbdfbc1cd7b1489cc5ebb0bc0ee3389ce519abf89d354c0e7f14b3bfa4d40ce"
+    )
+
+
+def test_adding_the_opencode_profile_moves_no_existing_identity() -> None:
+    """The term is off and absent from the snapshot on every other profile."""
+    assert {
+        profile_id: DEFAULT_REGISTRY.get(profile_id).profile_hash()
+        for profile_id in FIVE_EXISTING_PROFILE_HASHES
+    } == FIVE_EXISTING_PROFILE_HASHES
+    for profile_id in FIVE_EXISTING_PROFILE_HASHES:
+        profile = DEFAULT_REGISTRY.get(profile_id)
+        assert profile.effort_readback_reproof is False
+        assert "effort_readback_reproof" not in profile.snapshot()
+
+
+@pytest.mark.parametrize("value", [1, 0, "true", None])
+def test_reproof_term_must_be_a_bool(value) -> None:
+    with pytest.raises(ProfileValidationError):
+        AcpCompatProfile(
+            profile_id="p-v1",
+            revision=1,
+            acp_protocol_version="1",
+            effort_readback_reproof=value,
+        )
+
+
+@pytest.mark.parametrize("fidelity_mode", ["model-only", "parameterized"])
+def test_reproof_term_requires_separate_selectors(fidelity_mode: str) -> None:
+    """There is no effort leg to re-prove under a whole-configuration mode."""
+    with pytest.raises(ProfileValidationError):
+        AcpCompatProfile(
+            profile_id="p-v1",
+            revision=1,
+            acp_protocol_version="1",
+            config_fidelity_mode=fidelity_mode,
+            effort_selector_id=None,
+            effort_readback_reproof=True,
+        )
+    # The same profile with the term off stays constructible.
+    AcpCompatProfile(
+        profile_id="p-v1",
+        revision=1,
+        acp_protocol_version="1",
+        config_fidelity_mode=fidelity_mode,
+        effort_selector_id=None,
     )
 
 

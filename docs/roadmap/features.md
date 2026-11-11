@@ -52,6 +52,7 @@ Remaining cell says what happened to the source, because for the boundary reset 
 | F-RUN-EVENT-BUDGET-CONFIG-001 | operator-configurable per-Run event-ledger admission budget, default 4 GiB | Required | Done | PRD R9; technical solution §4; [archived plan](../plans/archive/2026-08-11-configurable-run-event-budget.md) | merged on `main`; `arsd --max-run-event-budget-bytes` sets the admission ceiling and `server_info` reports it. Strict durable admission evidence preserves the effective historical policy. No wire, request-digest, Spec, or launch schema version moved |
 | F-ARSD-AGENT-ROSTER-001 | read-only query of canonical AGENT IDs loaded by this daemon | Required | Done | PRD R11/R13; technical solution §1.3; [archived plan](../plans/archive/2026-08-21-live-agent-roster-query.md) | merged on `main`: one additive Socket API v3 `agent_list` operation over the immutable startup snapshot, returning unique stable-sorted canonical IDs only. Handlers require that snapshot at construction. No release, deployment, activation, routing, health, preset, or hot-reload claim |
 | F-OMP-REASONIX-SOURCE-001 | minimal operator-registry source support for OMP and Reasonix, with Reasonix static approval fidelity and canonical workspace regression coverage | Required | Done | PRD R3/R4/R7/R12/R13; [archived plan](../plans/archive/2026-08-11-omp-reasonix-source-support.md); isolated canaries | merged on `main`; OMP remains fail-closed for mutations under the observed 17.2.12 behavior, with no permissive fallback or unproven write-family mapping. This tracker records source state only; publication, deployment, and live activation remain separate facts |
+| F-OPENCODE-EFFORT-REPROOF-001 | opt-in `opencode-acp-compat-v1`: one bounded identical effort re-proof before Prompt | Required | Implemented | PRD R3/R12; technical solution §5; [plan](../plans/active/2026-11-10-opencode-effort-reproof.md) | source candidate only, on a task branch; not merged, released, installed, selected, or live-accepted; fresh zero-prompt discovery + denied-action canary required before merge or live selection |
 | F-SACHIMA-ARSD-001 | Sachima socket backend | Later integration | Parked | GOAL/PRD stage boundary | ARS production acceptance closed; integration still requires its own separate approval |
 | F-NONGOAL-001 | public/root/TCP/multi-tenant/business-orchestration surfaces | Non-goal | Non-goal | GOAL; PRD §6; non-approvals | separate product decision only |
 
@@ -68,6 +69,7 @@ Remaining cell says what happened to the source, because for the boundary reset 
 | vNext Stage 0/1 | 7 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | Configuration fidelity, SDK pin, launch permission | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | OMP and Reasonix source support | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| OpenCode effort re-proof | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | vNext Stage 2 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | Registered per-agent profiles | 0 | 0 | 0 | 0 | 1 | 2 | 0 | 0 | 0 |
 | Runtime Binding era | 0 | 0 | 0 | 0 | 0 | 3 | 0 | 0 | 0 |

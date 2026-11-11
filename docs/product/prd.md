@@ -106,6 +106,25 @@ initialize / capability discovery
 Missing capability, unadvertised value, alias/coercion, stale option set, failed set, or inexact readback
 produces zero Turn and no prompt. Literal `max` must never be downgraded to `high` or another value.
 
+**One bounded effort re-proof, profile-owned and opt-in.** A `separate-selectors` profile may declare one
+more term, `effort_readback_reproof`, which is off by default; only `opencode-acp-compat-v1` declares it.
+Under it, before any prompt, one effort readback may earn **exactly one** identical re-set of the same
+effort selector and value, followed by a new whole-configuration readback judged by the unchanged
+strict rules. All of these must hold:
+
+- the model reads back exact;
+- any required permission mode reads back exact;
+- the requested effort is still advertised as a select choice;
+- but the effort's current value is a different one.
+
+A second inexact readback, a wrong or missing option, a value no longer advertised, a malformed
+response, or an RPC error still ends the Run before the prompt as `CONFIG_FIDELITY`.
+
+The allowance is one per Run and belongs to the Run's forward configuration only — a between-Run
+rollback never receives it. Both the mismatching post-effort readback and the re-proof readback stay in
+the Run's evidence. It retries no model, mode, prompt, Run, or Session, and it adds no sleep, alias,
+or coercion.
+
 **Three configuration-fidelity modes exist, and a profile declares exactly one.** `separate-selectors` is
 the sequence above and is the default every existing profile keeps. `model-only` describes an agent whose
 model selector *is* the whole configuration: it advertises no independent effort selector, so the sequence
@@ -466,7 +485,7 @@ guarantees. ARS makes no isolation claim either way.
   which is why an ordinary ARS release leaves every Session identity field untouched.
 - A profile also declares its **configuration-fidelity mode** (R3), because how an agent is configured is an
   ACP semantic. It is the only place that fact may live.
-- The target registry is a closed set of five:
+- The target registry is a closed set of six:
   - `standard-native-acp-v1` is the ACP-v1 conformance contract for every agent without an evidenced
     deviation;
   - `claude-agent-acp-compat-v1` freezes session metadata on **both** `session/new` and `session/load`,
@@ -486,12 +505,19 @@ guarantees. ARS makes no isolation claim either way.
   - `reasonix-agent-acp-compat-v1` keeps the standard separate model and effort selectors and freezes
     Reasonix's `tool_approval` selector to the static literal `ask`, set and exactly read back before model
     and effort on every Run, including both `session/new` and real `session/load`. It does not select
-    `work_mode`, `auto`, or `yolo`.
+    `work_mode`, `auto`, or `yolo`;
+  - `opencode-acp-compat-v1` keeps every standard-contract term and adds only the bounded effort re-proof
+    of R3. Its cited evidence is a zero-prompt exchange in which an exact set of an advertised effort
+    read back the agent's stale default, consistent with an upstream-reproduced stale selection echo. It
+    is an explicit operator opt-in: `standard-native-acp-v1` stays the ordinary choice, and the term is
+    emitted into `profile_hash` only when it is on, so adding the profile moves no existing hash.
   Both grant-driven modes are cooperative mitigations, never sandboxes or strong permission guarantees
   (R7's non-guarantees apply unchanged). Every other frozen term of the Codex and Cursor profiles equals
   the standard contract. Adding Codex moves no existing profile hash. Selecting it changes Session identity
   through ordinary profile binding, with no alias, migration, or special continuation logic. Selecting
-  the Reasonix profile likewise changes Session identity through ordinary binding and no special path.
+  the Reasonix profile likewise changes Session identity through ordinary binding and no special path, and
+so does selecting the OpenCode profile: existing standard-profile Sessions of that agent are refused for
+reuse, and continuing that work needs a new Session with caller-owned context handoff.
 - A profile may also declare **one launch-permission policy id** (R7), because how an agent must be
   configured to honour a permission decision before it acts is a permission-mediation semantic. It is an id
   from a closed source-owned set, keyed by the capability family it enforces and never by an agent name; the

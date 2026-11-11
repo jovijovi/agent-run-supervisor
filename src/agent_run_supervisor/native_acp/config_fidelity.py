@@ -51,6 +51,14 @@ literal is never sent to the agent. The effective effort is the shared
 :data:`EFFORT_NOT_APPLICABLE` sentinel, because an effort-like parameter is part
 of the model literal rather than a separate request field.
 
+A profile may additionally grant a separate-selector Run's forward machine
+**one** effort re-proof (``effort_reproof_allowed``): a post-effort readback
+whose model and any required mode are exact, and whose effort is a select still
+advertising the requested value but currently showing another one, moves to
+``effort_reproof_planned`` instead of raising. The driver then sends one
+identical effort set, and that readback passes through the same strict checks
+with no allowance left. Every other readback raises exactly as before.
+
 Option inputs are wire-shaped plain dicts (``id`` / ``currentValue`` /
 ``options``) — the SDK-facing driver dumps models by alias before they reach
 this stdlib-only module.
@@ -217,6 +225,8 @@ _PHASE_POST_MODE = "post_mode"
 _PHASE_MODEL_PLANNED = "model_planned"
 _PHASE_POST_MODEL = "post_model"
 _PHASE_EFFORT_PLANNED = "effort_planned"
+_PHASE_EFFORT_REPROOF_PLANNED = "effort_reproof_planned"
+_PHASE_POST_EFFORT_REPROOF = "post_effort_reproof"
 _PHASE_PARAMETER_PLANNED = "parameter_planned"
 _PHASE_POST_PARAMETER = "post_parameter"
 _PHASE_VERIFIED = "verified"
@@ -279,6 +289,7 @@ class ConfigFidelityMachine:
         permission_mode_selector_id: str | None = None,
         required_permission_mode: str | None = None,
         fidelity_mode: str = FIDELITY_SEPARATE_SELECTORS,
+        effort_reproof_allowed: bool = False,
     ) -> None:
         if (permission_mode_selector_id is None) != (required_permission_mode is None):
             raise ConfigFidelityError(
@@ -315,6 +326,10 @@ class ConfigFidelityMachine:
             self._parameterized.parameters if self._parameterized else ()
         )
         self._planned_parameter: tuple[str, str] | None = None
+        # At most one identical effort re-set for this machine, granted only by
+        # a profile that declares it and only to a Run's forward sequence; the
+        # rollback machine is always constructed without it.
+        self._effort_reproof_available = effort_reproof_allowed is True
         self._effective_model: str | None = None
         self._phase = _PHASE_INIT
         self._initial_options: dict[str, _Option] | None = None
@@ -362,6 +377,10 @@ class ConfigFidelityMachine:
     @property
     def has_pending_parameter(self) -> bool:
         return bool(self._pending_parameters)
+
+    @property
+    def effort_reproof_pending(self) -> bool:
+        return self._phase == _PHASE_EFFORT_REPROOF_PLANNED
 
     @property
     def has_permission_mode(self) -> bool:
@@ -665,6 +684,66 @@ class ConfigFidelityMachine:
         self._expect_phase(_PHASE_EFFORT_PLANNED, "record_post_effort_options")
         parsed = _parse_options(options, phase="post-set-effort")
         self._record_snapshot("post_effort", options or [])
+        if self._effort_reproof_eligible(parsed):
+            # Recorded, not raised: the one identical re-set is the driver's
+            # next leg, and ``require_ready`` stays closed until it is proven.
+            self._effort_reproof_available = False
+            self._phase = _PHASE_EFFORT_REPROOF_PLANNED
+            return
+        self._require_exact_after_effort(parsed)
+        self._phase = _PHASE_VERIFIED
+
+    def _effort_reproof_eligible(self, parsed: dict[str, _Option]) -> bool:
+        """The one readback shape that earns an identical effort re-set.
+
+        Only a stale effort: the model is exact, the effort option is a select
+        that still advertises the requested value, its current value is some
+        other string, and a declared permission mode is exact. Anything else —
+        including a missing or malformed effort — is judged strictly as before.
+        """
+        if not self._effort_reproof_available:
+            return False
+        model = parsed.get(self._model_selector_id)
+        if model is None or model.current_value != self._requested_model:
+            return False
+        effort = parsed.get(self._effort_selector_id)
+        if effort is None or not effort.is_select:
+            return False
+        if self._requested_effort not in effort.choices:
+            return False
+        if (
+            not isinstance(effort.current_value, str)
+            or effort.current_value == self._requested_effort
+        ):
+            return False
+        if self._permission_mode_selector_id is not None:
+            mode = parsed.get(self._permission_mode_selector_id)
+            if mode is None or mode.current_value != self._required_permission_mode:
+                return False
+        return True
+
+    def effort_reproof_plan(self) -> str:
+        """The granted re-set: the same effort selector, for the same value."""
+        self._expect_phase(_PHASE_EFFORT_REPROOF_PLANNED, "effort_reproof_plan")
+        return self._effort_selector_id
+
+    def record_post_effort_reproof_options(
+        self, options: Sequence[Mapping[str, Any]] | None
+    ) -> None:
+        """Consume the re-set's complete set; prove it with the strict checks."""
+        self._expect_phase(
+            _PHASE_EFFORT_REPROOF_PLANNED, "record_post_effort_reproof_options"
+        )
+        parsed = _parse_options(options, phase="post-effort-reproof")
+        self._record_snapshot("post_effort_reproof", options or [])
+        # The granted re-set is consumed here, before the proof: a refused
+        # readback leaves nothing to plan again.
+        self._phase = _PHASE_POST_EFFORT_REPROOF
+        self._require_exact_after_effort(parsed)
+        self._phase = _PHASE_VERIFIED
+
+    def _require_exact_after_effort(self, parsed: dict[str, _Option]) -> None:
+        """The exact model/effort/mode proof after an effort set."""
         model = parsed.get(self._model_selector_id)
         effort = parsed.get(self._effort_selector_id)
         effective_model = None if model is None else model.current_value
@@ -685,7 +764,6 @@ class ConfigFidelityMachine:
             self._require_permission_mode_exact(
                 parsed, "permission mode readback after effort set"
             )
-        self._phase = _PHASE_VERIFIED
 
     def record_option_update(self, options: Sequence[Mapping[str, Any]]) -> None:
         """Record an agent-pushed config_option_update as evidence."""
