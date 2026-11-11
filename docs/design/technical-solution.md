@@ -28,7 +28,7 @@ capability claim in a current-authority document.
 **The V4 boundary-reset source is aligned on `main`.** Its module dispositions below describe merged
 source: `native_acp/runtime_binding.py` and `native_acp/attestation.py` are deleted,
 `native_acp/agent_registry.py` is the one reader of the operator agents file, and the sealed launch
-snapshot is value-blind. The source profile registry contract is a closed set of five. That contract is a
+snapshot is value-blind. The source profile registry contract is a closed set of six. That contract is a
 source fact only: it makes no publication, deployment, or runtime claim. The retired Binding-era module
 design is preserved under
 [`docs/archive/binding-era-2026-07/`](../archive/binding-era-2026-07/architecture-3.1-3.3.md) as cold
@@ -61,12 +61,12 @@ reintroduce one.
 | Module | Responsibility |
 |---|---|
 | `agent_registry.py` **(new)** | the only reader of the operator agents file: strict `tomllib` parse, bounded validation, typed `REGISTRY_*`/`ENTRY_*`/`MEDIATION_KEY_COLLISION` refusals, **one read per daemon lifetime** into an immutable snapshot, zero per-Run filesystem access, and the config-hygiene check (resolve symlinks; require a regular file that is not group- or world-writable) |
-| `profile.py` | `AcpCompatProfile` + `AgentInstance` + a **five-entry** registry (`standard-native-acp-v1`, `claude-agent-acp-compat-v1`, `codex-agent-acp-compat-v1`, `cursor-native-acp-v1`, `reasonix-agent-acp-compat-v1`) + the source-owned mediation binding table and its global `RESERVED_MEDIATION_KEYS`. A profile freezes ACP semantics only: protocol major, required and forbidden capabilities, session semantics, the declared configuration-fidelity mode and its selector-id conventions, the base environment allowlist, mediation semantics, and — only where evidenced — frozen session metadata, frozen `initialize` `clientCapabilities._meta`, and a required permission-mode selector whose required value is one frozen literal or is computed per Run from the Run's frozen grant by one of the closed source-owned grant-driven policies (`required_permission_mode_for`). No executables map, wrapped artifacts, binding slots, probe-as-gate, closure predicate, launch kind, or per-agent value domain |
+| `profile.py` | `AcpCompatProfile` + `AgentInstance` + a **six-entry** registry (`standard-native-acp-v1`, `claude-agent-acp-compat-v1`, `codex-agent-acp-compat-v1`, `cursor-native-acp-v1`, `reasonix-agent-acp-compat-v1`, `opencode-acp-compat-v1`) + the source-owned mediation binding table and its global `RESERVED_MEDIATION_KEYS`. A profile freezes ACP semantics only: protocol major, required and forbidden capabilities, session semantics, the declared configuration-fidelity mode and its selector-id conventions, the base environment allowlist, mediation semantics, and — only where evidenced — frozen session metadata, frozen `initialize` `clientCapabilities._meta`, the bounded `effort_readback_reproof` term (default off, separate-selectors only), and a required permission-mode selector whose required value is one frozen literal or is computed per Run from the Run's frozen grant by one of the closed source-owned grant-driven policies (`required_permission_mode_for`). No executables map, wrapped artifacts, binding slots, probe-as-gate, closure predicate, launch kind, or per-agent value domain |
 | `agent_registration.py` | the typed operator registry **entry** value and its bounded grammars — command, argv tokens, environment declarations, mediation selection, selector-id hints, capability narrowing, optional epoch. **Pure**: no filesystem access, so the single reader of the agents file stays `agent_registry.py` |
 | `spec.py` | versioned `AgentRunRequest`; immutable `AgentRunSpec`/`spec_hash`; the sealed **launch snapshot** that replaces `ResolvedLaunchSpec`; the ephemeral non-serializable `ResolvedEnvironment`; the durable value-blind `EnvProjection`; the observed-state record. `launch_spec_hash` on the Spec is **retained and load-bearing**. No sealed runtime identity, no runtime provenance, no artifact descriptor |
 | `storage.py` | the only constructor seam for `native-runs/` and `native-sessions/`; write-once discipline; bounded no-follow classifying readers returning valid/absent/corrupt while retaining the existing terminal trichotomy; the one sanctioned writer for free-form Run text, which judges the type before writing |
 | `driver.py` | ACP wire/state machine over a supplied `ManagedProcess`; never spawns or selects policy/profile. Accepts a typed load plan and the exact stored ID; `load_session()` keeps returning `None`, the expected ID is set before the call, and options are seeded from the load response |
-| `config_fidelity.py` | exact-or-zero configuration and between-Run switch/rollback state machine; the three **configuration-fidelity modes**, the strict parameterized model-literal grammar, and the shared `EFFORT_NOT_APPLICABLE` sentinel; option domains come from **live discovery**, with no source-domain preflight |
+| `config_fidelity.py` | exact-or-zero configuration and between-Run switch/rollback state machine; the three **configuration-fidelity modes**, the strict parameterized model-literal grammar, the shared `EFFORT_NOT_APPLICABLE` sentinel, and the one opt-in forward effort re-proof allowance; option domains come from **live discovery**, with no source-domain preflight |
 | `launch_permissions.py` **(new)** | the closed set of source-owned launch-permission policies a profile may select, each keyed by the capability family it enforces. Compiles one deterministic document from the Run's frozen grant, digests it, materializes it privately per Run under the supervisor root, and removes it. No dynamic approval, no path-level write policy, no positive write/execute grant, and no agent-named literal |
 | `client.py` | official SDK callback implementation. Synchronous fail-closed identity rejection at callback entry for every ID-bearing update, permission, filesystem, terminal, and session-scoped elicitation surface, using exact pinned SDK signatures rather than varargs; categorical violations carry no IDs |
 | `permissions.py` | frozen-grant → default-deny mediation; read-like requests additionally require protocol-declared, workspace-contained `locations[].path` evidence; denied tool-call ids are remembered so a later `completed` for one is a violation; deterministic mediation evidence; every decision reason is ARS-authored and stable |
@@ -553,6 +553,37 @@ the composed string never does. The effective model is re-composed from the fina
 request exactly when every leg is exact — and is what the Session record keeps, so a rollback replays the
 same sequence for the previous string. An advertised parameter the request omits refuses rather than running
 at an agent default, because the agent's value for it is unproven.
+
+**One bounded effort re-proof, opt-in by profile.** `opencode-acp-compat-v1` is the standard contract plus
+one frozen term, `effort_readback_reproof = True`. Construction refuses that term on any fidelity mode
+other than `separate-selectors`, and `snapshot()` emits it only when it is on, so the five other
+`profile_hash` values do not move.
+
+`RunTask` passes the term to the Run's **forward** machine only (`effort_reproof_allowed`). The
+between-Run rollback machine is always strict, so at most one extra set is ever dispatched per Run.
+After the `post_effort` snapshot is recorded, the machine consumes the allowance and enters
+`effort_reproof_planned` only when all of these hold:
+
+- the allowance is unused;
+- the model reads back the requested model exactly;
+- the effort option is present and a select;
+- the requested effort is among its choices;
+- its current value is a string that differs from the requested effort (a null value is malformed, not
+  stale);
+- any declared permission mode reads back exactly.
+
+Every other case raises the existing errors with the existing messages.
+
+The driver then sends one more `set_config_option` with the same selector and the requested effort, and
+records the response as `post_effort_reproof`. That response passes through the same strict
+model/effort/mode check, with no allowance left. A transport, RPC, or malformed response fails inside
+the call or the option parser before any eligibility test, so it can never authorize the re-set.
+`require_ready()` is unchanged: a pending re-proof is not `verified`, and nothing reaches the prompt
+around it.
+
+Both readbacks persist in `effective.json.discovery_snapshots` on success and failure, and the latest
+one seeds a rollback exactly as before. Markers, the `CONFIG_FIDELITY` detail code, rollback, and
+quarantine are unchanged. No event, sleep, value mapping, or exception-text parsing exists.
 
 **Value domains are live.** Registered model sets, allowed effort sets, and selector value domains are
 deleted as admission gates: the live-discovered option set is the domain authority and exact literal readback

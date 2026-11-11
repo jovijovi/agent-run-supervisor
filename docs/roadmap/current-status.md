@@ -13,10 +13,19 @@ supersedes: "docs/archive/pre-vnext-reset-2026-07-21/current-status.md"
 
 ```text
 base_branch: main
-active_plan: none
+active_plan: docs/plans/active/2026-11-10-opencode-effort-reproof.md
 ```
 
 ## Current position
+
+- OpenCode effort re-proof is in flight (F-OPENCODE-EFFORT-REPROOF-001, `Implemented`) under the
+  [active plan](../plans/active/2026-11-10-opencode-effort-reproof.md). It adds the explicit opt-in
+  source profile `opencode-acp-compat-v1`: before the prompt, one stale effort readback may earn exactly
+  one identical re-set, and the final whole-configuration proof stays exact-or-zero. The five existing
+  profile hashes are unchanged, and nothing changes in the wire, registry, events, or dependencies.
+  Remaining: source candidate only, on a task branch; not merged, released, installed, selected, or
+  live-accepted; fresh zero-prompt discovery + denied-action canary required before merge or live
+  selection; independent code review pending.
 
 - Parameterized Cursor ACP is closed on `main` (F-CURSOR-PARAMETERIZED-001).
   `cursor-native-acp-v1` revision 4 negotiates the agent's parameterized model picker and declares
@@ -130,6 +139,10 @@ active_plan: none
 
 None is approved by this board.
 
+- **OpenCode compatibility profile admission.** A fresh zero-prompt discovery and a denied-action canary
+  under `opencode-acp-compat-v1` stay mandatory before merge, default-registry admission, or live
+  selection. Selecting it is a deliberate continuity cut for existing standard-profile OpenCode
+  Sessions.
 - **Sachima `ArsdBackend` integration.** Parked; requires separate approval and evidence.
 - **Per-agent and operational gates.** The denied-action canary remains required before a registered agent's
   use; any future release, publication, deployment, service, migration, or runtime action requires separate

@@ -29,7 +29,7 @@ It freezes nothing else. There is no path, version, digest, model literal, agent
 name, value domain, or deployment fact in a profile, because none of those is an
 ACP semantic.
 
-Five profiles are registered:
+Six profiles are registered:
 
 | Profile id | Exists because |
 |---|---|
@@ -38,6 +38,7 @@ Five profiles are registered:
 | `codex-agent-acp-compat-v1` | keeps separate model and effort selectors, plus a grant-driven `mode`: `read-only` for exactly the `{read, search}` subsets and `agent` otherwise; advertised `agent-full-access` is never selected |
 | `cursor-native-acp-v1` | negotiates the agent's parameterized model picker and sets a base model plus each advertised model parameter from one `base[id=value,...]` request string, proven by a whole-configuration readback with no separate effort selector, plus a grant-driven permission-mode selector |
 | `reasonix-agent-acp-compat-v1` | keeps the standard model and effort selectors but sets and exactly reads back `tool_approval=ask` before them on every new or loaded Session; it never selects `auto`, `yolo`, or `work_mode` |
+| `opencode-acp-compat-v1` | an explicit opt-in that is the standard contract plus one bounded effort re-proof: when the post-effort readback shows the model exact and the requested effort still advertised but not current, ARS re-sets that same value once and requires an exact whole-configuration readback of the new response before any prompt |
 
 The `-v1` suffix is load-bearing: the id carries the ACP protocol generation, and
 a future `standard-native-acp-v2` would be a separate profile with its own

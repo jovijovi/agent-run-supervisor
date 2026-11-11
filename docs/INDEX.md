@@ -2,10 +2,11 @@
 
 # Documentation Index
 
-Total: 91 documents tracked across 2 statuses.
+Total: 92 documents tracked across 2 statuses.
 
-## Active (18)
+## Active (19)
 
+- [OpenCode minimal compatibility: one bounded same-value effort re-proof](plans/active/2026-11-10-opencode-effort-reproof.md) — created 2026-11-10
 - [ARS Public Documentation Site Design](design/documentation-site.md) — created 2026-08-07
 - [Session reuse acceptance test plan](roadmap/session-reuse-acceptance.md) — created 2026-08-07
 - [ARS agent registry — the operator contract](design/agent-registry.md) — created 2026-07-30

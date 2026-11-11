@@ -760,6 +760,9 @@ class RunTask:
                     )
                 ),
                 fidelity_mode=instance.config_fidelity_mode,
+                # The profile's one bounded effort re-proof, for this Run's
+                # forward configuration only; the rollback machine never gets it.
+                effort_reproof_allowed=instance.profile.effort_readback_reproof,
             )
         except ConfigFidelityError as exc:
             # A request the declared fidelity mode cannot honour — a non-``N/A``
@@ -1296,7 +1299,8 @@ class RunTask:
                 requested_model=previous_model,
                 requested_effort=previous_effort,
                 # The rollback runs the declared mode, so a model-only Session
-                # is restored by the same model-only sequence.
+                # is restored by the same model-only sequence. It carries no
+                # effort re-proof allowance: a rollback is always strict.
                 fidelity_mode=ctx.instance.config_fidelity_mode,
                 # The rollback re-runs the full exact sequence, so the
                 # required permission mode — frozen literal or grant-computed,

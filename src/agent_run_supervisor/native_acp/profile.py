@@ -19,7 +19,7 @@ That split is what makes an AGENT or adapter upgrade behind an unchanged
 registered command cost no ARS action at all: no identity field anywhere derives
 from what the agent turned out to be.
 
-Five profiles are registered. ``standard-native-acp-v1`` is the ACP-v1
+Six profiles are registered. ``standard-native-acp-v1`` is the ACP-v1
 conformance contract every standards-conforming agent runs under.
 ``claude-agent-acp-compat-v1`` exists because one adapter carries a cited
 ACP-semantic deviation: it resolves its initial permission mode from ambient
@@ -62,6 +62,13 @@ as ``ask``. ARS therefore sets ``ask`` before the model and effort and proves it
 twice by exact readback on every Run, including after a real ``session/load``.
 No other Reasonix selector is frozen and no agent-name branch exists in the
 runtime path.
+
+``opencode-acp-compat-v1`` is the standard contract plus one bounded term,
+``effort_readback_reproof``: before any prompt, a post-effort readback with the
+model exact and the requested effort still advertised but not current earns
+exactly one identical re-set of that effort, judged again by the unchanged
+strict checks. It is an explicit operator opt-in; the standard profile stays
+the ordinary choice for the same agent.
 
 The ``-v1`` suffix is load-bearing: the id carries the ACP protocol generation,
 construction refuses a profile whose frozen protocol disagrees with it, and a
@@ -353,6 +360,12 @@ class AcpCompatProfile:
     # ACP extension the agent keys its advertised configuration on; profiles
     # without it keep byte-identical ``initialize`` frames.
     client_capabilities_meta: str | None = None
+    # One bounded configuration-fidelity term: under separate selectors, a
+    # post-effort readback that is stale while the model (and any required
+    # mode) is exact and the requested effort is still advertised earns exactly
+    # one identical effort re-set before the prompt. Off by default, and absent
+    # from the snapshot while off, so no other profile's identity moves.
+    effort_readback_reproof: bool = False
 
     def __post_init__(self) -> None:
         if not self.profile_id or not isinstance(self.profile_id, str):
@@ -391,6 +404,16 @@ class AcpCompatProfile:
             raise ProfileValidationError(str(exc)) from exc
         if self.model_selector_id == self.effort_selector_id:
             raise ProfileValidationError("the two selector ids must be distinct")
+        if type(self.effort_readback_reproof) is not bool:
+            raise ProfileValidationError("effort_readback_reproof must be a bool")
+        if (
+            self.effort_readback_reproof
+            and self.config_fidelity_mode != FIDELITY_SEPARATE_SELECTORS
+        ):
+            raise ProfileValidationError(
+                "effort_readback_reproof requires separate-selector fidelity: "
+                "there is no effort leg to re-prove otherwise"
+            )
 
     def _validate_launch_permissions(self) -> None:
         """The selected policy is one of the closed set, and owns its own key.
@@ -594,6 +617,8 @@ class AcpCompatProfile:
             payload["client_capabilities_meta"] = json.loads(
                 self.client_capabilities_meta
             )
+        if self.effort_readback_reproof:
+            payload["effort_readback_reproof"] = True
         return payload
 
     def snapshot_ref(self) -> str:
@@ -907,6 +932,33 @@ REASONIX_AGENT_ACP_COMPAT_V1 = AcpCompatProfile(
     required_permission_mode="ask",
 )
 
+# The OpenCode compatibility profile is the standard contract plus one bounded
+# configuration-fidelity term, and nothing else.
+#
+# Cited ACP-level evidence: in a zero-prompt ``session/new`` exchange the
+# post-set-model set showed effort ``default``; the client then set the
+# advertised value ``max`` and the readback still showed ``default``, so the Run
+# refused before the prompt and its Session was quarantined. An upstream issue,
+# reproduced by its maintainers, describes a stale selection echo overwriting a
+# newer local selection; the retained exchange is consistent with that and does
+# not observe the echo order directly. Live discovery, exact readback, a
+# selector-id hint, or an environment value cannot express "one identical
+# re-set, then prove again", so the term lives here.
+#
+# The term grants at most one identical effort re-set per Run, only for that
+# exact shape, and only to the Run's forward configuration; every other
+# readback, and every rollback, keeps the strict checks. Selecting this profile
+# is an ordinary profile-identity change for existing Sessions.
+OPENCODE_ACP_COMPAT_V1 = AcpCompatProfile(
+    profile_id="opencode-acp-compat-v1",
+    revision=1,
+    acp_protocol_version="1",
+    required_capabilities=("loadSession",),
+    forbidden_capabilities=(),
+    requires_session_load=True,
+    effort_readback_reproof=True,
+)
+
 DEFAULT_REGISTRY = ProfileRegistry(
     (
         STANDARD_NATIVE_ACP_V1,
@@ -914,5 +966,6 @@ DEFAULT_REGISTRY = ProfileRegistry(
         CODEX_AGENT_ACP_COMPAT_V1,
         CURSOR_NATIVE_ACP_V1,
         REASONIX_AGENT_ACP_COMPAT_V1,
+        OPENCODE_ACP_COMPAT_V1,
     )
 )

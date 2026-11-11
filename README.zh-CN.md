@@ -152,7 +152,7 @@ forbidden_capabilities = ["terminal"]
 `session_epoch` —— 除此以外没有别的，任何层级上的未知键都会被拒绝。CLI 本身不讲 ACP 的 agent 也没有
 区别：把 `command` 指向你安装的那个 ACP 适配器。适配器可执行文件仍是运维方拥有的部署事实；只有它
 暴露的 ACP 行为符合标准契约时才选择 `standard-native-acp-v1`，有据可查的 ACP 语义偏差则选择对应的
-源码拥有的兼容 profile。共有四个兼容 profile 偏离标准契约：
+源码拥有的兼容 profile。共有五个兼容 profile 偏离标准契约：
 `claude-agent-acp-compat-v1` 保留它既有的 ACP 层兼容性差异；
 `codex-agent-acp-compat-v1` 保留独立的 model 和 effort 选择器，并从每个 Run 的冻结授权推导 Codex
 自己的 ACP `mode`：包括空集在内的任意 `{read, search}` 子集要求 `read-only`，其他所有有效授权要求
@@ -172,7 +172,12 @@ agent 的**协作式缓解** —— 它不是操作系统沙箱，也不是强�
 因此 agent 自己拥有的 Session 状态仍留在 agent 放置它的地方，并通过真实的 `session/load` 复用。
 `reasonix-agent-acp-compat-v1` 保留独立的 model 与 effort 选择器，并在每次新建或加载 Session 时先设置
 `tool_approval=ask`、逐字读回，再设置 model 与 effort；它绝不会自动选择 Reasonix 的 `auto`、`yolo`
-或 `work_mode`。`standard-native-acp-v1` 的行为一如往常。
+或 `work_mode`。
+`opencode-acp-compat-v1` 是标准契约加上一次有界的 effort 复验，只能由运维方显式选择启用。如果
+post-effort 读回显示 model（以及任何必需的 mode）一致，且请求的 effort 仍被公布、但当前值不是它，
+ARS 会把同一个 effort 值**再设置一次**，并在任何 prompt 之前要求对新响应做整份配置的逐字读回。
+再次不一致、选项缺失或值未被公布、或 RPC 错误，仍会在 prompt 之前失败。选择它与任何 profile 变更
+一样会改变 Session 身份。`standard-native-acp-v1` 的行为一如往常。
 
 已安装 OMP 与 Reasonix 命令的具体运维示例见
 [`examples/agents.omp-reasonix.toml`](examples/agents.omp-reasonix.toml)。OMP 使用标准 profile，并把

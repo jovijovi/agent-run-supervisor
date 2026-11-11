@@ -215,9 +215,10 @@ def _await_terminal(client, run_id: str, *, timeout: float = 180.0) -> dict:
 
 @pytest.fixture
 def sock_root():
-    # AF_UNIX path length is the constraint, so this lives under /tmp rather
-    # than under the (much longer) pytest tmp_path.
-    root = Path(tempfile.mkdtemp(prefix="arsd-fa-", dir="/tmp"))
+    # AF_UNIX path length is the constraint, so this lives directly under the
+    # (short) temp root — ``TMPDIR`` when set — rather than under the much
+    # longer pytest tmp_path.
+    root = Path(tempfile.mkdtemp(prefix="arsd-fa-"))
     try:
         yield root
     finally:

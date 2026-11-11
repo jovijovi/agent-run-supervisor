@@ -98,6 +98,15 @@ Script keys (all optional):
   because this root has no such configured session.
 - ``capture_config_path``: appends ``configId=value`` for every
   ``session/set_config_option`` the agent receives.
+- ``set_config_steps``: ``{configId: [step, ...]}`` — scripts the *n*-th
+  ``session/set_config_option`` for that config id (counted from 0 within this
+  process, i.e. within one Run); ``null`` or a missing entry is ordinary
+  behavior. A step is one of ``{"readback": value}`` (apply the set but read
+  this value back, for this set only), ``{"error": message}`` (answer with a
+  JSON-RPC error and change nothing), or ``{"reply_options": payload}`` (apply
+  the set but answer with exactly this ``configOptions`` payload, which may be
+  ``null`` or malformed). Models a stale readback that a later identical set
+  corrects, and per-set failures, without affecting any other set.
 - ``capture_meta_path``: append one JSON line per session/new and
   session/load recording the exact ``_meta`` the client sent (``null`` when
   the argument was absent) — proves the frozen session metadata on the wire.
@@ -172,6 +181,9 @@ class FakeAgent:
         self.pending_permission_prompt_id: Any = None
         self.update_session_id: str | None = None
         self.remembered: list[str] = []
+        # Per-config-id count of received set_config_option requests, the
+        # index into ``set_config_steps``.
+        self.set_counts: dict[str, int] = {}
 
     def _trace(self, method: str) -> None:
         if not self.trace_path:
@@ -404,12 +416,18 @@ class FakeAgent:
         config_id = params.get("configId")
         value = params.get("value")
         self._capture_config(config_id, value)
+        step = self._next_set_step(config_id)
+        if "error" in step:
+            _error(request_id, -32603, str(step["error"]))
+            return
         if value in self.script.get("reject_set_config_values", []):
             _error(request_id, -32602, f"value rejected by fake script: {value}")
             return
         if self.update_session_id is not None:
             self._notify_update({"sessionUpdate": "session_info_update"})
         readback = self.script.get("wrong_readback", {}).get(config_id, value)
+        if "readback" in step:
+            readback = step["readback"]
         if config_id == "model":
             by_value = self.catalog.get("post_model_options_by_value", {})
             if value in by_value:
@@ -424,7 +442,17 @@ class FakeAgent:
         if config_id in self.options:
             self.options[config_id]["currentValue"] = readback
         self._save_session_quarantined(params.get("sessionId") or self.session_id)
-        _result(request_id, {"configOptions": self._options_list()})
+        reply = step["reply_options"] if "reply_options" in step else self._options_list()
+        _result(request_id, {"configOptions": reply})
+
+    def _next_set_step(self, config_id: Any) -> dict[str, Any]:
+        """The scripted step for this set of ``config_id``, or ``{}``."""
+        key = str(config_id)
+        index = self.set_counts.get(key, 0)
+        self.set_counts[key] = index + 1
+        steps = (self.script.get("set_config_steps") or {}).get(key) or []
+        step = steps[index] if index < len(steps) else None
+        return dict(step) if isinstance(step, dict) else {}
 
     def _on_prompt(self, request_id: Any, params: dict[str, Any]) -> None:
         if self.script.get("exit_before_prompt_response"):

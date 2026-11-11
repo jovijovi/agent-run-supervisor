@@ -51,7 +51,7 @@ def run_async(coro, timeout: float = 30):
 
 @pytest.fixture
 def sock_root():
-    root = Path(tempfile.mkdtemp(prefix="arsd-s5-", dir="/tmp"))
+    root = Path(tempfile.mkdtemp(prefix="arsd-s5-"))
     try:
         yield root
     finally:

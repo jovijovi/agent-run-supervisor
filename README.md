@@ -163,7 +163,7 @@ Every value above is a **placeholder**. The closed field set is `profile`, `comm
 refused. For an agent whose CLI is not natively ACP, point `command` at the ACP adapter you installed.
 The adapter executable remains an operator-owned deployment fact. Select `standard-native-acp-v1` only
 when the ACP behavior it exposes conforms to that contract; an evidenced ACP-semantic deviation selects
-the corresponding source-owned compatibility profile. Four compatibility profiles differ from the
+the corresponding source-owned compatibility profile. Five compatibility profiles differ from the
 standard contract:
 `claude-agent-acp-compat-v1` carries its ACP-level compatibility differences.
 `codex-agent-acp-compat-v1` keeps separate model and effort selectors while deriving Codex's ACP `mode`
@@ -189,7 +189,13 @@ your agent's own configuration root, so agent-owned Session state stays where th
 resumes through a real `session/load`.
 `reasonix-agent-acp-compat-v1` keeps separate model and effort selectors and sets
 `tool_approval=ask`, with exact readback, before model and effort on every new or loaded Session. It
-never automatically selects Reasonix `auto`, `yolo`, or `work_mode`. `standard-native-acp-v1`
+never automatically selects Reasonix `auto`, `yolo`, or `work_mode`.
+`opencode-acp-compat-v1` is the standard contract plus one bounded effort re-proof, selected only by
+explicit operator opt-in. If the post-effort readback shows the model (and any required mode) exact
+and the requested effort still advertised but not current, ARS re-sets that same effort value
+**once**. It then requires an exact whole-configuration readback on the new response before any
+prompt. A second mismatch, a missing or unadvertised value, or an RPC error still fails before the
+prompt. Selecting it changes Session identity like any profile change. `standard-native-acp-v1`
 behaves ordinarily.
 
 A concrete operator example for the installed OMP and Reasonix commands is
